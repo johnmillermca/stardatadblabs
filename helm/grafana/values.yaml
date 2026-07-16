@@ -1,0 +1,126 @@
+# =============================================================================
+# Grafana (grafana/grafana)
+# Namespace   : monitoring
+# NodePort    : 30300 (Grafana UI)
+# Access      : http://192.168.1.50:30300
+# Helm chart  : grafana/grafana ≥ 8.x
+# Secret      : grafana-credentials  (admin user/password from OpenBao)
+# Datasource  : Prometheus auto-provisioned
+# =============================================================================
+
+fullnameOverride: grafana
+
+## ── Admin credentials — read from Kubernetes Secret (seeded by OpenBao) ─────
+admin:
+  existingSecret: grafana-credentials
+  userKey: admin-user
+  passwordKey: admin-password
+
+## ── Persistence ──────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: local-path
+
+## ── Service ──────────────────────────────────────────────────────────────────
+service:
+  type: NodePort
+  port: 3000
+  nodePort: 30300
+
+## ── Resources ────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+## ── Node placement (control-plane toleration) ────────────────────────────────
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+## ── Datasources auto-provisioned ─────────────────────────────────────────────
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-prometheus.monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+        jsonData:
+          timeInterval: "30s"
+
+## ── Dashboard providers ──────────────────────────────────────────────────────
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: 'k8s-platform'
+        orgId: 1
+        folder: 'K8s Platform'
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards/k8s-platform
+
+## ── Pre-built dashboards from grafana.com ────────────────────────────────────
+dashboards:
+  k8s-platform:
+    # Kubernetes cluster overview
+    kubernetes-cluster:
+      gnetId: 315
+      revision: 3
+      datasource: Prometheus
+    # Node exporter full
+    node-exporter:
+      gnetId: 1860
+      revision: 37
+      datasource: Prometheus
+    # Kafka overview (Strimzi)
+    kafka-overview:
+      gnetId: 7589
+      revision: 5
+      datasource: Prometheus
+    # PostgreSQL overview
+    postgresql:
+      gnetId: 9628
+      revision: 7
+      datasource: Prometheus
+    # OpenSearch overview
+    opensearch:
+      gnetId: 14191
+      revision: 1
+      datasource: Prometheus
+    # Kube-state-metrics
+    kube-state:
+      gnetId: 13332
+      revision: 12
+      datasource: Prometheus
+    # ArgoCD
+    argocd:
+      gnetId: 14584
+      revision: 1
+      datasource: Prometheus
+
+## ── Grafana INI overrides ────────────────────────────────────────────────────
+grafana.ini:
+  server:
+    root_url: "http://192.168.1.50:30300"
+  auth:
+    disable_login_form: false
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  log:
+    mode: console
+    level: info

@@ -1,0 +1,27 @@
+# ArgoCD Application — Apache Ranger (raw manifests)
+# Namespace : security
+# Access    : http://192.168.1.50:30680 (Admin UI)
+# Prereq    : secret ranger-db-credentials must exist (run 12-seed-openbao-secrets.sh)
+# Prereq    : image 192.168.1.50:30500/apache-ranger:2.4.0 must be pushed
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ranger
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/ranger
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: security
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

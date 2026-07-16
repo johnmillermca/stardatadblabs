@@ -1,0 +1,11 @@
+# =============================================================================
+# Oracle XE — STAGING reference stub
+# =============================================================================
+image:
+  repository: gvenzl/oracle-xe
+  tag: "21-slim"
+database: XEPDB1
+existingSecret: oracle-credentials
+storage:
+  size: 10Gi
+  storageClass: local-path

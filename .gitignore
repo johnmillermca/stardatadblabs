@@ -1,0 +1,32 @@
+# Secrets - never commit
+/root/openbao-init-keys.json
+*-init-keys.json
+*.key
+*.pem
+*-credentials.yaml
+secrets/
+.env
+*.env
+
+# Backups
+/opt/k8s-backups/
+
+# OS
+.DS_Store
+*.swp
+*~
+
+# Temp
+tmp/
+.tmp/
+
+# Kubernetes secret dumps (contain base64 secrets)
+all-secrets.yaml
+**/all-secrets.yaml
+
+# Downloaded JARs — large binaries; tracked by checksum/version in Dockerfiles
+jars/*.jar
+
+# Helm dependency downloads (re-fetchable via helm dep update)
+**/charts/
+**/Chart.lock

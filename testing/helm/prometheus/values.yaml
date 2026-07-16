@@ -1,0 +1,63 @@
+# =============================================================================
+# Prometheus — TESTING environment values
+# Namespace : monitoring (testing cluster or testing namespace)
+# Minimal footprint — ephemeral, no persistence
+# =============================================================================
+fullnameOverride: prometheus
+
+prometheus:
+  enabled: true
+  prometheusSpec:
+    retention: 2d
+    retentionSize: "5GB"
+    scrapeInterval: 60s
+    evaluationInterval: 60s
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 8Gi
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    serviceMonitorSelector: {}
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    nodeSelector:
+      kubernetes.io/hostname: master.local
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+  service:
+    type: NodePort
+    nodePort: 30992
+
+alertmanager:
+  enabled: false
+
+grafana:
+  enabled: false
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

@@ -1,0 +1,35 @@
+# =============================================================================
+# OpenSearch — TESTING override values
+# =============================================================================
+singleNode: true
+replicas: 1
+imageTag: "3.7.0"
+opensearchJavaOpts: "-Xms256m -Xmx256m"
+extraEnvs:
+  - name: DISABLE_SECURITY_PLUGIN
+    value: "true"
+  - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: opensearch-credentials
+        key: opensearch-password
+config:
+  opensearch.yml: |
+    cluster.name: opensearch-test
+    network.host: 0.0.0.0
+    discovery.type: single-node
+    plugins.security.disabled: true
+persistence:
+  enabled: false
+service:
+  type: NodePort
+  httpPortName: http
+  transportPortName: transport
+  nodePort: 32920
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m

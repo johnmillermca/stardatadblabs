@@ -1,0 +1,9 @@
+# =============================================================================
+# Testing Doris FE/BE deployments — reference stub
+# Active manifests: manifests/doris/
+# Namespace: prod (NodePort FE query: 32030)
+# Apply: kubectl apply -f manifests/doris/ -n prod
+# =============================================================================
+environment: testing
+namespace: prod
+fe_nodeport: 32030

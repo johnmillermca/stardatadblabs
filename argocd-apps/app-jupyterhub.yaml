@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jupyterhub
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  sources:
+    - repoURL: https://hub.jupyter.org/helm-chart/
+      chart: jupyterhub
+      targetRevision: "4.4.0"
+      helm:
+        valueFiles:
+          - $values/k8s-platform/helm/jupyterhub/values.yaml
+    - repoURL: https://github.com/johnmillermca/stardatadblabs
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: analytics
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

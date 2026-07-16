@@ -1,0 +1,5 @@
+# =============================================================================
+# Kerberos KDC — STAGING reference stub
+# =============================================================================
+realm: STARDATADBLABS.LOCAL
+existingSecret: kerberos-admin

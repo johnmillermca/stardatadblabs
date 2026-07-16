@@ -1,0 +1,101 @@
+# =============================================================================
+# Apache Doris FE (Frontend) — ConfigMap + PVC + Deployment
+# Namespace : analytics
+# Access    : http://192.168.1.50:30030 (HTTP/WebUI) jdbc:mysql://192.168.1.50:30090
+# Secret    : doris-credentials  (key: admin-password)
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-fe-config
+  namespace: prod
+data:
+  fe.conf: |
+    LOG_DIR = ${DORIS_HOME}/log
+    sys_log_level = INFO
+    meta_dir = /opt/apache-doris/fe/doris-meta
+    http_port = 8030
+    rpc_port = 9020
+    query_port = 9030
+    edit_log_port = 9010
+    enable_fqdn_mode = true
+    jdbc_drivers_dir = /opt/apache-doris/fe/jdbc_drivers
+    JAVA_OPTS = "-Xmx4096m -XX:+UseMembar -XX:SurvivorRatio=8"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: doris-fe-meta
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-fe
+  namespace: prod
+  labels:
+    app: doris-fe
+    component: fe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-fe
+  template:
+    metadata:
+      labels:
+        app: doris-fe
+        component: fe
+    spec:
+      containers:
+        - name: doris-fe
+          image: apache/doris:2.1.0-fe
+          ports:
+            - name: http
+              containerPort: 8030
+            - name: rpc
+              containerPort: 9020
+            - name: query
+              containerPort: 9030
+            - name: edit-log
+              containerPort: 9010
+          env:
+            - name: DORIS_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: doris-credentials
+                  key: admin-password
+          volumeMounts:
+            - name: fe-config
+              mountPath: /opt/apache-doris/fe/conf/fe.conf
+              subPath: fe.conf
+            - name: fe-meta
+              mountPath: /opt/apache-doris/fe/doris-meta
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /api/bootstrap
+              port: 8030
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
+      volumes:
+        - name: fe-config
+          configMap:
+            name: doris-fe-config
+        - name: fe-meta
+          persistentVolumeClaim:
+            claimName: doris-fe-meta

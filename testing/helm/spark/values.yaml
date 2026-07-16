@@ -1,0 +1,32 @@
+# =============================================================================
+# Apache Spark — TESTING override values
+# =============================================================================
+image:
+  registry: 192.168.1.50:30500
+  repository: spark-gluten-velox
+  tag: "3.5.1"
+  pullPolicy: IfNotPresent
+master:
+  webPort: 8080
+  clusterPort: 7077
+  service:
+    type: NodePort
+    nodePorts:
+      cluster: "32777"
+      http: "32707"
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+worker:
+  replicaCount: 1
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m

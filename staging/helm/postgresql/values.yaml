@@ -1,0 +1,42 @@
+# =============================================================================
+# PostgreSQL — STAGING override values
+# Inherits all settings from helm/postgresql/values.yaml
+# Overrides: smaller storage, no NodePort pin, staging namespace
+# =============================================================================
+global:
+  defaultStorageClass: local-path
+  postgresql:
+    auth:
+      existingSecret: postgresql-credentials
+      secretKeys:
+        adminPasswordKey: postgres-password
+        replicationPasswordKey: replication-password
+      database: metadata
+
+image:
+  tag: "17"
+
+primary:
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  service:
+    type: NodePort
+    nodePorts:
+      postgresql: "31532"
+
+readReplicas:
+  replicaCount: 0

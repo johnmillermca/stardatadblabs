@@ -1,0 +1,66 @@
+# =============================================================================
+# Apache Spark — prod namespace  (HA: 1 master + 3 workers)
+# Namespace   : prod
+# Image       : 192.168.1.50:30500/spark-gluten-velox:3.5.1
+# Access      : http://192.168.1.50:30707 (Master UI)
+#               spark://192.168.1.50:30777 (RPC)
+# Iceberg JAR : iceberg-spark-runtime-3.5_2.12-1.9.2.jar (bundled in image)
+# =============================================================================
+
+image:
+  registry: 192.168.1.50:30500
+  repository: spark-gluten-velox
+  tag: "3.5.1"
+  pullPolicy: IfNotPresent
+
+master:
+  webPort: 8080
+  clusterPort: 7077
+  configOptions:
+    SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-ubuntu_22.04-1.2.0.jar"
+  service:
+    type: NodePort
+    nodePorts:
+      cluster: "30777"
+      http: "30707"
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: "2"
+
+worker:
+  replicaCount: 3
+  configOptions:
+    SPARK_WORKER_MEMORY: "4G"
+    SPARK_WORKER_CORES: "4"
+    SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-ubuntu_22.04-1.2.0.jar"
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: "4"
+
+security:
+  rpc:
+    authenticationEnabled: false
+    encryptionEnabled: false
+  ssl:
+    enabled: false
+
+metrics:
+  enabled: true
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 15
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10

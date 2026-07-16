@@ -1,0 +1,29 @@
+# =============================================================================
+# SQLMesh — TESTING override values
+# DNS: postgresql.prod.svc.cluster.local
+# NodePort: 32883
+# =============================================================================
+image:
+  repository: 192.168.1.50:30500/sqlmesh
+  tag: "0.99.0"
+  pullPolicy: IfNotPresent
+db:
+  host: postgresql.prod.svc.cluster.local
+  port: 5432
+  name: sqlmesh_state
+  existingSecret: sqlmesh-credentials
+  userKey: db-user
+  passwordKey: db-password
+persistence:
+  enabled: false
+service:
+  type: NodePort
+  port: 8001
+  nodePort: 32883
+resources:
+  requests:
+    memory: 64Mi
+    cpu: 50m
+  limits:
+    memory: 256Mi
+    cpu: 250m

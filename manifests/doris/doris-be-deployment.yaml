@@ -1,0 +1,93 @@
+# =============================================================================
+# Apache Doris BE (Backend) — ConfigMap + PVC + Deployment
+# Namespace : prod
+# Connects  : to FE at doris-fe-headless.prod.svc.cluster.local:9020
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-be-config
+  namespace: prod
+data:
+  be.conf: |
+    sys_log_level = INFO
+    be_port = 9060
+    webserver_port = 8040
+    heartbeat_service_port = 9050
+    brpc_port = 8060
+    storage_root_path = /opt/apache-doris/be/storage
+    JAVA_OPTS = "-Xmx1024m -DlogPath=$DORIS_HOME/log/jni.log"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: doris-be-storage
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-be
+  namespace: prod
+  labels:
+    app: doris-be
+    component: be
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-be
+  template:
+    metadata:
+      labels:
+        app: doris-be
+        component: be
+    spec:
+      containers:
+        - name: doris-be
+          image: apache/doris:2.1.0-be
+          ports:
+            - name: be-port
+              containerPort: 9060
+            - name: webserver
+              containerPort: 8040
+            - name: heartbeat
+              containerPort: 9050
+            - name: brpc
+              containerPort: 8060
+          env:
+            - name: FE_SERVERS
+              value: "doris-fe-headless.prod.svc.cluster.local:9010"
+          volumeMounts:
+            - name: be-config
+              mountPath: /opt/apache-doris/be/conf/be.conf
+              subPath: be.conf
+            - name: be-storage
+              mountPath: /opt/apache-doris/be/storage
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8040
+            initialDelaySeconds: 60
+            periodSeconds: 15
+      volumes:
+        - name: be-config
+          configMap:
+            name: doris-be-config
+        - name: be-storage
+          persistentVolumeClaim:
+            claimName: doris-be-storage

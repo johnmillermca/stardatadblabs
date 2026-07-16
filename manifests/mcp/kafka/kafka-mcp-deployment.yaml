@@ -1,0 +1,80 @@
+# =============================================================================
+# Kafka MCP Server — Kubernetes Deployment
+# Namespace : streaming
+# Port      : 3104 (MCP SSE)
+# NodePort  : 30314
+# Image     : 192.168.1.50:30500/mcp-kafka:1.0.0
+# Default   : connects to Strimzi bootstrap (SCRAM-SHA-512)
+# Secret    : akhq-credentials (reuses kafka-sasl-username/password keys)
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-kafka
+  namespace: prod
+  labels:
+    app: mcp-kafka
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-kafka
+  template:
+    metadata:
+      labels:
+        app: mcp-kafka
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-kafka
+          image: 192.168.1.50:30500/mcp-kafka:1.0.0
+          ports:
+            - containerPort: 3104
+              name: mcp
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+            - name: KAFKA_SECURITY
+              value: "SASL_PLAINTEXT"
+            - name: KAFKA_SASL_MECH
+              value: "SCRAM-SHA-512"
+            - name: KAFKA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: akhq-credentials
+                  key: kafka-sasl-username
+            - name: KAFKA_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: akhq-credentials
+                  key: kafka-sasl-password
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 250m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3104
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-kafka
+  namespace: prod
+spec:
+  selector:
+    app: mcp-kafka
+  type: NodePort
+  ports:
+    - port: 3104
+      targetPort: 3104
+      nodePort: 30314
+      name: mcp

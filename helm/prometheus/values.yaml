@@ -1,0 +1,219 @@
+# =============================================================================
+# kube-prometheus-stack (prometheus-community/kube-prometheus-stack)
+# Namespace   : monitoring
+# NodePort    : 30990 (Prometheus UI)  |  Alertmanager: 30993
+# Access      : http://192.168.1.50:30990
+# Monitors    : ALL components in the prod namespace
+# Secret      : grafana-credentials (admin password read from OpenBao)
+# =============================================================================
+
+## ── Global ──────────────────────────────────────────────────────────────────
+fullnameOverride: prometheus
+namespaceOverride: monitoring
+
+## ── Prometheus Server ────────────────────────────────────────────────────────
+prometheus:
+  enabled: true
+  prometheusSpec:
+    # Retain metrics for 30 days
+    retention: 30d
+    retentionSize: "40GB"
+
+    # Scrape interval
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # PVC for data
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 50Gi
+
+    # Discover ServiceMonitors/PodMonitors in prod and monitoring
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector:
+      matchExpressions:
+        - key: environment
+          operator: In
+          values: [prod, monitoring, infra]
+    serviceMonitorSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorNamespaceSelector:
+      matchExpressions:
+        - key: environment
+          operator: In
+          values: [prod, monitoring, infra]
+    podMonitorSelector: {}
+    ruleSelectorNilUsesHelmValues: false
+    ruleNamespaceSelector: {}
+
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 6Gi
+
+    nodeSelector:
+      kubernetes.io/hostname: master.local
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+  service:
+    type: NodePort
+    nodePort: 30990
+
+## ── Alertmanager ─────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 5Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    nodeSelector:
+      kubernetes.io/hostname: master.local
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+  service:
+    type: NodePort
+    nodePort: 30993
+
+## ── Grafana (bundled — we deploy separately but keep stub enabled) ────────────
+grafana:
+  enabled: false  # Deployed as standalone; see helm/grafana/values.yaml
+
+## ── Node Exporter ────────────────────────────────────────────────────────────
+nodeExporter:
+  enabled: true
+
+## ── Kube-State-Metrics ───────────────────────────────────────────────────────
+kubeStateMetrics:
+  enabled: true
+
+## ── Prometheus Operator ──────────────────────────────────────────────────────
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+## ── Additional scrape configs — all prod namespace components ─────────────────
+additionalScrapeConfigs:
+  # Kestra orchestration
+  - job_name: 'kestra'
+    static_configs:
+      - targets: ['kestra.prod.svc.cluster.local:8080']
+    metrics_path: /prometheus
+    scrape_interval: 30s
+
+  # Kafka (Strimzi JMX exporter on port 9404)
+  - job_name: 'kafka-jmx'
+    static_configs:
+      - targets: ['strimzi-kafka-kafka-0.strimzi-kafka-kafka-brokers.prod.svc.cluster.local:9404']
+    scrape_interval: 30s
+
+  # OpenSearch (3-node cluster)
+  - job_name: 'opensearch'
+    static_configs:
+      - targets:
+          - 'opensearch-cluster-master-0.opensearch-cluster-master-headless.prod.svc.cluster.local:9200'
+          - 'opensearch-cluster-master-1.opensearch-cluster-master-headless.prod.svc.cluster.local:9200'
+          - 'opensearch-cluster-master-2.opensearch-cluster-master-headless.prod.svc.cluster.local:9200'
+    metrics_path: /_prometheus/metrics
+    scrape_interval: 30s
+
+  # PostgreSQL (exporter sidecar)
+  - job_name: 'postgresql'
+    static_configs:
+      - targets: ['postgresql-metrics.prod.svc.cluster.local:9187']
+    scrape_interval: 30s
+
+  # Apache Doris FE
+  - job_name: 'doris-fe'
+    static_configs:
+      - targets: ['doris-fe.prod.svc.cluster.local:8030']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # Apache Spark master
+  - job_name: 'spark-master'
+    static_configs:
+      - targets: ['spark-master-svc.prod.svc.cluster.local:8080']
+    metrics_path: /metrics/
+    scrape_interval: 30s
+
+  # Apache Ranger
+  - job_name: 'ranger'
+    static_configs:
+      - targets: ['ranger-admin.prod.svc.cluster.local:6080']
+    metrics_path: /metrics
+    scrape_interval: 60s
+
+  # Apache Polaris catalog
+  - job_name: 'polaris'
+    static_configs:
+      - targets: ['polaris-rest.prod.svc.cluster.local:8181']
+    metrics_path: /actuator/prometheus
+    scrape_interval: 30s
+
+  # MCP servers (monitoring namespace)
+  - job_name: 'mcp-prometheus'
+    static_configs:
+      - targets: ['mcp-prometheus.monitoring.svc.cluster.local:3200']
+    scrape_interval: 30s
+
+  - job_name: 'mcp-grafana'
+    static_configs:
+      - targets: ['mcp-grafana.monitoring.svc.cluster.local:3201']
+    scrape_interval: 30s
+
+  # MCP servers (prod namespace — doris/spark/opensearch/kestra/sqlmesh)
+  - job_name: 'mcp-doris'
+    static_configs:
+      - targets: ['mcp-doris.prod.svc.cluster.local:3101']
+    scrape_interval: 30s
+
+  - job_name: 'mcp-spark'
+    static_configs:
+      - targets: ['mcp-spark.prod.svc.cluster.local:3103']
+    scrape_interval: 30s
+
+  - job_name: 'mcp-opensearch'
+    static_configs:
+      - targets: ['mcp-opensearch.prod.svc.cluster.local:3102']
+    scrape_interval: 30s
+
+  - job_name: 'mcp-kafka'
+    static_configs:
+      - targets: ['mcp-kafka.prod.svc.cluster.local:3104']
+    scrape_interval: 30s
+
+  - job_name: 'mcp-sqlmesh'
+    static_configs:
+      - targets: ['mcp-sqlmesh.prod.svc.cluster.local:3105']
+    scrape_interval: 30s

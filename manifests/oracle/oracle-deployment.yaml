@@ -1,0 +1,116 @@
+# =============================================================================
+# Oracle XE 21c — PVC + Init Container + Deployment + Service
+# Namespace : databases
+# Node      : master.local
+# Access    : jdbc:oracle:thin:@192.168.1.50:30521/XEPDB1
+# Secret    : oracle-credentials  (key: oracle-password)
+# Note      : oracle-xe:19 has no public image; gvenzl/oracle-xe:21-slim is
+#             the closest free Oracle version and fully supports LogMiner/Debezium
+# =============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oracle-data
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oracle-xe
+  namespace: prod
+  labels:
+    app: oracle-xe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oracle-xe
+  template:
+    metadata:
+      labels:
+        app: oracle-xe
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      # Fix ownership of the PVC mount before Oracle starts
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 54321:54321 /opt/oracle/oradata"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: oracle-data
+              mountPath: /opt/oracle/oradata
+      containers:
+        - name: oracle-xe
+          image: gvenzl/oracle-xe:21-slim
+          env:
+            - name: ORACLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: oracle-credentials
+                  key: oracle-password
+            - name: ORACLE_DATABASE
+              value: XEPDB1
+          ports:
+            - name: oracle
+              containerPort: 1521
+          volumeMounts:
+            - name: oracle-data
+              mountPath: /opt/oracle/oradata
+            # Oracle XE requires >64MB shared memory
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          readinessProbe:
+            tcpSocket:
+              port: 1521
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 1521
+            initialDelaySeconds: 180
+            periodSeconds: 30
+      volumes:
+        - name: oracle-data
+          persistentVolumeClaim:
+            claimName: oracle-data
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle-xe
+  namespace: prod
+spec:
+  selector:
+    app: oracle-xe
+  type: NodePort
+  ports:
+    - name: oracle
+      port: 1521
+      targetPort: 1521
+      nodePort: 30521

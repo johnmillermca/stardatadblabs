@@ -1,0 +1,17 @@
+# =============================================================================
+# Apache Doris — STAGING reference stub
+# Namespace: prod
+# NodePort FE: 31030
+# =============================================================================
+fe:
+  image: apache/doris:2.1.0-fe
+  replicas: 1
+  storage: 5Gi
+  service:
+    type: NodePort
+    queryPort: 31030
+be:
+  image: apache/doris:2.1.0-be
+  replicas: 1
+  storage: 10Gi
+existingSecret: doris-credentials

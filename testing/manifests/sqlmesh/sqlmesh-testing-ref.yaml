@@ -1,0 +1,9 @@
+# =============================================================================
+# Testing SQLMesh — reference stub
+# Active manifests: manifests/sqlmesh/sqlmesh-deployment.yaml
+# Namespace: prod (NodePort: 32883)
+# DB: postgresql.prod.svc.cluster.local:5432/sqlmesh_state
+# =============================================================================
+environment: testing
+namespace: prod
+nodeport: 32883

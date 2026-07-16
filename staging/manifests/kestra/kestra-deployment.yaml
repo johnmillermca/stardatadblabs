@@ -1,0 +1,5 @@
+# Staging Kestra — symlink reference
+# Use: kubectl apply -f manifests/kestra/kestra-deployment.yaml
+# Override resources/nodePort via helm/kestra/values-staging.yaml
+# Staging NodePort: 31880
+staging: true

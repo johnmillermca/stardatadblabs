@@ -1,0 +1,98 @@
+# ArgoCD Helm values
+# Deploys ArgoCD with NodePort access and sensible resource limits.
+# Chart: argo/argo-cd
+
+global:
+  image:
+    tag: ""   # uses chart default
+
+## ArgoCD Server
+server:
+  replicas: 1
+
+  service:
+    type: NodePort
+    nodePortHttp: 30080
+    nodePortHttps: 30443
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+## Repo Server
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+## Application Set Controller
+applicationSet:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+## Redis
+redis:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+## Controller
+controller:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+## DEX (SSO) - disabled for simplicity; enable later with your OIDC provider
+dex:
+  enabled: false
+
+## Notifications
+notifications:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+## Global configs
+configs:
+  params:
+    server.insecure: "false"   # serve HTTPS on port 8080; expose via NodePort 30443
+  secret:
+    argocdServerAdminPassword: ""
+    argocdServerAdminPasswordMtime: ""
+  cm:
+    url: "https://192.168.1.50:30443"
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      p, role:admin, applications, *, */*, allow
+      p, role:admin, clusters,      get, *, allow
+      p, role:admin, repositories,  *, *, allow
+      g, admin, role:admin

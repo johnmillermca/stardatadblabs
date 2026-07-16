@@ -1,0 +1,27 @@
+# =============================================================================
+# Oracle XE 21c — raw manifest deployment (no official Helm chart)
+# Namespace   : databases
+# Node        : master.local
+# Image       : gvenzl/oracle-xe:21-slim
+#   NOTE: oracle-xe:19 is not a public image. gvenzl/oracle-xe:21-slim is the
+#   closest free Oracle XE version available. It supports LogMiner and can be
+#   used as a Debezium CDC source with the Oracle connector.
+# Access      : jdbc:oracle:thin:@192.168.1.50:30521:XEPDB1
+# Secret      : oracle-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+# This file is a reference stub. Actual deployment is in:
+# manifests/oracle/oracle-deployment.yaml
+# =============================================================================
+
+image:
+  repository: gvenzl/oracle-xe
+  tag: "21-slim"
+
+database: XEPDB1
+existingSecret: oracle-credentials
+passwordKey: oracle-password
+
+storage:
+  size: 30Gi
+  storageClass: local-path
+  mountPath: /opt/oracle/oradata

@@ -1,0 +1,23 @@
+# ArgoCD Application – Storage (StorageClass + local-path-provisioner)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: storage
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/stardatadblabs/k8s-platform.git
+    targetRevision: main
+    path: manifests/storage
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  syncPolicy:
+    automated:
+      prune: false       # Don't auto-prune storage objects
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

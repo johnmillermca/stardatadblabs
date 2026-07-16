@@ -1,0 +1,15 @@
+# SQLMesh config template — rendered at runtime from env vars
+gateways:
+  default:
+    connection:
+      type: spark
+      config:
+        spark.master: "spark://spark-master-svc.prod.svc.cluster.local:7077"
+    state_connection:
+      type: postgres
+      host: postgresql.prod.svc.cluster.local
+      port: 5432
+      database: sqlmesh_state
+      user: "${SQLMESH_DB_USER}"
+      password: "${SQLMESH_DB_PASS}"
+default_gateway: default

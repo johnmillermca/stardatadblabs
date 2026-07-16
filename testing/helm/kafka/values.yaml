@@ -1,0 +1,40 @@
+# =============================================================================
+# Kafka (bitnami) — TESTING override values
+# =============================================================================
+image:
+  tag: "4.0"
+controller:
+  replicaCount: 1
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+broker:
+  replicaCount: 0
+listeners:
+  client:
+    protocol: SASL_PLAINTEXT
+    name: CLIENT
+    containerPort: 9092
+sasl:
+  enabledMechanisms: PLAIN
+  interBrokerMechanism: PLAIN
+  client:
+    users: [kafka-user]
+    existingSecret: kafka-credentials
+    existingSecretPasswordKey: kafka-password
+externalAccess:
+  enabled: false
+extraConfig: |
+  offsets.topic.replication.factor=1
+  default.replication.factor=1
+  min.insync.replicas=1
+kraft:
+  enabled: true
+zookeeper:
+  enabled: false

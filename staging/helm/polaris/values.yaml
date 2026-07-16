@@ -1,0 +1,12 @@
+# =============================================================================
+# Apache Polaris — STAGING reference stub
+# DNS: postgresql.prod.svc.cluster.local
+# =============================================================================
+image:
+  repository: 192.168.1.50:30500/apache-polaris
+  tag: latest
+db:
+  host: postgresql.prod.svc.cluster.local
+  port: 5432
+  name: polaris
+  existingSecret: polaris-db-credentials

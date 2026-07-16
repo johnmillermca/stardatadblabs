@@ -1,0 +1,57 @@
+# =============================================================================
+# JupyterHub — STAGING override values
+# =============================================================================
+hub:
+  config:
+    JupyterHub:
+      admin_access: true
+      authenticator_class: dummy
+    Authenticator:
+      admin_users: [admin]
+    DummyAuthenticator:
+      password: ""
+  extraEnv:
+    DUMMY_AUTH_PASSWORD:
+      valueFrom:
+        secretKeyRef:
+          name: jupyterhub-credentials
+          key: admin-password
+  extraConfig:
+    00-auth: |
+      import os
+      c.DummyAuthenticator.password = os.environ.get('DUMMY_AUTH_PASSWORD', 'changeme')
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+      cpu: 500m
+proxy:
+  service:
+    type: NodePort
+    nodePorts:
+      http: 31888
+singleuser:
+  image:
+    name: 192.168.1.50:30500/jupyter-spark
+    tag: latest
+  storage:
+    type: dynamic
+    capacity: 2Gi
+    dynamic:
+      storageClass: local-path
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 1Gi
+      cpu: "1"
+scheduling:
+  userScheduler:
+    enabled: false
+culling:
+  enabled: true
+  timeout: 1800
+  every: 300

@@ -1,0 +1,98 @@
+# OpenBao Helm values
+# Chart: openbao/openbao
+# OpenBao is the open-source fork of HashiCorp Vault.
+
+global:
+  enabled: true
+  tlsDisable: true        # TLS handled externally; set false to enable internal TLS
+
+server:
+  image:
+    repository: openbao/openbao   # registry is set separately by chart (quay.io); don't duplicate it
+    tag: "2.6.0"                  # quay.io tags have no 'v' prefix (confirmed via quay.io API)
+    pullPolicy: IfNotPresent
+
+  # Development mode (single-node, in-memory). Set to false for production HA.
+  dev:
+    enabled: false
+
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address     = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      storage "file" {
+        path = "/openbao/data"
+      }
+
+      api_addr     = "http://0.0.0.0:8200"
+      cluster_addr = "https://0.0.0.0:8201"
+
+  service:
+    enabled: true
+    type: NodePort
+    port: 8200
+    nodePort: 30820     # UI/API on http://<master-ip>:30820
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 250m
+    limits:
+      memory: 512Mi
+      cpu: "1"
+
+  dataStorage:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+
+  auditStorage:
+    enabled: true
+    size: 5Gi
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+
+  # Readiness / liveness probes
+  readinessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
+  livenessProbe:
+    enabled: false    # OpenBao can be sealed and still "live"
+
+  # Service account for Kubernetes auth method
+  serviceAccount:
+    create: true
+    name: "openbao"
+    annotations: {}
+
+  # Pin to master: image is pre-pulled there and master has reliable internet
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+
+  # Tolerate control-plane taint so bao can run on master
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+ui:
+  enabled: true
+  serviceType: ClusterIP   # server.service already exposes NodePort 30820; avoid duplicate
+
+injector:
+  enabled: true     # Agent sidecar injector for automatic secret injection
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 128Mi
+      cpu: 250m

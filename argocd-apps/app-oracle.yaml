@@ -1,0 +1,26 @@
+# ArgoCD Application — Oracle XE 21c (raw manifests)
+# Namespace : databases  |  Node: master.local
+# Access    : jdbc:oracle:thin:@192.168.1.50:30521/XEPDB1
+# Prereq    : secret oracle-credentials must exist (run 12-seed-openbao-secrets.sh)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: oracle
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/oracle
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: databases
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,161 @@
+# =============================================================================
+# Debezium Kafka Connect — ConfigMap + Deployment + Service
+# Namespace : streaming
+# Access    : http://192.168.1.50:30083 (REST API)
+# Connects to: Kafka at strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+# CDC sources: PostgreSQL (pgoutput), MongoDB, Oracle (LogMiner)
+# Secret    : debezium-credentials  (kafka-sasl-username, kafka-sasl-password)
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: debezium-connect-config
+  namespace: prod
+data:
+  connect-distributed.properties: |
+    bootstrap.servers=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+    group.id=debezium-connect-cluster
+
+    # Kafka SASL/PLAIN — credentials injected from env vars at runtime
+    security.protocol=SASL_PLAINTEXT
+    sasl.mechanism=PLAIN
+    sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="${KAFKA_SASL_USERNAME}" \
+      password="${KAFKA_SASL_PASSWORD}";
+
+    # Same SASL config for producer and consumer
+    producer.security.protocol=SASL_PLAINTEXT
+    producer.sasl.mechanism=PLAIN
+    producer.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="${KAFKA_SASL_USERNAME}" \
+      password="${KAFKA_SASL_PASSWORD}";
+    consumer.security.protocol=SASL_PLAINTEXT
+    consumer.sasl.mechanism=PLAIN
+    consumer.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="${KAFKA_SASL_USERNAME}" \
+      password="${KAFKA_SASL_PASSWORD}";
+
+    # Internal Kafka Connect storage topics (single broker = replication.factor 1)
+    config.storage.topic=debezium-configs
+    config.storage.replication.factor=1
+    offset.storage.topic=debezium-offsets
+    offset.storage.replication.factor=1
+    status.storage.topic=debezium-statuses
+    status.storage.replication.factor=1
+
+    # REST API
+    rest.host.name=0.0.0.0
+    rest.port=8083
+
+    # Converters
+    key.converter=org.apache.kafka.connect.json.JsonConverter
+    value.converter=org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable=false
+    value.converter.schemas.enable=false
+
+    # Plugin path — Debezium connector JARs are bundled in the image
+    plugin.path=/kafka/connect
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debezium-connect
+  namespace: prod
+  labels:
+    app: debezium-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: debezium-connect
+  template:
+    metadata:
+      labels:
+        app: debezium-connect
+    spec:
+      containers:
+        - name: debezium-connect
+          image: quay.io/debezium/connect:2.7
+          ports:
+            - name: rest-api
+              containerPort: 8083
+          env:
+            - name: BOOTSTRAP_SERVERS
+              value: strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+            - name: CONFIG_STORAGE_TOPIC
+              value: debezium-configs
+            - name: OFFSET_STORAGE_TOPIC
+              value: debezium-offsets
+            - name: STATUS_STORAGE_TOPIC
+              value: debezium-statuses
+            - name: KAFKA_SASL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: debezium-credentials
+                  key: kafka-sasl-username
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: debezium-credentials
+                  key: kafka-sasl-password
+            # PostgreSQL CDC credentials
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: debezium-credentials
+                  key: pg-password
+            # MongoDB CDC credentials
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: debezium-credentials
+                  key: mongo-password
+            # Oracle LogMiner credentials
+            - name: ORACLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: debezium-credentials
+                  key: oracle-password
+          volumeMounts:
+            - name: connect-config
+              mountPath: /kafka/config/connect-distributed.properties
+              subPath: connect-distributed.properties
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8083
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8083
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: connect-config
+          configMap:
+            name: debezium-connect-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: debezium-connect
+  namespace: prod
+spec:
+  selector:
+    app: debezium-connect
+  type: NodePort
+  ports:
+    - name: rest-api
+      port: 8083
+      targetPort: 8083
+      nodePort: 30083

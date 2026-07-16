@@ -1,0 +1,5 @@
+# =============================================================================
+# Kerberos KDC — TESTING reference stub
+# =============================================================================
+realm: STARDATADBLABS.LOCAL
+existingSecret: kerberos-admin

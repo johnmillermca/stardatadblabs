@@ -1,0 +1,9 @@
+# =============================================================================
+# Staging Polaris — reference stub
+# Active manifests: manifests/polaris/polaris-deployment.yaml
+# Namespace: prod (NodePort: 31882)
+# =============================================================================
+environment: staging
+namespace: prod
+nodeport: 31882
+db: postgresql.prod.svc.cluster.local:5432/polaris

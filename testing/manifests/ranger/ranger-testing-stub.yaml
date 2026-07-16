@@ -1,0 +1,9 @@
+# =============================================================================
+# Testing Ranger — reference stub
+# Active manifests: manifests/ranger/ranger-deployment.yaml
+# Namespace: prod (NodePort: 32860)
+# =============================================================================
+environment: testing
+namespace: prod
+nodeport: 32860
+db: postgresql.prod.svc.cluster.local:5432/ranger

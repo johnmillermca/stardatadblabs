@@ -1,0 +1,24 @@
+# =============================================================================
+# Apache Ranger — raw manifest deployment (no official Helm chart)
+# Namespace   : security
+# Access      : http://192.168.1.50:30680 (Admin UI, port 6080)
+# Depends on  : PostgreSQL databases.postgresql:5432, db: ranger
+# Image       : 192.168.1.50:30500/apache-ranger:2.4.0
+#               (must be built and pushed before deploying)
+# Secret      : ranger-db-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+# This file is a reference stub. The actual deployment is in:
+# manifests/ranger/ranger-deployment.yaml
+# =============================================================================
+
+image:
+  repository: 192.168.1.50:30500/apache-ranger
+  tag: "2.4.0"
+
+db:
+  host: postgresql.prod.svc.cluster.local
+  port: 5432
+  name: ranger
+  existingSecret: ranger-db-credentials
+  userKey: db-user
+  passwordKey: db-password

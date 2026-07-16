@@ -1,0 +1,8 @@
+# =============================================================================
+# Staging Oracle XE — reference stub
+# Active manifests: manifests/oracle/oracle-deployment.yaml
+# Namespace: prod (NodePort: 31521)
+# =============================================================================
+environment: staging
+namespace: prod
+nodeport: 31521

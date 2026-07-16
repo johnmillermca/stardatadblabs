@@ -1,0 +1,92 @@
+# =============================================================================
+# Grafana MCP Server — Kubernetes Deployment
+# Namespace : monitoring
+# Port      : 3201 (MCP JSON-RPC)
+# NodePort  : 30321
+# Image     : 192.168.1.50:30500/mcp-grafana:1.0.0
+# Credentials: grafana-credentials secret (admin-user / admin-password)
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-grafana
+  namespace: monitoring
+  labels:
+    app: mcp-grafana
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-grafana
+  template:
+    metadata:
+      labels:
+        app: mcp-grafana
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-grafana
+          image: 192.168.1.50:30500/mcp-grafana:1.0.0
+          ports:
+            - containerPort: 3201
+              name: mcp
+          env:
+            - name: GRAFANA_URL
+              value: "http://grafana.monitoring.svc.cluster.local:3000"
+            - name: PORT
+              value: "3201"
+            - name: GRAFANA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-user
+            - name: GRAFANA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-password
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 250m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3201
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3201
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-grafana
+  namespace: monitoring
+  labels:
+    app: mcp-grafana
+    component: mcp-server
+spec:
+  selector:
+    app: mcp-grafana
+  type: NodePort
+  ports:
+    - port: 3201
+      targetPort: 3201
+      nodePort: 30321
+      name: mcp

@@ -1,0 +1,51 @@
+# =============================================================================
+# MongoDB — prod namespace  (standalone — no HA needed)
+# Namespace   : prod
+# Access      : mongodb.prod.svc.cluster.local:27017  (internal)
+#               NodePort 192.168.1.50:30017           (external)
+# Secret      : mongodb-credentials
+# =============================================================================
+global:
+  defaultStorageClass: local-path
+
+image:
+  tag: "8.0"
+
+architecture: standalone
+
+auth:
+  enabled: true
+  existingSecret: mongodb-credentials
+  existingSecretPasswordKey: mongodb-root-password
+
+directoryPerDB: true
+
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+persistence:
+  enabled: true
+  size: 30Gi
+
+service:
+  type: NodePort
+  nodePorts:
+    mongodb: "30017"
+
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 250m
+  limits:
+    memory: 2Gi
+    cpu: "1"
+
+metrics:
+  enabled: false
+
+arbiter:
+  enabled: false

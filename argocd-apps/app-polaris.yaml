@@ -1,0 +1,27 @@
+# ArgoCD Application — Apache Polaris (raw manifests)
+# Namespace : catalog
+# Access    : http://192.168.1.50:30181 (Iceberg REST catalog)
+# Prereq    : secret polaris-db-credentials must exist (run 12-seed-openbao-secrets.sh)
+# Prereq    : image 192.168.1.50:30500/apache-polaris:latest must be pushed
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: polaris
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/polaris
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: catalog
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

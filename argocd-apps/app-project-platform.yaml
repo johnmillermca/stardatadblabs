@@ -1,0 +1,46 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.io
+spec:
+  description: "StarDataDBLabs Platform — all data/streaming/analytics products (prod + monitoring)"
+  sourceRepos:
+    - "https://github.com/johnmillermca/stardatadblabs"
+    - "https://openbao.github.io/openbao-helm"
+    - "https://argoproj.github.io/argo-helm"
+    - "https://charts.bitnami.com/bitnami"
+    - "https://akhq.io"
+    - "https://strimzi.io/charts/"
+    - "https://confluentinc.github.io/cp-helm-charts/"
+    - "https://opensearch-project.github.io/helm-charts/"
+    - "https://hub.jupyter.org/helm-chart/"
+    - "https://helm.kestra.io"
+    - "https://prometheus-community.github.io/helm-charts"
+    - "https://grafana.github.io/helm-charts"
+
+  destinations:
+    - namespace: "prod"
+      server: https://kubernetes.default.svc
+    - namespace: "monitoring"
+      server: https://kubernetes.default.svc
+    - namespace: "argocd"
+      server: https://kubernetes.default.svc
+
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+
+  roles:
+    - name: platform-admin
+      description: Full platform admin access
+      policies:
+        - p, proj:platform:platform-admin, applications, *, platform/*, allow
+      groups:
+        - platform-admins

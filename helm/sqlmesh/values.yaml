@@ -1,0 +1,43 @@
+# =============================================================================
+# SQLMesh — prod namespace
+# Namespace   : prod
+# Access      : http://192.168.1.50:30883
+# PostgreSQL  : postgresql.prod.svc.cluster.local:5432/sqlmesh_state
+# Spark       : spark://spark-master-svc.prod.svc.cluster.local:7077
+# Polaris     : http://polaris-rest.prod.svc.cluster.local:8181
+# Secret      : sqlmesh-credentials
+# =============================================================================
+
+image:
+  repository: 192.168.1.50:30500/sqlmesh
+  tag: "0.99.0"
+  pullPolicy: IfNotPresent
+
+db:
+  host: postgresql.prod.svc.cluster.local
+  port: 5432
+  name: sqlmesh_state
+  existingSecret: sqlmesh-credentials
+  userKey: db-user
+  passwordKey: db-password
+
+spark:
+  master: "spark://spark-master-svc.prod.svc.cluster.local:7077"
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: local-path
+
+service:
+  type: NodePort
+  port: 8001
+  nodePort: 30883
+
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 250m
+  limits:
+    memory: 2Gi
+    cpu: "1"

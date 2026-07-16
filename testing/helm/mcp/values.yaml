@@ -1,0 +1,18 @@
+# =============================================================================
+# MCP Servers — TESTING reference values
+# =============================================================================
+sqlmesh:
+  image: 192.168.1.50:30500/mcp-sqlmesh:1.0.0
+  nodePort: 32310
+doris:
+  image: 192.168.1.50:30500/mcp-doris:1.0.0
+  nodePort: 32311
+opensearch:
+  image: 192.168.1.50:30500/mcp-opensearch:1.0.0
+  nodePort: 32312
+spark:
+  image: 192.168.1.50:30500/mcp-spark:1.0.0
+  nodePort: 32313
+kafka:
+  image: 192.168.1.50:30500/mcp-kafka:1.0.0
+  nodePort: 32314

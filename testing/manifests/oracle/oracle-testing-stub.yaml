@@ -1,0 +1,8 @@
+# =============================================================================
+# Testing Oracle XE — reference stub
+# Active manifests: manifests/oracle/oracle-deployment.yaml
+# Namespace: prod (NodePort: 32521)
+# =============================================================================
+environment: testing
+namespace: prod
+nodeport: 32521

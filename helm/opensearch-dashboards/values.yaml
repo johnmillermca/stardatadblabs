@@ -1,0 +1,47 @@
+# =============================================================================
+# OpenSearch Dashboards — prod namespace
+# Namespace   : prod
+# Access      : http://192.168.1.50:30601
+# Connects to : opensearch-cluster-master.prod.svc.cluster.local:9200
+# Replicas    : 2 (HA)
+# =============================================================================
+
+replicaCount: 2
+
+imageTag: "3.7.0"
+
+opensearchHosts: "http://opensearch-cluster-master.prod.svc.cluster.local:9200"
+
+config:
+  opensearch_dashboards.yml: |
+    server.host: '0.0.0.0'
+    opensearch.hosts: ['http://opensearch-cluster-master.prod.svc.cluster.local:9200']
+    opensearch_security.disabled: true
+    opensearch.ssl.verificationMode: none
+
+extraEnvs:
+  - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
+    value: "true"
+
+service:
+  type: NodePort
+  port: 5601
+  nodePort: 30601
+
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 250m
+  limits:
+    memory: 1Gi
+    cpu: "1"
+
+readinessProbe:
+  failureThreshold: 10
+  initialDelaySeconds: 60
+  periodSeconds: 10
+
+livenessProbe:
+  failureThreshold: 10
+  initialDelaySeconds: 60
+  periodSeconds: 20

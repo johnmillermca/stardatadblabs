@@ -1,0 +1,65 @@
+# =============================================================================
+# Apache Kestra — prod namespace  (HA: 2 replicas)
+# Namespace   : prod
+# Access      : http://192.168.1.50:30880
+# Kafka       : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+# PostgreSQL  : postgresql.prod.svc.cluster.local:5432/kestra
+# Secret      : kestra-credentials
+# =============================================================================
+
+image:
+  repository: kestra/kestra
+  tag: latest-lts
+  pullPolicy: IfNotPresent
+
+configuration:
+  kestra:
+    server:
+      basicAuth:
+        enabled: false
+    repository:
+      type: postgres
+    storage:
+      type: local
+      local:
+        basePath: /app/storage
+    queue:
+      type: kafka
+
+datasources:
+  postgres:
+    url: "jdbc:postgresql://postgresql.prod.svc.cluster.local:5432/kestra"
+    driverClassName: org.postgresql.Driver
+
+existingSecret: kestra-credentials
+
+replicaCount: 2
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: local-path
+
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 30880
+
+resources:
+  requests:
+    memory: 1Gi
+    cpu: 500m
+  limits:
+    memory: 4Gi
+    cpu: "2"
+
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

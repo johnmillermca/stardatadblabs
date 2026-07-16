@@ -1,0 +1,17 @@
+# =============================================================================
+# Apache Doris — TESTING reference stub
+# Namespace: prod
+# NodePort FE: 32030
+# =============================================================================
+fe:
+  image: apache/doris:2.1.0-fe
+  replicas: 1
+  storage: 2Gi
+  service:
+    type: NodePort
+    queryPort: 32030
+be:
+  image: apache/doris:2.1.0-be
+  replicas: 1
+  storage: 5Gi
+existingSecret: doris-credentials

@@ -1,0 +1,18 @@
+# =============================================================================
+# MIT Kerberos KDC — raw manifest deployment (no official Helm chart)
+# Namespace   : kerberos
+# Realm       : STARDATADBLABS.LOCAL
+# Services    : KDC (88/TCP+UDP), kadmin (749/TCP) — ClusterIP only
+# Node        : master.local
+# Image       : rockylinux:9 + krb5-server installed at startup
+# Secret      : kerberos-admin (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+# This file is a reference stub. Actual deployment is in:
+# manifests/kerberos/kerberos-deployment.yaml
+# =============================================================================
+
+realm: STARDATADBLABS.LOCAL
+adminPrincipal: admin/admin
+existingSecret: kerberos-admin
+masterPasswordKey: master-password
+adminPasswordKey: admin-password

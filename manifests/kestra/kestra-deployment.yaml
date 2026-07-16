@@ -1,0 +1,176 @@
+# =============================================================================
+# Apache Kestra 0.22.x — Workflow Orchestrator
+# Namespace   : prod
+# Node        : master.local (pinned)
+# Access      : http://192.168.1.50:30880 (UI)
+#               http://kestra.prod.svc.cluster.local:8080 (internal)
+# Image       : kestra/kestra:latest-lts (v0.22)
+# Depends on  : PostgreSQL (prod namespace, db: kestra)
+#               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+# Secret      : kestra-credentials
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kestra-config
+  namespace: prod
+data:
+  application.yaml: |
+    kestra:
+      server:
+        basicAuth:
+          enabled: false
+      repository:
+        type: postgres
+      storage:
+        type: local
+        local:
+          basePath: /app/storage
+      queue:
+        type: kafka
+        kafka:
+          client:
+            properties:
+              bootstrap.servers: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+              security.protocol: SASL_PLAINTEXT
+              sasl.mechanism: PLAIN
+              sasl.jaas.config: "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${KESTRA_KAFKA_USER}\" password=\"${KESTRA_KAFKA_PASS}\";"
+      tasks:
+        defaults: []
+      url: "http://192.168.1.50:30880"
+      variables:
+        env-vars-prefix: ""
+
+    datasources:
+      postgres:
+        url: "jdbc:postgresql://postgresql.prod.svc.cluster.local:5432/kestra"
+        driverClassName: org.postgresql.Driver
+        username: "${KESTRA_DB_USER}"
+        password: "${KESTRA_DB_PASS}"
+
+    flyway:
+      datasources:
+        postgres:
+          enabled: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kestra-storage
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kestra
+  namespace: prod
+  labels:
+    app: kestra
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kestra
+  template:
+    metadata:
+      labels:
+        app: kestra
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: kestra
+          image: kestra/kestra:latest-lts
+          args: ["server", "standalone", "--worker-thread=16"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 8081
+          env:
+            - name: KESTRA_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: db-user
+            - name: KESTRA_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: db-password
+            - name: KESTRA_KAFKA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: kafka-user
+            - name: KESTRA_KAFKA_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: kafka-password
+            - name: KESTRA_ENCRYPTION_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: encryption-key
+            - name: SECRET_OPENBAO_URL
+              value: "http://openbao.prod.svc.cluster.local:8200"
+          volumeMounts:
+            - name: kestra-config
+              mountPath: /app/confs/application.yaml
+              subPath: application.yaml
+            - name: kestra-storage
+              mountPath: /app/storage
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/alive
+              port: 8081
+            initialDelaySeconds: 90
+            periodSeconds: 30
+      volumes:
+        - name: kestra-config
+          configMap:
+            name: kestra-config
+        - name: kestra-storage
+          persistentVolumeClaim:
+            claimName: kestra-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kestra
+  namespace: prod
+spec:
+  selector:
+    app: kestra
+  type: NodePort
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30880

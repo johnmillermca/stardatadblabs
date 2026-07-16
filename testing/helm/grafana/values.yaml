@@ -1,0 +1,54 @@
+# =============================================================================
+# Grafana — TESTING environment values
+# Namespace : monitoring (testing)
+# NodePort  : 30302
+# =============================================================================
+fullnameOverride: grafana
+
+admin:
+  existingSecret: grafana-credentials
+  userKey: admin-user
+  passwordKey: admin-password
+
+persistence:
+  enabled: false
+
+service:
+  type: NodePort
+  port: 3000
+  nodePort: 30302
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus-Testing
+        type: prometheus
+        url: http://prometheus-prometheus.monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+
+grafana.ini:
+  server:
+    root_url: "http://192.168.1.50:30302"
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  log:
+    mode: console
+    level: info

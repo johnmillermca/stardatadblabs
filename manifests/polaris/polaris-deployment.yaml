@@ -1,0 +1,101 @@
+# =============================================================================
+# Apache Polaris — ConfigMap + Deployment + Service
+# Namespace : catalog
+# Access    : http://192.168.1.50:30181 (Iceberg REST catalog API)
+# Depends on: PostgreSQL databases.postgresql:5432, db: polaris
+# Image     : 192.168.1.50:30500/apache-polaris:latest
+# Secret    : polaris-db-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: polaris-config
+  namespace: prod
+data:
+  application.properties: |
+    server.port=8181
+    polaris.persistence.type=relational-jdbc
+    polaris.persistence.relational.jdbc.type=postgres
+    polaris.persistence.relational.jdbc.host=postgresql.prod.svc.cluster.local
+    polaris.persistence.relational.jdbc.port=5432
+    polaris.persistence.relational.jdbc.database=polaris
+    # username/password injected from env vars (see Deployment below)
+    polaris.persistence.relational.jdbc.user=${POLARIS_DB_USER}
+    polaris.persistence.relational.jdbc.password=${POLARIS_DB_PASS}
+    polaris.features.ALLOW_WILDCARD_LOCATION=true
+    polaris.features.INITIALIZE_DEFAULT_CATALOG_FILEIO_FOR_WRITES=true
+    logging.level.org.apache.polaris=INFO
+    management.endpoints.web.exposure.include=health,info,metrics
+    management.endpoint.health.show-details=always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polaris
+  namespace: prod
+  labels:
+    app: polaris
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: polaris
+  template:
+    metadata:
+      labels:
+        app: polaris
+    spec:
+      containers:
+        - name: polaris
+          image: 192.168.1.50:30500/apache-polaris:latest
+          ports:
+            - name: rest
+              containerPort: 8181
+          env:
+            - name: POLARIS_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-db-credentials
+                  key: db-user
+            - name: POLARIS_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-db-credentials
+                  key: db-password
+          volumeMounts:
+            - name: polaris-config
+              mountPath: /opt/polaris/application.properties
+              subPath: application.properties
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8181
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: polaris-config
+          configMap:
+            name: polaris-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: polaris-rest
+  namespace: prod
+spec:
+  selector:
+    app: polaris
+  type: NodePort
+  ports:
+    - name: rest
+      port: 8181
+      targetPort: 8181
+      nodePort: 30181

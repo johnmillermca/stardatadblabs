@@ -1,0 +1,9 @@
+# =============================================================================
+# Staging Kerberos KDC — reference stub
+# Active manifests: manifests/kerberos/kerberos-deployment.yaml
+# Namespace: prod (NodePort: 31088)
+# =============================================================================
+environment: staging
+namespace: prod
+realm: STARDATADBLABS.LOCAL
+nodeport: 31088

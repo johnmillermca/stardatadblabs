@@ -1,0 +1,77 @@
+# =============================================================================
+# OpenSearch MCP Server — Kubernetes Deployment
+# Namespace : search
+# Port      : 3102 (MCP SSE)
+# NodePort  : 30312
+# Image     : 192.168.1.50:30500/mcp-opensearch:1.0.0
+# Secret    : opensearch-credentials
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-opensearch
+  namespace: prod
+  labels:
+    app: mcp-opensearch
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-opensearch
+  template:
+    metadata:
+      labels:
+        app: mcp-opensearch
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-opensearch
+          image: 192.168.1.50:30500/mcp-opensearch:1.0.0
+          ports:
+            - containerPort: 3102
+              name: mcp
+          env:
+            - name: OPENSEARCH_HOST
+              value: "opensearch-cluster-master.prod.svc.cluster.local"
+            - name: OPENSEARCH_PORT
+              value: "9200"
+            - name: OPENSEARCH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: opensearch-credentials
+                  key: opensearch-user
+            - name: OPENSEARCH_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: opensearch-credentials
+                  key: opensearch-password
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 250m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3102
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-opensearch
+  namespace: prod
+spec:
+  selector:
+    app: mcp-opensearch
+  type: NodePort
+  ports:
+    - port: 3102
+      targetPort: 3102
+      nodePort: 30312
+      name: mcp

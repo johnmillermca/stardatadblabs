@@ -1,0 +1,96 @@
+# =============================================================================
+# Apache Kafka Helm values — bitnami/kafka  chart 32.4.3 / app 4.0.0
+# Namespace   : prod
+# Mode        : KRaft (no ZooKeeper) — KRaft is default in Kafka 4.0
+# Access      : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (internal SASL/PLAIN)
+#               NodePort 192.168.1.50:30092 (external)
+# Secret      : kafka-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+
+image:
+  tag: "4.0"
+
+# KRaft mode is the only mode in Kafka 4.0 (ZooKeeper removed)
+controller:
+  replicaCount: 1
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: local-path
+
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: "2"
+
+broker:
+  replicaCount: 0   # combined controller+broker in single node lab
+
+listeners:
+  client:
+    protocol: SASL_PLAINTEXT
+    name: CLIENT
+    containerPort: 9092
+    sslClientAuth: ""
+  interbroker:
+    protocol: SASL_PLAINTEXT
+    name: INTERNAL
+    containerPort: 9094
+  external:
+    protocol: SASL_PLAINTEXT
+    name: EXTERNAL
+    containerPort: 9095
+
+sasl:
+  enabledMechanisms: PLAIN
+  interBrokerMechanism: PLAIN
+  client:
+    users:
+      - kafka-user
+    passwords: ""
+    existingSecret: kafka-credentials
+    existingSecretPasswordKey: kafka-password
+
+externalAccess:
+  enabled: true
+  controller:
+    service:
+      type: NodePort
+      nodePorts:
+        - 30092
+      externalIPs:
+        - 192.168.1.50
+
+extraConfig: |
+  auto.create.topics.enable=true
+  offsets.topic.replication.factor=1
+  transaction.state.log.replication.factor=1
+  transaction.state.log.min.isr=1
+  default.replication.factor=1
+  min.insync.replicas=1
+
+kraft:
+  enabled: true
+  clusterId: ""   # auto-generated
+
+service:
+  type: ClusterIP
+  ports:
+    client: 9092
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: local-path
+
+metrics:
+  kafka:
+    enabled: false
+  jmx:
+    enabled: false
+
+zookeeper:
+  enabled: false

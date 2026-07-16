@@ -1,0 +1,22 @@
+# =============================================================================
+# Apache Doris — raw manifest deployment (no stable Helm chart)
+# Namespace   : analytics
+# Access      : http://192.168.1.50:30030 (FE HTTP / Query)
+#               jdbc:mysql://192.168.1.50:30090 (FE MySQL protocol)
+# Secret      : doris-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+# This file is a reference stub. Actual deployment is in:
+# manifests/doris/doris-fe-deployment.yaml
+# manifests/doris/doris-be-deployment.yaml
+# manifests/doris/doris-services.yaml
+# =============================================================================
+
+fe:
+  image: apache/doris:2.1.0-fe
+  replicas: 1
+  storage: 10Gi
+
+be:
+  image: apache/doris:2.1.0-be
+  replicas: 1
+  storage: 20Gi

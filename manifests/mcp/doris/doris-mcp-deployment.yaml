@@ -1,0 +1,74 @@
+# =============================================================================
+# Doris MCP Server — Kubernetes Deployment
+# Namespace : analytics
+# Port      : 3101 (MCP SSE)
+# NodePort  : 30311
+# Image     : 192.168.1.50:30500/mcp-doris:1.0.0
+# Secret    : doris-credentials
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-doris
+  namespace: prod
+  labels:
+    app: mcp-doris
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-doris
+  template:
+    metadata:
+      labels:
+        app: mcp-doris
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-doris
+          image: 192.168.1.50:30500/mcp-doris:1.0.0
+          ports:
+            - containerPort: 3101
+              name: mcp
+          env:
+            - name: DORIS_HOST
+              value: "doris-fe.prod.svc.cluster.local"
+            - name: DORIS_PORT
+              value: "9030"
+            - name: DORIS_USER
+              value: "root"
+            - name: DORIS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: doris-credentials
+                  key: admin-password
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 250m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3101
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-doris
+  namespace: prod
+spec:
+  selector:
+    app: mcp-doris
+  type: NodePort
+  ports:
+    - port: 3101
+      targetPort: 3101
+      nodePort: 30311
+      name: mcp

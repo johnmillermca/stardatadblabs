@@ -1,0 +1,20 @@
+# =============================================================================
+# MCP Servers — STAGING reference values
+# NodePorts: 313xx (staging) vs 314xx (testing)
+# All MCP servers share the same image versions
+# =============================================================================
+sqlmesh:
+  image: 192.168.1.50:30500/mcp-sqlmesh:1.0.0
+  nodePort: 31310
+doris:
+  image: 192.168.1.50:30500/mcp-doris:1.0.0
+  nodePort: 31311
+opensearch:
+  image: 192.168.1.50:30500/mcp-opensearch:1.0.0
+  nodePort: 31312
+spark:
+  image: 192.168.1.50:30500/mcp-spark:1.0.0
+  nodePort: 31313
+kafka:
+  image: 192.168.1.50:30500/mcp-kafka:1.0.0
+  nodePort: 31314

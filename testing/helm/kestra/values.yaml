@@ -1,0 +1,26 @@
+# =============================================================================
+# Kestra — TESTING override values
+# =============================================================================
+image:
+  repository: kestra/kestra
+  tag: latest-lts
+existingSecret: kestra-credentials
+persistence:
+  enabled: false
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 32880
+resources:
+  requests:
+    memory: 128Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"

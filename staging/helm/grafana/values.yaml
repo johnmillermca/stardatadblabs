@@ -1,0 +1,56 @@
+# =============================================================================
+# Grafana — STAGING environment values
+# Namespace : monitoring (staging)
+# NodePort  : 30301
+# =============================================================================
+fullnameOverride: grafana
+
+admin:
+  existingSecret: grafana-credentials
+  userKey: admin-user
+  passwordKey: admin-password
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClassName: local-path
+
+service:
+  type: NodePort
+  port: 3000
+  nodePort: 30301
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus-Staging
+        type: prometheus
+        url: http://prometheus-prometheus.monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+
+grafana.ini:
+  server:
+    root_url: "http://192.168.1.50:30301"
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  log:
+    mode: console
+    level: info

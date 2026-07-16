@@ -1,0 +1,9 @@
+# =============================================================================
+# Testing Kerberos KDC — reference stub
+# Active manifests: manifests/kerberos/kerberos-deployment.yaml
+# Namespace: prod (NodePort: 32088)
+# =============================================================================
+environment: testing
+namespace: prod
+realm: STARDATADBLABS.LOCAL
+nodeport: 32088

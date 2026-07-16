@@ -1,0 +1,61 @@
+# =============================================================================
+# Apache Doris Services
+# Namespace : analytics
+# FE NodePort: http://192.168.1.50:30030 (HTTP)  jdbc://192.168.1.50:30090 (MySQL)
+# =============================================================================
+---
+# External NodePort for FE — HTTP WebUI + StreamLoad (8030) and MySQL query (9030)
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe
+  namespace: prod
+spec:
+  selector:
+    app: doris-fe
+  type: NodePort
+  ports:
+    - name: http
+      port: 8030
+      targetPort: 8030
+      nodePort: 30030
+    - name: query
+      port: 9030
+      targetPort: 9030
+      nodePort: 30090
+---
+# Headless service for stable FE DNS (required for enable_fqdn_mode=true)
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-headless
+  namespace: prod
+spec:
+  clusterIP: None
+  selector:
+    app: doris-fe
+  ports:
+    - name: edit-log
+      port: 9010
+    - name: rpc
+      port: 9020
+---
+# Internal ClusterIP for BE — not exposed externally
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-be
+  namespace: prod
+spec:
+  selector:
+    app: doris-be
+  type: ClusterIP
+  ports:
+    - name: be-port
+      port: 9060
+    - name: webserver
+      port: 8040
+    - name: heartbeat
+      port: 9050
+    - name: brpc
+      port: 8060

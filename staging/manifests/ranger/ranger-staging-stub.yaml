@@ -1,0 +1,9 @@
+# =============================================================================
+# Staging Ranger — reference stub
+# Active manifests: manifests/ranger/ranger-deployment.yaml
+# Namespace: prod (NodePort: 31860)
+# =============================================================================
+environment: staging
+namespace: prod
+nodeport: 31860
+db: postgresql.prod.svc.cluster.local:5432/ranger

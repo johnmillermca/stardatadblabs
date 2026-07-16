@@ -1,0 +1,67 @@
+# =============================================================================
+# OpenSearch — prod namespace  (3-node HA cluster)
+# Namespace   : prod
+# Access      : http://192.168.1.50:30920 (HTTP REST NodePort)
+#               opensearch-cluster-master.prod.svc.cluster.local:9200 (internal)
+# Replicas    : 3 (HA — quorum-safe for master election)
+# Secret      : opensearch-credentials
+# =============================================================================
+
+singleNode: false
+replicas: 3
+
+imageTag: "3.7.0"
+
+opensearchJavaOpts: "-Xms1g -Xmx1g"
+
+extraEnvs:
+  - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: opensearch-credentials
+        key: opensearch-password
+
+config:
+  opensearch.yml: |
+    cluster.name: opensearch-prod
+    network.host: 0.0.0.0
+    # Minimum master nodes = (replicas/2)+1 = 2
+    discovery.zen.minimum_master_nodes: 2
+    plugins.security.disabled: true
+
+persistence:
+  enabled: true
+  size: 50Gi
+  storageClass: local-path
+
+service:
+  type: NodePort
+  httpPortName: http
+  transportPortName: transport
+  nodePort: 30920
+
+resources:
+  requests:
+    memory: 2Gi
+    cpu: 500m
+  limits:
+    memory: 4Gi
+    cpu: "2"
+
+# Pod anti-affinity — spread across nodes where possible
+antiAffinity: soft
+
+startupProbe:
+  failureThreshold: 30
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+livenessProbe:
+  failureThreshold: 3
+  initialDelaySeconds: 60
+  periodSeconds: 10
+
+readinessProbe:
+  failureThreshold: 3
+  initialDelaySeconds: 60
+  periodSeconds: 5

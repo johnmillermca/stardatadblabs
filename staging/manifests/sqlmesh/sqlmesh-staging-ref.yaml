@@ -1,0 +1,9 @@
+# =============================================================================
+# Staging SQLMesh — reference stub
+# Active manifests: manifests/sqlmesh/sqlmesh-deployment.yaml
+# Namespace: prod (NodePort: 31883)
+# DB: postgresql.prod.svc.cluster.local:5432/sqlmesh_state
+# =============================================================================
+environment: staging
+namespace: prod
+nodeport: 31883

@@ -1,0 +1,28 @@
+# =============================================================================
+# Kestra — STAGING override values
+# =============================================================================
+image:
+  repository: kestra/kestra
+  tag: latest-lts
+existingSecret: kestra-credentials
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: local-path
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 31880
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 250m
+  limits:
+    memory: 1Gi
+    cpu: "1"
+nodeSelector:
+  kubernetes.io/hostname: master.local
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"

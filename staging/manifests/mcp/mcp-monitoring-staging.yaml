@@ -1,0 +1,150 @@
+# =============================================================================
+# Staging MCP servers manifest — includes monitoring MCP servers
+# Namespace : monitoring (staging)
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-prometheus
+  namespace: monitoring
+  labels:
+    app: mcp-prometheus
+    component: mcp-server
+    environment: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-prometheus
+  template:
+    metadata:
+      labels:
+        app: mcp-prometheus
+        component: mcp-server
+        environment: staging
+    spec:
+      containers:
+        - name: mcp-prometheus
+          image: 192.168.1.50:30500/mcp-prometheus:1.0.0
+          ports:
+            - containerPort: 3200
+              name: mcp
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-prometheus.monitoring.svc.cluster.local:9090"
+            - name: ALERTMANAGER_URL
+              value: "http://prometheus-alertmanager.monitoring.svc.cluster.local:9093"
+            - name: PORT
+              value: "3200"
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 100m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-prometheus
+  namespace: monitoring
+spec:
+  selector:
+    app: mcp-prometheus
+  type: NodePort
+  ports:
+    - port: 3200
+      targetPort: 3200
+      nodePort: 30325
+      name: mcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-grafana
+  namespace: monitoring
+  labels:
+    app: mcp-grafana
+    component: mcp-server
+    environment: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-grafana
+  template:
+    metadata:
+      labels:
+        app: mcp-grafana
+        component: mcp-server
+        environment: staging
+    spec:
+      containers:
+        - name: mcp-grafana
+          image: 192.168.1.50:30500/mcp-grafana:1.0.0
+          ports:
+            - containerPort: 3201
+              name: mcp
+          env:
+            - name: GRAFANA_URL
+              value: "http://grafana.monitoring.svc.cluster.local:3000"
+            - name: PORT
+              value: "3201"
+            - name: GRAFANA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-user
+            - name: GRAFANA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-password
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 100m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3201
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-grafana
+  namespace: monitoring
+spec:
+  selector:
+    app: mcp-grafana
+  type: NodePort
+  ports:
+    - port: 3201
+      targetPort: 3201
+      nodePort: 30326
+      name: mcp

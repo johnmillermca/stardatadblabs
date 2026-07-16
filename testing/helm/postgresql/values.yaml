@@ -1,0 +1,41 @@
+# =============================================================================
+# PostgreSQL — TESTING override values
+# Minimal resources, ephemeral storage
+# =============================================================================
+global:
+  defaultStorageClass: local-path
+  postgresql:
+    auth:
+      existingSecret: postgresql-credentials
+      secretKeys:
+        adminPasswordKey: postgres-password
+        replicationPasswordKey: replication-password
+      database: metadata
+
+image:
+  tag: "17"
+
+primary:
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+  persistence:
+    enabled: true
+    size: 2Gi
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 250m
+  service:
+    type: NodePort
+    nodePorts:
+      postgresql: "32532"
+
+readReplicas:
+  replicaCount: 0

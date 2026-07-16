@@ -1,0 +1,198 @@
+# =============================================================================
+# MIT Kerberos KDC — ConfigMap + PVC + Deployment + Services
+# Namespace : kerberos
+# Realm     : STARDATADBLABS.LOCAL
+# Node      : master.local
+# Secret    : kerberos-admin  (keys: master-password, admin-password)
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kerberos-config
+  namespace: prod
+data:
+  krb5.conf: |
+    [libdefaults]
+        default_realm = STARDATADBLABS.LOCAL
+        dns_lookup_realm = false
+        dns_lookup_kdc = false
+        ticket_lifetime = 24h
+        renew_lifetime = 7d
+        forwardable = true
+
+    [realms]
+        STARDATADBLABS.LOCAL = {
+            kdc = kerberos-kdc.prod.svc.cluster.local
+            admin_server = kerberos-kadmin.prod.svc.cluster.local
+        }
+
+    [domain_realm]
+        .cluster.local = STARDATADBLABS.LOCAL
+        cluster.local   = STARDATADBLABS.LOCAL
+
+  kdc.conf: |
+    [kdcdefaults]
+        kdc_ports = 88
+        kdc_tcp_ports = 88
+
+    [realms]
+        STARDATADBLABS.LOCAL = {
+            master_key_type = aes256-cts
+            max_life = 12h 0m 0s
+            max_renewable_life = 7d 0h 0m 0s
+            acl_file = /etc/krb5kdc/kadm5.acl
+            dict_file = /usr/share/dict/words
+            admin_keytab = /etc/krb5kdc/kadm5.keytab
+            supported_enctypes = aes256-cts:normal aes128-cts:normal
+        }
+
+  kadm5.acl: |
+    */admin@STARDATADBLABS.LOCAL  *
+
+  startup.sh: |
+    #!/bin/bash
+    set -e
+    # Install Kerberos packages if not already present
+    if ! command -v kdb5_util &>/dev/null; then
+      dnf install -y krb5-server krb5-libs krb5-workstation
+    fi
+    # Copy config files
+    cp /etc/krb5-config/krb5.conf /etc/krb5.conf
+    cp /etc/krb5-config/kdc.conf  /var/kerberos/krb5kdc/kdc.conf
+    cp /etc/krb5-config/kadm5.acl /var/kerberos/krb5kdc/kadm5.acl
+    # Initialise DB only on first boot
+    if [ ! -f /var/kerberos/krb5kdc/principal ]; then
+      kdb5_util create -s -P "${KRB5_MASTER_PASSWORD}" -r STARDATADBLABS.LOCAL
+      kadmin.local -q "addprinc -pw ${KRB5_ADMIN_PASSWORD} admin/admin@STARDATADBLABS.LOCAL"
+      kadmin.local -q "addprinc -randkey host/master.local@STARDATADBLABS.LOCAL"
+      kadmin.local -q "ktadd -k /var/kerberos/krb5kdc/kadm5.keytab kadmin/admin@STARDATADBLABS.LOCAL"
+    fi
+    # Start KDC and kadmind
+    /usr/sbin/krb5kdc -n &
+    exec /usr/sbin/kadmind -nofork
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kerberos-data
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kerberos-kdc
+  namespace: prod
+  labels:
+    app: kerberos-kdc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kerberos-kdc
+  template:
+    metadata:
+      labels:
+        app: kerberos-kdc
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      initContainers:
+        - name: install-kerberos
+          image: rockylinux:9
+          command: ["/bin/bash", "-c", "dnf install -y krb5-server krb5-libs krb5-workstation && cp -r /usr/sbin/kdb5_util /mnt/sbin/ 2>/dev/null || true"]
+          volumeMounts:
+            - name: kerberos-data
+              mountPath: /var/kerberos/krb5kdc
+      containers:
+        - name: kerberos-kdc
+          image: rockylinux:9
+          command: ["/bin/bash", "/etc/krb5-config/startup.sh"]
+          env:
+            - name: KRB5_MASTER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kerberos-admin
+                  key: master-password
+            - name: KRB5_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kerberos-admin
+                  key: admin-password
+          ports:
+            - name: kdc-tcp
+              containerPort: 88
+              protocol: TCP
+            - name: kdc-udp
+              containerPort: 88
+              protocol: UDP
+            - name: kadmin
+              containerPort: 749
+              protocol: TCP
+          volumeMounts:
+            - name: kerberos-config
+              mountPath: /etc/krb5-config
+            - name: kerberos-data
+              mountPath: /var/kerberos/krb5kdc
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 500m
+          readinessProbe:
+            tcpSocket:
+              port: 88
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: kerberos-config
+          configMap:
+            name: kerberos-config
+            defaultMode: 0755
+        - name: kerberos-data
+          persistentVolumeClaim:
+            claimName: kerberos-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kerberos-kdc
+  namespace: prod
+spec:
+  selector:
+    app: kerberos-kdc
+  ports:
+    - name: kdc-tcp
+      port: 88
+      targetPort: 88
+      protocol: TCP
+    - name: kdc-udp
+      port: 88
+      targetPort: 88
+      protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kerberos-kadmin
+  namespace: prod
+spec:
+  selector:
+    app: kerberos-kdc
+  ports:
+    - name: kadmin
+      port: 749
+      targetPort: 749
+      protocol: TCP

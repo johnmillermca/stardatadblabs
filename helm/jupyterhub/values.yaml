@@ -1,0 +1,77 @@
+# =============================================================================
+# JupyterHub — prod namespace  (HA: 2 hubs via pod disruption budget)
+# Namespace   : prod
+# Access      : http://192.168.1.50:30888
+# Secret      : jupyterhub-credentials
+# =============================================================================
+
+hub:
+  config:
+    JupyterHub:
+      admin_access: true
+      authenticator_class: dummy
+    Authenticator:
+      admin_users:
+        - admin
+    DummyAuthenticator:
+      password: ""
+  extraEnv:
+    JUPYTERHUB_CRYPT_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: jupyterhub-credentials
+          key: crypt-key
+          optional: true
+    DUMMY_AUTH_PASSWORD:
+      valueFrom:
+        secretKeyRef:
+          name: jupyterhub-credentials
+          key: admin-password
+  extraConfig:
+    00-auth: |
+      import os
+      c.DummyAuthenticator.password = os.environ.get('DUMMY_AUTH_PASSWORD', 'changeme')
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi
+      cpu: "1"
+
+proxy:
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30888
+
+singleuser:
+  image:
+    name: 192.168.1.50:30500/jupyter-spark
+    tag: latest
+    pullPolicy: IfNotPresent
+  storage:
+    type: dynamic
+    capacity: 10Gi
+    dynamic:
+      storageClass: local-path
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 4Gi
+      cpu: "2"
+  profileList:
+    - display_name: "Standard — Python + PySpark"
+      description: "Python 3.11, PySpark 3.5, Gluten/Velox acceleration, Iceberg 1.9.2"
+      default: true
+
+scheduling:
+  userScheduler:
+    enabled: false
+
+culling:
+  enabled: true
+  timeout: 3600
+  every: 300

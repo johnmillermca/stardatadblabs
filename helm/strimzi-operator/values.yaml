@@ -1,0 +1,47 @@
+# =============================================================================
+# Strimzi Kafka Operator — Helm values  strimzi/strimzi-kafka-operator 1.1.0
+# Namespace   : prod  (co-located with all workloads)
+# What it does: Installs CRDs + operator that manages Kafka, KafkaNodePool,
+#               KafkaUser, KafkaTopic, KafkaConnect CRs in prod namespace
+# After this  : apply manifests/strimzi/ to create the Kafka cluster
+# Note        : Strimzi 1.x uses Kafka 3.9+; KRaft is stable and default
+# =============================================================================
+
+# Watch only the prod namespace (all workloads consolidated there)
+watchNamespaces: ["prod"]
+watchAnyNamespace: false
+
+# Single replica (Kafka itself is single-broker as requested)
+replicas: 1
+
+defaultImageRegistry: quay.io
+defaultImageRepository: strimzi
+defaultImageTag: "1.1.0"
+
+image:
+  registry: ""
+  repository: ""
+  name: operator
+  tag: ""
+
+logLevel: INFO
+fullReconciliationIntervalMs: 120000
+operationTimeoutMs: 300000
+kubernetesServiceDnsDomain: cluster.local
+
+# KRaft and NodePools are stable features in Strimzi 1.x — no feature gates needed
+featureGates: ""
+
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m
+
+tolerations: []
+affinity: {}
+
+# Do NOT create the 'strimzi-system' namespace — ArgoCD does it via CreateNamespace
+createGlobalResources: true

@@ -1,0 +1,27 @@
+# ArgoCD Application — Debezium Kafka Connect (raw manifests)
+# Namespace : streaming
+# Access    : http://192.168.1.50:30083 (REST API)
+# Prereq    : secret debezium-credentials must exist (run 12-seed-openbao-secrets.sh)
+# CDC sources: PostgreSQL, MongoDB, Oracle (LogMiner)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: debezium
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/debezium
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: streaming
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

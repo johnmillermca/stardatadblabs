@@ -1,0 +1,195 @@
+# =============================================================================
+# Strimzi-managed Kafka cluster — prod namespace  (single-broker, no HA needed)
+# Namespace   : prod
+# Topology    : 1 combined controller+broker (KRaft) — single replica as requested
+# Listeners   :
+#   PLAIN  port 9092 — SCRAM-SHA-512 in-cluster
+#   EXTERNAL port 9094 → NodePort 30093 — external access
+# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+# Kafka ver   : 3.9.0 (Strimzi 1.1.0)
+# =============================================================================
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: combined
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  replicas: 1
+  roles:
+    - controller
+    - broker
+  storage:
+    type: persistent-claim
+    size: 50Gi
+    class: local-path
+    deleteClaim: false
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: "2"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: strimzi-kafka
+  namespace: prod
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 3.9.0
+    metadataVersion: "3.9-IV0"
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+      - name: external
+        port: 9094
+        type: nodeport
+        tls: false
+        authentication:
+          type: scram-sha-512
+        configuration:
+          bootstrap:
+            nodePort: 30093
+    config:
+      offsets.topic.replication.factor: "1"
+      transaction.state.log.replication.factor: "1"
+      transaction.state.log.min.isr: "1"
+      default.replication.factor: "1"
+      min.insync.replicas: "1"
+      auto.create.topics.enable: "true"
+    storage:
+      type: persistent-claim
+      size: 1Gi
+      class: local-path
+      deleteClaim: false
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: kafka-app-user
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: "*", patternType: literal}
+        operations: [Read, Write, Create, Describe, DescribeConfigs, Alter, AlterConfigs]
+      - resource: {type: group, name: "*", patternType: literal}
+        operations: [Read, Describe]
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: debezium-user
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: "*", patternType: prefix}
+        operations: [Read, Write, Create, Describe]
+      - resource: {type: group, name: "debezium-*", patternType: prefix}
+        operations: [Read, Describe]
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: schema-registry-user
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: "_schemas", patternType: literal}
+        operations: [Read, Write, Create, Describe, DescribeConfigs]
+      - resource: {type: group, name: "schema-registry", patternType: literal}
+        operations: [Read, Describe]
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: debezium-offsets
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    cleanup.policy: compact
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: debezium-configs
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    cleanup.policy: compact
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: debezium-statuses
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    cleanup.policy: compact
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: schema-registry-schemas
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    cleanup.policy: compact
+    min.compaction.lag.ms: "0"

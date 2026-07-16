@@ -1,0 +1,40 @@
+# =============================================================================
+# AKHQ — STAGING override values
+# DNS: strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local
+# NodePort: 31808
+# =============================================================================
+replicaCount: 1
+image:
+  tag: "0.27.0"
+extraEnv:
+  - name: AKHQ_CONFIGURATION
+    value: |
+      akhq:
+        connections:
+          strimzi-kafka:
+            properties:
+              bootstrap.servers: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+              security.protocol: SASL_PLAINTEXT
+              sasl.mechanism: SCRAM-SHA-512
+              sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$(AKHQ_KAFKA_USER)\" password=\"$(AKHQ_KAFKA_PASS)\";"
+  - name: AKHQ_KAFKA_USER
+    valueFrom:
+      secretKeyRef:
+        name: akhq-credentials
+        key: kafka-sasl-username
+  - name: AKHQ_KAFKA_PASS
+    valueFrom:
+      secretKeyRef:
+        name: akhq-credentials
+        key: kafka-sasl-password
+service:
+  type: NodePort
+  nodePort: 31808
+  port: 8080
+resources:
+  requests:
+    memory: 64Mi
+    cpu: 50m
+  limits:
+    memory: 256Mi
+    cpu: 250m

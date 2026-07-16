@@ -1,0 +1,140 @@
+# =============================================================================
+# SQLMesh 0.99.0 — SQL-based DataOps / transformation framework
+# Namespace   : analytics
+# Access      : http://192.168.1.50:30883 (UI)
+#               http://sqlmesh.prod.svc.cluster.local:8001 (internal)
+# Image       : 192.168.1.50:30500/sqlmesh:0.99.0 (built from docker/sqlmesh/)
+# Depends on  : PostgreSQL (db: sqlmesh_state)
+# Secret      : sqlmesh-credentials
+# Build first : bash docker/sqlmesh/build-and-push.sh
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqlmesh-config
+  namespace: prod
+data:
+  config.yaml: |
+    gateways:
+      default:
+        connection:
+          type: spark
+          config:
+            spark.master: "spark://spark-master-svc.prod.svc.cluster.local:7077"
+            spark.app.name: sqlmesh
+            spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+            spark.sql.catalog.polaris: "org.apache.iceberg.spark.SparkCatalog"
+            spark.sql.catalog.polaris.type: "rest"
+            spark.sql.catalog.polaris.uri: "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+        state_connection:
+          type: postgres
+          host: postgresql.prod.svc.cluster.local
+          port: 5432
+          database: sqlmesh_state
+          user: "${SQLMESH_DB_USER}"
+          password: "${SQLMESH_DB_PASS}"
+
+    default_gateway: default
+
+    model_defaults:
+      dialect: spark
+      cron: "@daily"
+
+  entrypoint.sh: |
+    #!/bin/bash
+    set -e
+    # Initialize state DB if needed
+    sqlmesh --config /app/config/config.yaml migrate
+    # Start the UI server
+    exec sqlmesh --config /app/config/config.yaml ui --host 0.0.0.0 --port 8001
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sqlmesh-models
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlmesh
+  namespace: prod
+  labels:
+    app: sqlmesh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqlmesh
+  template:
+    metadata:
+      labels:
+        app: sqlmesh
+    spec:
+      containers:
+        - name: sqlmesh
+          image: 192.168.1.50:30500/sqlmesh:0.99.0
+          command: ["/bin/bash", "/app/config/entrypoint.sh"]
+          ports:
+            - name: ui
+              containerPort: 8001
+          env:
+            - name: SQLMESH_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sqlmesh-credentials
+                  key: db-user
+            - name: SQLMESH_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: sqlmesh-credentials
+                  key: db-password
+          volumeMounts:
+            - name: sqlmesh-config
+              mountPath: /app/config
+            - name: sqlmesh-models
+              mountPath: /app/models
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 10
+      volumes:
+        - name: sqlmesh-config
+          configMap:
+            name: sqlmesh-config
+            defaultMode: 0755
+        - name: sqlmesh-models
+          persistentVolumeClaim:
+            claimName: sqlmesh-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqlmesh
+  namespace: prod
+spec:
+  selector:
+    app: sqlmesh
+  type: NodePort
+  ports:
+    - name: ui
+      port: 8001
+      targetPort: 8001
+      nodePort: 30883

@@ -1,0 +1,74 @@
+# =============================================================================
+# PostgreSQL — prod namespace  (single-replica — no HA needed)
+# Namespace   : prod
+# Access      : postgresql.prod.svc.cluster.local:5432  (internal)
+#               NodePort 192.168.1.50:30532             (external)
+# Databases   : metadata, kestra, sqlmesh_state, ranger, polaris
+# Secret      : postgresql-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+global:
+  defaultStorageClass: local-path
+  postgresql:
+    auth:
+      existingSecret: postgresql-credentials
+      secretKeys:
+        adminPasswordKey: postgres-password
+        replicationPasswordKey: replication-password
+      database: metadata
+
+image:
+  tag: "17"
+
+primary:
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+  persistence:
+    enabled: true
+    size: 50Gi
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: "2"
+  service:
+    type: NodePort
+    nodePorts:
+      postgresql: "30532"
+  initdb:
+    scripts:
+      01-create-dbs.sql: |
+        CREATE DATABASE kestra;
+        CREATE DATABASE sqlmesh_state;
+        CREATE DATABASE ranger;
+        CREATE DATABASE polaris;
+      02-create-users.sh: |
+        #!/bin/bash
+        set -e
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+          CREATE USER kestra   WITH PASSWORD '${KESTRA_DB_PASS:-changeme}';
+          CREATE USER sqlmesh  WITH PASSWORD '${SQLMESH_DB_PASS:-changeme}';
+          CREATE USER ranger   WITH PASSWORD '${RANGER_DB_PASS:-changeme}';
+          CREATE USER polaris  WITH PASSWORD '${POLARIS_DB_PASS:-changeme}';
+          GRANT ALL PRIVILEGES ON DATABASE kestra       TO kestra;
+          GRANT ALL PRIVILEGES ON DATABASE sqlmesh_state TO sqlmesh;
+          GRANT ALL PRIVILEGES ON DATABASE ranger       TO ranger;
+          GRANT ALL PRIVILEGES ON DATABASE polaris      TO polaris;
+        EOSQL
+
+readReplicas:
+  replicaCount: 0
+
+backup:
+  enabled: false
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: prod

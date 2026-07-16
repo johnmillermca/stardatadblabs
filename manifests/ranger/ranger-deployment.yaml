@@ -1,0 +1,151 @@
+# =============================================================================
+# Apache Ranger — ConfigMap + PVC + Deployment + Service
+# Namespace : security
+# Access    : http://192.168.1.50:30680 (Admin UI / port 6080)
+# Depends on: PostgreSQL databases.postgresql:5432, db: ranger
+# Image     : 192.168.1.50:30500/apache-ranger:2.4.0
+#             Build: docker pull apache/ranger:2.4.0 && docker tag ... && docker push
+# Secret    : ranger-db-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ranger-install-config
+  namespace: prod
+data:
+  install.properties: |
+    DB_FLAVOR=POSTGRES
+    SQL_CONNECTOR_JAR=/usr/share/java/postgresql.jar
+    db_root_user=postgres
+    db_host=postgresql.prod.svc.cluster.local
+    db_port=5432
+    db_name=ranger
+    db_user=${RANGER_DB_USER}
+    db_password=${RANGER_DB_PASS}
+    db_root_password=${RANGER_DB_ROOT_PASS}
+    rangerAdmin_password=${RANGER_ADMIN_PASSWORD}
+    rangerTagsync_password=${RANGER_TAGSYNC_PASSWORD}
+    rangerUsersync_password=${RANGER_USERSYNC_PASSWORD}
+    keyadmin_password=${RANGER_KEYADMIN_PASSWORD}
+    POLICY_MGR_URL=http://ranger-admin.prod.svc.cluster.local:6080
+    XAAUDIT.HDFS.ENABLE=false
+    XAAUDIT.SOLR.ENABLE=false
+    XAAUDIT.ELASTICSEARCH.ENABLE=false
+    unix_user=ranger
+    unix_group=ranger
+    hadoop_conf=/etc/hadoop/conf
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ranger-data
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranger-admin
+  namespace: prod
+  labels:
+    app: ranger-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ranger-admin
+  template:
+    metadata:
+      labels:
+        app: ranger-admin
+    spec:
+      containers:
+        - name: ranger-admin
+          image: 192.168.1.50:30500/apache-ranger:2.4.0
+          ports:
+            - name: http
+              containerPort: 6080
+          env:
+            - name: RANGER_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: db-user
+            - name: RANGER_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: db-password
+            - name: RANGER_DB_ROOT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: db-root-password
+            - name: RANGER_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: admin-password
+            - name: RANGER_TAGSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: tagsync-password
+            - name: RANGER_USERSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: usersync-password
+            - name: RANGER_KEYADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranger-db-credentials
+                  key: keyadmin-password
+          volumeMounts:
+            - name: ranger-config
+              mountPath: /opt/ranger/install.properties
+              subPath: install.properties
+            - name: ranger-data
+              mountPath: /opt/ranger/data
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /login.jsp
+              port: 6080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
+      volumes:
+        - name: ranger-config
+          configMap:
+            name: ranger-install-config
+        - name: ranger-data
+          persistentVolumeClaim:
+            claimName: ranger-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranger-admin
+  namespace: prod
+spec:
+  selector:
+    app: ranger-admin
+  type: NodePort
+  ports:
+    - name: http
+      port: 6080
+      targetPort: 6080
+      nodePort: 30680

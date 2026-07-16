@@ -1,0 +1,9 @@
+# =============================================================================
+# Staging Debezium — reference stub
+# Active manifests: manifests/debezium/debezium-deployment.yaml
+# Namespace: prod (NodePort: 31083)
+# =============================================================================
+environment: staging
+namespace: prod
+nodeport: 31083
+kafka_bootstrap: strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092

@@ -1,0 +1,31 @@
+# =============================================================================
+# SQLMesh — STAGING override values
+# DNS: postgresql.prod.svc.cluster.local
+# NodePort: 31883
+# =============================================================================
+image:
+  repository: 192.168.1.50:30500/sqlmesh
+  tag: "0.99.0"
+  pullPolicy: IfNotPresent
+db:
+  host: postgresql.prod.svc.cluster.local
+  port: 5432
+  name: sqlmesh_state
+  existingSecret: sqlmesh-credentials
+  userKey: db-user
+  passwordKey: db-password
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: local-path
+service:
+  type: NodePort
+  port: 8001
+  nodePort: 31883
+resources:
+  requests:
+    memory: 128Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m

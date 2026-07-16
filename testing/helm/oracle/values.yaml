@@ -1,0 +1,11 @@
+# =============================================================================
+# Oracle XE — TESTING reference stub
+# =============================================================================
+image:
+  repository: gvenzl/oracle-xe
+  tag: "21-slim"
+database: XEPDB1
+existingSecret: oracle-credentials
+storage:
+  size: 5Gi
+  storageClass: local-path

@@ -1,0 +1,68 @@
+# =============================================================================
+# Spark / Gluten / Velox MCP Server — Kubernetes Deployment
+# Namespace : analytics
+# Port      : 3103 (MCP SSE)
+# NodePort  : 30313
+# Image     : 192.168.1.50:30500/mcp-spark:1.0.0
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-spark
+  namespace: prod
+  labels:
+    app: mcp-spark
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-spark
+  template:
+    metadata:
+      labels:
+        app: mcp-spark
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-spark
+          image: 192.168.1.50:30500/mcp-spark:1.0.0
+          ports:
+            - containerPort: 3103
+              name: mcp
+          env:
+            - name: SPARK_MASTER_URL
+              value: "spark://spark-master-svc.prod.svc.cluster.local:7077"
+            - name: SPARK_UI_URL
+              value: "http://spark-master-svc.prod.svc.cluster.local:8080"
+            - name: SPARK_REST_URL
+              value: "http://spark-master-svc.prod.svc.cluster.local:6066"
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3103
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-spark
+  namespace: prod
+spec:
+  selector:
+    app: mcp-spark
+  type: NodePort
+  ports:
+    - port: 3103
+      targetPort: 3103
+      nodePort: 30313
+      name: mcp

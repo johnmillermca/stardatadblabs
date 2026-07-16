@@ -1,0 +1,7 @@
+# =============================================================================
+# Debezium Kafka Connect — STAGING reference stub
+# DNS: strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local
+# =============================================================================
+image: quay.io/debezium/connect:2.7
+bootstrapServers: strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+existingSecret: debezium-credentials

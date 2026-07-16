@@ -1,0 +1,25 @@
+# ArgoCD Application — MIT Kerberos KDC
+# Namespace : kerberos  |  Node: master.local
+# Access    : KDC ClusterIP :88, kadmin ClusterIP :749 (cluster-internal only)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kerberos
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/kerberos
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kerberos
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

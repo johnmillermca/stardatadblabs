@@ -1,0 +1,27 @@
+# =============================================================================
+# OpenSearch Dashboards — TESTING override values
+# DNS: opensearch-cluster-master.prod.svc.cluster.local
+# NodePort: 32601
+# =============================================================================
+replicaCount: 1
+imageTag: "3.7.0"
+opensearchHosts: "http://opensearch-cluster-master.prod.svc.cluster.local:9200"
+config:
+  opensearch_dashboards.yml: |
+    server.host: '0.0.0.0'
+    opensearch.hosts: ['http://opensearch-cluster-master.prod.svc.cluster.local:9200']
+    opensearch_security.disabled: true
+extraEnvs:
+  - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
+    value: "true"
+service:
+  type: NodePort
+  port: 5601
+  nodePort: 32601
+resources:
+  requests:
+    memory: 64Mi
+    cpu: 50m
+  limits:
+    memory: 256Mi
+    cpu: 250m

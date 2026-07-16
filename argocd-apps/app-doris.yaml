@@ -1,0 +1,27 @@
+# ArgoCD Application — Apache Doris (raw manifests)
+# Namespace : analytics
+# Access    : http://192.168.1.50:30030 (FE HTTP/WebUI)
+#             jdbc:mysql://192.168.1.50:30090 (FE MySQL query)
+# Prereq    : secret doris-credentials must exist (run 12-seed-openbao-secrets.sh)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: doris
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/doris
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: analytics
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
