@@ -33,20 +33,12 @@ prometheus:
             requests:
               storage: 50Gi
 
-    # Discover ServiceMonitors/PodMonitors in prod and monitoring
+    # Discover ServiceMonitors/PodMonitors across ALL namespaces
     serviceMonitorSelectorNilUsesHelmValues: false
-    serviceMonitorNamespaceSelector:
-      matchExpressions:
-        - key: environment
-          operator: In
-          values: [prod, monitoring, infra]
+    serviceMonitorNamespaceSelector: {}   # match all namespaces
     serviceMonitorSelector: {}
     podMonitorSelectorNilUsesHelmValues: false
-    podMonitorNamespaceSelector:
-      matchExpressions:
-        - key: environment
-          operator: In
-          values: [prod, monitoring, infra]
+    podMonitorNamespaceSelector: {}       # match all namespaces
     podMonitorSelector: {}
     ruleSelectorNilUsesHelmValues: false
     ruleNamespaceSelector: {}
@@ -59,12 +51,14 @@ prometheus:
         cpu: "2"
         memory: 6Gi
 
-    nodeSelector:
-      kubernetes.io/hostname: master.local
-    tolerations:
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: "NoSchedule"
+    # Workers only — avoid master
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: DoesNotExist
 
   service:
     type: NodePort
@@ -89,12 +83,14 @@ alertmanager:
       limits:
         cpu: 500m
         memory: 512Mi
-    nodeSelector:
-      kubernetes.io/hostname: master.local
-    tolerations:
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: "NoSchedule"
+    # Workers only
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: DoesNotExist
   service:
     type: NodePort
     nodePort: 30993

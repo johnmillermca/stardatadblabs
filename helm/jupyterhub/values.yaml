@@ -1,7 +1,9 @@
 # =============================================================================
-# JupyterHub — prod namespace  (HA: 2 hubs via pod disruption budget)
+# JupyterHub — hub.jupyter.org/helm-chart 4.4.0
 # Namespace   : prod
-# Access      : http://192.168.1.50:30888
+# Image       : private registry for singleuser; standard hub images cached
+# HA          : PDB minAvailable=1; user scheduler disabled (4-worker cluster)
+# Access      : http://192.168.1.5x:30888
 # Secret      : jupyterhub-credentials
 # =============================================================================
 
@@ -11,8 +13,7 @@ hub:
       admin_access: true
       authenticator_class: dummy
     Authenticator:
-      admin_users:
-        - admin
+      admin_users: [admin]
     DummyAuthenticator:
       password: ""
   extraEnv:
@@ -38,6 +39,14 @@ hub:
     limits:
       memory: 1Gi
       cpu: "1"
+  # Workers only
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
 
 proxy:
   service:
@@ -75,3 +84,7 @@ culling:
   enabled: true
   timeout: 3600
   every: 300
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

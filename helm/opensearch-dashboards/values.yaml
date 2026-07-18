@@ -1,14 +1,15 @@
 # =============================================================================
-# OpenSearch Dashboards — prod namespace
+# OpenSearch Dashboards — 2-replica HA
 # Namespace   : prod
-# Access      : http://192.168.1.50:30601
-# Connects to : opensearch-cluster-master.prod.svc.cluster.local:9200
-# Replicas    : 2 (HA)
+# Image       : 192.168.1.50:30500/opensearch/opensearch-dashboards:3.7.0
+# Access      : http://192.168.1.5x:30601 (NodePort, any worker)
+# HA          : 2 replicas, soft anti-affinity across workers
 # =============================================================================
 
 replicaCount: 2
 
 imageTag: "3.7.0"
+image: "192.168.1.50:30500/opensearch/opensearch-dashboards"
 
 opensearchHosts: "http://opensearch-cluster-master.prod.svc.cluster.local:9200"
 
@@ -36,12 +37,28 @@ resources:
     memory: 1Gi
     cpu: "1"
 
+# Spread across workers, never on master
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: opensearch-dashboards
+          topologyKey: kubernetes.io/hostname
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
 readinessProbe:
   failureThreshold: 10
   initialDelaySeconds: 60
   periodSeconds: 10
-
-livenessProbe:
-  failureThreshold: 10
-  initialDelaySeconds: 60
-  periodSeconds: 20

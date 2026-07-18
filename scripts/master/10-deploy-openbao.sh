@@ -6,7 +6,7 @@
 set -euo pipefail
 export PATH="/usr/local/bin:${PATH}"
 
-OPENBAO_NAMESPACE="openbao"
+OPENBAO_NAMESPACE="prod"
 MASTER_IP="192.168.1.50"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -25,11 +25,19 @@ helm upgrade --install openbao openbao/openbao \
   --values "$(dirname "$0")/../../helm/openbao/values.yaml" \
   --wait --timeout 10m
 
-# ── Wait for pod ──────────────────────────────────────────────────────────────
-log "Waiting for OpenBao pod..."
-kubectl wait pod -l "app.kubernetes.io/name=openbao" \
-  -n "${OPENBAO_NAMESPACE}" \
-  --for=condition=Ready --timeout=300s
+# ── Wait for pod to be Running (not Ready — probe needs init+unseal first) ───
+log "Waiting for OpenBao pod to start (Running state)..."
+# Wait up to 3 minutes for the pod to exist and enter Running phase
+for i in $(seq 1 36); do
+  POD_PHASE=$(kubectl get pod -n "${OPENBAO_NAMESPACE}" -l app.kubernetes.io/name=openbao \
+    -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Pending")
+  if [[ "${POD_PHASE}" == "Running" ]]; then
+    log "OpenBao pod is Running."
+    break
+  fi
+  echo "  waiting... phase=${POD_PHASE} (${i}/36)"
+  sleep 5
+done
 
 # ── Initialize OpenBao ────────────────────────────────────────────────────────
 log "Initializing OpenBao..."

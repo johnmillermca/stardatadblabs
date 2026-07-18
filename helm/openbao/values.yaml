@@ -60,10 +60,20 @@ server:
     storageClass: local-path
     accessMode: ReadWriteOnce
 
-  # Readiness / liveness probes
+  # Readiness probe — use exec (curl via localhost) so it works even when
+  # the pod IP is not directly reachable from the kubelet (iptables/Calico).
   readinessProbe:
     enabled: true
     path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
+    # exec form avoids kubelet→podIP routing issues on single-node masters
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - >-
+          wget -qO- --timeout=3
+          'http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204'
+          | grep -q 'initialized'
   livenessProbe:
     enabled: false    # OpenBao can be sealed and still "live"
 
@@ -73,11 +83,13 @@ server:
     name: "openbao"
     annotations: {}
 
-  # Pin to master: image is pre-pulled there and master has reliable internet
+  # Pin to master so the pod can always pull from quay.io directly (workers
+  # route internet through master; if masquerade is not set up they cannot pull).
+  # The Calico/firewalld networking fixes in §14.1, §14.4, §14.13 resolve the
+  # master NodePort blackhole issue — run fix-iptables-modules.sh,
+  # fix-master-firewall.sh, and fix-calico-firewalld.sh after cluster init.
   nodeSelector:
     kubernetes.io/hostname: master.local
-
-  # Tolerate control-plane taint so bao can run on master
   tolerations:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"

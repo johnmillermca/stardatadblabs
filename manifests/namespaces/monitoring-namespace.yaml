@@ -7,8 +7,8 @@ kind: Namespace
 metadata:
   name: monitoring
   labels:
-    environment: platform
-    managed-by: platform
+    environment: monitoring
+    app.kubernetes.io/managed-by: platform
     purpose: observability
 ---
 apiVersion: v1

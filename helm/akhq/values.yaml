@@ -1,15 +1,18 @@
 # =============================================================================
-# AKHQ (Kafka HQ UI) — prod namespace
+# AKHQ (Kafka HQ UI) — 2-replica HA
 # Namespace   : prod
-# Access      : http://192.168.1.50:30808
-# Connects to : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
-# Secret      : akhq-credentials
+# Image       : 192.168.1.50:30500/tchiotacom/akhq:0.27.0 (private registry)
+# Access      : http://192.168.1.5x:30808
+# HA          : 2 replicas, PDB minAvailable=1, workers only
 # =============================================================================
 
-replicaCount: 1
+replicaCount: 2
 
 image:
+  registry: 192.168.1.50:30500
+  repository: tchiotacom/akhq
   tag: "0.27.0"
+  pullPolicy: IfNotPresent
 
 extraEnv:
   - name: AKHQ_CONFIGURATION
@@ -48,16 +51,23 @@ resources:
     memory: 512Mi
     cpu: 500m
 
-readinessProbe:
-  httpGet:
-    path: /api/me
-    port: http
-  initialDelaySeconds: 30
-  periodSeconds: 10
+# Workers only, spread replicas
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: akhq
+          topologyKey: kubernetes.io/hostname
 
-livenessProbe:
-  httpGet:
-    path: /api/me
-    port: http
-  initialDelaySeconds: 60
-  periodSeconds: 30
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

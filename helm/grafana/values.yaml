@@ -37,13 +37,19 @@ resources:
     cpu: "1"
     memory: 1Gi
 
-## ── Node placement (control-plane toleration) ────────────────────────────────
-nodeSelector:
-  kubernetes.io/hostname: master.local
-tolerations:
-  - key: "node-role.kubernetes.io/control-plane"
-    operator: "Exists"
-    effect: "NoSchedule"
+## ── Node placement — workers only ────────────────────────────────────────────
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+## ── HA ───────────────────────────────────────────────────────────────────────
+replicas: 2
+podDisruptionBudget:
+  minAvailable: 1
 
 ## ── Datasources auto-provisioned ─────────────────────────────────────────────
 datasources:

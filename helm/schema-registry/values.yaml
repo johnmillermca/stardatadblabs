@@ -1,16 +1,16 @@
 # =============================================================================
-# Confluent Schema Registry — prod namespace
+# Confluent Schema Registry — 2-replica HA
 # Namespace   : prod
-# Access      : http://192.168.1.50:30810
+# Image       : 192.168.1.50:30500/confluentinc/cp-schema-registry:7.9.0
+# Access      : http://192.168.1.5x:30810
 #               http://schema-registry.prod.svc.cluster.local:8081 (internal)
-# Connects to : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
-# Secret      : schema-registry-credentials
+# HA          : 2 replicas, PDB minAvailable=1, spread across workers
 # =============================================================================
 
 replicaCount: 2
 
 image:
-  repository: confluentinc/cp-schema-registry
+  repository: 192.168.1.50:30500/confluentinc/cp-schema-registry
   tag: "7.9.0"
   pullPolicy: IfNotPresent
 
@@ -46,12 +46,23 @@ resources:
     memory: 512Mi
     cpu: "1"
 
-livenessProbe:
-  enabled: true
-  initialDelaySeconds: 30
-  periodSeconds: 10
+# Workers only, spread across nodes
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app: cp-schema-registry
+          topologyKey: kubernetes.io/hostname
 
-readinessProbe:
+podDisruptionBudget:
   enabled: true
-  initialDelaySeconds: 20
-  periodSeconds: 10
+  minAvailable: 1

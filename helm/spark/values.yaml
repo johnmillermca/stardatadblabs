@@ -1,10 +1,10 @@
 # =============================================================================
-# Apache Spark — prod namespace  (HA: 1 master + 3 workers)
+# Apache Spark — bitnami/spark 10.0.3
 # Namespace   : prod
-# Image       : 192.168.1.50:30500/spark-gluten-velox:3.5.1
-# Access      : http://192.168.1.50:30707 (Master UI)
-#               spark://192.168.1.50:30777 (RPC)
-# Iceberg JAR : iceberg-spark-runtime-3.5_2.12-1.9.2.jar (bundled in image)
+# Image       : 192.168.1.50:30500/spark-gluten-velox:3.5.1 (private registry)
+# HA          : 1 master + 3 workers spread across workers, never on master node
+# Access      : http://192.168.1.5x:30707 (Master UI)
+#               spark://192.168.1.5x:30777 (RPC)
 # =============================================================================
 
 image:
@@ -30,6 +30,14 @@ master:
     limits:
       memory: 4Gi
       cpu: "2"
+  # Master runs on workers only
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
 
 worker:
   replicaCount: 3
@@ -44,23 +52,28 @@ worker:
     limits:
       memory: 4Gi
       cpu: "4"
+  # Spread workers across all worker nodes, hard anti-affinity
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: worker
+            topologyKey: kubernetes.io/hostname
 
 security:
   rpc:
     authenticationEnabled: false
-    encryptionEnabled: false
   ssl:
     enabled: false
 
 metrics:
   enabled: true
-
-livenessProbe:
-  enabled: true
-  initialDelaySeconds: 30
-  periodSeconds: 15
-
-readinessProbe:
-  enabled: true
-  initialDelaySeconds: 30
-  periodSeconds: 10

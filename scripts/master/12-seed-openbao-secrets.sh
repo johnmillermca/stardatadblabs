@@ -8,23 +8,23 @@
 # Safe to re-run — skips secrets that already exist in OpenBao.
 #
 # Secrets managed:
-#   postgresql-credentials    → databases
-#   mongodb-credentials       → databases
-#   oracle-credentials        → databases
-#   kafka-credentials         → streaming
-#   akhq-credentials          → streaming
-#   debezium-credentials      → streaming
-#   schema-registry-credentials → streaming
-#   opensearch-credentials    → search
-#   kerberos-admin            → kerberos
-#   ranger-db-credentials     → security
-#   polaris-db-credentials    → catalog
-#   doris-credentials         → analytics
-#   jupyterhub-credentials    → analytics
-#   kestra-credentials        → orchestration
-#   sqlmesh-credentials       → analytics
-#   grafana-credentials       → monitoring
-#   prometheus-credentials    → monitoring
+#   postgresql-credentials      → prod
+#   mongodb-credentials         → prod
+#   oracle-credentials          → prod
+#   kafka-credentials           → prod
+#   akhq-credentials            → prod
+#   debezium-credentials        → prod
+#   schema-registry-credentials → prod
+#   opensearch-credentials      → prod
+#   kerberos-admin              → prod
+#   ranger-db-credentials       → prod
+#   polaris-db-credentials      → prod
+#   doris-credentials           → prod
+#   jupyterhub-credentials      → prod
+#   kestra-credentials          → prod
+#   sqlmesh-credentials         → prod
+#   grafana-credentials         → monitoring
+#   prometheus-credentials      → monitoring
 # =============================================================================
 set -euo pipefail
 export PATH="/usr/local/bin:${PATH}"

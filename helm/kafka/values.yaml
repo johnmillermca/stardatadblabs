@@ -1,23 +1,26 @@
 # =============================================================================
-# Apache Kafka Helm values — bitnami/kafka  chart 32.4.3 / app 4.0.0
+# Apache Kafka — bitnami/kafka 32.4.3 / app 4.0.0
 # Namespace   : prod
 # Mode        : KRaft (no ZooKeeper) — KRaft is default in Kafka 4.0
-# Access      : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (internal SASL/PLAIN)
-#               NodePort 192.168.1.50:30092 (external)
-# Secret      : kafka-credentials (seeded by 12-seed-openbao-secrets.sh)
+# HA          : 3 combined controller+broker replicas spread across workers
+# Image       : 192.168.1.50:30500/bitnami/kafka:4.0  (private registry)
+# Access      : bootstrap.prod.svc.cluster.local:9092 (internal)
+#               NodePort 192.168.1.5x:30092 (external via any worker)
+# Secret      : kafka-credentials
 # =============================================================================
 
 image:
+  registry: 192.168.1.50:30500
+  repository: bitnami/kafka
   tag: "4.0"
+  pullPolicy: IfNotPresent
 
-# KRaft mode is the only mode in Kafka 4.0 (ZooKeeper removed)
 controller:
-  replicaCount: 1
+  replicaCount: 3
   persistence:
     enabled: true
     size: 20Gi
     storageClass: local-path
-
   resources:
     requests:
       memory: 512Mi
@@ -25,31 +28,40 @@ controller:
     limits:
       memory: 2Gi
       cpu: "2"
+  # Spread across workers — never on master
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: controller
+          topologyKey: kubernetes.io/hostname
 
 broker:
-  replicaCount: 0   # combined controller+broker in single node lab
+  replicaCount: 0   # combined controller+broker mode
 
 listeners:
   client:
     protocol: SASL_PLAINTEXT
-    name: CLIENT
     containerPort: 9092
-    sslClientAuth: ""
   interbroker:
     protocol: SASL_PLAINTEXT
-    name: INTERNAL
     containerPort: 9094
   external:
     protocol: SASL_PLAINTEXT
-    name: EXTERNAL
     containerPort: 9095
 
 sasl:
   enabledMechanisms: PLAIN
   interBrokerMechanism: PLAIN
   client:
-    users:
-      - kafka-user
+    users: [kafka-user]
     passwords: ""
     existingSecret: kafka-credentials
     existingSecretPasswordKey: kafka-password
@@ -59,22 +71,19 @@ externalAccess:
   controller:
     service:
       type: NodePort
-      nodePorts:
-        - 30092
-      externalIPs:
-        - 192.168.1.50
+      nodePorts: [30092]
 
 extraConfig: |
   auto.create.topics.enable=true
-  offsets.topic.replication.factor=1
-  transaction.state.log.replication.factor=1
-  transaction.state.log.min.isr=1
-  default.replication.factor=1
-  min.insync.replicas=1
+  offsets.topic.replication.factor=3
+  transaction.state.log.replication.factor=3
+  transaction.state.log.min.isr=2
+  default.replication.factor=3
+  min.insync.replicas=2
 
 kraft:
   enabled: true
-  clusterId: ""   # auto-generated
+  clusterId: ""
 
 service:
   type: ClusterIP
@@ -88,9 +97,9 @@ persistence:
 
 metrics:
   kafka:
-    enabled: false
+    enabled: true
   jmx:
-    enabled: false
+    enabled: true
 
 zookeeper:
   enabled: false

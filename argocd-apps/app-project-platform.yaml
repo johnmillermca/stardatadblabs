@@ -6,7 +6,8 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.io
 spec:
-  description: "StarDataDBLabs Platform — all data/streaming/analytics products (prod + monitoring)"
+  description: "StarDataDBLabs Platform — all data/streaming/analytics products"
+
   sourceRepos:
     - "https://github.com/johnmillermca/stardatadblabs"
     - "https://openbao.github.io/openbao-helm"
@@ -20,6 +21,8 @@ spec:
     - "https://helm.kestra.io"
     - "https://prometheus-community.github.io/helm-charts"
     - "https://grafana.github.io/helm-charts"
+    # Private OCI registry as Helm chart source
+    - "oci://192.168.1.50:30500/charts"
 
   destinations:
     - namespace: "prod"
@@ -27,6 +30,10 @@ spec:
     - namespace: "monitoring"
       server: https://kubernetes.default.svc
     - namespace: "argocd"
+      server: https://kubernetes.default.svc
+    - namespace: "strimzi-system"
+      server: https://kubernetes.default.svc
+    - namespace: "kerberos"
       server: https://kubernetes.default.svc
 
   clusterResourceWhitelist:

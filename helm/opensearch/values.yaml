@@ -1,9 +1,10 @@
 # =============================================================================
-# OpenSearch — prod namespace  (3-node HA cluster)
+# OpenSearch — 3-node HA cluster
 # Namespace   : prod
-# Access      : http://192.168.1.50:30920 (HTTP REST NodePort)
+# Image       : 192.168.1.50:30500/opensearch/opensearch:3.7.0 (private registry)
+# Access      : http://192.168.1.5x:30920 (NodePort, any worker)
 #               opensearch-cluster-master.prod.svc.cluster.local:9200 (internal)
-# Replicas    : 3 (HA — quorum-safe for master election)
+# HA          : 3 replicas, hard pod anti-affinity across workers
 # Secret      : opensearch-credentials
 # =============================================================================
 
@@ -11,6 +12,7 @@ singleNode: false
 replicas: 3
 
 imageTag: "3.7.0"
+image: "192.168.1.50:30500/opensearch/opensearch"
 
 opensearchJavaOpts: "-Xms1g -Xmx1g"
 
@@ -25,7 +27,6 @@ config:
   opensearch.yml: |
     cluster.name: opensearch-prod
     network.host: 0.0.0.0
-    # Minimum master nodes = (replicas/2)+1 = 2
     discovery.zen.minimum_master_nodes: 2
     plugins.security.disabled: true
 
@@ -36,8 +37,6 @@ persistence:
 
 service:
   type: NodePort
-  httpPortName: http
-  transportPortName: transport
   nodePort: 30920
 
 resources:
@@ -48,8 +47,21 @@ resources:
     memory: 4Gi
     cpu: "2"
 
-# Pod anti-affinity — spread across nodes where possible
-antiAffinity: soft
+# Hard anti-affinity — each replica on a different worker, never on master
+antiAffinity: hard
+nodeSelector: {}
+tolerations: []
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+
+podDisruptionBudget:
+  enable: true
+  minAvailable: 2
 
 startupProbe:
   failureThreshold: 30

@@ -53,12 +53,22 @@ resources:
     memory: 4Gi
     cpu: "2"
 
-nodeSelector:
-  kubernetes.io/hostname: master.local
-tolerations:
-  - key: "node-role.kubernetes.io/control-plane"
-    operator: "Exists"
-    effect: "NoSchedule"
+# Workers only, spread 2 replicas across different workers
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kestra
+          topologyKey: kubernetes.io/hostname
 
 podDisruptionBudget:
   enabled: true

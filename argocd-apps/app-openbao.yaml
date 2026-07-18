@@ -27,7 +27,7 @@ spec:
             nodePort: 30820
   destination:
     server: https://kubernetes.default.svc
-    namespace: openbao
+    namespace: prod
   syncPolicy:
     automated:
       prune: true

@@ -58,13 +58,12 @@ Secrets: OpenBao (KV v2 + Kubernetes auth)
 
 | Namespace | Purpose | Quota |
 |---|---|---|
-| `prod` | Production workloads | Full capacity |
+| `prod` | Production workloads + OpenBao secret manager | Full capacity |
 | `test` | Development / test | 1/5 of prod |
 | `staging` | Pre-prod build validation | No hard quota |
 | `testing` (K8s) | Integration test jobs | No hard quota |
 | `registry` | Private OCI registry | — |
 | `argocd` | ArgoCD control plane | — |
-| `openbao` | Secret manager | — |
 | `local-path-storage` | Storage provisioner | — |
 
 ### Port Reference
@@ -719,6 +718,8 @@ Before running the deploy script, ensure:
 
 3. **No leftover release** — if a previous failed install exists, clean it up first:
    ```bash
+   helm uninstall openbao -n prod 2>/dev/null || true
+   # If it was accidentally installed in the openbao namespace, clean that too
    helm uninstall openbao -n openbao 2>/dev/null || true
    kubectl delete namespace openbao --ignore-not-found
    # Confirm port 30820 is free
@@ -734,7 +735,7 @@ sudo bash 10-deploy-openbao.sh
 
 The script:
 1. Adds the `openbao` Helm repo and runs `helm repo update`
-2. Creates the `openbao` namespace
+2. Creates the `prod` namespace (if not already present)
 3. Deploys via Helm with `helm/openbao/values.yaml`
 4. Waits for `openbao-0` pod to reach `Ready`
 5. Initializes with 5 key shares / threshold 3
@@ -743,7 +744,7 @@ The script:
 8. Enables KV v2 secrets engine at `secret/`
 9. Enables and configures Kubernetes auth method
 
-#### Deployed resources (namespace: `openbao`)
+#### Deployed resources (namespace: `prod`)
 
 | Resource | Type | Details |
 |---|---|---|
@@ -1301,49 +1302,50 @@ spec:
 
 **Symptom:** `https://192.168.1.50:30443` times out in browser. `curl -sk https://192.168.1.50:30443` never responds.
 
-**Root cause:** RHEL 10 uses `nf_tables` as the kernel packet-filtering backend. kube-proxy defaults to `iptables` mode but writes rules using the `iptables-legacy` API, which writes to a separate rule table that the kernel never consults. NodePort rules exist on paper but are never evaluated.
+**Root cause:** RHEL 10 ships `nf_tables` as the native kernel filter. The iptables compatibility modules (`iptable_filter`, `iptable_nat`) exist on disk but are **not loaded by default**. Without them, kube-proxy (iptables mode) and Calico Felix both fail:
+- kube-proxy crashes: `No iptables support for family IPv4`
+- Calico Felix panics: `iptables-save failed: incompatible nft rules`
+
+> ⚠️ **Do NOT switch kube-proxy to `nftables` mode** — it is alpha in K8s 1.30 and conflicts with Calico Felix which uses `iptables-nft` to write its own `cali-*` chains. Running both kube-proxy nftables AND Calico simultaneously causes Calico to continuously panic.
+> ⚠️ **Do NOT switch to `ipvs` mode** — ipvs mode also requires iptables for some rules and crashes the same way.
+
+**The correct fix is: load the missing iptables modules.**
 
 **Diagnosis:**
 ```bash
-sudo iptables -V
-# If output shows "(nf_tables)" the system uses nf_tables natively
-# If output shows "(legacy)" iptables-legacy is active
+# Check which modules are loaded
+lsmod | grep -E "iptable_filter|iptable_nat|ip_tables"
+# If iptable_filter and iptable_nat are missing, this is the problem
 
-sudo iptables -t nat -L KUBE-NODEPORTS -n
-# Rules may appear here but still not work if backend is wrong
+# Check kube-proxy error
+kubectl logs -n kube-system -l k8s-app=kube-proxy | grep "No iptables"
 ```
 
-**Fix — switch kube-proxy to `ipvs` mode:**
+**Fix — run the dedicated script:**
 ```bash
-# Load required kernel modules (must be done on ALL nodes)
-sudo modprobe ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh nf_conntrack
-
-# Persist modules across reboots
-echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack" | \
-  sudo tee /etc/modules-load.d/ipvs.conf
-
-# Switch kube-proxy mode
-kubectl -n kube-system get configmap kube-proxy \
-  -o jsonpath='{.data.config\.conf}' > /tmp/kube-proxy-config.conf
-sed -i 's/mode: ""/mode: "ipvs"/' /tmp/kube-proxy-config.conf
-kubectl -n kube-system patch configmap kube-proxy --type merge \
-  -p "{\"data\":{\"config.conf\":$(python3 -c 'import json,sys; print(json.dumps(open("/tmp/kube-proxy-config.conf").read()))')}}"
-
-kubectl -n kube-system rollout restart daemonset/kube-proxy
-sleep 15
-kubectl -n kube-system get pods -l k8s-app=kube-proxy
+sudo bash scripts/master/fix-iptables-modules.sh
 ```
 
-> ⚠️ `nftables` is **not** a valid mode value in Kubernetes 1.30 — it was added in 1.31. Setting `mode: "nftables"` will crash kube-proxy on 1.30.
+The script loads the modules, persists them to `/etc/modules-load.d/iptables.conf`, restarts kube-proxy and calico-node on master, auto-unseals OpenBao if needed, and verifies all three paths (pod IP, ClusterIP, NodePort).
 
-**Revert if kube-proxy crashes:**
+**Or apply manually:**
 ```bash
-kubectl -n kube-system get configmap kube-proxy \
-  -o jsonpath='{.data.config\.conf}' > /tmp/kube-proxy-config.conf
-sed -i 's/mode: "nftables"/mode: ""/' /tmp/kube-proxy-config.conf
-kubectl -n kube-system patch configmap kube-proxy --type merge \
-  -p "{\"data\":{\"config.conf\":$(python3 -c 'import json,sys; print(json.dumps(open("/tmp/kube-proxy-config.conf").read()))')}}"
+sudo modprobe ip_tables iptable_filter iptable_nat iptable_mangle nf_nat nf_conntrack
+
+# Persist across reboots
+echo -e "ip_tables\niptable_filter\niptable_nat\niptable_mangle\nnf_nat\nnf_conntrack" | \
+  sudo tee /etc/modules-load.d/iptables.conf
+
 kubectl -n kube-system rollout restart daemonset/kube-proxy
+CALICO=$(kubectl get pod -n kube-system -l k8s-app=calico-node -o wide --no-headers | grep master.local | awk '{print $1}')
+kubectl delete pod ${CALICO} -n kube-system
+```
+
+**Verify:**
+```bash
+kubectl -n kube-system get pods -l k8s-app=kube-proxy -o wide
+kubectl -n kube-system get pods -l k8s-app=calico-node -o wide
+curl -s http://192.168.1.50:30820/v1/sys/health | python3 -m json.tool
 ```
 
 ---
@@ -1436,9 +1438,13 @@ kubectl exec -n kube-system <calico-node-on-worker> -- birdcl show protocols | g
 
 ### 14.4 Pod-to-ClusterIP Traffic Blocked by Firewall (firewalld)
 
-**Symptom:** Pods on workers cannot reach Kubernetes ClusterIPs (`10.96.0.1`, `10.96.0.10`). DNS resolution fails inside pods. ArgoCD components crash with `dial tcp 10.96.0.1:443: connect: no route to host`. `nslookup` from pods returns `Host is unreachable`.
+**Symptom (workers):** Pods on workers cannot reach Kubernetes ClusterIPs (`10.96.0.1`, `10.96.0.10`). DNS resolution fails inside pods. ArgoCD components crash with `dial tcp 10.96.0.1:443: connect: no route to host`.
 
-**Root cause:** firewalld on master is active and its `public` zone (which `eno1` belongs to) does not trust traffic sourced from the pod CIDR (`10.244.0.0/16`) or service CIDR (`10.96.0.0/12`). Packets from pods arrive on master via IPIP tunnel, get decapsulated, and are then dropped by firewalld before reaching CoreDNS or the API server.
+**Symptom (master itself):** `curl http://192.168.1.50:<NodePort>` times out with exit code 28. Direct pod IP (`10.244.233.x`) and ClusterIP (`10.96.x.x` / `10.100.x.x`) also time out. But `kubectl exec <pod> -- wget http://127.0.0.1:<port>` works fine — meaning the pod is healthy, firewalld is the barrier.
+
+**Root cause:** firewalld does not trust pod CIDR (`10.244.0.0/16`) or service CIDR (`10.96.0.0/12`). This affects:
+- Worker pods reaching master services (CoreDNS, API server)
+- The master itself reaching its own NodePorts and pod IPs via kube-proxy DNAT
 
 **Diagnosis:**
 ```bash
@@ -1446,16 +1452,20 @@ sudo firewall-cmd --get-active-zones
 sudo firewall-cmd --zone=trusted --list-sources
 # If 10.244.0.0/16 and 10.96.0.0/12 are not listed, this is the problem
 
-# Test from a pod on a worker
-kubectl run nettest --image=public.ecr.aws/docker/library/redis:7.2.4-alpine \
-  --restart=Never --command \
-  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"worker1.local"}}}' \
-  -- sh -c "wget -qO- --timeout=5 --no-check-certificate https://10.96.0.1/healthz && echo OK"
-sleep 10; kubectl logs nettest; kubectl delete pod nettest --grace-period=0
+# Quick test from master — if all three timeout, firewalld is blocking:
+curl -sf --max-time 3 http://192.168.1.50:30820/v1/sys/health  # NodePort
+curl -sf --max-time 3 http://$(kubectl get svc openbao -n prod -o jsonpath='{.spec.clusterIP}'):8200/v1/sys/health  # ClusterIP
+curl -sf --max-time 3 http://$(kubectl get pod openbao-0 -n prod -o jsonpath='{.status.podIP}'):8200/v1/sys/health  # Pod IP
 ```
 
-**Fix — trust pod and service CIDRs on master:**
+**Fix — use the dedicated script (covers master firewall + rp_filter together):**
 ```bash
+sudo bash scripts/master/fix-master-firewall.sh
+```
+
+**Or apply manually:**
+```bash
+# Master — trust pod and service CIDRs
 sudo firewall-cmd --permanent --add-source=10.244.0.0/16 --zone=trusted
 sudo firewall-cmd --permanent --add-source=10.96.0.0/12 --zone=trusted
 sudo firewall-cmd --reload
@@ -1803,6 +1813,8 @@ ui:
 
 **Cleanup after a failed partial install:**
 ```bash
+helm uninstall openbao -n prod 2>/dev/null || true
+# Clean up any stale openbao namespace from an old install attempt
 helm uninstall openbao -n openbao 2>/dev/null || true
 kubectl delete namespace openbao --ignore-not-found
 # Wait for namespace to terminate, then confirm port is free
@@ -1883,3 +1895,62 @@ sudo crictl pull docker.io/hashicorp/vault-k8s:1.7.2
 
 For workers to pull images independently (agent-injector and future workloads), fix the
 masquerade first — see [§14.5](#145-worker-nodes-cannot-pull-images--reach-internet).
+
+---
+
+### 14.13 NodePort / ClusterIP / Pod IP Unreachable from Master — Calico Interfaces Not in firewalld Zone
+
+**Symptom:** After fixing `rp_filter`, trusted CIDRs, and kube-proxy mode, `curl http://192.168.1.50:<NodePort>` still times out (exit 28). `kubectl exec <pod> -- wget http://127.0.0.1:<port>` works. `curl http://<podIP>:<port>` also times out.
+
+**Root cause:** Calico creates veth pairs (`caliXXXX`) for each pod on the master node. These interfaces are **not assigned to any firewalld zone**. The `inet firewalld` nftables table's `filter_INPUT_POLICIES` chain ends with:
+```
+iifname "eno1" reject with icmpx admin-prohibited
+iifname "wlp2s0" reject with icmpx admin-prohibited
+jump filter_IN_public
+reject with icmpx admin-prohibited   ← cali interfaces fall through to here
+```
+Return packets from pods (source `10.244.233.x`) arrive via the cali veth, hit `filter_INPUT_POLICIES`, find no matching zone rule, and are **rejected**. The `ip saddr 10.244.0.0/16 accept` rule in `filter_INPUT_POLICIES` matches the pod CIDR as a **source**, which is correct for pods-to-master. But for master-to-pod traffic, the **return** packet arrives via the cali interface — the interface check runs before the source-IP check and rejects it.
+
+**This is the definitive fix for "NodePort not reachable from master" on RHEL 10 + Calico + nftables kube-proxy + firewalld.**
+
+**Diagnosis:**
+```bash
+# Confirm cali interfaces are not in any firewalld zone
+sudo firewall-cmd --get-active-zones
+# cali interfaces will not appear under any zone
+
+# Inspect the reject rule in filter_INPUT_POLICIES
+sudo nft list chain inet firewalld filter_INPUT_POLICIES | grep -E "cali|reject"
+```
+
+**Fix — run the dedicated script:**
+```bash
+sudo bash scripts/master/fix-calico-firewalld.sh
+```
+
+The script:
+1. Adds all existing `cali*` interfaces and `tunl0` to the `trusted` zone (permanent + runtime)
+2. Reloads firewalld
+3. Installs a systemd watcher (`fix-cali-firewalld.service`) that adds every new `cali*` interface to the trusted zone and sets `rp_filter=0` as pods are created
+4. Tests Pod IP, ClusterIP, and NodePort connectivity
+
+**Or apply manually:**
+```bash
+# Add all current cali interfaces to trusted zone
+for iface in $(ip link show | grep -oE 'cali[a-z0-9]+' | sort -u); do
+  sudo firewall-cmd --permanent --zone=trusted --add-interface="${iface}"
+  sudo firewall-cmd --zone=trusted --add-interface="${iface}"
+done
+sudo firewall-cmd --permanent --zone=trusted --add-interface=tunl0
+sudo firewall-cmd --reload
+```
+
+**Verify:**
+```bash
+curl -s http://192.168.1.50:30820/v1/sys/health | python3 -m json.tool
+# Expected: {"initialized": true, "sealed": false, ...}
+```
+
+> **Required on every RHEL 10 master with Calico + firewalld.** New `cali*` interfaces are created on every pod start — the watchdog service ensures new pods are always accessible. Add `fix-calico-firewalld.sh` to the post-install runbook.
+
+---

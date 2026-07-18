@@ -41,3 +41,12 @@ resources:
   limits:
     memory: 2Gi
     cpu: "1"
+
+# Workers only
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
