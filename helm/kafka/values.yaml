@@ -9,10 +9,12 @@
 # Secret      : kafka-credentials
 # =============================================================================
 
+# NOTE: bitnami images are now restricted. Use apache/kafka from private registry.
+# The bitnami/kafka chart accepts a custom image via these overrides.
 image:
   registry: 192.168.1.50:30500
-  repository: bitnami/kafka
-  tag: "4.0"
+  repository: apache/kafka
+  tag: "3.9.0"
   pullPolicy: IfNotPresent
 
 controller:
@@ -28,6 +30,9 @@ controller:
     limits:
       memory: 2Gi
       cpu: "2"
+  # KRaft — Kafka 4.0 removed ZooKeeper; use 3.9 for bitnami chart compat
+  extraConfig: |
+    process.roles=broker,controller
   # Spread across workers — never on master
   affinity:
     nodeAffinity:

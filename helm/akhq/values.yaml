@@ -10,7 +10,7 @@ replicaCount: 2
 
 image:
   registry: 192.168.1.50:30500
-  repository: tchiotacom/akhq
+  repository: tchiotludo/akhq
   tag: "0.27.0"
   pullPolicy: IfNotPresent
 
