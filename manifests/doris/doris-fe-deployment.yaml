@@ -54,6 +54,15 @@ spec:
         app: doris-fe
         component: fe
     spec:
+      initContainers:
+        - name: copy-fe-config
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /config-ro/fe.conf /config-rw/fe.conf"]
+          volumeMounts:
+            - name: fe-config
+              mountPath: /config-ro
+            - name: fe-config-rw
+              mountPath: /config-rw
       containers:
         - name: doris-fe
           image: 192.168.1.50:30500/apache/doris:fe-4.0.7
@@ -81,7 +90,7 @@ spec:
             - name: FE_ID
               value: "1"
           volumeMounts:
-            - name: fe-config
+            - name: fe-config-rw
               mountPath: /opt/apache-doris/fe/conf/fe.conf
               subPath: fe.conf
             - name: fe-meta
@@ -104,6 +113,8 @@ spec:
         - name: fe-config
           configMap:
             name: doris-fe-config
+        - name: fe-config-rw
+          emptyDir: {}
         - name: fe-meta
           persistentVolumeClaim:
             claimName: doris-fe-meta
