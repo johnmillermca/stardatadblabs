@@ -98,10 +98,12 @@ spec:
             - name: brpc
               containerPort: 8060
           env:
-            - name: BE_ADDR
+            - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: BE_ADDR
+              value: "$(POD_IP):9050"
           volumeMounts:
             - name: be-config-rw
               mountPath: /opt/apache-doris/be/conf/be.conf
