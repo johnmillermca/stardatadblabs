@@ -7,8 +7,8 @@
 set -euo pipefail
 
 RANGER_HOME=/opt/ranger
-ADMIN_HOME=${RANGER_HOME}/admin
-PROPS=/opt/ranger/install.properties
+ADMIN_HOME=$(ls -d ${RANGER_HOME}/ranger-*-admin 2>/dev/null | head -1 || echo "${RANGER_HOME}/admin")
+PROPS=${ADMIN_HOME}/install.properties
 MARKER=${RANGER_HOME}/data/.setup_done
 
 # If install.properties is mounted via ConfigMap, copy it in
@@ -36,6 +36,6 @@ if [ ! -f "${MARKER}" ]; then
 fi
 
 echo "[entrypoint] Starting Ranger Admin..."
-exec ${ADMIN_HOME}/ews/ranger-admin start
+${ADMIN_HOME}/ews/ranger-admin-services.sh start
 # Keep container alive — tail the log
 tail -f ${ADMIN_HOME}/ews/logs/ranger-admin-*.log 2>/dev/null || sleep infinity

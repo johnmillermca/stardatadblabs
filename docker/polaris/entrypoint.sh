@@ -13,16 +13,15 @@ if [ -f "${PROPS}" ]; then
         "${PROPS}"
 fi
 
-# Find the server start script in the distribution
-START_SCRIPT=$(find ${POLARIS_HOME}/dist -name "polaris-server" -o -name "run.sh" 2>/dev/null | head -1)
-if [[ -n "${START_SCRIPT}" ]]; then
-    echo "[entrypoint] Starting Apache Polaris via ${START_SCRIPT}..."
-    exec "${START_SCRIPT}"
-else
-    # Fallback: find and run the quarkus runner jar
-    JAR=$(find ${POLARIS_HOME}/dist -name "*runner*.jar" -o -name "*polaris*.jar" 2>/dev/null | head -1)
+# Start the Quarkus server from the dist/server directory
+JAR="${POLARIS_HOME}/dist/server/quarkus-run.jar"
+if [[ -f "${JAR}" ]]; then
     echo "[entrypoint] Starting Apache Polaris (jar: ${JAR})..."
     exec java \
         -Dquarkus.config.locations="${PROPS}" \
         -jar "${JAR}"
+else
+    echo "[ERROR] Polaris server jar not found at ${JAR}" >&2
+    find ${POLARIS_HOME}/dist -name "*.jar" | head -10
+    exit 1
 fi

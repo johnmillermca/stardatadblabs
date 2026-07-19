@@ -44,9 +44,14 @@ data:
   entrypoint.sh: |
     #!/bin/bash
     set -e
-    # Initialize state DB if needed
-    sqlmesh --config /app/config/config.yaml migrate
-    # Start the UI server
+    # Initialize project if not yet set up
+    if [ ! -f /app/models/.sqlmesh_init ]; then
+        mkdir -p /app/models
+        cd /app/models
+        sqlmesh --config /app/config/config.yaml init -t full || true
+        touch /app/models/.sqlmesh_init
+    fi
+    # Start the UI server (migrate runs implicitly on first UI load)
     exec sqlmesh --config /app/config/config.yaml ui --host 0.0.0.0 --port 8001
 ---
 apiVersion: v1
