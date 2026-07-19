@@ -3,7 +3,7 @@
 # Namespace : security
 # Access    : http://192.168.1.50:30680 (Admin UI / port 6080)
 # Depends on: PostgreSQL databases.postgresql:5432, db: ranger
-# Image     : 192.168.1.50:30500/apache-ranger:2.4.0
+# Image     : 192.168.1.50:30500/apache-ranger:2.7.0
 #             Build: docker pull apache/ranger:2.4.0 && docker tag ... && docker push
 # Secret    : ranger-db-credentials (seeded by 12-seed-openbao-secrets.sh)
 # =============================================================================
@@ -67,7 +67,7 @@ spec:
     spec:
       containers:
         - name: ranger-admin
-          image: 192.168.1.50:30500/apache-ranger:2.4.0
+          image: 192.168.1.50:30500/apache-ranger:2.7.0
           ports:
             - name: http
               containerPort: 6080

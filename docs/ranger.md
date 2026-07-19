@@ -8,7 +8,7 @@ Apache Ranger 2.4.0 — centralized security framework for fine-grained RBAC, da
 | Namespace | `security` |
 | Admin UI | `http://192.168.1.50:30680` |
 | Default credentials | admin / (from `ranger-db-credentials` secret, key `admin-password`) |
-| Image | `192.168.1.50:30500/apache-ranger:2.4.0` (must be built) |
+| Image | `192.168.1.50:30500/apache-ranger:2.7.0` (must be built) |
 | Depends on | PostgreSQL (`databases` namespace, `ranger` database) |
 | Secret | `ranger-db-credentials` |
 | Manifest | `manifests/ranger/ranger-deployment.yaml` |
@@ -19,8 +19,8 @@ Apache Ranger 2.4.0 — centralized security framework for fine-grained RBAC, da
 ```bash
 # Pull from Docker Hub and retag
 docker pull apache/ranger:2.4.0
-docker tag apache/ranger:2.4.0 192.168.1.50:30500/apache-ranger:2.4.0
-docker push 192.168.1.50:30500/apache-ranger:2.4.0
+docker tag apache/ranger:2.4.0 192.168.1.50:30500/apache-ranger:2.7.0
+docker push 192.168.1.50:30500/apache-ranger:2.7.0
 ```
 3. Seed secrets:
 ```bash

@@ -2,7 +2,7 @@
 # Namespace : security
 # Access    : http://192.168.1.50:30680 (Admin UI)
 # Prereq    : secret ranger-db-credentials must exist (run 12-seed-openbao-secrets.sh)
-# Prereq    : image 192.168.1.50:30500/apache-ranger:2.4.0 must be pushed
+# Prereq    : image 192.168.1.50:30500/apache-ranger:2.7.0 must be pushed
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

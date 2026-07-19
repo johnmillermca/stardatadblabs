@@ -3,7 +3,7 @@
 # Namespace   : security
 # Access      : http://192.168.1.50:30680 (Admin UI, port 6080)
 # Depends on  : PostgreSQL databases.postgresql:5432, db: ranger
-# Image       : 192.168.1.50:30500/apache-ranger:2.4.0
+# Image       : 192.168.1.50:30500/apache-ranger:2.7.0
 #               (must be built and pushed before deploying)
 # Secret      : ranger-db-credentials (seeded by 12-seed-openbao-secrets.sh)
 # =============================================================================

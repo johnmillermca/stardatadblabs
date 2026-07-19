@@ -145,11 +145,11 @@ push_image "quay.io/jupyterhub/configurable-http-proxy:4.6.2"     "jupyterhub/co
 log "=== Security / Catalog ==="
 
 # Apache Ranger (custom — must be built and pushed separately)
-# Image: 192.168.1.50:30500/apache-ranger:2.4.0
-# Build: docker build -t 192.168.1.50:30500/apache-ranger:2.4.0 manifests/ranger/
-log "  NOTE: apache-ranger:2.4.0 is a custom image — build and push manually:"
-log "        podman build -t ${REGISTRY}/apache-ranger:2.4.0 manifests/ranger/"
-log "        podman push --tls-verify=false ${REGISTRY}/apache-ranger:2.4.0"
+# Image: 192.168.1.50:30500/apache-ranger:2.7.0
+# Build: docker build -t 192.168.1.50:30500/apache-ranger:2.7.0 manifests/ranger/
+log "  NOTE: apache-ranger:2.7.0 is a custom image — build and push manually:"
+log "        podman build -t ${REGISTRY}/apache-ranger:2.7.0 manifests/ranger/"
+log "        podman push --tls-verify=false ${REGISTRY}/apache-ranger:2.7.0"
 
 # Apache Polaris (custom — must be built and pushed separately)
 log "  NOTE: apache-polaris:latest is a custom image — build and push manually:"
