@@ -8,8 +8,9 @@
 
 replicaCount: 2
 
-imageTag: "3.7.0"
-image: "192.168.1.50:30500/opensearch/opensearch-dashboards"
+image:
+  repository: "192.168.1.50:30500/opensearch/opensearch-dashboards"
+  tag: "3.7.0"
 
 opensearchHosts: "http://opensearch-cluster-master.prod.svc.cluster.local:9200"
 

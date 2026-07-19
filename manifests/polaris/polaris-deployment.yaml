@@ -75,11 +75,15 @@ spec:
               memory: 1Gi
               cpu: "1"
           readinessProbe:
-            httpGet:
-              path: /actuator/health
+            tcpSocket:
               port: 8181
             initialDelaySeconds: 30
             periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8181
+            initialDelaySeconds: 60
+            periodSeconds: 15
       volumes:
         - name: polaris-config
           configMap:
