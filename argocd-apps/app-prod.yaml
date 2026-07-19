@@ -119,17 +119,10 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   project: platform
-  sources:
-    - repoURL: https://charts.bitnami.com/bitnami
-      chart: postgresql
-      targetRevision: "18.8.0"
-      helm:
-        releaseName: postgresql
-        valueFiles:
-          - $values/k8s-platform/helm/postgresql/values.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/postgresql
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
@@ -149,17 +142,10 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   project: platform
-  sources:
-    - repoURL: https://charts.bitnami.com/bitnami
-      chart: mongodb
-      targetRevision: "19.1.17"
-      helm:
-        releaseName: mongodb
-        valueFiles:
-          - $values/k8s-platform/helm/mongodb/values.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/mongodb
   destination:
     server: https://kubernetes.default.svc
     namespace: prod

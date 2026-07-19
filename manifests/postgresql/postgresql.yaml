@@ -1,0 +1,136 @@
+# =============================================================================
+# PostgreSQL 17 — prod namespace  (single-replica — master node only)
+# Image  : 192.168.1.50:30500/library/postgres:17
+# Access : postgresql.prod.svc.cluster.local:5432  (internal)
+#          NodePort 192.168.1.50:30532              (external)
+# DBs    : metadata, kestra, sqlmesh_state, ranger, polaris
+# Secret : postgresql-credentials  (key: postgres-password)
+# =============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql-data
+  namespace: prod
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-init
+  namespace: prod
+data:
+  01-create-dbs.sql: |
+    CREATE DATABASE kestra;
+    CREATE DATABASE sqlmesh_state;
+    CREATE DATABASE ranger;
+    CREATE DATABASE polaris;
+  02-create-users.sh: |
+    #!/bin/bash
+    set -e
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+      CREATE USER kestra   WITH PASSWORD 'changeme';
+      CREATE USER sqlmesh  WITH PASSWORD 'changeme';
+      CREATE USER ranger   WITH PASSWORD 'changeme';
+      CREATE USER polaris  WITH PASSWORD 'changeme';
+      GRANT ALL PRIVILEGES ON DATABASE kestra        TO kestra;
+      GRANT ALL PRIVILEGES ON DATABASE sqlmesh_state TO sqlmesh;
+      GRANT ALL PRIVILEGES ON DATABASE ranger        TO ranger;
+      GRANT ALL PRIVILEGES ON DATABASE polaris       TO polaris;
+    EOSQL
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql
+  namespace: prod
+  labels:
+    app: postgresql
+spec:
+  serviceName: postgresql-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: postgresql
+          image: 192.168.1.50:30500/library/postgres:17
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-credentials
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: metadata
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgresql-storage
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "2"
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: postgresql-storage
+          persistentVolumeClaim:
+            claimName: postgresql-data
+        - name: init-scripts
+          configMap:
+            name: postgresql-init
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-headless
+  namespace: prod
+spec:
+  clusterIP: None
+  selector:
+    app: postgresql
+  ports:
+    - port: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql
+  namespace: prod
+spec:
+  selector:
+    app: postgresql
+  type: NodePort
+  ports:
+    - port: 5432
+      targetPort: 5432
+      nodePort: 30532
