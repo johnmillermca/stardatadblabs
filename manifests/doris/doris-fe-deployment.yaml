@@ -56,7 +56,7 @@ spec:
     spec:
       containers:
         - name: doris-fe
-          image: apache/doris:2.1.0-fe
+          image: 192.168.1.50:30500/apache/doris:fe-4.0.7
           ports:
             - name: http
               containerPort: 8030

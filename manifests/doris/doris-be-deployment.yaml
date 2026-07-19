@@ -52,7 +52,7 @@ spec:
     spec:
       containers:
         - name: doris-be
-          image: apache/doris:2.1.0-be
+          image: 192.168.1.50:30500/apache/doris:be-4.0.7
           ports:
             - name: be-port
               containerPort: 9060
