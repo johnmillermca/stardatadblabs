@@ -74,21 +74,28 @@ spec:
       labels:
         app: debezium-connect
     spec:
+      initContainers:
+        - name: copy-config
+          image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
+          command: ["sh", "-c", "cp /kafka-config-ro/connect-distributed.properties /kafka-config-rw/connect-distributed.properties"]
+          volumeMounts:
+            - name: connect-config-ro
+              mountPath: /kafka-config-ro
+              readOnly: true
+            - name: connect-config-rw
+              mountPath: /kafka-config-rw
       containers:
         - name: debezium-connect
-          image: quay.io/debezium/connect:2.7
+          image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              sed -i "s|\${KAFKA_SASL_USERNAME}|${KAFKA_SASL_USERNAME}|g; s|\${KAFKA_SASL_PASSWORD}|${KAFKA_SASL_PASSWORD}|g" /kafka-config-rw/connect-distributed.properties
+              exec /opt/kafka/bin/connect-distributed.sh /kafka-config-rw/connect-distributed.properties
           ports:
             - name: rest-api
               containerPort: 8083
           env:
-            - name: BOOTSTRAP_SERVERS
-              value: strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
-            - name: CONFIG_STORAGE_TOPIC
-              value: debezium-configs
-            - name: OFFSET_STORAGE_TOPIC
-              value: debezium-offsets
-            - name: STATUS_STORAGE_TOPIC
-              value: debezium-statuses
             - name: KAFKA_SASL_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -99,28 +106,24 @@ spec:
                 secretKeyRef:
                   name: debezium-credentials
                   key: kafka-sasl-password
-            # PostgreSQL CDC credentials
             - name: PG_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: debezium-credentials
                   key: pg-password
-            # MongoDB CDC credentials
             - name: MONGO_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: debezium-credentials
                   key: mongo-password
-            # Oracle LogMiner credentials
             - name: ORACLE_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: debezium-credentials
                   key: oracle-password
           volumeMounts:
-            - name: connect-config
-              mountPath: /kafka/config/connect-distributed.properties
-              subPath: connect-distributed.properties
+            - name: connect-config-rw
+              mountPath: /kafka-config-rw
           resources:
             requests:
               memory: 512Mi
@@ -130,20 +133,22 @@ spec:
               cpu: "1"
           readinessProbe:
             httpGet:
-              path: /
-              port: 8083
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /
+              path: /connectors
               port: 8083
             initialDelaySeconds: 60
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /connectors
+              port: 8083
+            initialDelaySeconds: 90
             periodSeconds: 20
       volumes:
-        - name: connect-config
+        - name: connect-config-ro
           configMap:
             name: debezium-connect-config
+        - name: connect-config-rw
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

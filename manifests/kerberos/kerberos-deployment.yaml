@@ -58,9 +58,11 @@ data:
       dnf install -y krb5-server krb5-libs krb5-workstation
     fi
     # Copy config files
+    mkdir -p /var/kerberos/krb5kdc /etc/krb5kdc
     cp /etc/krb5-config/krb5.conf /etc/krb5.conf
     cp /etc/krb5-config/kdc.conf  /var/kerberos/krb5kdc/kdc.conf
     cp /etc/krb5-config/kadm5.acl /var/kerberos/krb5kdc/kadm5.acl
+    cp /etc/krb5-config/kadm5.acl /etc/krb5kdc/kadm5.acl
     # Initialise DB only on first boot
     if [ ! -f /var/kerberos/krb5kdc/principal ]; then
       kdb5_util create -s -P "${KRB5_MASTER_PASSWORD}" -r STARDATADBLABS.LOCAL
@@ -109,14 +111,14 @@ spec:
           effect: "NoSchedule"
       initContainers:
         - name: install-kerberos
-          image: rockylinux:9
+          image: 192.168.1.50:30500/rockylinux:9
           command: ["/bin/bash", "-c", "dnf install -y krb5-server krb5-libs krb5-workstation && cp -r /usr/sbin/kdb5_util /mnt/sbin/ 2>/dev/null || true"]
           volumeMounts:
             - name: kerberos-data
               mountPath: /var/kerberos/krb5kdc
       containers:
         - name: kerberos-kdc
-          image: rockylinux:9
+          image: 192.168.1.50:30500/rockylinux:9
           command: ["/bin/bash", "/etc/krb5-config/startup.sh"]
           env:
             - name: KRB5_MASTER_PASSWORD

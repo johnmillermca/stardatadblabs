@@ -1,5 +1,5 @@
 # =============================================================================
-# OpenSearch — 3-node HA cluster
+# OpenSearch — 3-node HA cluster  (opensearch-project/helm-charts 3.7.0)
 # Namespace   : prod
 # Image       : 192.168.1.50:30500/opensearch/opensearch:3.7.0 (private registry)
 # Access      : http://192.168.1.5x:30920 (NodePort, any worker)
@@ -11,8 +11,10 @@
 singleNode: false
 replicas: 3
 
-imageTag: "3.7.0"
-image: "192.168.1.50:30500/opensearch/opensearch"
+image:
+  repository: "192.168.1.50:30500/opensearch/opensearch"
+  tag: "3.7.0"
+  pullPolicy: IfNotPresent
 
 opensearchJavaOpts: "-Xms1g -Xmx1g"
 
@@ -27,7 +29,8 @@ config:
   opensearch.yml: |
     cluster.name: opensearch-prod
     network.host: 0.0.0.0
-    discovery.zen.minimum_master_nodes: 2
+    discovery.seed_hosts: ["opensearch-cluster-master-headless"]
+    cluster.initial_master_nodes: ["opensearch-cluster-master-0","opensearch-cluster-master-1","opensearch-cluster-master-2"]
     plugins.security.disabled: true
 
 persistence:
@@ -47,7 +50,6 @@ resources:
     memory: 4Gi
     cpu: "2"
 
-# Hard anti-affinity — each replica on a different worker, never on master
 antiAffinity: hard
 nodeSelector: {}
 tolerations: []

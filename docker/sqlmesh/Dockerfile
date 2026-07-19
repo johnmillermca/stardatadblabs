@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    "sqlmesh[spark,github]==${SQLMESH_VERSION}" \
+    "sqlmesh[spark,github,web]==${SQLMESH_VERSION}" \
     "pyspark==${SPARK_VERSION}"
 
 RUN mkdir -p /opt/spark/jars && \

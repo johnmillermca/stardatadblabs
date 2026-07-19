@@ -2,7 +2,6 @@
 # JupyterHub — hub.jupyter.org/helm-chart 4.4.0
 # Namespace   : prod
 # Image       : private registry for singleuser; standard hub images cached
-# HA          : PDB minAvailable=1; user scheduler disabled (4-worker cluster)
 # Access      : http://192.168.1.5x:30888
 # Secret      : jupyterhub-credentials
 # =============================================================================
@@ -32,27 +31,18 @@ hub:
     00-auth: |
       import os
       c.DummyAuthenticator.password = os.environ.get('DUMMY_AUTH_PASSWORD', 'changeme')
-  resources:
-    requests:
-      memory: 512Mi
-      cpu: 250m
-    limits:
-      memory: 1Gi
-      cpu: "1"
-  # Workers only
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: node-role.kubernetes.io/control-plane
-                operator: DoesNotExist
+  # Workers only — no master
+  nodeSelector: {}
 
 proxy:
   service:
     type: NodePort
     nodePorts:
       http: 30888
+  chp:
+    image:
+      name: 192.168.1.50:30500/jupyterhub/configurable-http-proxy
+      tag: "4.6.2"
 
 singleuser:
   image:
@@ -64,27 +54,22 @@ singleuser:
     capacity: 10Gi
     dynamic:
       storageClass: local-path
-  resources:
-    requests:
-      memory: 512Mi
-      cpu: 250m
-    limits:
-      memory: 4Gi
-      cpu: "2"
+  cpu:
+    limit: 2
+    guarantee: 0.25
+  memory:
+    limit: 4G
+    guarantee: 512M
   profileList:
     - display_name: "Standard — Python + PySpark"
-      description: "Python 3.11, PySpark 3.5, Gluten/Velox acceleration, Iceberg 1.9.2"
+      description: "Python 3.11, PySpark 3.5, Iceberg"
       default: true
 
 scheduling:
   userScheduler:
     enabled: false
 
-culling:
+cull:
   enabled: true
   timeout: 3600
   every: 300
-
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1

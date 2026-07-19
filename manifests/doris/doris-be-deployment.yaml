@@ -64,7 +64,11 @@ spec:
               containerPort: 8060
           env:
             - name: FE_SERVERS
-              value: "doris-fe-headless.prod.svc.cluster.local:9010"
+              value: "fe1:doris-fe-headless.prod.svc.cluster.local:9010"
+            - name: BE_ADDR
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           volumeMounts:
             - name: be-config
               mountPath: /opt/apache-doris/be/conf/be.conf

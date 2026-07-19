@@ -18,6 +18,8 @@ spec:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/namespaces
+    directory:
+      include: "monitoring-namespace.yaml"
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -41,14 +43,6 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   project: platform
-  source:
-    repoURL: https://prometheus-community.github.io/helm-charts
-    chart: kube-prometheus-stack
-    targetRevision: "60.4.0"
-    helm:
-      releaseName: prometheus
-      valueFiles:
-        - $values/helm/prometheus/values.yaml
   sources:
     - repoURL: https://prometheus-community.github.io/helm-charts
       chart: kube-prometheus-stack
@@ -69,7 +63,7 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true
+      - Replace=true
 
 # ── Grafana (standalone) ──────────────────────────────────────────────────────
 ---
