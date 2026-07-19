@@ -5,6 +5,7 @@
 # =============================================================================
 ---
 # External NodePort for FE — HTTP WebUI + StreamLoad (8030) and MySQL query (9030)
+# Also exposes internal ports so BE can reach FE via ClusterIP
 apiVersion: v1
 kind: Service
 metadata:
@@ -23,6 +24,12 @@ spec:
       port: 9030
       targetPort: 9030
       nodePort: 30090
+    - name: edit-log
+      port: 9010
+      targetPort: 9010
+    - name: rpc
+      port: 9020
+      targetPort: 9020
 ---
 # Headless service for stable FE DNS (required for enable_fqdn_mode=true)
 apiVersion: v1
