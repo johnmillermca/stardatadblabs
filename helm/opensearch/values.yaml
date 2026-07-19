@@ -52,15 +52,8 @@ resources:
     cpu: "2"
 
 antiAffinity: soft
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker3.local
+nodeSelector:
+  kubernetes.io/hostname: worker3.local
 
 podDisruptionBudget:
   enable: false
