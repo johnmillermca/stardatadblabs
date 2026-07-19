@@ -17,7 +17,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/namespaces
+    path: manifests/namespaces
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -48,7 +48,7 @@ spec:
     helm:
       releaseName: prometheus
       valueFiles:
-        - $values/k8s-platform/helm/prometheus/values.yaml
+        - $values/helm/prometheus/values.yaml
   sources:
     - repoURL: https://prometheus-community.github.io/helm-charts
       chart: kube-prometheus-stack
@@ -56,7 +56,7 @@ spec:
       helm:
         releaseName: prometheus
         valueFiles:
-          - $values/k8s-platform/helm/prometheus/values.yaml
+          - $values/helm/prometheus/values.yaml
     - repoURL: https://github.com/johnmillermca/stardatadblabs
       targetRevision: HEAD
       ref: values
@@ -90,7 +90,7 @@ spec:
       helm:
         releaseName: grafana
         valueFiles:
-          - $values/k8s-platform/helm/grafana/values.yaml
+          - $values/helm/grafana/values.yaml
     - repoURL: https://github.com/johnmillermca/stardatadblabs
       targetRevision: HEAD
       ref: values
@@ -120,7 +120,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/prometheus
+    path: manifests/mcp/prometheus
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
@@ -147,7 +147,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/grafana
+    path: manifests/mcp/grafana
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
