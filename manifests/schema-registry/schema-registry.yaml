@@ -1,7 +1,8 @@
 # =============================================================================
-# Confluent Schema Registry 7.9.0 — 2-replica HA
+# Confluent Schema Registry 7.9.0 — single replica (no HA needed)
+# Node   : worker4.local (co-located with Kafka)
 # Image  : 192.168.1.50:30500/confluentinc/cp-schema-registry:7.9.0
-# Access : http://192.168.1.5x:30810
+# Access : http://192.168.1.54:30810
 #          http://schema-registry.prod.svc.cluster.local:8081 (internal)
 # Secret : schema-registry-credentials (key: sasl-jaas-config)
 # =============================================================================
@@ -14,7 +15,7 @@ metadata:
   labels:
     app: schema-registry
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: schema-registry
@@ -23,21 +24,8 @@ spec:
       labels:
         app: schema-registry
     spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: schema-registry
-                topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kubernetes.io/hostname: worker4.local
       containers:
         - name: schema-registry
           image: 192.168.1.50:30500/confluentinc/cp-schema-registry:7.9.0
@@ -88,14 +76,3 @@ spec:
     - port: 8081
       targetPort: 8081
       nodePort: 30810
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: schema-registry-pdb
-  namespace: prod
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: schema-registry

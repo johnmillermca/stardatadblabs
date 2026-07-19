@@ -1,13 +1,15 @@
 # =============================================================================
 # Apache Kestra 0.22.x — Workflow Orchestrator
 # Namespace   : prod
-# Node        : master.local (pinned)
+# Node        : worker2.local (pinned)
 # Access      : http://192.168.1.50:30880 (UI)
 #               http://kestra.prod.svc.cluster.local:8080 (internal)
 # Image       : kestra/kestra:latest-lts (v0.22)
 # Depends on  : PostgreSQL (prod namespace, db: kestra)
 #               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # Secret      : kestra-credentials
+# PVC         : 20Gi on /home (worker2.local)
+# Replicas    : 1
 # =============================================================================
 ---
 apiVersion: v1
@@ -67,7 +69,7 @@ metadata:
   labels:
     app: kestra
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: kestra
@@ -77,11 +79,7 @@ spec:
         app: kestra
     spec:
       nodeSelector:
-        kubernetes.io/hostname: master.local
-      tolerations:
-        - key: "node-role.kubernetes.io/control-plane"
-          operator: "Exists"
-          effect: "NoSchedule"
+        kubernetes.io/hostname: worker2.local
       containers:
         - name: kestra
           image: kestra/kestra:latest-lts

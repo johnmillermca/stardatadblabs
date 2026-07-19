@@ -1,7 +1,8 @@
 # =============================================================================
 # Debezium Kafka Connect — ConfigMap + Deployment + Service
-# Namespace : streaming
-# Access    : http://192.168.1.50:30083 (REST API)
+# Namespace : prod
+# Node      : worker4.local (co-located with Kafka)
+# Access    : http://192.168.1.54:30083 (REST API)
 # Connects to: Kafka at strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # CDC sources: PostgreSQL (pgoutput), MongoDB, Oracle (LogMiner)
 # Secret    : debezium-credentials  (kafka-sasl-username, kafka-sasl-password)
@@ -74,6 +75,8 @@ spec:
       labels:
         app: debezium-connect
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker4.local
       initContainers:
         - name: copy-config
           image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0

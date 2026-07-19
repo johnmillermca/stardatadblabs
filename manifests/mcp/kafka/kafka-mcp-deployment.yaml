@@ -1,10 +1,10 @@
 # =============================================================================
 # Kafka MCP Server — Kubernetes Deployment
-# Namespace : streaming
+# Namespace : prod
+# Node      : worker4.local (co-located with Kafka/Strimzi)
 # Port      : 3104 (MCP SSE)
 # NodePort  : 30314
 # Image     : 192.168.1.50:30500/mcp-kafka:1.0.0
-# Default   : connects to Strimzi bootstrap (SCRAM-SHA-512)
 # Secret    : akhq-credentials (reuses kafka-sasl-username/password keys)
 # =============================================================================
 ---
@@ -27,6 +27,8 @@ spec:
         app: mcp-kafka
         component: mcp-server
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker4.local
       containers:
         - name: mcp-kafka
           image: 192.168.1.50:30500/mcp-kafka:1.0.0

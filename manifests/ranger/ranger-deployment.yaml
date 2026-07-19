@@ -1,11 +1,12 @@
 # =============================================================================
 # Apache Ranger — ConfigMap + PVC + Deployment + Service
-# Namespace : security
+# Namespace : prod
+# Node      : master.local (pinned — freeing worker capacity)
 # Access    : http://192.168.1.50:30680 (Admin UI / port 6080)
 # Depends on: PostgreSQL databases.postgresql:5432, db: ranger
 # Image     : 192.168.1.50:30500/apache-ranger:2.7.0
-#             Build: docker pull apache/ranger:2.4.0 && docker tag ... && docker push
 # Secret    : ranger-db-credentials (seeded by 12-seed-openbao-secrets.sh)
+# PVC       : 5Gi on /home (master.local)
 # =============================================================================
 ---
 apiVersion: v1
@@ -65,6 +66,12 @@ spec:
       labels:
         app: ranger-admin
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
       containers:
         - name: ranger-admin
           image: 192.168.1.50:30500/apache-ranger:2.7.0

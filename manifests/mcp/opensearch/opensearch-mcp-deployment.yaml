@@ -1,6 +1,7 @@
 # =============================================================================
 # OpenSearch MCP Server — Kubernetes Deployment
-# Namespace : search
+# Namespace : prod
+# Node      : worker3.local (co-located with OpenSearch)
 # Port      : 3102 (MCP SSE)
 # NodePort  : 30312
 # Image     : 192.168.1.50:30500/mcp-opensearch:1.0.0
@@ -26,6 +27,8 @@ spec:
         app: mcp-opensearch
         component: mcp-server
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker3.local
       containers:
         - name: mcp-opensearch
           image: 192.168.1.50:30500/mcp-opensearch:1.0.0

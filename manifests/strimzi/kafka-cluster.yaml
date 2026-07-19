@@ -1,12 +1,14 @@
 # =============================================================================
-# Strimzi-managed Kafka cluster — prod namespace  (single-broker, no HA needed)
+# Strimzi-managed Kafka cluster — prod namespace  (single-broker, no HA)
 # Namespace   : prod
-# Topology    : 1 combined controller+broker (KRaft) — single replica as requested
+# Node        : worker4.local (pinned via pod affinity on KafkaNodePool)
+# Topology    : 1 combined controller+broker (KRaft) — single replica
 # Listeners   :
 #   PLAIN  port 9092 — SCRAM-SHA-512 in-cluster
 #   EXTERNAL port 9094 → NodePort 30093 — external access
 # Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # Kafka ver   : 3.9.0 (Strimzi 1.1.0)
+# PVC         : 50Gi on /home (worker4.local)
 # =============================================================================
 
 ---
@@ -34,6 +36,17 @@ spec:
     limits:
       memory: 4Gi
       cpu: "2"
+  template:
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker4.local
 
 ---
 apiVersion: kafka.strimzi.io/v1beta2

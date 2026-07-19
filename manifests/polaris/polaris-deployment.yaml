@@ -1,6 +1,7 @@
 # =============================================================================
 # Apache Polaris — ConfigMap + Deployment + Service
-# Namespace : catalog
+# Namespace : prod
+# Node      : master.local (pinned — freeing worker capacity)
 # Access    : http://192.168.1.50:30181 (Iceberg REST catalog API)
 # Depends on: PostgreSQL databases.postgresql:5432, db: polaris
 # Image     : 192.168.1.50:30500/apache-polaris:latest
@@ -20,7 +21,6 @@ data:
     polaris.persistence.relational.jdbc.host=postgresql.prod.svc.cluster.local
     polaris.persistence.relational.jdbc.port=5432
     polaris.persistence.relational.jdbc.database=polaris
-    # username/password injected from env vars (see Deployment below)
     polaris.persistence.relational.jdbc.user=${POLARIS_DB_USER}
     polaris.persistence.relational.jdbc.password=${POLARIS_DB_PASS}
     polaris.features.ALLOW_WILDCARD_LOCATION=true
@@ -46,6 +46,12 @@ spec:
       labels:
         app: polaris
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
       containers:
         - name: polaris
           image: 192.168.1.50:30500/apache-polaris:latest

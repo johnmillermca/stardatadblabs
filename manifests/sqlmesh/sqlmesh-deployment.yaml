@@ -1,11 +1,13 @@
 # =============================================================================
 # SQLMesh 0.99.0 — SQL-based DataOps / transformation framework
-# Namespace   : analytics
+# Namespace   : prod
+# Node        : worker2.local
 # Access      : http://192.168.1.50:30883 (UI)
 #               http://sqlmesh.prod.svc.cluster.local:8001 (internal)
 # Image       : 192.168.1.50:30500/sqlmesh:0.99.0 (built from docker/sqlmesh/)
 # Depends on  : PostgreSQL (db: sqlmesh_state)
 # Secret      : sqlmesh-credentials
+# PVC         : 10Gi on /home (worker2.local)
 # Build first : bash docker/sqlmesh/build-and-push.sh
 # =============================================================================
 ---
@@ -83,6 +85,8 @@ spec:
       labels:
         app: sqlmesh
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker2.local
       containers:
         - name: sqlmesh
           image: 192.168.1.50:30500/sqlmesh:0.99.0

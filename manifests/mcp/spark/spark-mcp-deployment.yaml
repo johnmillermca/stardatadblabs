@@ -1,6 +1,7 @@
 # =============================================================================
-# Spark / Gluten / Velox MCP Server — Kubernetes Deployment
-# Namespace : analytics
+# Spark MCP Server — Kubernetes Deployment
+# Namespace : prod
+# Node      : worker2.local (co-located with Spark)
 # Port      : 3103 (MCP SSE)
 # NodePort  : 30313
 # Image     : 192.168.1.50:30500/mcp-spark:1.0.0
@@ -25,6 +26,8 @@ spec:
         app: mcp-spark
         component: mcp-server
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker2.local
       containers:
         - name: mcp-spark
           image: 192.168.1.50:30500/mcp-spark:1.0.0

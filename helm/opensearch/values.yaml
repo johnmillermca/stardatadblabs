@@ -1,15 +1,17 @@
 # =============================================================================
-# OpenSearch — 3-node HA cluster  (opensearch-project/helm-charts 3.7.0)
+# OpenSearch — single node (opensearch-project/helm-charts 3.7.0)
 # Namespace   : prod
+# Node        : worker3.local
 # Image       : 192.168.1.50:30500/opensearch/opensearch:3.7.0 (private registry)
-# Access      : http://192.168.1.5x:30920 (NodePort, any worker)
+# Access      : http://192.168.1.53:30920 (NodePort)
 #               opensearch-cluster-master.prod.svc.cluster.local:9200 (internal)
-# HA          : 3 replicas, hard pod anti-affinity across workers
+# HA          : single node
 # Secret      : opensearch-credentials
+# PVC         : 50Gi on /home (worker3.local)
 # =============================================================================
 
-singleNode: false
-replicas: 3
+singleNode: true
+replicas: 1
 
 image:
   repository: "192.168.1.50:30500/opensearch/opensearch"
@@ -29,8 +31,7 @@ config:
   opensearch.yml: |
     cluster.name: opensearch-prod
     network.host: 0.0.0.0
-    discovery.seed_hosts: ["opensearch-cluster-master-headless"]
-    cluster.initial_master_nodes: ["opensearch-cluster-master-0","opensearch-cluster-master-1","opensearch-cluster-master-2"]
+    discovery.type: single-node
     plugins.security.disabled: true
 
 persistence:
@@ -50,20 +51,19 @@ resources:
     memory: 4Gi
     cpu: "2"
 
-antiAffinity: hard
-nodeSelector: {}
-tolerations: []
+antiAffinity: soft
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker3.local
 
 podDisruptionBudget:
-  enable: true
-  minAvailable: 2
+  enable: false
 
 startupProbe:
   failureThreshold: 30

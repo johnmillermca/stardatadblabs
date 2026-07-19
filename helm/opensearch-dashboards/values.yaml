@@ -1,12 +1,12 @@
 # =============================================================================
-# OpenSearch Dashboards — 2-replica HA
+# OpenSearch Dashboards — single replica
 # Namespace   : prod
+# Node        : worker3.local (co-located with OpenSearch)
 # Image       : 192.168.1.50:30500/opensearch/opensearch-dashboards:3.7.0
-# Access      : http://192.168.1.5x:30601 (NodePort, any worker)
-# HA          : 2 replicas, soft anti-affinity across workers
+# Access      : http://192.168.1.53:30601 (NodePort)
 # =============================================================================
 
-replicaCount: 2
+replicaCount: 1
 
 image:
   repository: "192.168.1.50:30500/opensearch/opensearch-dashboards"
@@ -38,26 +38,18 @@ resources:
     memory: 1Gi
     cpu: "1"
 
-# Spread across workers, never on master
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        podAffinityTerm:
-          labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: opensearch-dashboards
-          topologyKey: kubernetes.io/hostname
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker3.local
 
 podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
+  enabled: false
 
 readinessProbe:
   failureThreshold: 10

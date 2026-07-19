@@ -1,23 +1,56 @@
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-path
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
-provisioner: rancher.io/local-path
-volumeBindingMode: WaitForFirstConsumer
-reclaimPolicy: Delete
----
-# Test PVC – delete after verification
+# =============================================================================
+# Storage — local-path provisioner reconfigured to use /home on all nodes
+# All application PVCs should use storageClassName: local-path
+# The provisioner is patched via ConfigMap to provision under /home
+# =============================================================================
+
+# Patch the local-path-provisioner ConfigMap to use /home on every node
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: ConfigMap
 metadata:
-  name: storage-test-pvc
-  namespace: default
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 1Gi
+  name: local-path-config
+  namespace: local-path-storage
+data:
+  config.json: |
+    {
+      "nodePathMap": [
+        {
+          "node": "master.local",
+          "paths": ["/home/local-path-provisioner"]
+        },
+        {
+          "node": "worker1.local",
+          "paths": ["/home/local-path-provisioner"]
+        },
+        {
+          "node": "worker2.local",
+          "paths": ["/home/local-path-provisioner"]
+        },
+        {
+          "node": "worker3.local",
+          "paths": ["/home/local-path-provisioner"]
+        },
+        {
+          "node": "worker4.local",
+          "paths": ["/home/local-path-provisioner"]
+        }
+      ]
+    }
+  helperPod.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      containers:
+      - name: helper-pod
+        image: busybox
+        imagePullPolicy: IfNotPresent
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"

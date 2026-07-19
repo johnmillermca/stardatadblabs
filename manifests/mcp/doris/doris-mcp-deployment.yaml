@@ -1,6 +1,7 @@
 # =============================================================================
 # Doris MCP Server — Kubernetes Deployment
-# Namespace : analytics
+# Namespace : prod
+# Node      : worker1.local (co-located with Doris)
 # Port      : 3101 (MCP SSE)
 # NodePort  : 30311
 # Image     : 192.168.1.50:30500/mcp-doris:1.0.0
@@ -26,6 +27,8 @@ spec:
         app: mcp-doris
         component: mcp-server
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
       containers:
         - name: mcp-doris
           image: 192.168.1.50:30500/mcp-doris:1.0.0

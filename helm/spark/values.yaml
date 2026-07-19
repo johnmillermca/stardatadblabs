@@ -1,10 +1,11 @@
 # =============================================================================
-# Apache Spark — bitnami/spark 10.0.3
+# Apache Spark (Gluten-Velox) — bitnami/spark 10.0.3
 # Namespace   : prod
+# Node        : worker2.local (master + workers pinned; overflow to worker3)
 # Image       : 192.168.1.50:30500/spark-gluten-velox:3.5.1 (private registry)
-# HA          : 1 master + 3 workers spread across workers, never on master node
-# Access      : http://192.168.1.5x:30707 (Master UI)
-#               spark://192.168.1.5x:30777 (RPC)
+# Access      : http://192.168.1.52:30707 (Master UI)
+#               spark://192.168.1.52:30777 (RPC)
+# Workers     : 3 replicas pinned to worker2/worker3
 # =============================================================================
 
 image:
@@ -30,14 +31,15 @@ master:
     limits:
       memory: 4Gi
       cpu: "2"
-  # Master runs on workers only
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
           - matchExpressions:
-              - key: node-role.kubernetes.io/control-plane
-                operator: DoesNotExist
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - worker2.local
 
 worker:
   replicaCount: 3
@@ -52,22 +54,16 @@ worker:
     limits:
       memory: 4Gi
       cpu: "4"
-  # Spread workers across all worker nodes, hard anti-affinity
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
           - matchExpressions:
-              - key: node-role.kubernetes.io/control-plane
-                operator: DoesNotExist
-    podAntiAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchLabels:
-                app.kubernetes.io/component: worker
-            topologyKey: kubernetes.io/hostname
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - worker2.local
+                  - worker3.local
 
 security:
   rpc:

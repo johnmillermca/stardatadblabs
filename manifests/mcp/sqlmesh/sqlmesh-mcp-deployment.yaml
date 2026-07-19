@@ -1,6 +1,7 @@
 # =============================================================================
 # SQLMesh MCP Server — Kubernetes Deployment
-# Namespace : analytics
+# Namespace : prod
+# Node      : worker2.local (co-located with SQLMesh)
 # Port      : 3100 (MCP SSE transport)
 # NodePort  : 30310
 # Image     : 192.168.1.50:30500/mcp-sqlmesh:1.0.0
@@ -26,6 +27,8 @@ spec:
         app: mcp-sqlmesh
         component: mcp-server
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker2.local
       containers:
         - name: mcp-sqlmesh
           image: 192.168.1.50:30500/mcp-sqlmesh:1.0.0
