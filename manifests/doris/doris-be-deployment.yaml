@@ -68,8 +68,12 @@ spec:
             - name: brpc
               containerPort: 8060
           env:
+            - name: FE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: FE_SERVERS
-              value: "fe1:doris-fe-headless.prod.svc.cluster.local:9010"
+              value: "fe1:doris-fe.prod.svc.cluster.local:9010"
             - name: BE_ADDR
               valueFrom:
                 fieldRef:

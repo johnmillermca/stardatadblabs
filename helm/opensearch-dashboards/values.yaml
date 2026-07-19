@@ -18,7 +18,6 @@ config:
   opensearch_dashboards.yml: |
     server.host: '0.0.0.0'
     opensearch.hosts: ['http://opensearch-cluster-master.prod.svc.cluster.local:9200']
-    opensearch_security.disabled: true
     opensearch.ssl.verificationMode: none
 
 extraEnvs:
