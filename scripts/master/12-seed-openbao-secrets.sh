@@ -30,14 +30,13 @@ set -euo pipefail
 export PATH="/usr/local/bin:${PATH}"
 
 BAO_ADDR="http://192.168.1.50:30820"
-KEYS_FILE="/root/openbao-init-keys.json"
+KEYS_FILE="${HOME}/openbao-init-keys.json"
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 ok()   { echo "  ✓ $*"; }
 skip() { echo "  – $* (already exists — skipping)"; }
 die()  { echo "[ERROR] $*" >&2; exit 1; }
 
-[[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"
 [[ -f "${KEYS_FILE}" ]] || die "OpenBao keys file not found: ${KEYS_FILE}. Run 10-deploy-openbao.sh first."
 
 # ── Read root token ───────────────────────────────────────────────────────────
