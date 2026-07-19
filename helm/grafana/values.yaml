@@ -38,13 +38,8 @@ resources:
     memory: 1Gi
 
 ## ── Node placement — workers only ────────────────────────────────────────────
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+nodeSelector:
+  kubernetes.io/hostname: worker4.local
 
 ## ── HA ───────────────────────────────────────────────────────────────────────
 replicas: 2

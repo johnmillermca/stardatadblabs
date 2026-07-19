@@ -16,7 +16,7 @@ spec:
   storageClassName: local-path
   resources:
     requests:
-      storage: 30Gi
+      storage: 100Gi
 ---
 apiVersion: apps/v1
 kind: StatefulSet
