@@ -87,7 +87,7 @@ spec:
             - |
               . /shared/fe_env
               export FE_SERVERS
-              exec /entrypoint.sh
+              exec /usr/local/bin/entry_point.sh
           ports:
             - name: be-port
               containerPort: 9060
