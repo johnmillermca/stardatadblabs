@@ -12,7 +12,7 @@
 # =============================================================================
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
   name: combined
@@ -49,7 +49,7 @@ spec:
                       - worker4.local
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: strimzi-kafka
@@ -94,7 +94,7 @@ spec:
     userOperator: {}
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
 metadata:
   name: kafka-app-user
@@ -113,7 +113,7 @@ spec:
         operations: [Read, Describe]
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
 metadata:
   name: debezium-user
@@ -132,7 +132,7 @@ spec:
         operations: [Read, Describe]
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
 metadata:
   name: schema-registry-user
@@ -151,7 +151,7 @@ spec:
         operations: [Read, Describe]
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: debezium-offsets
@@ -165,7 +165,7 @@ spec:
     cleanup.policy: compact
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: debezium-configs
@@ -179,7 +179,7 @@ spec:
     cleanup.policy: compact
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: debezium-statuses
@@ -193,7 +193,7 @@ spec:
     cleanup.policy: compact
 
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
   name: schema-registry-schemas
