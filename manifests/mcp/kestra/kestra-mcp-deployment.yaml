@@ -32,7 +32,6 @@ spec:
       containers:
         - name: mcp-kestra
           image: 192.168.1.50:30500/mcp-kestra:1.0.0
-          command: ["sh", "-c", "sed -i 's/FastMCP(\"kestra-mcp\"/FastMCP(\"kestra-mcp\", host=\"0.0.0.0\"/' /app/server.py && exec python3 /app/server.py"]
           ports:
             - containerPort: 3105
               name: mcp
