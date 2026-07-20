@@ -97,6 +97,18 @@ spec:
                 cp -rn ${CONF}.dist/. ${CONF}/
               fi
 
+              # EmbeddedServerUtil always loads core-site.xml from classpath (conf/).
+              # It does not exist in the Ranger distribution — create a minimal one.
+              if [ ! -f "${CONF}/core-site.xml" ]; then
+                printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<configuration>' '</configuration>' > ${CONF}/core-site.xml
+              fi
+
+              # PostgreSQL JDBC driver must be in WEB-INF/lib/ for the Tomcat webapp classloader.
+              WEBAPP_LIB=${ADMIN_HOME}/ews/webapp/WEB-INF/lib
+              if [ ! -f "${WEBAPP_LIB}/postgresql.jar" ]; then
+                cp /usr/share/java/postgresql.jar ${WEBAPP_LIB}/postgresql.jar
+              fi
+
               # Patch ranger-admin-site.xml with PostgreSQL JDBC settings
               SITE=${CONF}/ranger-admin-site.xml
               DB_URL="jdbc:postgresql://${RANGER_DB_HOST:-postgresql.prod.svc.cluster.local}:${RANGER_DB_PORT:-5432}/${RANGER_DB_NAME:-ranger}"
@@ -182,7 +194,7 @@ spec:
               cpu: "2"
           readinessProbe:
             httpGet:
-              path: /login.jsp
+              path: /
               port: 6080
             initialDelaySeconds: 60
             periodSeconds: 15
