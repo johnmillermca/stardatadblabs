@@ -115,6 +115,8 @@ spec:
                 secretKeyRef:
                   name: kestra-credentials
                   key: encryption-key
+            - name: MICRONAUT_CONFIG_FILES
+              value: "/app/confs/application.yml"
             - name: SECRET_OPENBAO_URL
               value: "http://openbao.prod.svc.cluster.local:8200"
           volumeMounts:

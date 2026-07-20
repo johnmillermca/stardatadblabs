@@ -80,6 +80,20 @@ spec:
       containers:
         - name: ranger-admin
           image: 192.168.1.50:30500/apache-ranger:2.7.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              ADMIN_HOME=$(ls -d /opt/ranger/ranger-*-admin | head -1)
+              # Create required dirs if missing (setup.sh normally does this)
+              mkdir -p ${ADMIN_HOME}/ews/logs
+              mkdir -p ${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf
+              # Copy conf.dist -> conf if conf is empty
+              if [ -d "${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf.dist" ]; then
+                cp -rn ${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf.dist/. \
+                       ${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf/
+              fi
+              exec /entrypoint.sh
           ports:
             - name: http
               containerPort: 6080
