@@ -64,9 +64,11 @@ spec:
             - sh
             - -c
             - |
-              FE_IP=$(nslookup doris-fe.prod.svc.cluster.local | grep 'Address:' | tail -1 | awk '{print $2}')
+              # Use headless service — resolves to pod IP, not ClusterIP
+              # FE entrypoint checks SHOW FRONTENDS for the exact IP in FE_SERVERS
+              FE_IP=$(nslookup doris-fe-headless.prod.svc.cluster.local | grep 'Address:' | grep -v '#' | tail -1 | awk '{print $2}')
               echo "FE_SERVERS=fe1:${FE_IP}:9010" > /shared/fe_env
-              echo "Resolved: fe1:${FE_IP}:9010"
+              echo "Resolved FE pod IP: ${FE_IP}"
           volumeMounts:
             - name: shared-env
               mountPath: /shared
