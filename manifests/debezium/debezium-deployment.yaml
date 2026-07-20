@@ -70,40 +70,64 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker2.local
-      initContainers:
-        - name: copy-config
-          image: 192.168.1.50:30500/debezium/connect:2.7
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c", "cp /kafka-config-ro/connect-distributed.properties /kafka-config-rw/connect-distributed.properties"]
-          volumeMounts:
-            - name: connect-config-ro
-              mountPath: /kafka-config-ro
-              readOnly: true
-            - name: connect-config-rw
-              mountPath: /kafka-config-rw
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7
           imagePullPolicy: IfNotPresent
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              sed -i "s|\${KAFKA_SASL_USERNAME}|${KAFKA_SASL_USERNAME}|g; s|\${KAFKA_SASL_PASSWORD}|${KAFKA_SASL_PASSWORD}|g" /kafka-config-rw/connect-distributed.properties
-              exec /opt/kafka/bin/connect-distributed.sh /kafka-config-rw/connect-distributed.properties
           ports:
             - name: rest-api
               containerPort: 8083
           env:
-            - name: KAFKA_SASL_USERNAME
+            # Bootstrap — Debezium entrypoint reads this directly
+            - name: BOOTSTRAP_SERVERS
+              value: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+            - name: GROUP_ID
+              value: "debezium-connect-cluster"
+            # SASL/SCRAM-SHA-512
+            - name: CONNECT_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: CONNECT_SASL_MECHANISM
+              value: "SCRAM-SHA-512"
+            - name: CONNECT_SASL_JAAS_CONFIG
               valueFrom:
                 secretKeyRef:
                   name: debezium-credentials
-                  key: kafka-sasl-username
-            - name: KAFKA_SASL_PASSWORD
+                  key: kafka-sasl-jaas-config
+            - name: CONNECT_PRODUCER_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: CONNECT_PRODUCER_SASL_MECHANISM
+              value: "SCRAM-SHA-512"
+            - name: CONNECT_PRODUCER_SASL_JAAS_CONFIG
               valueFrom:
                 secretKeyRef:
                   name: debezium-credentials
-                  key: kafka-sasl-password
+                  key: kafka-sasl-jaas-config
+            - name: CONNECT_CONSUMER_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: CONNECT_CONSUMER_SASL_MECHANISM
+              value: "SCRAM-SHA-512"
+            - name: CONNECT_CONSUMER_SASL_JAAS_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: debezium-credentials
+                  key: kafka-sasl-jaas-config
+            # Internal topics
+            - name: CONFIG_STORAGE_TOPIC
+              value: "debezium-configs"
+            - name: OFFSET_STORAGE_TOPIC
+              value: "debezium-offsets"
+            - name: STATUS_STORAGE_TOPIC
+              value: "debezium-statuses"
+            # Converters
+            - name: KEY_CONVERTER
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: VALUE_CONVERTER
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
+            - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
+            # DB credentials for connectors
             - name: PG_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -120,17 +144,15 @@ spec:
                   name: debezium-credentials
                   key: oracle-password
           volumeMounts:
-            - name: connect-config-rw
-              mountPath: /kafka-config-rw
             - name: debezium-data
-              mountPath: /debezium/data
+              mountPath: /kafka/data
           resources:
             requests:
               memory: 512Mi
               cpu: 500m
             limits:
-              memory: 1Gi
-              cpu: "1"
+              memory: 2Gi
+              cpu: "2"
           readinessProbe:
             httpGet:
               path: /connectors
@@ -144,11 +166,6 @@ spec:
             initialDelaySeconds: 90
             periodSeconds: 20
       volumes:
-        - name: connect-config-ro
-          configMap:
-            name: debezium-connect-config
-        - name: connect-config-rw
-          emptyDir: {}
         - name: debezium-data
           persistentVolumeClaim:
             claimName: debezium-data
