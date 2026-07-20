@@ -32,6 +32,7 @@ spec:
       containers:
         - name: mcp-opensearch
           image: 192.168.1.50:30500/mcp-opensearch:1.0.0
+          command: ["sh", "-c", "sed -i 's/FastMCP(\"opensearch-mcp\"/FastMCP(\"opensearch-mcp\", host=\"0.0.0.0\"/' /app/server.py && exec python3 /app/server.py"]
           ports:
             - containerPort: 3102
               name: mcp

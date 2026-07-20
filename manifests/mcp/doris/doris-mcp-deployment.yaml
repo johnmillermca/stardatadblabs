@@ -32,6 +32,7 @@ spec:
       containers:
         - name: mcp-doris
           image: 192.168.1.50:30500/mcp-doris:1.0.0
+          command: ["sh", "-c", "sed -i 's/FastMCP(\"doris-mcp\"/FastMCP(\"doris-mcp\", host=\"0.0.0.0\"/' /app/server.py && exec python3 /app/server.py"]
           ports:
             - containerPort: 3101
               name: mcp

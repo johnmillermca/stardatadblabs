@@ -31,6 +31,7 @@ spec:
       containers:
         - name: mcp-spark
           image: 192.168.1.50:30500/mcp-spark:1.0.0
+          command: ["sh", "-c", "sed -i 's/FastMCP(\"spark-mcp\"/FastMCP(\"spark-mcp\", host=\"0.0.0.0\"/' /app/server.py && exec python3 /app/server.py"]
           ports:
             - containerPort: 3103
               name: mcp
