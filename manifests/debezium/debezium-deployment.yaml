@@ -69,10 +69,11 @@ spec:
         app: debezium-connect
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker4.local
+        kubernetes.io/hostname: worker2.local
       initContainers:
         - name: copy-config
-          image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
+          image: 192.168.1.50:30500/debezium/connect:2.7
+          imagePullPolicy: IfNotPresent
           command: ["sh", "-c", "cp /kafka-config-ro/connect-distributed.properties /kafka-config-rw/connect-distributed.properties"]
           volumeMounts:
             - name: connect-config-ro
@@ -82,7 +83,8 @@ spec:
               mountPath: /kafka-config-rw
       containers:
         - name: debezium-connect
-          image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
+          image: 192.168.1.50:30500/debezium/connect:2.7
+          imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
           args:
             - |
