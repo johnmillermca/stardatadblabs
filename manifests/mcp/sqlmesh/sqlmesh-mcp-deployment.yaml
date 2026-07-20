@@ -50,6 +50,8 @@ spec:
                 secretKeyRef:
                   name: sqlmesh-credentials
                   key: db-password
+            - name: MCP_HOST
+              value: "0.0.0.0"
           resources:
             requests:
               memory: 256Mi
@@ -58,8 +60,7 @@ spec:
               memory: 512Mi
               cpu: 500m
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: 3100
             initialDelaySeconds: 15
             periodSeconds: 10

@@ -52,6 +52,8 @@ spec:
                 secretKeyRef:
                   name: akhq-credentials
                   key: kafka-sasl-password
+            - name: MCP_HOST
+              value: "0.0.0.0"
           resources:
             requests:
               memory: 128Mi
@@ -60,8 +62,7 @@ spec:
               memory: 256Mi
               cpu: 250m
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: 3104
             initialDelaySeconds: 10
             periodSeconds: 10
