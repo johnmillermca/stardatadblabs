@@ -134,14 +134,14 @@ spec:
               cpu: "2"
           readinessProbe:
             httpGet:
-              path: /api/v1/health/ready
+              path: /health
               port: 8081
             initialDelaySeconds: 60
             periodSeconds: 15
             failureThreshold: 20
           livenessProbe:
             httpGet:
-              path: /api/v1/health/alive
+              path: /health
               port: 8081
             initialDelaySeconds: 90
             periodSeconds: 30
