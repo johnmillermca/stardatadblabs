@@ -18,7 +18,7 @@ metadata:
   name: kestra-config
   namespace: prod
 data:
-  application.yaml: |
+  application.yml: |
     kestra:
       server:
         basicAuth:
@@ -119,8 +119,8 @@ spec:
               value: "http://openbao.prod.svc.cluster.local:8200"
           volumeMounts:
             - name: kestra-config
-              mountPath: /app/confs/application.yaml
-              subPath: application.yaml
+              mountPath: /app/confs/application.yml
+              subPath: application.yml
             - name: kestra-storage
               mountPath: /app/storage
           resources:
