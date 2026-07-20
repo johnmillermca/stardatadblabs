@@ -1,0 +1,82 @@
+# =============================================================================
+# Kestra MCP Server — Kubernetes Deployment
+# Namespace : prod
+# Node      : worker2.local (co-located with Kestra)
+# Port      : 3105 (MCP SSE)
+# NodePort  : 30315
+# Image     : 192.168.1.50:30500/mcp-kestra:1.0.0
+# Secret    : kestra-credentials
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-kestra
+  namespace: prod
+  labels:
+    app: mcp-kestra
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-kestra
+  template:
+    metadata:
+      labels:
+        app: mcp-kestra
+        component: mcp-server
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker2.local
+      containers:
+        - name: mcp-kestra
+          image: 192.168.1.50:30500/mcp-kestra:1.0.0
+          command: ["sh", "-c", "sed -i 's/FastMCP(\"kestra-mcp\"/FastMCP(\"kestra-mcp\", host=\"0.0.0.0\"/' /app/server.py && exec python3 /app/server.py"]
+          ports:
+            - containerPort: 3105
+              name: mcp
+          env:
+            - name: KESTRA_URL
+              value: "http://kestra.prod.svc.cluster.local:8080"
+            - name: KESTRA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: db-user
+                  optional: true
+            - name: KESTRA_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: kestra-credentials
+                  key: db-password
+                  optional: true
+            - name: FASTMCP_HOST
+              value: "0.0.0.0"
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 250m
+          readinessProbe:
+            tcpSocket:
+              port: 3105
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-kestra
+  namespace: prod
+spec:
+  selector:
+    app: mcp-kestra
+  type: NodePort
+  ports:
+    - port: 3105
+      targetPort: 3105
+      nodePort: 30315
+      name: mcp
