@@ -21,7 +21,6 @@ data:
     rpc_port = 9020
     query_port = 9030
     edit_log_port = 9010
-    enable_fqdn_mode = true
     jdbc_drivers_dir = /opt/apache-doris/fe/jdbc_drivers
     JAVA_OPTS = "-Xmx4096m -XX:+UseMembar -XX:SurvivorRatio=8"
     JAVA_OPTS_FOR_JDK_17 = "-Xmx4096m -XX:SurvivorRatio=8 --add-opens=java.base/java.nio=ALL-UNNAMED"
