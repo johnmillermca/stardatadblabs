@@ -15,9 +15,16 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
+  ignoreDifferences:
+    - group: ""
+      kind: PersistentVolumeClaim
+      jsonPointers:
+        - /metadata
+        - /spec
+        - /status
   syncPolicy:
     automated:
-      prune: true
+      prune: false
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
