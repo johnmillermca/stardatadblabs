@@ -10,6 +10,9 @@ kind: PersistentVolumeClaim
 metadata:
   name: registry-data
   namespace: registry
+  annotations:
+    # Pins provisioning to master.local so local-path uses /home/local-path-provisioner
+    volume.kubernetes.io/selected-node: master.local
 spec:
   accessModes:
     - ReadWriteOnce

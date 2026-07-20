@@ -26,7 +26,7 @@ spec:
     - broker
   storage:
     type: persistent-claim
-    size: 50Gi
+    size: 250Gi
     class: local-path
     deleteClaim: false
   resources:
@@ -60,7 +60,7 @@ metadata:
 spec:
   kafka:
     version: 4.2.0
-    metadataVersion: "4.2-IV0"
+    metadataVersion: "4.2-IV1"
     image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
     listeners:
       - name: plain
@@ -85,11 +85,6 @@ spec:
       default.replication.factor: "1"
       min.insync.replicas: "1"
       auto.create.topics.enable: "true"
-    storage:
-      type: persistent-claim
-      size: 1Gi
-      class: local-path
-      deleteClaim: false
   entityOperator:
     topicOperator: {}
     userOperator: {}

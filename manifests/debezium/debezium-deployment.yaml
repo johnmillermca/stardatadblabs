@@ -18,24 +18,17 @@ data:
     bootstrap.servers=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
     group.id=debezium-connect-cluster
 
-    # Kafka SASL/PLAIN — credentials injected from env vars at runtime
     security.protocol=SASL_PLAINTEXT
-    sasl.mechanism=PLAIN
-    sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
-      username="${KAFKA_SASL_USERNAME}" \
-      password="${KAFKA_SASL_PASSWORD}";
+    sasl.mechanism=SCRAM-SHA-512
+    sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_SASL_USERNAME}" password="${KAFKA_SASL_PASSWORD}";
 
-    # Same SASL config for producer and consumer
     producer.security.protocol=SASL_PLAINTEXT
-    producer.sasl.mechanism=PLAIN
-    producer.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
-      username="${KAFKA_SASL_USERNAME}" \
-      password="${KAFKA_SASL_PASSWORD}";
+    producer.sasl.mechanism=SCRAM-SHA-512
+    producer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_SASL_USERNAME}" password="${KAFKA_SASL_PASSWORD}";
+
     consumer.security.protocol=SASL_PLAINTEXT
-    consumer.sasl.mechanism=PLAIN
-    consumer.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
-      username="${KAFKA_SASL_USERNAME}" \
-      password="${KAFKA_SASL_PASSWORD}";
+    consumer.sasl.mechanism=SCRAM-SHA-512
+    consumer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_SASL_USERNAME}" password="${KAFKA_SASL_PASSWORD}";
 
     # Internal Kafka Connect storage topics (single broker = replication.factor 1)
     config.storage.topic=debezium-configs
@@ -127,6 +120,8 @@ spec:
           volumeMounts:
             - name: connect-config-rw
               mountPath: /kafka-config-rw
+            - name: debezium-data
+              mountPath: /debezium/data
           resources:
             requests:
               memory: 512Mi
@@ -152,6 +147,24 @@ spec:
             name: debezium-connect-config
         - name: connect-config-rw
           emptyDir: {}
+        - name: debezium-data
+          persistentVolumeClaim:
+            claimName: debezium-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: debezium-data
+  namespace: prod
+  labels:
+    app: debezium-connect
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: local-path
 ---
 apiVersion: v1
 kind: Service
