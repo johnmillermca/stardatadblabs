@@ -16,7 +16,7 @@ spec:
     path: k8s-platform/manifests/oracle
   destination:
     server: https://kubernetes.default.svc
-    namespace: databases
+    namespace: prod
   syncPolicy:
     automated:
       prune: true
