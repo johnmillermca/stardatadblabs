@@ -85,9 +85,10 @@ spec:
             - |
               set -e
               ADMIN_HOME=$(ls -d /opt/ranger/ranger-*-admin | head -1)
-              CONF=${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf
+              CLASSES=${ADMIN_HOME}/ews/webapp/WEB-INF/classes
+              CONF=${CLASSES}/conf
 
-              # Create required dirs if missing (setup.sh normally does this)
+              # Create required dirs
               mkdir -p ${ADMIN_HOME}/ews/logs
               mkdir -p ${CONF}
 
@@ -109,6 +110,7 @@ spec:
                 'ranger.jpa.jdbc.user':      '${RANGER_DB_USER}',
                 'ranger.jpa.jdbc.password':  '${RANGER_DB_PASS}',
                 'ranger.jpa.jdbc.dialect':   'org.eclipse.persistence.platform.database.PostgreSQLPlatform',
+                'ranger.jpa.showsql':        'false',
               }
               for prop in root.findall('property'):
                   name = prop.find('name')
@@ -118,6 +120,12 @@ spec:
                           val.text = patches[name.text]
               tree.write('${SITE}', xml_declaration=True, encoding='UTF-8')
               PYEOF
+
+              # Spring loads classpath:ranger-admin-site.xml (root of WEB-INF/classes/)
+              # so symlink conf/  XMLs to classes/ root
+              ln -sf ${CONF}/ranger-admin-site.xml         ${CLASSES}/ranger-admin-site.xml
+              ln -sf ${CONF}/ranger-admin-default-site.xml ${CLASSES}/ranger-admin-default-site.xml
+              ln -sf ${CONF}/security-applicationContext.xml ${CLASSES}/security-applicationContext.xml
 
               exec /entrypoint.sh
           ports:
