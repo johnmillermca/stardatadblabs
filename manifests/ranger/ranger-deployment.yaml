@@ -85,14 +85,40 @@ spec:
             - |
               set -e
               ADMIN_HOME=$(ls -d /opt/ranger/ranger-*-admin | head -1)
+              CONF=${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf
+
               # Create required dirs if missing (setup.sh normally does this)
               mkdir -p ${ADMIN_HOME}/ews/logs
-              mkdir -p ${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf
-              # Copy conf.dist -> conf if conf is empty
-              if [ -d "${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf.dist" ]; then
-                cp -rn ${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf.dist/. \
-                       ${ADMIN_HOME}/ews/webapp/WEB-INF/classes/conf/
+              mkdir -p ${CONF}
+
+              # Copy conf.dist -> conf on first run
+              if [ -d "${CONF}.dist" ]; then
+                cp -rn ${CONF}.dist/. ${CONF}/
               fi
+
+              # Patch ranger-admin-site.xml with PostgreSQL JDBC settings
+              SITE=${CONF}/ranger-admin-site.xml
+              DB_URL="jdbc:postgresql://${RANGER_DB_HOST:-postgresql.prod.svc.cluster.local}:${RANGER_DB_PORT:-5432}/${RANGER_DB_NAME:-ranger}"
+              python3 - <<PYEOF
+              import xml.etree.ElementTree as ET
+              tree = ET.parse('${SITE}')
+              root = tree.getroot()
+              patches = {
+                'ranger.jpa.jdbc.driver':    'org.postgresql.Driver',
+                'ranger.jpa.jdbc.url':       '${DB_URL}',
+                'ranger.jpa.jdbc.user':      '${RANGER_DB_USER}',
+                'ranger.jpa.jdbc.password':  '${RANGER_DB_PASS}',
+                'ranger.jpa.jdbc.dialect':   'org.eclipse.persistence.platform.database.PostgreSQLPlatform',
+              }
+              for prop in root.findall('property'):
+                  name = prop.find('name')
+                  val  = prop.find('value')
+                  if name is not None and name.text in patches:
+                      if val is not None:
+                          val.text = patches[name.text]
+              tree.write('${SITE}', xml_declaration=True, encoding='UTF-8')
+              PYEOF
+
               exec /entrypoint.sh
           ports:
             - name: http
