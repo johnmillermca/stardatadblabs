@@ -15,7 +15,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/sqlmesh
+    path: manifests/mcp/sqlmesh
   destination:
     server: https://kubernetes.default.svc
     namespace: analytics
@@ -38,7 +38,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/doris
+    path: manifests/mcp/doris
   destination:
     server: https://kubernetes.default.svc
     namespace: analytics
@@ -61,7 +61,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/opensearch
+    path: manifests/mcp/opensearch
   destination:
     server: https://kubernetes.default.svc
     namespace: search
@@ -84,7 +84,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/spark
+    path: manifests/mcp/spark
   destination:
     server: https://kubernetes.default.svc
     namespace: analytics
@@ -107,7 +107,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/kafka
+    path: manifests/mcp/kafka
   destination:
     server: https://kubernetes.default.svc
     namespace: streaming
@@ -130,7 +130,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/mcp/kestra
+    path: manifests/mcp/kestra
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
