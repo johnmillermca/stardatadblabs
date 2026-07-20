@@ -22,6 +22,12 @@ spec:
         - /metadata
         - /spec
         - /status
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+      name: strimzi-prod-strimzi-kafka-kafka-init
+      jsonPointers:
+        - /metadata
+        - /subjects
   syncPolicy:
     automated:
       prune: false
