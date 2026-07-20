@@ -47,7 +47,7 @@ spec:
                 secretKeyRef:
                   name: doris-credentials
                   key: admin-password
-            - name: MCP_HOST
+            - name: FASTMCP_HOST
               value: "0.0.0.0"
           resources:
             requests:

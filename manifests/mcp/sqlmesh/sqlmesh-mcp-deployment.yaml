@@ -50,7 +50,7 @@ spec:
                 secretKeyRef:
                   name: sqlmesh-credentials
                   key: db-password
-            - name: MCP_HOST
+            - name: FASTMCP_HOST
               value: "0.0.0.0"
           resources:
             requests:

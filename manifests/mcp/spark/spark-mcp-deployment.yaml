@@ -41,7 +41,7 @@ spec:
               value: "http://spark-master-svc.prod.svc.cluster.local:8080"
             - name: SPARK_REST_URL
               value: "http://spark-master-svc.prod.svc.cluster.local:6066"
-            - name: MCP_HOST
+            - name: FASTMCP_HOST
               value: "0.0.0.0"
           resources:
             requests:
