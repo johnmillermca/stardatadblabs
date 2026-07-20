@@ -100,13 +100,6 @@ metadata:
 spec:
   authentication:
     type: scram-sha-512
-  authorization:
-    type: simple
-    acls:
-      - resource: {type: topic, name: "*", patternType: literal}
-        operations: [Read, Write, Create, Describe, DescribeConfigs, Alter, AlterConfigs]
-      - resource: {type: group, name: "*", patternType: literal}
-        operations: [Read, Describe]
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -119,13 +112,6 @@ metadata:
 spec:
   authentication:
     type: scram-sha-512
-  authorization:
-    type: simple
-    acls:
-      - resource: {type: topic, name: "*", patternType: prefix}
-        operations: [Read, Write, Create, Describe]
-      - resource: {type: group, name: "debezium-*", patternType: prefix}
-        operations: [Read, Describe]
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -138,13 +124,6 @@ metadata:
 spec:
   authentication:
     type: scram-sha-512
-  authorization:
-    type: simple
-    acls:
-      - resource: {type: topic, name: "_schemas", patternType: literal}
-        operations: [Read, Write, Create, Describe, DescribeConfigs]
-      - resource: {type: group, name: "schema-registry", patternType: literal}
-        operations: [Read, Describe]
 
 ---
 apiVersion: kafka.strimzi.io/v1
