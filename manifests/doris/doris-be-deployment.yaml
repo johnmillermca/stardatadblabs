@@ -73,7 +73,7 @@ spec:
             - sh
             - -c
             - |
-              ulimit -n 655350 2>/dev/null || true
+              ulimit -n 524288
               exec /opt/apache-doris/be_entrypoint.sh doris-fe-headless.prod.svc.cluster.local
           ports:
             - name: be-port
