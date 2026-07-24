@@ -2,10 +2,11 @@
 # Apache Doris BE (Backend) — ConfigMap + PVC + Deployment
 # Namespace : prod
 # Node      : worker1.local
-# Connects  : to FE via ClusterIP doris-fe.prod.svc.cluster.local
+# Connects  : to FE via stable FQDN doris-fe-0.doris-fe-headless.prod.svc.cluster.local
 # PVC       : 400Gi on /home (worker1.local)
 # Replicas  : 1
-# FE_SERVERS: uses doris-fe ClusterIP resolved by init container at startup
+# FE_SERVERS: static FQDN — no init-container IP resolution needed now that FE
+#             runs as a StatefulSet with enable_fqdn_mode = true.
 # =============================================================================
 ---
 apiVersion: v1
@@ -57,21 +58,6 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: worker1.local
       initContainers:
-        # Resolve FE ClusterIP at startup — entrypoint requires a real IP in FE_SERVERS
-        - name: resolve-fe-ip
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              # Use headless service — resolves to pod IP, not ClusterIP
-              # FE entrypoint checks SHOW FRONTENDS for the exact IP in FE_SERVERS
-              FE_IP=$(nslookup doris-fe-headless.prod.svc.cluster.local | grep 'Address:' | grep -v '#' | tail -1 | awk '{print $2}')
-              echo "FE_SERVERS=fe1:${FE_IP}:9010" > /shared/fe_env
-              echo "Resolved FE pod IP: ${FE_IP}"
-          volumeMounts:
-            - name: shared-env
-              mountPath: /shared
         - name: copy-be-config
           image: busybox:1.36
           command: ["sh", "-c", "cp /config-ro/be.conf /config-rw/be.conf"]
@@ -83,13 +69,6 @@ spec:
       containers:
         - name: doris-be
           image: 192.168.1.50:30500/apache/doris:be-4.0.7
-          command:
-            - sh
-            - -c
-            - |
-              . /shared/fe_env
-              export FE_SERVERS
-              exec /usr/local/bin/entry_point.sh
           ports:
             - name: be-port
               containerPort: 9060
@@ -100,6 +79,8 @@ spec:
             - name: brpc
               containerPort: 8060
           env:
+            - name: FE_SERVERS
+              value: "fe1:doris-fe-0.doris-fe-headless.prod.svc.cluster.local:9010"
             - name: POD_IP
               valueFrom:
                 fieldRef:
@@ -112,8 +93,6 @@ spec:
               subPath: be.conf
             - name: be-storage
               mountPath: /opt/apache-doris/be/storage
-            - name: shared-env
-              mountPath: /shared
           resources:
             requests:
               memory: 1Gi
@@ -128,8 +107,6 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 15
       volumes:
-        - name: shared-env
-          emptyDir: {}
         - name: be-config
           configMap:
             name: doris-be-config

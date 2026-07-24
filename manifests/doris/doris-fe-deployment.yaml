@@ -1,10 +1,14 @@
 # =============================================================================
-# Apache Doris FE (Frontend) — ConfigMap + PVC + Deployment
+# Apache Doris FE (Frontend) — ConfigMap + PVC + StatefulSet
 # Namespace : prod
 # Node      : worker1.local
 # Access    : http://192.168.1.50:30030 (HTTP/WebUI) jdbc:mysql://192.168.1.50:30090
 # Secret    : doris-credentials  (key: admin-password)
 # PVC       : 100Gi on /home (worker1.local)
+# NOTE      : StatefulSet + enable_fqdn_mode ensures BdbJE stores a stable FQDN
+#             (doris-fe-0.doris-fe-headless.prod.svc.cluster.local) instead of the
+#             ephemeral pod IP, so FE survives reboots without getting stuck in
+#             feType:UNKNOWN.
 # =============================================================================
 ---
 apiVersion: v1
@@ -24,6 +28,12 @@ data:
     jdbc_drivers_dir = /opt/apache-doris/fe/jdbc_drivers
     JAVA_OPTS = "-Xmx4096m -XX:+UseMembar -XX:SurvivorRatio=8"
     JAVA_OPTS_FOR_JDK_17 = "-Xmx4096m -XX:SurvivorRatio=8 --add-opens=java.base/java.nio=ALL-UNNAMED"
+    # ── Stable identity across pod restarts ──────────────────────────────────
+    # BdbJE stores this FQDN instead of the ephemeral pod IP, so the membership
+    # record remains valid after every reboot or pod reschedule.
+    enable_fqdn_mode = true
+    advertised_address = doris-fe-0.doris-fe-headless.prod.svc.cluster.local
+    priority_networks = 10.244.0.0/16
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -38,7 +48,7 @@ spec:
       storage: 100Gi
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: doris-fe
   namespace: prod
@@ -47,6 +57,7 @@ metadata:
     component: fe
 spec:
   replicas: 1
+  serviceName: doris-fe-headless
   selector:
     matchLabels:
       app: doris-fe
@@ -85,12 +96,8 @@ spec:
                 secretKeyRef:
                   name: doris-credentials
                   key: admin-password
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
             - name: FE_SERVERS
-              value: "fe1:$(POD_IP):9010"
+              value: "fe1:doris-fe-0.doris-fe-headless.prod.svc.cluster.local:9010"
             - name: FE_ID
               value: "1"
           volumeMounts:
@@ -116,7 +123,7 @@ spec:
       volumes:
         - name: fe-config
           configMap:
-            name: doris-fe-config
+              name: doris-fe-config
         - name: fe-config-rw
           emptyDir: {}
         - name: fe-meta
