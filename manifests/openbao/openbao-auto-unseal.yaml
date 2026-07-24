@@ -1,0 +1,64 @@
+# =============================================================================
+# OpenBao Auto-Unseal CronJob
+# Namespace : prod
+# Schedule  : every 2 minutes
+# Runs on   : master.local (control-plane)
+#
+# Calls /v1/sys/seal-status directly instead of /v1/sys/health.
+# /v1/sys/health returns HTTP 503 when sealed, which causes `curl -sf`
+# to fail and return an empty body — the old grep-based sealed check
+# always fell through to "already unsealed", leaving Bao sealed forever.
+# /v1/sys/seal-status always returns HTTP 200 with a JSON body regardless
+# of seal state, so the grep is reliable.
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openbao-auto-unseal
+  namespace: prod
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 120
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: master.local
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: unseal
+              image: 192.168.1.50:30500/strimzi/operator:1.1.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  # Use /v1/sys/seal-status — always returns HTTP 200 regardless of seal state,
+                  # unlike /v1/sys/health which returns 503 when sealed (causing curl -sf to
+                  # silently fail and produce an empty body, making the sealed check unreliable).
+                  SEALED=$(curl -sf http://openbao.prod.svc.cluster.local:8200/v1/sys/seal-status \
+                    | grep -o '"sealed":[a-z]*' | cut -d: -f2)
+                  echo "Sealed status: '${SEALED}'"
+                  if [ "${SEALED}" = "true" ]; then
+                    echo "OpenBao is sealed — unsealing..."
+                    curl -sf -X PUT \
+                      http://openbao.prod.svc.cluster.local:8200/v1/sys/unseal \
+                      -d "{\"key\":\"${UNSEAL_KEY}\"}"
+                    echo "Unseal attempted"
+                  else
+                    echo "OpenBao is already unsealed — nothing to do"
+                  fi
+              env:
+                - name: UNSEAL_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: openbao-unseal-keys
+                      key: unseal-key
