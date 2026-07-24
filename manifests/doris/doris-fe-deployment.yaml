@@ -81,6 +81,9 @@ spec:
       containers:
         - name: doris-fe
           image: 192.168.1.50:30500/apache/doris:fe-4.0.7
+          command:
+            - /opt/apache-doris/fe_entrypoint.sh
+            - doris-fe-headless.prod.svc.cluster.local
           ports:
             - name: http
               containerPort: 8030
@@ -96,10 +99,6 @@ spec:
                 secretKeyRef:
                   name: doris-credentials
                   key: admin-password
-            - name: FE_SERVERS
-              value: "fe1:doris-fe-0.doris-fe-headless.prod.svc.cluster.local:9010"
-            - name: FE_ID
-              value: "1"
           volumeMounts:
             - name: fe-config-rw
               mountPath: /opt/apache-doris/fe/conf/fe.conf
