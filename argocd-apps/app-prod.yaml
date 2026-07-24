@@ -257,8 +257,14 @@ spec:
     server: https://kubernetes.default.svc
     namespace: prod
   syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true]
+    automated:
+      # prune:false — Strimzi dynamically creates PVCs, ConfigMaps, Secrets, and
+      # StrimziPodSets at runtime that are not in git. Enabling prune deletes them
+      # on every sync, wiping Kafka data. selfHeal still reconciles declared resources.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 
 # ── Schema Registry ───────────────────────────────────────────────────────────
 ---

@@ -37,6 +37,13 @@ spec:
       memory: 4Gi
       cpu: "2"
   template:
+    # Annotate Strimzi-created PVCs so ArgoCD treats them as unmanaged (IgnoreExtraneous).
+    # Without this, ArgoCD prune:true deletes these PVCs on every sync because they
+    # don't exist in the git manifests — wiping all Kafka data.
+    persistentVolumeClaim:
+      metadata:
+        annotations:
+          argocd.argoproj.io/compare-options: IgnoreExtraneous
     pod:
       affinity:
         nodeAffinity:
