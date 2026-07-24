@@ -1,0 +1,94 @@
+# =============================================================================
+# Polaris Registry Seed CronJob
+# Namespace : prod
+# Node      : master.local
+#
+# Runs daily. Re-pushes the apache-polaris:1.6.0 image from the containerd
+# node cache back into the private registry. This ensures the image is always
+# present in the registry after a registry pod restart or PVC wipe, preventing
+# the Polaris Deployment from falling into ImagePullBackOff.
+#
+# The registry image at 192.168.1.50:30500 is backed by a PVC on master.local.
+# If that PVC is lost or the registry is redeployed, this job re-populates it
+# without requiring internet access or a manual re-push.
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: polaris-registry-seed
+  namespace: prod
+spec:
+  # Run once daily at 03:00 UTC — low-traffic window
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: master.local
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          hostPID: false
+          volumes:
+            - name: containerd-sock
+              hostPath:
+                path: /run/containerd/containerd.sock
+                type: Socket
+            - name: registry-certs
+              hostPath:
+                # containerd trusts the registry cert from this path
+                path: /etc/containerd/certs.d
+                type: Directory
+          containers:
+            - name: seed
+              image: 192.168.1.50:30500/strimzi/operator:1.1.0
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+                - name: containerd-sock
+                  mountPath: /run/containerd/containerd.sock
+                - name: registry-certs
+                  mountPath: /etc/containerd/certs.d
+                  readOnly: true
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  REGISTRY="192.168.1.50:30500"
+                  IMAGE="apache-polaris"
+                  TAG="1.6.0"
+                  FULL="${REGISTRY}/${IMAGE}:${TAG}"
+
+                  # Check if image already present in registry
+                  STATUS=$(curl -sk -o /dev/null -w "%{http_code}" \
+                    https://${REGISTRY}/v2/${IMAGE}/manifests/${TAG})
+
+                  if [ "${STATUS}" = "200" ]; then
+                    echo "Image ${FULL} already present in registry (HTTP 200) — nothing to do."
+                    exit 0
+                  fi
+
+                  echo "Image ${FULL} missing from registry (HTTP ${STATUS}) — re-pushing from node cache..."
+
+                  # Re-push via ctr using the containerd socket on the host
+                  ctr --address /run/containerd/containerd.sock \
+                      --namespace k8s.io \
+                      images push \
+                      --plain-http=false \
+                      "${FULL}"
+
+                  # Verify
+                  STATUS_AFTER=$(curl -sk -o /dev/null -w "%{http_code}" \
+                    https://${REGISTRY}/v2/${IMAGE}/manifests/${TAG})
+                  if [ "${STATUS_AFTER}" = "200" ]; then
+                    echo "Re-push successful — ${FULL} now in registry."
+                  else
+                    echo "ERROR: re-push failed — registry returned HTTP ${STATUS_AFTER}." >&2
+                    exit 1
+                  fi

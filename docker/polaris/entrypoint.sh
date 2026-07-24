@@ -3,7 +3,7 @@
 set -euo pipefail
 
 POLARIS_HOME=/opt/polaris
-PROPS=${POLARIS_HOME}/config/application.properties
+PROPS=${POLARIS_HOME}/application.properties
 
 # Substitute env vars injected from Kubernetes secret
 if [ -f "${PROPS}" ]; then

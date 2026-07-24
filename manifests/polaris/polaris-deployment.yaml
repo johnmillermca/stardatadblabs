@@ -4,7 +4,7 @@
 # Node      : master.local (pinned — freeing worker capacity)
 # Access    : http://192.168.1.50:30181 (Iceberg REST catalog API)
 # Depends on: PostgreSQL databases.postgresql:5432, db: polaris
-# Image     : 192.168.1.50:30500/apache-polaris:latest
+# Image     : 192.168.1.50:30500/apache-polaris:1.6.0
 # Secret    : polaris-db-credentials (seeded by 12-seed-openbao-secrets.sh)
 # =============================================================================
 ---
@@ -54,7 +54,8 @@ spec:
           effect: "NoSchedule"
       containers:
         - name: polaris
-          image: 192.168.1.50:30500/apache-polaris:latest
+          image: 192.168.1.50:30500/apache-polaris:1.6.0
+          imagePullPolicy: IfNotPresent
           ports:
             - name: rest
               containerPort: 8181
@@ -71,6 +72,8 @@ spec:
                   key: db-password
           volumeMounts:
             - name: polaris-config
+              # entrypoint.sh reads /opt/polaris/application.properties directly;
+              # mount the ConfigMap here rather than into the empty config/ subdir.
               mountPath: /opt/polaris/application.properties
               subPath: application.properties
           resources:

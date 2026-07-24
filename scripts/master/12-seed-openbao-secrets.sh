@@ -187,22 +187,13 @@ else
   ok "debezium-credentials"
 fi
 
-# ─── 7. Schema Registry (SCRAM-SHA-512 for Strimzi) ──────────────────────────
-if bao_secret_exists "secret/data/schema-registry/credentials"; then
-  skip "schema-registry-credentials"
-else
-  SR_PASS=$(gen_password)
-  SR_JAAS="org.apache.kafka.common.security.scram.ScramLoginModule required username=\"schema-registry-user\" password=\"${SR_PASS}\";"
-  bao_write "secret/data/schema-registry/credentials" \
-    "username=schema-registry-user" \
-    "password=${SR_PASS}" \
-    "sasl-jaas-config=${SR_JAAS}"
-  kube_secret schema-registry-credentials prod \
-    "username=schema-registry-user" \
-    "password=${SR_PASS}" \
-    "sasl-jaas-config=${SR_JAAS}"
-  ok "schema-registry-credentials"
-fi
+# ─── 7. Schema Registry ───────────────────────────────────────────────────────
+# NOTE: schema-registry reads its SCRAM password directly from the
+# Strimzi-managed KafkaUser secret (schema-registry-user, key: password).
+# Do NOT seed a separate schema-registry-credentials secret here — Strimzi
+# generates and owns that password, and any value written here would diverge
+# from Kafka's SCRAM store after the first KafkaUser reconciliation.
+log "schema-registry-credentials: managed by Strimzi KafkaUser — skipping."
 
 # ─── 8. OpenSearch ────────────────────────────────────────────────────────────
 ensure_ns prod

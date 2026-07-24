@@ -2,7 +2,7 @@
 # Apache Polaris 1.6.0 (Iceberg REST Catalog) — amd64
 # Base  : docker.io/eclipse-temurin:21-jre-jammy
 # Source: polaris-bin-1.6.0.tgz pre-built binary from GitHub releases
-# Target: 192.168.1.50:30500/apache-polaris:latest
+# Target: 192.168.1.50:30500/apache-polaris:1.6.0
 # =============================================================================
 FROM --platform=linux/amd64 docker.io/eclipse-temurin:21-jre-jammy
 

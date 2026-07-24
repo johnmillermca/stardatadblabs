@@ -4,7 +4,10 @@
 # Image  : 192.168.1.50:30500/confluentinc/cp-schema-registry:7.9.0
 # Access : http://192.168.1.54:30810
 #          http://schema-registry.prod.svc.cluster.local:8081 (internal)
-# Secret : schema-registry-credentials (key: sasl-jaas-config)
+# Secret : schema-registry-user (Strimzi-managed KafkaUser secret, key: password)
+#          Read directly — no intermediate secret needed. Strimzi rotates the
+#          SCRAM password in this secret; reading it directly means schema-registry
+#          always has the same password as Kafka's SCRAM store.
 # =============================================================================
 ---
 apiVersion: apps/v1
@@ -45,11 +48,19 @@ spec:
               value: "SASL_PLAINTEXT"
             - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM
               value: "SCRAM-SHA-512"
-            - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+            # Read the SCRAM password directly from the Strimzi-managed KafkaUser secret.
+            # Strimzi writes the canonical password here; using an intermediate secret
+            # (schema-registry-credentials) causes a split — Strimzi rotates its secret
+            # independently and the two diverge after every cluster reboot.
+            # SCHEMA_REGISTRY_USER_PASSWORD must be declared BEFORE JAAS_CONFIG so that
+            # Kubernetes env-var substitution $(SCHEMA_REGISTRY_USER_PASSWORD) resolves.
+            - name: SCHEMA_REGISTRY_USER_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: schema-registry-credentials
-                  key: sasl-jaas-config
+                  name: schema-registry-user
+                  key: password
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+              value: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"schema-registry-user\" password=\"$(SCHEMA_REGISTRY_USER_PASSWORD)\";"
           resources:
             requests:
               memory: 256Mi

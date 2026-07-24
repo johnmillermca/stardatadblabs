@@ -37,7 +37,7 @@ declare -A IMAGE_CONTEXT=(
 
 declare -A IMAGE_TAG=(
   [ranger]="${REGISTRY}/apache-ranger:2.7.0"
-  [polaris]="${REGISTRY}/apache-polaris:latest"
+  [polaris]="${REGISTRY}/apache-polaris:1.6.0"
   [sqlmesh]="${REGISTRY}/sqlmesh:0.99.0"
   [jupyter-spark]="${REGISTRY}/jupyter-spark:latest"
 )
