@@ -19,6 +19,7 @@ This directory contains detailed operational runbooks for every application depl
 | [06](runbook-06-orchestration.md) | **Orchestration & Workflow** | Apache Kestra 0.22, SQLMesh 0.99 | 30880, 30883 |
 | [07](runbook-07-observability.md) | **Observability** | Prometheus (kube-prometheus-stack 60.4), Grafana 8.4, 8× MCP Servers | 30990, 30993, 30300, 30320–30326 |
 | [08](runbook-08-security-access.md) | **Security & Access** | Kerberos KDC, Apache Ranger 2.4, Private Registry | 30680, 30500 |
+| [09](runbook-09-incident-postmortem.md) | **Incident Post-Mortem** | Post-reboot degraded platform — root causes & permanent fixes for OpenBao, Strimzi/Kafka, Schema Registry, Debezium, Doris FE/BE, Polaris, ArgoCD | — |
 
 ---
 
