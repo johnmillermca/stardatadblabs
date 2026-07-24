@@ -69,6 +69,9 @@ spec:
       containers:
         - name: doris-be
           image: 192.168.1.50:30500/apache/doris:be-4.0.7
+          command:
+            - /opt/apache-doris/be_entrypoint.sh
+            - doris-fe-headless.prod.svc.cluster.local
           ports:
             - name: be-port
               containerPort: 9060
@@ -79,8 +82,6 @@ spec:
             - name: brpc
               containerPort: 8060
           env:
-            - name: FE_SERVERS
-              value: "fe1:doris-fe-0.doris-fe-headless.prod.svc.cluster.local:9010"
             - name: POD_IP
               valueFrom:
                 fieldRef:
