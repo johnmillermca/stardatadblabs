@@ -70,8 +70,11 @@ spec:
         - name: doris-be
           image: 192.168.1.50:30500/apache/doris:be-4.0.7
           command:
-            - /opt/apache-doris/be_entrypoint.sh
-            - doris-fe-headless.prod.svc.cluster.local
+            - sh
+            - -c
+            - |
+              ulimit -n 655350 2>/dev/null || true
+              exec /opt/apache-doris/be_entrypoint.sh doris-fe-headless.prod.svc.cluster.local
           ports:
             - name: be-port
               containerPort: 9060
