@@ -759,4 +759,113 @@ initContainers:
 
 ---
 
-*Last updated: 2026-07-26 — covers Session 1 (2026-07-24), Session 2 (2026-07-26), and Session 3 (2026-07-26) post-reboot incidents.*
+### 15.11 Kerberos KDC 108 Crash-Loops — Runtime dnf Install
+
+**Pattern**: `kerberos-kdc` crash-loops 108× after every reboot. Pod is eventually `Ready` only if internet is available long enough for dnf to succeed.
+
+**Root cause**: `startup.sh` ran `dnf install -y krb5-server krb5-libs krb5-workstation` on every pod start. The init container also ran `dnf install`. This required internet access (mirrors.rockylinux.org) at the moment the pod started. On a rebooted node, DNS is not yet fully resolved → `dnf` gets a curl error → `set -e` kills the script → pod exits → crash-loop.
+
+**Evidence**: `Couldn't resolve host: mirrors.rockylinux.org` in `--previous` pod logs. 108 restarts over 6 days.
+
+**Fix** (commit `e120ef5`):
+- Built `192.168.1.50:30500/kerberos-kdc:1.0.0` — a custom image with `krb5-server`, `krb5-libs`, `krb5-workstation` baked in at build time (Dockerfile: `docker/kerberos-kdc/Dockerfile`)
+- Removed the `install-kerberos` init container entirely
+- Removed the `dnf install` block from `startup.sh`
+- Added `strategy: Recreate` + `terminationGracePeriodSeconds: 60`
+
+**Rule**: Never run package managers (`dnf`, `apt`, `yum`, `pip`, `npm install`) at container startup. All dependencies must be baked into the image. Containers must be able to start with zero network access.
+
+---
+
+### 15.12 Debezium Connect — RollingUpdate + RWO PVC
+
+**Pattern**: `debezium-connect` stays in `ContainerCreating` or has high restart count after reboots.
+
+**Root cause**: Default `RollingUpdate` strategy + `ReadWriteOnce` PVC (`debezium-data 50Gi`). During a rolling update, the new pod starts before the old pod fully terminates. Both pods compete to mount the same RWO volume → the new pod hangs in `ContainerCreating`.
+
+**Fix** (commit `e120ef5`): `strategy: Recreate` + `terminationGracePeriodSeconds: 60`.
+
+---
+
+### 15.13 Kestra — Internet Image + RollingUpdate + RWO PVC
+
+**Pattern**: `kestra` stays in `ImagePullBackOff` or `ContainerCreating` after reboot.
+
+**Root cause (1)**: Image `kestra/kestra:latest-lts` referenced docker.io with no registry prefix. If the image was not cached on the node after reboot, pod entered `ImagePullBackOff` permanently (no internet in some states).
+
+**Root cause (2)**: `RollingUpdate` strategy + `ReadWriteOnce` PVC (`kestra-storage 20Gi`) — same volume contention issue as Debezium.
+
+**Fix** (commit `e120ef5`):
+- Image pushed to private registry: `192.168.1.50:30500/kestra/kestra:latest-lts`
+- `strategy: Recreate` + `terminationGracePeriodSeconds: 60`
+
+---
+
+### 15.14 Oracle XE Init Containers — Internet Images
+
+**Pattern**: `oracle-xe` init containers fail on reboot if images not cached.
+
+**Root cause**: Both init containers (`fix-permissions` using `busybox:1.36`, `oracle-cleanup` using `gvenzl/oracle-xe:21-slim`) referenced docker.io with no registry prefix.
+
+**Fix** (commit `e120ef5`):
+- `busybox:1.36` → `192.168.1.50:30500/busybox:1.36`
+- `gvenzl/oracle-xe:21-slim` → `192.168.1.50:30500/gvenzl/oracle-xe:21-slim` (image pushed this session)
+- Main container image updated to `192.168.1.50:30500/gvenzl/oracle-xe:21-slim`
+
+---
+
+### 15.15 Ranger, SQLMesh — RollingUpdate + RWO PVC
+
+**Root cause**: Both had default `RollingUpdate` strategy with `ReadWriteOnce` PVCs.
+
+**Fix** (commit `e120ef5`): `strategy: Recreate` on both. `terminationGracePeriodSeconds: 60` on `ranger-admin`.
+
+---
+
+### 15.16 MongoDB + PostgreSQL — Insufficient Termination Grace Period
+
+**Pattern**: MongoDB and PostgreSQL take longer than expected to become ready after a reboot.
+
+**Root cause**: Default `terminationGracePeriodSeconds: 30`. MongoDB's WiredTiger and PostgreSQL's WAL need time to flush/checkpoint cleanly. A hard SIGKILL forces crash-recovery on next boot which can be slow enough to race the readiness probe.
+
+**Fix** (commit `e120ef5`): `terminationGracePeriodSeconds: 60` on both StatefulSets.
+
+---
+
+### 15.17 All 16 PVs Had reclaimPolicy: Delete — Silent Data-Loss Risk
+
+**Pattern**: Any accidental PVC deletion (ArgoCD prune, `kubectl delete pvc`, namespace delete) would have permanently destroyed data with no recovery path.
+
+**Root cause**: `local-path-provisioner` creates PVs with `reclaimPolicy: Delete` by default. Only Kafka and registry PVs had been manually changed to `Retain`.
+
+**Fix** (commit `e120ef5`):
+- Patched all 16 remaining PVs live: `kubectl patch pv <name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'`
+- Added `manifests/storage/pv-retain.yaml` — declares all 18 PVs with `Retain` so ArgoCD asserts the policy permanently
+- All 18 PVs are now `Retain`:
+
+| PVC | Size | Protection |
+|-----|------|-----------|
+| doris-be-storage | 400Gi | ✅ Retain |
+| doris-fe-meta | 100Gi | ✅ Retain |
+| mongodb-data | 100Gi | ✅ Retain |
+| postgresql-data | 100Gi | ✅ Retain |
+| oracle-data | 200Gi | ✅ Retain |
+| opensearch-cluster-master-* | 50Gi | ✅ Retain |
+| debezium-data | 50Gi | ✅ Retain |
+| prometheus-*-db | 50Gi | ✅ Retain |
+| kestra-storage | 20Gi | ✅ Retain |
+| registry-data | 100Gi | ✅ Retain |
+| data-strimzi-kafka-combined-0 | 250Gi | ✅ Retain |
+| data-openbao-0 | 10Gi | ✅ Retain |
+| sqlmesh-models | 10Gi | ✅ Retain |
+| grafana | 10Gi | ✅ Retain |
+| ranger-data | 5Gi | ✅ Retain |
+| alertmanager-*-db | 5Gi | ✅ Retain |
+| hub-db-dir | 1Gi | ✅ Retain |
+| kerberos-data | 1Gi | ✅ Retain |
+
+**Rule**: After provisioning any new PVC, immediately run `kubectl patch pv <pv-name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'` and add it to `manifests/storage/pv-retain.yaml`.
+
+---
+
+*Last updated: 2026-07-26 — covers Session 1 (2026-07-24), Session 2 (2026-07-26), Session 3 (2026-07-26), and Session 4 (2026-07-26) post-reboot hardening.*
