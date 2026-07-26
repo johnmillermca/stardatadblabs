@@ -25,12 +25,14 @@ FAILURES=()
 
 # Check if an image already exists in the registry
 image_exists() {
-  local repo="${1%:*}"   # strip tag
-  local tag="${1##*:}"
-  curl -sf --max-time 5 \
-    "https://${REGISTRY}/v2/${repo}/manifests/${tag}" \
-    -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-    -o /dev/null 2>/dev/null
+  local dest="$1"        # e.g. jupyterhub/configurable-http-proxy:4.6.2
+  local repo="${dest%:*}"
+  local tag="${dest##*:}"
+  # Use the catalog-style tags/list endpoint — more reliable than manifests
+  # for registries without auth. curl -sk handles self-signed certs.
+  curl -sk --max-time 5 \
+    "https://${REGISTRY}/v2/${repo}/tags/list" \
+    2>/dev/null | grep -q "\"${tag}\""
 }
 
 push_image() {
