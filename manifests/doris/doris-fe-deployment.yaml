@@ -69,9 +69,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker1.local
+      terminationGracePeriodSeconds: 120
       initContainers:
         - name: copy-fe-config
-          image: busybox:1.36
+          image: 192.168.1.50:30500/busybox:1.36
           command: ["sh", "-c", "cp /config-ro/fe.conf /config-rw/fe.conf"]
           volumeMounts:
             - name: fe-config

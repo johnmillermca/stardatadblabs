@@ -59,9 +59,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker1.local
+      terminationGracePeriodSeconds: 120
       initContainers:
         - name: copy-be-config
-          image: busybox:1.36
+          image: 192.168.1.50:30500/busybox:1.36
           command: ["sh", "-c", "cp /config-ro/be.conf /config-rw/be.conf"]
           volumeMounts:
             - name: be-config
@@ -106,12 +107,26 @@ spec:
             limits:
               memory: 4Gi
               cpu: "2"
+          # ── Probes ─────────────────────────────────────────────────────────
+          # startupProbe: gates readiness until BE is reachable; allows FE up to
+          # 5 min (20 × 15s) to start and send the first heartbeat before we
+          # declare the pod unhealthy. Once BE passes startup, readinessProbe
+          # takes over with a generous failureThreshold so transient FE hiccups
+          # (e.g. FE leader election on reboot) don't evict BE from Service.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8040
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 20   # 30 + 20×15 = 330s max wait for FE heartbeat
           readinessProbe:
             httpGet:
               path: /api/health
               port: 8040
-            initialDelaySeconds: 60
+            initialDelaySeconds: 0
             periodSeconds: 15
+            failureThreshold: 5    # 5×15 = 75s tolerance for transient failures
       volumes:
         - name: be-config
           configMap:
