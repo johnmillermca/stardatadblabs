@@ -32,6 +32,10 @@ spec:
   selector:
     matchLabels:
       app: oracle-xe
+  # Recreate is required for RWO PVC — only one pod can mount it at a time.
+  # RollingUpdate would leave two pods competing for the same PVC.
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -43,20 +47,55 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
-      # Fix ownership of the PVC mount before Oracle starts
+      # Graceful shutdown: give Oracle enough time to checkpoint and close cleanly.
+      # This prevents stale lock files (ORA-01081) on the next startup.
+      terminationGracePeriodSeconds: 120
       initContainers:
+        # Step 1 — Fix PVC ownership and wipe all stale lock/SGA artefacts from
+        #           the oradata directory tree. Oracle leaves these behind when the
+        #           pod is killed without a graceful shutdown (e.g. node reboot).
         - name: fix-permissions
           image: busybox:1.36
+          securityContext:
+            runAsUser: 0
           command:
             - sh
             - -c
             - |
               chown -R 54321:54321 /opt/oracle/oradata
-              # Remove stale Oracle lock/shared-memory files that cause ORA-01081
+              # PVC-resident lock & SGA files — cause ORA-01081 on restart
               rm -f /opt/oracle/oradata/XE/lk*
               rm -f /opt/oracle/oradata/XE/sgadef.dbf
-          securityContext:
-            runAsUser: 0
+              rm -f /opt/oracle/oradata/XE/.oracle_ipc_lock
+              rm -f /opt/oracle/oradata/dbconfig/XE/lk*
+              rm -f /opt/oracle/oradata/dbconfig/XE/sgadef.dbf
+              echo "fix-permissions: PVC cleanup done."
+          volumeMounts:
+            - name: oracle-data
+              mountPath: /opt/oracle/oradata
+        # Step 2 — Wipe lock/health-check files inside the Oracle Home (image layer).
+        #           Uses the same image so all Oracle paths are guaranteed correct.
+        - name: oracle-cleanup
+          image: gvenzl/oracle-xe:21-slim
+          env:
+            - name: ORACLE_BASE_HOME
+              value: /opt/oracle/product/21c/dbhomeXE
+          command:
+            - sh
+            - -c
+            - |
+              rm -f "${ORACLE_BASE_HOME}/dbs/sgadef.dbf"
+              rm -f "${ORACLE_BASE_HOME}/dbs/lk"*
+              rm -f "${ORACLE_BASE_HOME}/dbs/hc_"*.dat
+              rm -f /tmp/.oracle/s*
+              echo "oracle-cleanup: Oracle Home cleanup done."
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
           volumeMounts:
             - name: oracle-data
               mountPath: /opt/oracle/oradata
