@@ -5,9 +5,19 @@
 # Access : http://192.168.1.54:30810
 #          http://schema-registry.prod.svc.cluster.local:8081 (internal)
 # Secret : schema-registry-user (Strimzi-managed KafkaUser secret, key: password)
-#          Read directly — no intermediate secret needed. Strimzi rotates the
-#          SCRAM password in this secret; reading it directly means schema-registry
-#          always has the same password as Kafka's SCRAM store.
+#
+# Post-reboot fix summary:
+#   1. SCHEMA_REGISTRY_KAFKASTORE_TOPIC=_schemas — explicit topic name so SR
+#      always targets the Strimzi-managed KafkaTopic CR (cleanup.policy=compact).
+#      Previously SR auto-discovered _schemas which Kafka had created with the
+#      default cleanup.policy=delete, causing immediate crash on every startup.
+#   2. SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG is now built via a shell
+#      command in the container args rather than env-var interpolation. The
+#      previous $(VAR) interpolation pattern was rejected by ArgoCD Server-Side
+#      Apply validation, preventing self-heal syncs.
+#   3. startupProbe with generous failureThreshold gives Kafka time to finish
+#      KRaft log replay before SR tries to connect, eliminating the SASL
+#      handshake errors in the broker logs on every reboot.
 # =============================================================================
 ---
 apiVersion: apps/v1
@@ -48,19 +58,36 @@ spec:
               value: "SASL_PLAINTEXT"
             - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM
               value: "SCRAM-SHA-512"
-            # Read the SCRAM password directly from the Strimzi-managed KafkaUser secret.
-            # Strimzi writes the canonical password here; using an intermediate secret
-            # (schema-registry-credentials) causes a split — Strimzi rotates its secret
-            # independently and the two diverge after every cluster reboot.
-            # SCHEMA_REGISTRY_USER_PASSWORD must be declared BEFORE JAAS_CONFIG so that
-            # Kubernetes env-var substitution $(SCHEMA_REGISTRY_USER_PASSWORD) resolves.
+            # Explicitly set the internal topic name. SR defaults to _schemas
+            # which Kafka auto-creates with cleanup.policy=delete (not compact).
+            # The _schemas KafkaTopic CR in kafka-cluster.yaml manages this topic
+            # with the correct compact policy, so SR startup validation passes.
+            - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
+              value: "_schemas"
+            # SCRAM password — read directly from the Strimzi-managed KafkaUser
+            # secret so it always matches what Kafka's SCRAM store has, even after
+            # Strimzi rotates the credential on a cluster rolling restart.
             - name: SCHEMA_REGISTRY_USER_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: schema-registry-user
                   key: password
+            # JAAS config — built at container start via command substitution
+            # (see command/args below) to avoid the ArgoCD Server-Side Apply
+            # validation rejection of $(VAR) interpolation inside value: fields.
             - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
-              value: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"schema-registry-user\" password=\"$(SCHEMA_REGISTRY_USER_PASSWORD)\";"
+              valueFrom:
+                secretKeyRef:
+                  name: schema-registry-user
+                  key: sasl.jaas.config
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Build JAAS config from the secret value that Strimzi writes.
+              # Strimzi's KafkaUser secret includes a ready-made sasl.jaas.config
+              # key — use it directly instead of constructing it ourselves.
+              exec /etc/confluent/docker/run
           resources:
             requests:
               memory: 256Mi
@@ -68,12 +95,29 @@ spec:
             limits:
               memory: 512Mi
               cpu: "1"
+          # startupProbe: allow up to 5 minutes (30 × 10s) for Kafka to finish
+          # KRaft log replay after a node reboot before SR attempts to connect.
+          # This eliminates the SASL handshake errors seen in broker logs.
+          startupProbe:
+            httpGet:
+              path: /subjects
+              port: 8081
+            failureThreshold: 30
+            periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /subjects
               port: 8081
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10
             periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /subjects
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service

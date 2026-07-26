@@ -57,6 +57,11 @@ spec:
       securityContext:
         fsGroup: 1000
         runAsUser: 1000
+      # Give KRaft enough time to flush the metadata log cleanly on shutdown.
+      # 30s (default) is too short — an unclean stop leaves more log to replay
+      # on the next boot, widening the window where the operator races controller
+      # election and stamps NotReady on the Kafka CR.
+      terminationGracePeriodSeconds: 120
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -178,6 +183,31 @@ spec:
     cleanup.policy: compact
 
 ---
+# _schemas is the internal topic used by Confluent Schema Registry to store
+# all registered schemas. It MUST have cleanup.policy=compact — SR refuses to
+# start if it finds cleanup.policy=delete (the Kafka auto-create default).
+# This CR ensures Strimzi creates/manages the topic with the correct policy
+# before Schema Registry starts, so no manual topic repair is ever needed.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: _schemas
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    cleanup.policy: compact
+    min.compaction.lag.ms: "0"
+    # Retain schemas forever — never expire them by size or time.
+    retention.ms: "-1"
+    retention.bytes: "-1"
+
+---
+# schema-registry-schemas is kept for backwards compatibility but is no longer
+# used by Schema Registry (which always targets _schemas).
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
