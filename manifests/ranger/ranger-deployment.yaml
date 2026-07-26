@@ -63,6 +63,9 @@ metadata:
     app: ranger-admin
 spec:
   replicas: 1
+  # Recreate is required: RWO PVC can only be mounted by one pod at a time.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: ranger-admin
@@ -73,6 +76,8 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: master.local
+      # 60s: allows Ranger/Tomcat to flush audit logs and close DB connections cleanly.
+      terminationGracePeriodSeconds: 60
       tolerations:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"

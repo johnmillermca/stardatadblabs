@@ -1,9 +1,14 @@
 # =============================================================================
 # MIT Kerberos KDC — ConfigMap + PVC + Deployment + Services
-# Namespace : kerberos
+# Namespace : prod
 # Realm     : STARDATADBLABS.LOCAL
 # Node      : master.local
 # Secret    : kerberos-admin  (keys: master-password, admin-password)
+# Image     : 192.168.1.50:30500/kerberos-kdc:1.0.0
+#             Built from docker/kerberos-kdc/Dockerfile — krb5-server baked in.
+#             DO NOT use rockylinux:9 directly — that image has no krb5 packages
+#             and the old startup.sh ran dnf install at pod start, causing 108
+#             crash-loops on air-gapped reboots (mirrors.rockylinux.org unreachable).
 # =============================================================================
 ---
 apiVersion: v1
@@ -53,10 +58,10 @@ data:
   startup.sh: |
     #!/bin/bash
     set -e
-    # Install Kerberos packages if not already present
-    if ! command -v kdb5_util &>/dev/null; then
-      dnf install -y krb5-server krb5-libs krb5-workstation
-    fi
+    # NOTE: krb5-server, krb5-libs, krb5-workstation are baked into the image
+    # (192.168.1.50:30500/kerberos-kdc:1.0.0). There is NO runtime dnf install.
+    # The old approach ran dnf at startup which required internet access and caused
+    # 108 crash-loops every time the node rebooted without internet (DNS not yet up).
     # Copy config files
     mkdir -p /var/kerberos/krb5kdc /etc/krb5kdc
     cp /etc/krb5-config/krb5.conf /etc/krb5.conf
@@ -95,6 +100,9 @@ metadata:
     app: kerberos-kdc
 spec:
   replicas: 1
+  # Recreate: kerberos-data PVC is RWO.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: kerberos-kdc
@@ -109,16 +117,12 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
-      initContainers:
-        - name: install-kerberos
-          image: 192.168.1.50:30500/rockylinux:9
-          command: ["/bin/bash", "-c", "dnf install -y krb5-server krb5-libs krb5-workstation && cp -r /usr/sbin/kdb5_util /mnt/sbin/ 2>/dev/null || true"]
-          volumeMounts:
-            - name: kerberos-data
-              mountPath: /var/kerberos/krb5kdc
+      # Recreate strategy: kerberos-data is RWO — only one pod can hold it.
+      terminationGracePeriodSeconds: 60
+      # NO init container needed — krb5 packages are baked into the image.
       containers:
         - name: kerberos-kdc
-          image: 192.168.1.50:30500/rockylinux:9
+          image: 192.168.1.50:30500/kerberos-kdc:1.0.0
           command: ["/bin/bash", "/etc/krb5-config/startup.sh"]
           env:
             - name: KRB5_MASTER_PASSWORD

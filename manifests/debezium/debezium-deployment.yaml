@@ -60,6 +60,10 @@ metadata:
     app: debezium-connect
 spec:
   replicas: 1
+  # Recreate is required: RWO PVC can only be mounted by one pod at a time.
+  # RollingUpdate would leave old+new pods competing for the volume on reboot.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: debezium-connect
@@ -70,6 +74,8 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker2.local
+      # 60s: enough for Kafka Connect to flush offsets and deregister cleanly.
+      terminationGracePeriodSeconds: 60
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7

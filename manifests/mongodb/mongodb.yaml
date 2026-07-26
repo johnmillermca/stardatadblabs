@@ -38,6 +38,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: master.local
+      # 60s: gives WiredTiger checkpoint and journal flush time to complete cleanly.
+      # Without this, SIGKILL forces crash-recovery on next boot, slowing startup
+      # enough to exceed the readiness probe window.
+      terminationGracePeriodSeconds: 60
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists

@@ -4,7 +4,7 @@
 # Node        : worker2.local (pinned)
 # Access      : http://192.168.1.50:30880 (UI)
 #               http://kestra.prod.svc.cluster.local:8080 (internal)
-# Image       : kestra/kestra:latest-lts (v0.22)
+# Image       : 192.168.1.50:30500/kestra/kestra:latest-lts (private registry)
 # Depends on  : PostgreSQL (prod namespace, db: kestra)
 #               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # Secret      : kestra-credentials
@@ -70,6 +70,9 @@ metadata:
     app: kestra
 spec:
   replicas: 1
+  # Recreate is required: RWO PVC can only be mounted by one pod at a time.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: kestra
@@ -80,9 +83,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker2.local
+      terminationGracePeriodSeconds: 60
       containers:
         - name: kestra
-          image: kestra/kestra:latest-lts
+          image: 192.168.1.50:30500/kestra/kestra:latest-lts
           args: ["server", "standalone", "--worker-thread=16"]
           ports:
             - name: http

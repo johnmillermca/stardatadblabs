@@ -64,6 +64,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: master.local
+      # 60s: allows PostgreSQL to complete its checkpoint and close WAL cleanly.
+      # A hard SIGKILL leaves a dirty shutdown requiring crash-recovery on next
+      # boot, which can be slow enough to fail the readiness probe.
+      terminationGracePeriodSeconds: 60
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
