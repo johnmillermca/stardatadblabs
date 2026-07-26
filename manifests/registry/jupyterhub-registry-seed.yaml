@@ -1,0 +1,131 @@
+# =============================================================================
+# JupyterHub Registry Seed CronJob
+# Namespace : prod
+# Node      : master.local (registry PVC is pinned here)
+#
+# Runs daily at 03:15 UTC. Re-pushes all JupyterHub images from the containerd
+# node cache into the private registry. Prevents JupyterHub from entering
+# ImagePullBackOff / permanent Progressing state after a registry pod restart,
+# PVC wipe, or node rescheduling.
+#
+# Images covered:
+#   - jupyter-spark:latest               (custom singleuser — PySpark + Iceberg)
+#   - jupyterhub/configurable-http-proxy:4.6.2  (JupyterHub proxy)
+#   - jupyterhub/k8s-hub:4.4.0           (JupyterHub hub)
+#
+# Why this is needed:
+#   The private registry at 192.168.1.50:30500 is backed by a local-path PVC
+#   on master.local (reclaimPolicy=Retain). If the registry pod restarts or is
+#   redeployed from scratch, all pushed images are lost. Without this CronJob,
+#   the hook-image-puller DaemonSet (a JupyterHub PreSync hook) fails on all
+#   nodes with ImagePullBackOff, causing ArgoCD sync to stay Running forever
+#   and JupyterHub health to show Progressing permanently.
+#
+# Incident reference: runbook-09 §14 — 2026-07-26
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jupyterhub-registry-seed
+  namespace: prod
+  labels:
+    app: jupyterhub-registry-seed
+spec:
+  # 03:15 UTC daily — 15 minutes after polaris seed, low-traffic window
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: master.local
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          volumes:
+            - name: containerd-sock
+              hostPath:
+                path: /run/containerd/containerd.sock
+                type: Socket
+            - name: registry-certs
+              hostPath:
+                path: /etc/containerd/certs.d
+                type: Directory
+          containers:
+            - name: seed
+              image: 192.168.1.50:30500/strimzi/operator:1.1.0
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+                - name: containerd-sock
+                  mountPath: /run/containerd/containerd.sock
+                - name: registry-certs
+                  mountPath: /etc/containerd/certs.d
+                  readOnly: true
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  REGISTRY="192.168.1.50:30500"
+                  CTR="ctr --address /run/containerd/containerd.sock --namespace k8s.io"
+                  ERRORS=0
+
+                  # image_exists: checks registry tags/list endpoint
+                  # Returns 0 (true) if tag is present, 1 (false) if not.
+                  image_exists() {
+                    local dest="$1"           # e.g. jupyterhub/k8s-hub:4.4.0
+                    local repo="${dest%:*}"
+                    local tag="${dest##*:}"
+                    curl -sk --max-time 5 \
+                      "https://${REGISTRY}/v2/${repo}/tags/list" \
+                      2>/dev/null | grep -q "\"${tag}\""
+                  }
+
+                  push_image() {
+                    local full="${REGISTRY}/$1"   # full registry path with tag
+                    local dest="$1"               # repo:tag without registry prefix
+
+                    if image_exists "${dest}"; then
+                      echo "  SKIP  ${full} (already in registry)"
+                      return 0
+                    fi
+
+                    echo "  PUSH  ${full} ..."
+                    if ! ${CTR} images push --plain-http=false "${full}" 2>&1; then
+                      echo "  ERROR ${full} — push failed" >&2
+                      ERRORS=$((ERRORS + 1))
+                      return 1
+                    fi
+
+                    # Verify
+                    if image_exists "${dest}"; then
+                      echo "  OK    ${full}"
+                    else
+                      echo "  ERROR ${full} — not found in registry after push" >&2
+                      ERRORS=$((ERRORS + 1))
+                    fi
+                  }
+
+                  echo "=== JupyterHub Registry Seed — $(date) ==="
+
+                  # Custom singleuser image (built from docker/jupyter-spark/Dockerfile)
+                  push_image "jupyter-spark:latest"
+
+                  # Upstream JupyterHub images (pulled from quay.io/jupyterhub)
+                  push_image "jupyterhub/configurable-http-proxy:4.6.2"
+                  push_image "jupyterhub/k8s-hub:4.4.0"
+
+                  echo ""
+                  if [ "${ERRORS}" -eq 0 ]; then
+                    echo "=== All images present in registry ==="
+                    exit 0
+                  else
+                    echo "=== ${ERRORS} image(s) failed to seed ===" >&2
+                    exit 1
+                  fi

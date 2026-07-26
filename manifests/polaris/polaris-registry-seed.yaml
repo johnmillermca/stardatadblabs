@@ -65,16 +65,16 @@ spec:
                   TAG="1.6.0"
                   FULL="${REGISTRY}/${IMAGE}:${TAG}"
 
-                  # Check if image already present in registry
-                  STATUS=$(curl -sk -o /dev/null -w "%{http_code}" \
-                    https://${REGISTRY}/v2/${IMAGE}/manifests/${TAG})
-
-                  if [ "${STATUS}" = "200" ]; then
-                    echo "Image ${FULL} already present in registry (HTTP 200) — nothing to do."
+                  # Check if image already present in registry using tags/list
+                  # (manifests endpoint requires auth headers on some registries)
+                  if curl -sk --max-time 5 \
+                    "https://${REGISTRY}/v2/${IMAGE}/tags/list" \
+                    2>/dev/null | grep -q "\"${TAG}\""; then
+                    echo "Image ${FULL} already present in registry — nothing to do."
                     exit 0
                   fi
 
-                  echo "Image ${FULL} missing from registry (HTTP ${STATUS}) — re-pushing from node cache..."
+                  echo "Image ${FULL} missing from registry — re-pushing from node cache..."
 
                   # Re-push via ctr using the containerd socket on the host
                   ctr --address /run/containerd/containerd.sock \
@@ -83,12 +83,12 @@ spec:
                       --plain-http=false \
                       "${FULL}"
 
-                  # Verify
-                  STATUS_AFTER=$(curl -sk -o /dev/null -w "%{http_code}" \
-                    https://${REGISTRY}/v2/${IMAGE}/manifests/${TAG})
-                  if [ "${STATUS_AFTER}" = "200" ]; then
+                  # Verify using tags/list
+                  if curl -sk --max-time 5 \
+                    "https://${REGISTRY}/v2/${IMAGE}/tags/list" \
+                    2>/dev/null | grep -q "\"${TAG}\""; then
                     echo "Re-push successful — ${FULL} now in registry."
                   else
-                    echo "ERROR: re-push failed — registry returned HTTP ${STATUS_AFTER}." >&2
+                    echo "ERROR: re-push failed — tag not found in registry." >&2
                     exit 1
                   fi
