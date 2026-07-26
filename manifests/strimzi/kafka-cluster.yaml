@@ -31,7 +31,15 @@ spec:
     deleteClaim: false
   resources:
     requests:
-      memory: 1Gi
+      # Request must reflect actual JVM consumption:
+      #   Heap:        2Gi  (STRIMZI_DYNAMIC_HEAP_PERCENTAGE=50% of 4Gi limit)
+      #   JVM overhead: ~1Gi  (metaspace, thread stacks, JIT code cache, off-heap)
+      #   OS + buffers: ~0.5Gi
+      # With request=1Gi the node scheduler undersizes the pod; under memory
+      # pressure the kernel OOM-kills the admin client thread inside the JVM
+      # which causes "describeMetadataQuorum" timeouts → operator stamps
+      # NotReady on the Kafka CR every reconcile cycle.
+      memory: 3.5Gi
       cpu: 500m
     limits:
       memory: 4Gi
