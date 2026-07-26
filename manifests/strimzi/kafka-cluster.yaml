@@ -186,16 +186,17 @@ spec:
 # _schemas is the internal topic used by Confluent Schema Registry to store
 # all registered schemas. It MUST have cleanup.policy=compact — SR refuses to
 # start if it finds cleanup.policy=delete (the Kafka auto-create default).
-# This CR ensures Strimzi creates/manages the topic with the correct policy
-# before Schema Registry starts, so no manual topic repair is ever needed.
+# CR name must be a valid RFC 1123 subdomain, so we use 'schemas-internal' and
+# set topicName to the actual Kafka topic name '_schemas'.
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
-  name: _schemas
+  name: schemas-internal
   namespace: prod
   labels:
     strimzi.io/cluster: strimzi-kafka
 spec:
+  topicName: "_schemas"
   partitions: 1
   replicas: 1
   config:

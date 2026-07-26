@@ -64,30 +64,15 @@ spec:
             # with the correct compact policy, so SR startup validation passes.
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
               value: "_schemas"
-            # SCRAM password — read directly from the Strimzi-managed KafkaUser
-            # secret so it always matches what Kafka's SCRAM store has, even after
-            # Strimzi rotates the credential on a cluster rolling restart.
-            - name: SCHEMA_REGISTRY_USER_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: schema-registry-user
-                  key: password
-            # JAAS config — built at container start via command substitution
-            # (see command/args below) to avoid the ArgoCD Server-Side Apply
-            # validation rejection of $(VAR) interpolation inside value: fields.
+            # JAAS config — read the ready-made sasl.jaas.config key that Strimzi
+            # writes into every KafkaUser secret. It is always in sync with the
+            # SCRAM store and avoids the ArgoCD SSA rejection of $(VAR) interpolation
+            # inside value: fields that the previous approach triggered.
             - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
               valueFrom:
                 secretKeyRef:
                   name: schema-registry-user
                   key: sasl.jaas.config
-          command:
-            - /bin/bash
-            - -c
-            - |
-              # Build JAAS config from the secret value that Strimzi writes.
-              # Strimzi's KafkaUser secret includes a ready-made sasl.jaas.config
-              # key — use it directly instead of constructing it ourselves.
-              exec /etc/confluent/docker/run
           resources:
             requests:
               memory: 256Mi
