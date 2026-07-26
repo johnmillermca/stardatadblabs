@@ -711,6 +711,52 @@ spec:
   topicName: "_schemas"    # actual Kafka topic name
 ```
 
+### 15.10 Doris BE Probe Race on Startup
+
+**Pattern**: `doris-be` pod stays `NotReady` (or restarts) after every node reboot.
+
+**Root cause — 4 compounding factors**:
+
+| # | Factor | Detail |
+|---|--------|--------|
+| 1 | `readinessProbe.failureThreshold` defaulted to 3 | 60s initial delay + 3×15s = 105s total — BE probe failed before FE sent its first heartbeat |
+| 2 | No `startupProbe` | Readiness fired at 60s while FE (also booting) hadn't become leader yet |
+| 3 | `terminationGracePeriodSeconds: 30` (default) | Too short for WAL flush and clean BE de-registration; stale entry in FE caused re-registration delay on next boot (`available backend num is 0`) |
+| 4 | `busybox:1.36` init container used bare `docker.io` reference | Pull could stall after reboot if internet is slow / unavailable |
+
+**Evidence in logs**:
+```
+W olap_server.cpp] Have not get FE Master heartbeat yet
+I task_worker_pool.cpp] waiting to receive first heartbeat from frontend before doing report
+```
+These lines repeat every 10s well beyond the 105s probe window.
+
+**Fix** (commit `9065494`):
+```yaml
+# BE Deployment
+terminationGracePeriodSeconds: 120
+initContainers:
+  - image: 192.168.1.50:30500/busybox:1.36   # private registry, no docker.io dependency
+containers:
+  startupProbe:
+    httpGet: { path: /api/health, port: 8040 }
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    failureThreshold: 20   # 330s max for FE to send first heartbeat
+  readinessProbe:
+    httpGet: { path: /api/health, port: 8040 }
+    initialDelaySeconds: 0
+    periodSeconds: 15
+    failureThreshold: 5    # 75s tolerance for transient FE hiccups
+
+# FE StatefulSet (same busybox + gracePeriod fix)
+terminationGracePeriodSeconds: 120
+initContainers:
+  - image: 192.168.1.50:30500/busybox:1.36
+```
+
+**Rule**: Any BE/FE pod pair that shares a node must have a `startupProbe` with `failureThreshold ≥ 20` so the slower component doesn't kill the faster one during boot.
+
 ---
 
-*Last updated: 2026-07-26 — covers Session 1 (2026-07-24) and Session 2 (2026-07-26) post-reboot incidents.*
+*Last updated: 2026-07-26 — covers Session 1 (2026-07-24), Session 2 (2026-07-26), and Session 3 (2026-07-26) post-reboot incidents.*
