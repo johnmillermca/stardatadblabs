@@ -1,57 +1,11 @@
+# =============================================================================
+# Persistent Volumes — reclaimPolicy: Retain on all local-path PVs
+# Generated from live cluster — all PVs use spec.hostPath (rancher.io/local-path
+# provisioner creates hostPath, not spec.local volumes).
+# Retain policy: data survives PVC deletion and node reboots.
+# =============================================================================
 ---
-# PV backing PVC 'sqlmesh-models' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-03aec162-ee61-4106-a209-ad5d6645e84f
-spec:
-  capacity:
-    storage: 10Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: sqlmesh-models
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-03aec162-ee61-4106-a209-ad5d6645e84f_prod_sqlmesh-models
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker2.local
----
-# PV backing PVC 'mongodb-data' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-187c230e-48e2-43bc-9c5d-3ac49a6a85e3
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: mongodb-data
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-187c230e-48e2-43bc-9c5d-3ac49a6a85e3_prod_mongodb-data
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - master.local
----
-# PV backing PVC 'alertmanager-prometheus-alertmanager-db-alertmanager-prometheus-alertmanager-0' (ns: monitoring) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'alertmanager-prometheus-alertmanager-db-alertmanager-prometheus-alertmanager-0' (monitoring) on worker2.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -63,11 +17,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-3010574a-1574-44db-b747-8b3d66071d23_monitoring_alertmanager-prometheus-alertmanager-db-alertmanager-prometheus-alertmanager-0
+    type: DirectoryOrCreate
   claimRef:
     name: alertmanager-prometheus-alertmanager-db-alertmanager-prometheus-alertmanager-0
     namespace: monitoring
-  local:
-    path: /home/local-path-provisioner/pvc-3010574a-1574-44db-b747-8b3d66071d23_monitoring_alertmanager-prometheus-alertmanager-db-alertmanager-prometheus-alertmanager-0
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -77,33 +32,7 @@ spec:
               values:
                 - worker2.local
 ---
-# PV backing PVC 'postgresql-data' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-413a682a-65a6-47bb-b838-b138501b1c9e
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: postgresql-data
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-413a682a-65a6-47bb-b838-b138501b1c9e_prod_postgresql-data
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - master.local
----
-# PV backing PVC 'data-openbao-0' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'data-openbao-0' (prod) on master.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -115,11 +44,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-41545a46-e9ba-4d34-a07c-6b7f23b71176_prod_data-openbao-0
+    type: DirectoryOrCreate
   claimRef:
     name: data-openbao-0
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-41545a46-e9ba-4d34-a07c-6b7f23b71176_prod_data-openbao-0
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -129,111 +59,7 @@ spec:
               values:
                 - master.local
 ---
-# PV backing PVC 'doris-be-storage' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-485b1e96-35e5-4bd2-9cab-4d564afcdb6e
-spec:
-  capacity:
-    storage: 400Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: doris-be-storage
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-485b1e96-35e5-4bd2-9cab-4d564afcdb6e_prod_doris-be-storage
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker1.local
----
-# PV backing PVC 'kerberos-data' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-53c73403-7255-4cf6-adbe-8e48dcc48835
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: kerberos-data
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-53c73403-7255-4cf6-adbe-8e48dcc48835_prod_kerberos-data
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - master.local
----
-# PV backing PVC 'grafana' (ns: monitoring) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-54f0f78b-538e-4e81-a348-a05178e53034
-spec:
-  capacity:
-    storage: 10Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: grafana
-    namespace: monitoring
-  local:
-    path: /home/local-path-provisioner/pvc-54f0f78b-538e-4e81-a348-a05178e53034_monitoring_grafana
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker4.local
----
-# PV backing PVC 'opensearch-cluster-master-opensearch-cluster-master-0' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-5f695b16-1ee6-437b-8134-e24602c1bb5f
-spec:
-  capacity:
-    storage: 50Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: opensearch-cluster-master-opensearch-cluster-master-0
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-5f695b16-1ee6-437b-8134-e24602c1bb5f_prod_opensearch-cluster-master-opensearch-cluster-master-0
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker3.local
----
-# PV backing PVC 'data-strimzi-kafka-combined-0' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'data-strimzi-kafka-combined-0' (prod) on worker4.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -245,11 +71,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
+    type: DirectoryOrCreate
   claimRef:
     name: data-strimzi-kafka-combined-0
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -259,33 +86,7 @@ spec:
               values:
                 - worker4.local
 ---
-# PV backing PVC 'hub-db-dir' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-bd1a1c81-aaab-40c3-aa1f-8465e3a50e41
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: hub-db-dir
-    namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-bd1a1c81-aaab-40c3-aa1f-8465e3a50e41_prod_hub-db-dir
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker4.local
----
-# PV backing PVC 'debezium-data' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'debezium-data' (prod) on worker2.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -297,11 +98,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-c48eee7a-8eaf-46c2-a0cd-b0debadc3e81_prod_debezium-data
+    type: DirectoryOrCreate
   claimRef:
     name: debezium-data
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-c48eee7a-8eaf-46c2-a0cd-b0debadc3e81_prod_debezium-data
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -311,23 +113,24 @@ spec:
               values:
                 - worker2.local
 ---
-# PV backing PVC 'prometheus-prometheus-prometheus-db-prometheus-prometheus-prometheus-0' (ns: monitoring) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'doris-be-storage' (prod) on worker1.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: pvc-cf997578-e11f-47fd-88c3-4601a9701f92
+  name: pvc-485b1e96-35e5-4bd2-9cab-4d564afcdb6e
 spec:
   capacity:
-    storage: 50Gi
+    storage: 400Gi
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-485b1e96-35e5-4bd2-9cab-4d564afcdb6e_prod_doris-be-storage
+    type: DirectoryOrCreate
   claimRef:
-    name: prometheus-prometheus-prometheus-db-prometheus-prometheus-prometheus-0
-    namespace: monitoring
-  local:
-    path: /home/local-path-provisioner/pvc-cf997578-e11f-47fd-88c3-4601a9701f92_monitoring_prometheus-prometheus-prometheus-db-prometheus-prometheus-prometheus-0
+    name: doris-be-storage
+    namespace: prod
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -335,35 +138,9 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - worker4.local
+                - worker1.local
 ---
-# PV backing PVC 'registry-data' (ns: registry) — reclaimPolicy: Retain protects data if PVC is deleted
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-d2841499-d50f-45a3-a9c2-2d236affa2ee
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  claimRef:
-    name: registry-data
-    namespace: registry
-  local:
-    path: /home/local-path-provisioner/pvc-d2841499-d50f-45a3-a9c2-2d236affa2ee_registry_registry-data
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - master.local
----
-# PV backing PVC 'doris-fe-meta' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'doris-fe-meta' (prod) on worker1.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -375,11 +152,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-e1dd8491-c675-4bdd-b3a9-ba56fb5266a8_prod_doris-fe-meta
+    type: DirectoryOrCreate
   claimRef:
     name: doris-fe-meta
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-e1dd8491-c675-4bdd-b3a9-ba56fb5266a8_prod_doris-fe-meta
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -389,7 +167,88 @@ spec:
               values:
                 - worker1.local
 ---
-# PV backing PVC 'kestra-storage' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'grafana' (monitoring) on worker4.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-54f0f78b-538e-4e81-a348-a05178e53034
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-54f0f78b-538e-4e81-a348-a05178e53034_monitoring_grafana
+    type: DirectoryOrCreate
+  claimRef:
+    name: grafana
+    namespace: monitoring
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker4.local
+---
+# PVC 'hub-db-dir' (prod) on worker4.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-bd1a1c81-aaab-40c3-aa1f-8465e3a50e41
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-bd1a1c81-aaab-40c3-aa1f-8465e3a50e41_prod_hub-db-dir
+    type: DirectoryOrCreate
+  claimRef:
+    name: hub-db-dir
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker4.local
+---
+# PVC 'kerberos-data' (prod) on master.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-53c73403-7255-4cf6-adbe-8e48dcc48835
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-53c73403-7255-4cf6-adbe-8e48dcc48835_prod_kerberos-data
+    type: DirectoryOrCreate
+  claimRef:
+    name: kerberos-data
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - master.local
+---
+# PVC 'kestra-storage' (prod) on worker2.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -401,11 +260,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-e902dcda-9bcd-4714-a6d2-43ce4542a410_prod_kestra-storage
+    type: DirectoryOrCreate
   claimRef:
     name: kestra-storage
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-e902dcda-9bcd-4714-a6d2-43ce4542a410_prod_kestra-storage
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -415,7 +275,61 @@ spec:
               values:
                 - worker2.local
 ---
-# PV backing PVC 'oracle-data' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'mongodb-data' (prod) on master.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-187c230e-48e2-43bc-9c5d-3ac49a6a85e3
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-187c230e-48e2-43bc-9c5d-3ac49a6a85e3_prod_mongodb-data
+    type: DirectoryOrCreate
+  claimRef:
+    name: mongodb-data
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - master.local
+---
+# PVC 'opensearch-cluster-master-opensearch-cluster-master-0' (prod) on worker3.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-5f695b16-1ee6-437b-8134-e24602c1bb5f
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-5f695b16-1ee6-437b-8134-e24602c1bb5f_prod_opensearch-cluster-master-opensearch-cluster-master-0
+    type: DirectoryOrCreate
+  claimRef:
+    name: opensearch-cluster-master-opensearch-cluster-master-0
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker3.local
+---
+# PVC 'oracle-data' (prod) on master.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -427,11 +341,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-ec732bc2-129f-45a2-b118-94439a9c149f_prod_oracle-data
+    type: DirectoryOrCreate
   claimRef:
     name: oracle-data
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-ec732bc2-129f-45a2-b118-94439a9c149f_prod_oracle-data
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -441,7 +356,61 @@ spec:
               values:
                 - master.local
 ---
-# PV backing PVC 'ranger-data' (ns: prod) — reclaimPolicy: Retain protects data if PVC is deleted
+# PVC 'postgresql-data' (prod) on master.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-413a682a-65a6-47bb-b838-b138501b1c9e
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-413a682a-65a6-47bb-b838-b138501b1c9e_prod_postgresql-data
+    type: DirectoryOrCreate
+  claimRef:
+    name: postgresql-data
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - master.local
+---
+# PVC 'prometheus-prometheus-prometheus-db-prometheus-prometheus-prometheus-0' (monitoring) on worker4.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-cf997578-e11f-47fd-88c3-4601a9701f92
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-cf997578-e11f-47fd-88c3-4601a9701f92_monitoring_prometheus-prometheus-prometheus-db-prometheus-prometheus-prometheus-0
+    type: DirectoryOrCreate
+  claimRef:
+    name: prometheus-prometheus-prometheus-db-prometheus-prometheus-prometheus-0
+    namespace: monitoring
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker4.local
+---
+# PVC 'ranger-data' (prod) on master.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -453,11 +422,12 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-f2025e33-0c00-4cce-bbfc-44b78879460e_prod_ranger-data
+    type: DirectoryOrCreate
   claimRef:
     name: ranger-data
     namespace: prod
-  local:
-    path: /home/local-path-provisioner/pvc-f2025e33-0c00-4cce-bbfc-44b78879460e_prod_ranger-data
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -466,3 +436,57 @@ spec:
               operator: In
               values:
                 - master.local
+---
+# PVC 'registry-data' (registry) on master.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-d2841499-d50f-45a3-a9c2-2d236affa2ee
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-d2841499-d50f-45a3-a9c2-2d236affa2ee_registry_registry-data
+    type: DirectoryOrCreate
+  claimRef:
+    name: registry-data
+    namespace: registry
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - master.local
+---
+# PVC 'sqlmesh-models' (prod) on worker2.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-03aec162-ee61-4106-a209-ad5d6645e84f
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-03aec162-ee61-4106-a209-ad5d6645e84f_prod_sqlmesh-models
+    type: DirectoryOrCreate
+  claimRef:
+    name: sqlmesh-models
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker2.local
