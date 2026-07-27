@@ -20,19 +20,41 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
-  # k8s 1.27+ injects persistentVolumeClaimRetentionPolicy into every StatefulSet
-  # at runtime. The OpenSearch Helm chart does not set this field, causing
-  # permanent OutOfSync. Ignore it so ArgoCD does not fight the API server.
+  # Kubernetes injects several default fields into the StatefulSet at runtime
+  # (persistentVolumeClaimRetentionPolicy, revisionHistoryLimit, probe defaults,
+  # protocol: TCP, terminationMessagePath, etc.) that the Helm chart does not set.
+  # Ignoring them prevents perpetual OutOfSync.
   ignoreDifferences:
     - group: apps
       kind: StatefulSet
       name: opensearch-cluster-master
       jsonPointers:
         - /spec/persistentVolumeClaimRetentionPolicy
+        - /spec/revisionHistoryLimit
+        - /spec/template/spec/containers/0/env/0/valueFrom/fieldRef/apiVersion
+        - /spec/template/spec/containers/0/livenessProbe/successThreshold
+        - /spec/template/spec/containers/0/livenessProbe/timeoutSeconds
+        - /spec/template/spec/containers/0/ports/0/protocol
+        - /spec/template/spec/containers/0/ports/1/protocol
+        - /spec/template/spec/containers/0/ports/2/protocol
+        - /spec/template/spec/containers/0/readinessProbe/successThreshold
+        - /spec/template/spec/containers/0/startupProbe/successThreshold
+        - /spec/template/spec/containers/0/terminationMessagePath
+        - /spec/template/spec/containers/0/terminationMessagePolicy
+        - /spec/template/spec/dnsPolicy
+        - /spec/template/spec/initContainers/0/terminationMessagePath
+        - /spec/template/spec/initContainers/0/terminationMessagePolicy
+        - /spec/template/spec/initContainers/1/terminationMessagePath
+        - /spec/template/spec/initContainers/1/terminationMessagePolicy
+        - /spec/template/spec/restartPolicy
+        - /spec/template/spec/schedulerName
+        - /spec/template/spec/volumes/0/configMap/defaultMode
+        - /spec/volumeClaimTemplates/0/apiVersion
+        - /spec/volumeClaimTemplates/0/kind
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
