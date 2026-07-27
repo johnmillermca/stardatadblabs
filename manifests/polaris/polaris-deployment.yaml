@@ -54,7 +54,7 @@ spec:
       containers:
         - name: polaris
           image: 192.168.1.50:30500/apache-polaris:1.6.0-r2
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: rest
               containerPort: 8181
