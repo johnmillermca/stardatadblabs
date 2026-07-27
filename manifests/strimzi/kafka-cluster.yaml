@@ -162,6 +162,9 @@ spec:
         periodSeconds: 30
         failureThreshold: 3
     userOperator:
+      # NOTE: startupProbe is NOT in the userOperator CRD schema (only topicOperator
+      # supports it). terminationGracePeriodSeconds is controlled by the entityOperator
+      # Deployment — no spec.template on the Kafka CR (not in CRD schema either).
       resources:
         requests:
           memory: 128Mi
@@ -169,28 +172,16 @@ spec:
         limits:
           memory: 512Mi
           cpu: 250m
-      startupProbe:
-        initialDelaySeconds: 30
-        timeoutSeconds: 10
-        periodSeconds: 15
-        failureThreshold: 12
       livenessProbe:
-        initialDelaySeconds: 0
+        initialDelaySeconds: 60
         timeoutSeconds: 10
         periodSeconds: 30
         failureThreshold: 3
       readinessProbe:
-        initialDelaySeconds: 0
+        initialDelaySeconds: 60
         timeoutSeconds: 10
         periodSeconds: 30
         failureThreshold: 3
-  # Give the entity operator pod enough time to flush in-flight reconciliations
-  # before SIGKILL. 120s matches the Kafka broker terminationGracePeriodSeconds.
-  # Default Deployment grace period (30s) is too short — the topic/user operators
-  # need time to drain their work queues cleanly.
-  template:
-    pod:
-      terminationGracePeriodSeconds: 120
 
 ---
 apiVersion: kafka.strimzi.io/v1
