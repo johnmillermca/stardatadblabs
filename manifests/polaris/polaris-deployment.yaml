@@ -21,7 +21,6 @@ data:
     quarkus.datasource.jdbc.url=jdbc:postgresql://postgresql.prod.svc.cluster.local:5432/polaris
     quarkus.datasource.username=${POLARIS_DB_USER}
     quarkus.datasource.password=${POLARIS_DB_PASS}
-    polaris.bootstrap.credentials=POLARIS:${POLARIS_BOOTSTRAP_CLIENT_ID}:${POLARIS_BOOTSTRAP_CLIENT_SECRET}
     polaris.realm-context.require-header=false
     polaris.features.ALLOW_WILDCARD_LOCATION=true
     polaris.features.INITIALIZE_DEFAULT_CATALOG_FILEIO_FOR_WRITES=true
@@ -54,7 +53,7 @@ spec:
           effect: "NoSchedule"
       containers:
         - name: polaris
-          image: 192.168.1.50:30500/apache-polaris:1.6.0-r1
+          image: 192.168.1.50:30500/apache-polaris:1.6.0-r2
           imagePullPolicy: Always
           ports:
             - name: rest
@@ -70,16 +69,14 @@ spec:
                 secretKeyRef:
                   name: polaris-db-credentials
                   key: db-password
-            - name: POLARIS_BOOTSTRAP_CLIENT_ID
+            # Polaris reads POLARIS_BOOTSTRAP_CREDENTIALS from the environment
+            # directly (System.getenv). Format: clientId:clientSecret
+            # This keeps the root credentials fixed across restarts.
+            - name: POLARIS_BOOTSTRAP_CREDENTIALS
               valueFrom:
                 secretKeyRef:
                   name: polaris-bootstrap-credentials
-                  key: client-id
-            - name: POLARIS_BOOTSTRAP_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: polaris-bootstrap-credentials
-                  key: client-secret
+                  key: credentials
           volumeMounts:
             - name: polaris-config
               mountPath: /home/polaris/application.properties

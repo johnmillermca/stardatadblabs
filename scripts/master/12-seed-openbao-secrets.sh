@@ -274,21 +274,18 @@ else
 fi
 
 # ─── 11b. Apache Polaris — bootstrap (root catalog) credentials ───────────────
-# These are the fixed client-id/secret used to authenticate as the Polaris root
-# principal.  Without this, Polaris regenerates random credentials every restart
-# and previously-issued tokens stop working.
+# Polaris reads POLARIS_BOOTSTRAP_CREDENTIALS env var (System.getenv).
+# Format: clientId:clientSecret  (16-hex-char ID, 32-hex-char secret).
+# Without this, Polaris regenerates random credentials every restart.
 if bao_secret_exists "secret/data/polaris/bootstrap"; then
   skip "polaris-bootstrap-credentials"
 else
-  # client-id: 16 hex chars (matches Polaris auto-generated format)
   POL_CLIENT_ID=$(openssl rand -hex 8)
   POL_CLIENT_SECRET=$(openssl rand -hex 16)
   bao_write "secret/data/polaris/bootstrap" \
-    "client-id=${POL_CLIENT_ID}" \
-    "client-secret=${POL_CLIENT_SECRET}"
+    "credentials=${POL_CLIENT_ID}:${POL_CLIENT_SECRET}"
   kube_secret polaris-bootstrap-credentials prod \
-    "client-id=${POL_CLIENT_ID}" \
-    "client-secret=${POL_CLIENT_SECRET}"
+    "credentials=${POL_CLIENT_ID}:${POL_CLIENT_SECRET}"
   ok "polaris-bootstrap-credentials"
 fi
 

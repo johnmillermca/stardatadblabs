@@ -12,8 +12,6 @@ if [ -f "${PROPS_SRC}" ]; then
     sed -i \
         -e "s|\${POLARIS_DB_USER}|${POLARIS_DB_USER:-polaris}|g" \
         -e "s|\${POLARIS_DB_PASS}|${POLARIS_DB_PASS:-changeme}|g" \
-        -e "s|\${POLARIS_BOOTSTRAP_CLIENT_ID}|${POLARIS_BOOTSTRAP_CLIENT_ID}|g" \
-        -e "s|\${POLARIS_BOOTSTRAP_CLIENT_SECRET}|${POLARIS_BOOTSTRAP_CLIENT_SECRET}|g" \
         "${PROPS}"
     echo "[entrypoint] Configuration written to ${PROPS}"
 else
