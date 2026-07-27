@@ -89,6 +89,33 @@ configs:
     argocdServerAdminPasswordMtime: ""
   cm:
     url: "https://192.168.1.50:30443"
+    # Exclude Strimzi-operator-owned PVCs and ClusterRoleBindings from ArgoCD
+    # tracking entirely. These resources are created by the Strimzi operator at
+    # runtime (not in git) and carry label app.kubernetes.io/managed-by: strimzi-cluster-operator.
+    # Without this exclusion, ArgoCD marks them requiresPruning → OutOfSync on
+    # every sync because they are "not present in application source".
+    # prune: false alone is insufficient — it changes the action to PruneSkipped
+    # but still marks the app OutOfSync. This exclusion removes them from the
+    # comparison entirely so the app stays Synced/Healthy.
+    resource.exclusions: |
+      - apiGroups:
+        - ""
+        kinds:
+        - PersistentVolumeClaim
+        clusters:
+        - "*"
+        labelSelectors:
+        - matchLabels:
+            app.kubernetes.io/managed-by: strimzi-cluster-operator
+      - apiGroups:
+        - rbac.authorization.k8s.io
+        kinds:
+        - ClusterRoleBinding
+        clusters:
+        - "*"
+        labelSelectors:
+        - matchLabels:
+            app.kubernetes.io/managed-by: strimzi-cluster-operator
   rbac:
     policy.default: role:readonly
     policy.csv: |
