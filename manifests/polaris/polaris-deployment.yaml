@@ -54,7 +54,7 @@ spec:
           effect: "NoSchedule"
       containers:
         - name: polaris
-          image: 192.168.1.50:30500/apache-polaris:1.6.0
+          image: 192.168.1.50:30500/apache-polaris:1.6.0-r1
           imagePullPolicy: Always
           ports:
             - name: rest
