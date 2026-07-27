@@ -309,7 +309,7 @@ metadata:
   name: pvc-5f695b16-1ee6-437b-8134-e24602c1bb5f
 spec:
   capacity:
-    storage: 50Gi
+    storage: 250Gi
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
