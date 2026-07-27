@@ -52,6 +52,13 @@ spec:
       metadata:
         annotations:
           argocd.argoproj.io/compare-options: IgnoreExtraneous
+    # Annotate the kafka-init ClusterRoleBinding so ArgoCD ignores it.
+    # Strimzi generates this CRB at runtime with the ServiceAccount subject;
+    # it is not in the git manifest so ArgoCD would mark it PruneSkipped forever.
+    clusterRoleBinding:
+      metadata:
+        annotations:
+          argocd.argoproj.io/compare-options: IgnoreExtraneous
     pod:
       affinity:
         nodeAffinity:
