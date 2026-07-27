@@ -490,3 +490,36 @@ spec:
               operator: In
               values:
                 - worker2.local
+---
+# PVC 'data-strimzi-kafka-combined-0' (prod) on worker4.local
+# Strimzi KafkaNodePool — combined controller+broker (KRaft)
+# IMPORTANT: This PV is created by the local-path provisioner when the
+# KafkaNodePool first binds its PVC. It is recorded here so that after a
+# full cluster rebuild the PV can be recreated with the same name, claimRef,
+# and hostPath — allowing the existing PVC to rebind to its data rather than
+# getting stuck in Released state.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-69ed15cb-feae-4d77-9f1f-362778687016
+spec:
+  capacity:
+    storage: 250Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
+    type: DirectoryOrCreate
+  claimRef:
+    name: data-strimzi-kafka-combined-0
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker4.local

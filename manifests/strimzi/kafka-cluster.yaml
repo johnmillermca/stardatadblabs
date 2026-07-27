@@ -8,7 +8,10 @@
 #   EXTERNAL port 9094 → NodePort 30093 — external access
 # Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # Kafka ver   : 4.2.0 (matches installed Strimzi operator)
-# PVC         : 50Gi on /home (worker4.local)
+# PVC         : 250Gi on /home (worker4.local) — reclaimPolicy: Retain
+#               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
+#               hostPath: /home/local-path-provisioner/
+#                 pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
 # =============================================================================
 
 ---
@@ -111,10 +114,83 @@ spec:
       transaction.state.log.min.isr: "1"
       default.replication.factor: "1"
       min.insync.replicas: "1"
-      auto.create.topics.enable: "true"
+      # Disable auto-create: the Strimzi topic operator manages all topics
+      # declaratively via KafkaTopic CRs. auto.create.topics.enable=true causes
+      # races where Kafka creates a topic with default settings before the operator
+      # can apply the KafkaTopic spec (wrong retention, partitions, compaction etc).
+      auto.create.topics.enable: "false"
+      # ── Durability: flush to disk before OS page-cache writeback ─────────────
+      # Flush every 10 000 messages OR every 1 000ms — whichever comes first.
+      # Default (flush only on page-cache eviction) means up to ~5s of data is
+      # unsynced to disk on a hard power failure. These values cap that window.
+      log.flush.interval.messages: "10000"
+      log.flush.interval.ms: "1000"
+      # ── Log retention ─────────────────────────────────────────────────────────
+      # Keep log segments for 7 days (default). Check interval reduced to 1 min
+      # so compacted topics reclaim space promptly after restart.
+      log.retention.hours: "168"
+      log.retention.check.interval.ms: "60000"
   entityOperator:
-    topicOperator: {}
-    userOperator: {}
+    topicOperator:
+      # Resources for the topic-operator JVM.
+      # Default 512Mi limit causes OOM when reconciling many topics on startup
+      # (8 restarts observed — all exit code 1 / OOM). Bump to 1Gi.
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 100m
+        limits:
+          memory: 1Gi
+          cpu: 500m
+      # Allow up to 3 min for Kafka bootstrap to be ready before declaring
+      # the operator unhealthy. On reboot, Kafka KRaft leader election can
+      # take 60–90 s; without a startupProbe the liveness probe fires first
+      # and restarts the operator — causing the 8 crash-loops seen in prod.
+      startupProbe:
+        initialDelaySeconds: 30
+        timeoutSeconds: 10
+        periodSeconds: 15
+        failureThreshold: 12   # 30 + 12×15 = 210s max wait for Kafka ready
+      livenessProbe:
+        initialDelaySeconds: 0
+        timeoutSeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+      readinessProbe:
+        initialDelaySeconds: 0
+        timeoutSeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+    userOperator:
+      resources:
+        requests:
+          memory: 128Mi
+          cpu: 50m
+        limits:
+          memory: 512Mi
+          cpu: 250m
+      startupProbe:
+        initialDelaySeconds: 30
+        timeoutSeconds: 10
+        periodSeconds: 15
+        failureThreshold: 12
+      livenessProbe:
+        initialDelaySeconds: 0
+        timeoutSeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+      readinessProbe:
+        initialDelaySeconds: 0
+        timeoutSeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+  # Give the entity operator pod enough time to flush in-flight reconciliations
+  # before SIGKILL. 120s matches the Kafka broker terminationGracePeriodSeconds.
+  # Default Deployment grace period (30s) is too short — the topic/user operators
+  # need time to drain their work queues cleanly.
+  template:
+    pod:
+      terminationGracePeriodSeconds: 120
 
 ---
 apiVersion: kafka.strimzi.io/v1
