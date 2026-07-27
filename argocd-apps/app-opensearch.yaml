@@ -19,6 +19,15 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: search
+  # k8s 1.27+ injects persistentVolumeClaimRetentionPolicy into every StatefulSet
+  # at runtime. The OpenSearch Helm chart does not set this field, causing
+  # permanent OutOfSync. Ignore it so ArgoCD does not fight the API server.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      name: opensearch-cluster-master
+      jsonPointers:
+        - /spec/persistentVolumeClaimRetentionPolicy
   syncPolicy:
     automated:
       prune: true

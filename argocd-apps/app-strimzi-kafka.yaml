@@ -19,15 +19,16 @@ spec:
     - group: ""
       kind: PersistentVolumeClaim
       jsonPointers:
-        - /metadata
-        - /spec
+        - /metadata/annotations/pv.kubernetes.io~1bind-completed
+        - /metadata/labels/argocd.argoproj.io~1instance
         - /status
     - group: "rbac.authorization.k8s.io"
       kind: ClusterRoleBinding
       name: strimzi-prod-strimzi-kafka-kafka-init
       jsonPointers:
-        - /metadata
         - /subjects
+        - /metadata/annotations
+        - /metadata/labels
   syncPolicy:
     automated:
       prune: false
