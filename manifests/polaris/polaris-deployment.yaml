@@ -69,14 +69,6 @@ spec:
                 secretKeyRef:
                   name: polaris-db-credentials
                   key: db-password
-            # Polaris reads POLARIS_BOOTSTRAP_CREDENTIALS from the environment
-            # directly (System.getenv). Format: clientId:clientSecret
-            # This keeps the root credentials fixed across restarts.
-            - name: POLARIS_BOOTSTRAP_CREDENTIALS
-              valueFrom:
-                secretKeyRef:
-                  name: polaris-bootstrap-credentials
-                  key: credentials
           volumeMounts:
             - name: polaris-config
               mountPath: /home/polaris/application.properties
