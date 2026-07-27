@@ -1,9 +1,20 @@
 # =============================================================================
-# Storage — local-path provisioner reconfigured to use /home on all nodes
+# Storage — local-path StorageClass + provisioner path config
+# reclaimPolicy: Retain  — data is NEVER deleted when a PVC is removed
 # All application PVCs should use storageClassName: local-path
-# The provisioner is patched via ConfigMap to provision under /home
 # =============================================================================
 
+# StorageClass with Retain policy — ensures no PV is auto-deleted on PVC removal
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+---
 # Patch the local-path-provisioner ConfigMap to use /home on every node
 apiVersion: v1
 kind: ConfigMap
