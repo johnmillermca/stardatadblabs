@@ -11,14 +11,15 @@ spec:
       chart: opensearch
       targetRevision: "3.7.0"
       helm:
+        releaseName: opensearch
         valueFiles:
-          - $values/k8s-platform/helm/opensearch/values.yaml
+          - $values/helm/opensearch/values.yaml
     - repoURL: https://github.com/johnmillermca/stardatadblabs
       targetRevision: HEAD
       ref: values
   destination:
     server: https://kubernetes.default.svc
-    namespace: search
+    namespace: prod
   # k8s 1.27+ injects persistentVolumeClaimRetentionPolicy into every StatefulSet
   # at runtime. The OpenSearch Helm chart does not set this field, causing
   # permanent OutOfSync. Ignore it so ArgoCD does not fight the API server.
