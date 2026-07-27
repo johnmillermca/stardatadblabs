@@ -26,9 +26,16 @@ This runbook documents every degraded pod/service encountered after cluster rebo
 12. [Strimzi Kafka CR — NotReady After Reboot (KRaft Controller Race)](#12-strimzi-kafka-cr--notready-after-reboot-kraft-controller-race)
 13. [Kafka PVC Pruned by ArgoCD (Data-Loss Near-Miss)](#13-kafka-pvc-pruned-by-argocd-data-loss-near-miss)
 
+### Session 3 — 2026-07-27 (Strimzi Kafka ArgoCD & Reboot-Safety Hardening)
+14. [Strimzi KafkaNodePool — Unknown Sync Status (ComparisonError)](#14-strimzi-kafkanodepool--unknown-sync-status-comparisionerror)
+15. [strimzi-kafka OutOfSync — PVC + CRB "Not Present in Source"](#15-strimzi-kafka-outofsync--pvc--crb-not-present-in-source)
+16. [Kafka Entity Operator — 8 Crash-Loops on Reboot](#16-kafka-entity-operator--8-crash-loops-on-reboot)
+17. [Kafka Data Durability — Missing Disk Flush + auto.create.topics Race](#17-kafka-data-durability--missing-disk-flush--autocreatetopics-race)
+18. [Kafka PV Not in Git — Silent Rebuild Risk](#18-kafka-pv-not-in-git--silent-rebuild-risk)
+
 ### Reference
-14. [Post-Reboot Recovery Checklist](#14-post-reboot-recovery-checklist)
-15. [Architecture Lessons Learned](#15-architecture-lessons-learned)
+19. [Post-Reboot Recovery Checklist](#14-post-reboot-recovery-checklist)
+20. [Architecture Lessons Learned](#15-architecture-lessons-learned)
 
 ---
 
@@ -868,4 +875,353 @@ initContainers:
 
 ---
 
-*Last updated: 2026-07-26 — covers Session 1 (2026-07-24), Session 2 (2026-07-26), Session 3 (2026-07-26), and Session 4 (2026-07-26) post-reboot hardening.*
+## Session 3 — 2026-07-27
+
+---
+
+## 14. Strimzi KafkaNodePool — Unknown Sync Status (ComparisonError)
+
+### App
+`strimzi-kafka` ArgoCD application — `combined` KafkaNodePool sync status: **Unknown**
+
+### Symptom
+ArgoCD `strimzi-kafka` app showed `Unknown` sync status (not OutOfSync, not Synced — Unknown). ArgoCD condition:
+```
+Failed to compare desired state to live state: failed to calculate diff:
+error calculating structured merge diff: error building typed value from config
+resource: .spec.template.clusterRoleBinding: field not declared in schema
+```
+
+### Root Cause
+The `KafkaNodePool` manifest had a `clusterRoleBinding` block under `spec.template`:
+```yaml
+# manifests/strimzi/kafka-cluster.yaml
+template:
+  clusterRoleBinding:           # ← NOT in KafkaNodePool CRD schema
+    metadata:
+      annotations:
+        argocd.argoproj.io/compare-options: IgnoreExtraneous
+```
+The installed Strimzi 1.1.0 `KafkaNodePool` CRD **does not declare `clusterRoleBinding`** under `spec.template`. The only valid template fields are: `initContainer`, `kafkaContainer`, `perPodIngress`, `perPodRoute`, `perPodService`, `persistentVolumeClaim`, `pod`, `podSet`.
+
+With `ServerSideApply=true`, the Kubernetes API rejects the unknown field when ArgoCD tries to build a typed merge diff — returning a `ComparisonError` that renders the entire app `Unknown`.
+
+### Permanent Fix
+**File:** [`manifests/strimzi/kafka-cluster.yaml`](../../manifests/strimzi/kafka-cluster.yaml) — removed the `clusterRoleBinding` template block from `KafkaNodePool`.
+
+The kafka-init `ClusterRoleBinding` is handled entirely via `ignoreDifferences` in the ArgoCD app (see §15 below).
+
+```bash
+# Verify CRD schema does not include clusterRoleBinding
+kubectl get crd kafkanodepools.kafka.strimzi.io \
+  -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.template.properties}' \
+  | python3 -c "import sys,json; print(sorted(json.load(sys.stdin).keys()))"
+# ['initContainer', 'kafkaContainer', 'perPodIngress', 'perPodRoute',
+#  'perPodService', 'persistentVolumeClaim', 'pod', 'podSet']
+```
+
+### Commits
+- `8ba6503` — `fix(strimzi): remove clusterRoleBinding from KafkaNodePool spec.template`
+
+### Result
+```
+strimzi-kafka  Sync: Synced  Health: Healthy
+KafkaNodePool combined: Synced
+```
+
+### Rule
+> Before adding any field to a Strimzi CRD's `template` section, verify it exists in the live CRD schema. The schema changes between Strimzi versions. `ServerSideApply=true` rejects unknown fields at the API server — it does not silently ignore them.
+
+---
+
+## 15. strimzi-kafka OutOfSync — PVC + CRB "Not Present in Source"
+
+### Symptom
+`strimzi-kafka` ArgoCD app perpetually `OutOfSync` with message:
+```
+This resource is not present in the application's source.
+It will be deleted from Kubernetes if the prune option is enabled during sync.
+```
+Two resources flagged:
+| Resource | Kind | Why not in git |
+|---|---|---|
+| `data-strimzi-kafka-combined-0` | PersistentVolumeClaim | Created by Strimzi operator at runtime |
+| `strimzi-prod-strimzi-kafka-kafka-init` | ClusterRoleBinding | Created by Strimzi operator at runtime |
+
+### Root Cause — Three Compounding Issues
+
+**Issue A — `ignoreDifferences` with `name:` filter does not suppress `requiresPruning`:**
+The existing config used named entries:
+```yaml
+ignoreDifferences:
+  - kind: PersistentVolumeClaim
+    name: data-strimzi-kafka-combined-0   # ← name filter
+    jsonPointers: [/]
+  - kind: ClusterRoleBinding
+    name: strimzi-prod-strimzi-kafka-kafka-init
+    jsonPointers: [/]
+```
+`ignoreDifferences` with `name:` only suppresses *field-level* diffs. It does **not** suppress the `requiresPruning` flag set when a resource exists in the cluster but not in git. The app stayed OutOfSync.
+
+**Issue B — `argocd.argoproj.io/compare-options: IgnoreExtraneous` annotation on live resources:**
+The PVC had this annotation but ArgoCD v2.11 does not honour it for the overall app sync status computation. The CRB had no annotation at all.
+
+**Issue C — No global resource exclusion for Strimzi-managed resources:**
+ArgoCD had no rule to exclude Strimzi-generated PVCs and CRBs from its tracking inventory entirely.
+
+### Permanent Fix — Two Changes
+
+**Fix 1 — Remove `name:` filter from `ignoreDifferences`** (type-wide rule suppresses more diff paths):
+**File:** [`argocd-apps/app-strimzi-kafka.yaml`](../../argocd-apps/app-strimzi-kafka.yaml)
+```yaml
+ignoreDifferences:
+  - group: ""
+    kind: PersistentVolumeClaim   # ← no name: filter = type-wide rule
+    jsonPointers: [/]
+  - group: "rbac.authorization.k8s.io"
+    kind: ClusterRoleBinding
+    jsonPointers: [/]
+```
+
+**Fix 2 — Add `resource.exclusions` to `argocd-cm`** scoped to Strimzi-labeled resources:
+**File:** [`helm/argocd/values.yaml`](../../helm/argocd/values.yaml) — `configs.cm.resource.exclusions`
+```yaml
+resource.exclusions: |
+  - apiGroups: [""]
+    kinds: [PersistentVolumeClaim]
+    clusters: ["*"]
+    labelSelectors:
+      - matchLabels:
+          app.kubernetes.io/managed-by: strimzi-cluster-operator
+  - apiGroups: [rbac.authorization.k8s.io]
+    kinds: [ClusterRoleBinding]
+    clusters: ["*"]
+    labelSelectors:
+      - matchLabels:
+          app.kubernetes.io/managed-by: strimzi-cluster-operator
+```
+This removes Strimzi-operator-owned PVCs and CRBs from ArgoCD's tracking inventory entirely — the app sync hash excludes them so the app reports `Synced` regardless of whether they exist.
+
+Also annotated the live CRB immediately:
+```bash
+kubectl annotate clusterrolebinding strimzi-prod-strimzi-kafka-kafka-init \
+  argocd.argoproj.io/compare-options=IgnoreExtraneous --overwrite
+```
+
+### Commits
+- `5be8726` — `fix(argocd/strimzi): remove name filter from ignoreDifferences`
+- `461f289` — `fix(argocd): persist resource.exclusions for strimzi-managed PVC+CRB`
+
+### Result
+```
+strimzi-kafka  Sync: Synced  Health: Healthy  (no OutOfSync resources)
+```
+
+### Rule
+> `ignoreDifferences` with `name:` suppresses field-level diffs only. To suppress "not present in source" OutOfSync, use `resource.exclusions` in `argocd-cm` scoped by label, OR use `ignoreDifferences` without `name:` (type-wide). Never rely solely on `IgnoreExtraneous` annotations for the app-level sync status in ArgoCD v2.11.
+
+---
+
+## 16. Kafka Entity Operator — 8 Crash-Loops on Reboot
+
+### Pod
+`strimzi-kafka-entity-operator-784c68b99-qb66r` — `prod` namespace — **8 restarts** (both `topic-operator` and `user-operator` containers)
+
+### Symptom
+Entity operator crash-loops on every reboot / cold start. `--previous` logs:
+```
+WARN  ClientUtils:90 - Couldn't resolve server strimzi-kafka-kafka-bootstrap:9091
+Exception in thread "main" org.apache.kafka.common.KafkaException:
+  Failed to create new KafkaAdminClient
+Caused by: ConfigException: No resolvable bootstrap urls given in bootstrap.servers
+```
+`topic-operator` and `user-operator` both exit with code 1 immediately.
+
+### Root Cause — Two Compounding Issues
+
+**Issue A — No startup probe:** The entity operator containers connected to `strimzi-kafka-kafka-bootstrap:9091` (Strimzi's internal mTLS port) on startup. After a node reboot, Kafka's KRaft leader election takes 60–90 seconds. The entity operator tried to connect before Kafka was ready → DNS resolved but TCP connection refused → `KafkaAdminClient` creation failed → `exit 1`. The default `livenessProbe` (or pod restart on non-zero exit) immediately restarted the container, which retried too soon and failed again → 8 crash-loops.
+
+**Issue B — Default memory limit (512Mi) too small:** Both containers defaulted to `{}` resources — Strimzi applied 512Mi limits. Under the topic reconciliation burst on startup (replaying all KafkaTopic CRs), the JVM OOM-killed an admin client thread, causing an additional exit-code-1 failure path.
+
+### Permanent Fix
+**File:** [`manifests/strimzi/kafka-cluster.yaml`](../../manifests/strimzi/kafka-cluster.yaml) — `spec.entityOperator`
+
+```yaml
+entityOperator:
+  topicOperator:
+    resources:
+      requests: { memory: 256Mi, cpu: 100m }
+      limits:   { memory: 1Gi,   cpu: 500m }   # was 512Mi — OOM risk
+    startupProbe:                                # gates liveness until Kafka ready
+      initialDelaySeconds: 30
+      timeoutSeconds: 10
+      periodSeconds: 15
+      failureThreshold: 12    # 30 + 12×15 = 210s max wait for Kafka bootstrap
+    livenessProbe:
+      initialDelaySeconds: 0
+      timeoutSeconds: 10
+      periodSeconds: 30
+      failureThreshold: 3
+    readinessProbe:
+      initialDelaySeconds: 0
+      timeoutSeconds: 10
+      periodSeconds: 30
+      failureThreshold: 3
+  userOperator:
+    resources:
+      requests: { memory: 128Mi, cpu: 50m  }
+      limits:   { memory: 512Mi, cpu: 250m }
+    livenessProbe:             # startupProbe NOT in userOperator CRD schema
+      initialDelaySeconds: 60
+      timeoutSeconds: 10
+      periodSeconds: 30
+      failureThreshold: 3
+    readinessProbe:
+      initialDelaySeconds: 60
+      timeoutSeconds: 10
+      periodSeconds: 30
+      failureThreshold: 3
+```
+
+> ⚠️ **CRD schema gotcha:** `startupProbe` exists on `topicOperator` but is **not declared** in the `userOperator` CRD schema. `spec.template` is also **not declared** on the `Kafka` CR (only on `KafkaNodePool`). Adding undeclared fields causes `ComparisonError → Unknown` — same pattern as §14.
+
+### Verify CRD schema before editing
+```bash
+# topicOperator fields
+kubectl get crd kafkas.kafka.strimzi.io \
+  -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.entityOperator.properties.topicOperator.properties}' \
+  | python3 -c "import sys,json; print(sorted(json.load(sys.stdin).keys()))"
+# ['image','jvmOptions','livenessProbe','logging','readinessProbe',
+#  'reconciliationIntervalMs','resources','startupProbe','watchedNamespace']
+
+# userOperator fields
+kubectl get crd kafkas.kafka.strimzi.io \
+  -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.entityOperator.properties.userOperator.properties}' \
+  | python3 -c "import sys,json; print(sorted(json.load(sys.stdin).keys()))"
+# ['image','jvmOptions','livenessProbe','logging','readinessProbe',
+#  'reconciliationIntervalMs','resources','secretPrefix','watchedNamespace']
+# NOTE: no startupProbe, no template
+```
+
+### Commits
+- `31e0460` — `fix(strimzi): harden kafka for reboot safety`
+- `7e21ca3` — `fix(strimzi): remove startupProbe from userOperator + spec.template from Kafka CR`
+
+### Result
+```
+strimzi-kafka-entity-operator-758454fc7b-rzhfx  2/2  Running  0 restarts  ✅
+topic-operator: requests=256Mi limits=1Gi  ready=true  restarts=0
+user-operator:  requests=128Mi limits=512Mi ready=true  restarts=0
+```
+
+---
+
+## 17. Kafka Data Durability — Missing Disk Flush + auto.create.topics Race
+
+### Symptom
+No immediate crash — two latent risks discovered during audit:
+1. **Data loss on hard power failure:** Kafka only flushed log segments on OS page-cache eviction (default). Up to ~5 seconds of messages were unsynced to disk at any moment.
+2. **Topic config corruption:** `auto.create.topics.enable: true` caused Kafka to auto-create topics with default settings (e.g. `cleanup.policy=delete`) before the Strimzi topic operator could apply the `KafkaTopic` CR spec. This silently corrupted the Debezium and schema-registry topics on first boot.
+
+### Root Cause
+Both are Kafka defaults that were not overridden:
+- `log.flush.interval.messages` defaults to `Long.MAX_VALUE` (never flush explicitly)
+- `log.flush.interval.ms` defaults to `Long.MAX_VALUE` (OS controls all flushing)
+- `auto.create.topics.enable` defaults to `true`
+
+### Permanent Fix
+**File:** [`manifests/strimzi/kafka-cluster.yaml`](../../manifests/strimzi/kafka-cluster.yaml) — `spec.kafka.config`
+
+```yaml
+config:
+  # Disable auto-create: Strimzi topic operator manages all topics declaratively.
+  # auto.create.topics.enable=true causes Kafka to create with wrong cleanup.policy
+  # before the operator applies the KafkaTopic CR spec.
+  auto.create.topics.enable: "false"
+
+  # Durability: flush log to disk every 10 000 messages OR every 1 000ms.
+  # Default (flush only on OS eviction) leaves up to ~5s of data unsynced
+  # on hard power failure.
+  log.flush.interval.messages: "10000"
+  log.flush.interval.ms: "1000"
+
+  # Log retention: keep 7 days (already default), check every 60s.
+  # Faster compaction check so _schemas and debezium topics reclaim space promptly.
+  log.retention.hours: "168"
+  log.retention.check.interval.ms: "60000"
+```
+
+### Commits
+- `31e0460` — `fix(strimzi): harden kafka for reboot safety`
+
+### Result
+Kafka broker restarted cleanly with the new config (Strimzi rolls broker on config change). Log flush is now deterministic; topic operator is the sole owner of topic creation.
+
+---
+
+## 18. Kafka PV Not in Git — Silent Rebuild Risk
+
+### Symptom
+No immediate failure — discovered during audit. The Kafka data PV (`pvc-69ed15cb-feae-4d77-9f1f-362778687016`) was **not in `manifests/storage/pv-retain.yaml`**.
+
+### Risk
+If the cluster was rebuilt from scratch (or the node `worker4.local` was reimaged), ArgoCD would apply all PV manifests from git. The Kafka PV would not exist in git → `data-strimzi-kafka-combined-0` PVC would fail to bind → Kafka would create a new PVC on a new PV → **all 250Gi of Kafka data unreachable** (the old PV still exists on disk but the cluster has no record of it).
+
+This is a silent recovery failure: no alert, no CrashLoopBackOff — Kafka starts on empty storage and data is gone.
+
+### Root Cause
+The Kafka PVC was created by the Strimzi operator at runtime (not declared in git). The PV was created by the `local-path` provisioner. Because neither is in git, they were not included in the manual PV backup in `pv-retain.yaml`.
+
+### Permanent Fix
+**File:** [`manifests/storage/pv-retain.yaml`](../../manifests/storage/pv-retain.yaml) — added full PV spec:
+
+```yaml
+# PVC 'data-strimzi-kafka-combined-0' (prod) on worker4.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pvc-69ed15cb-feae-4d77-9f1f-362778687016
+spec:
+  capacity:
+    storage: 250Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
+    type: DirectoryOrCreate
+  claimRef:
+    name: data-strimzi-kafka-combined-0
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [worker4.local]
+```
+
+### Verify
+```bash
+# Live PV matches git
+kubectl get pv pvc-69ed15cb-feae-4d77-9f1f-362778687016 \
+  -o jsonpath='name={.metadata.name} policy={.spec.persistentVolumeReclaimPolicy} status={.status.phase}{"\n"}'
+# name=pvc-69ed15cb-feae-4d77-9f1f-362778687016 policy=Retain status=Bound
+
+# PVC is Bound (never Terminating/Lost)
+kubectl get pvc data-strimzi-kafka-combined-0 -n prod
+```
+
+### Commits
+- `31e0460` — `fix(strimzi): harden kafka for reboot safety — entity-operator resources/probes, durability config, PV in git`
+
+### Rule
+> After **any** Strimzi-managed PVC is created, immediately add its PV to `manifests/storage/pv-retain.yaml`. The PV name and `hostPath` are visible in:
+> ```bash
+> kubectl get pv -o jsonpath='{range .items[?(@.spec.claimRef.name=="data-strimzi-kafka-combined-0")]}{.metadata.name} {.spec.hostPath.path}{"\n"}{end}'
+> ```
+
+---
+
+*Last updated: 2026-07-27 — covers Session 1 (2026-07-24), Session 2 (2026-07-26), Session 3 (2026-07-27) Strimzi ArgoCD & reboot-safety hardening.*
