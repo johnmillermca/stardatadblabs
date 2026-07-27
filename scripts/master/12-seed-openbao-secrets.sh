@@ -258,7 +258,7 @@ else
   ok "ranger-db-credentials"
 fi
 
-# ─── 11. Apache Polaris ───────────────────────────────────────────────────────
+# ─── 11. Apache Polaris — DB credentials ─────────────────────────────────────
 ensure_ns prod
 if bao_secret_exists "secret/data/polaris/credentials"; then
   skip "polaris-db-credentials"
@@ -271,6 +271,25 @@ else
     "db-user=polaris" \
     "db-password=${POL_DB}"
   ok "polaris-db-credentials"
+fi
+
+# ─── 11b. Apache Polaris — bootstrap (root catalog) credentials ───────────────
+# These are the fixed client-id/secret used to authenticate as the Polaris root
+# principal.  Without this, Polaris regenerates random credentials every restart
+# and previously-issued tokens stop working.
+if bao_secret_exists "secret/data/polaris/bootstrap"; then
+  skip "polaris-bootstrap-credentials"
+else
+  # client-id: 16 hex chars (matches Polaris auto-generated format)
+  POL_CLIENT_ID=$(openssl rand -hex 8)
+  POL_CLIENT_SECRET=$(openssl rand -hex 16)
+  bao_write "secret/data/polaris/bootstrap" \
+    "client-id=${POL_CLIENT_ID}" \
+    "client-secret=${POL_CLIENT_SECRET}"
+  kube_secret polaris-bootstrap-credentials prod \
+    "client-id=${POL_CLIENT_ID}" \
+    "client-secret=${POL_CLIENT_SECRET}"
+  ok "polaris-bootstrap-credentials"
 fi
 
 # ─── 12. Apache Doris ─────────────────────────────────────────────────────────
@@ -385,6 +404,7 @@ printf "  %-38s %-15s  %s\n" "opensearch-credentials"       "prod"            "s
 printf "  %-38s %-15s  %s\n" "kerberos-admin"               "prod"            "secret/data/kerberos/credentials"
 printf "  %-38s %-15s  %s\n" "ranger-db-credentials"        "prod"            "secret/data/ranger/credentials"
 printf "  %-38s %-15s  %s\n" "polaris-db-credentials"       "prod"            "secret/data/polaris/credentials"
+printf "  %-38s %-15s  %s\n" "polaris-bootstrap-credentials" "prod"           "secret/data/polaris/bootstrap"
 printf "  %-38s %-15s  %s\n" "doris-credentials"            "prod"            "secret/data/doris/credentials"
 printf "  %-38s %-15s  %s\n" "jupyterhub-credentials"       "prod"            "secret/data/jupyterhub/credentials"
 printf "  %-38s %-15s  %s\n" "kestra-credentials"           "prod"            "secret/data/kestra/credentials"

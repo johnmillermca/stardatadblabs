@@ -2,15 +2,23 @@
 # Polaris entrypoint — substitutes env vars then starts the Polaris server
 set -euo pipefail
 
-POLARIS_HOME=/opt/polaris
-PROPS=${POLARIS_HOME}/application.properties
+POLARIS_HOME=/home/polaris
+# The ConfigMap is mounted read-only; copy to /tmp so sed -i can write to it.
+PROPS_SRC=${POLARIS_HOME}/application.properties
+PROPS=/tmp/polaris-application.properties
 
-# Substitute env vars injected from Kubernetes secret
-if [ -f "${PROPS}" ]; then
+if [ -f "${PROPS_SRC}" ]; then
+    cp "${PROPS_SRC}" "${PROPS}"
     sed -i \
         -e "s|\${POLARIS_DB_USER}|${POLARIS_DB_USER:-polaris}|g" \
-        -e "s|\${POLARIS_DB_PASS}|${POLARIS_DB_PASS:-polaris}|g" \
+        -e "s|\${POLARIS_DB_PASS}|${POLARIS_DB_PASS:-changeme}|g" \
+        -e "s|\${POLARIS_BOOTSTRAP_CLIENT_ID}|${POLARIS_BOOTSTRAP_CLIENT_ID}|g" \
+        -e "s|\${POLARIS_BOOTSTRAP_CLIENT_SECRET}|${POLARIS_BOOTSTRAP_CLIENT_SECRET}|g" \
         "${PROPS}"
+    echo "[entrypoint] Configuration written to ${PROPS}"
+else
+    echo "[ERROR] Source properties not found at ${PROPS_SRC}" >&2
+    exit 1
 fi
 
 # Start the Quarkus server from the dist/server directory

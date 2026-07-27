@@ -3,9 +3,10 @@
 # Namespace : prod
 # Node      : master.local (pinned — freeing worker capacity)
 # Access    : http://192.168.1.50:30181 (Iceberg REST catalog API)
-# Depends on: PostgreSQL databases.postgresql:5432, db: polaris
+# Depends on: PostgreSQL prod.postgresql:5432, db: polaris
 # Image     : 192.168.1.50:30500/apache-polaris:1.6.0
-# Secret    : polaris-db-credentials (seeded by 12-seed-openbao-secrets.sh)
+# Secrets   : polaris-db-credentials        (seeded by 12-seed-openbao-secrets.sh)
+#             polaris-bootstrap-credentials  (seeded by 12-seed-openbao-secrets.sh)
 # =============================================================================
 ---
 apiVersion: v1
@@ -17,12 +18,11 @@ data:
   application.properties: |
     server.port=8181
     polaris.persistence.type=relational-jdbc
-    polaris.persistence.relational.jdbc.type=postgres
-    polaris.persistence.relational.jdbc.host=postgresql.prod.svc.cluster.local
-    polaris.persistence.relational.jdbc.port=5432
-    polaris.persistence.relational.jdbc.database=polaris
-    polaris.persistence.relational.jdbc.user=${POLARIS_DB_USER}
-    polaris.persistence.relational.jdbc.password=${POLARIS_DB_PASS}
+    quarkus.datasource.jdbc.url=jdbc:postgresql://postgresql.prod.svc.cluster.local:5432/polaris
+    quarkus.datasource.username=${POLARIS_DB_USER}
+    quarkus.datasource.password=${POLARIS_DB_PASS}
+    polaris.bootstrap.credentials=POLARIS:${POLARIS_BOOTSTRAP_CLIENT_ID}:${POLARIS_BOOTSTRAP_CLIENT_SECRET}
+    polaris.realm-context.require-header=false
     polaris.features.ALLOW_WILDCARD_LOCATION=true
     polaris.features.INITIALIZE_DEFAULT_CATALOG_FILEIO_FOR_WRITES=true
     logging.level.org.apache.polaris=INFO
@@ -55,7 +55,7 @@ spec:
       containers:
         - name: polaris
           image: 192.168.1.50:30500/apache-polaris:1.6.0
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: rest
               containerPort: 8181
@@ -70,11 +70,19 @@ spec:
                 secretKeyRef:
                   name: polaris-db-credentials
                   key: db-password
+            - name: POLARIS_BOOTSTRAP_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-bootstrap-credentials
+                  key: client-id
+            - name: POLARIS_BOOTSTRAP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-bootstrap-credentials
+                  key: client-secret
           volumeMounts:
             - name: polaris-config
-              # entrypoint.sh reads /opt/polaris/application.properties directly;
-              # mount the ConfigMap here rather than into the empty config/ subdir.
-              mountPath: /opt/polaris/application.properties
+              mountPath: /home/polaris/application.properties
               subPath: application.properties
           resources:
             requests:

@@ -8,19 +8,19 @@ FROM --platform=linux/amd64 docker.io/eclipse-temurin:21-jre-jammy
 
 ARG POLARIS_VERSION=1.6.0
 
-ENV POLARIS_HOME=/opt/polaris
+ENV POLARIS_HOME=/home/polaris
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl bash tar gzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -r polaris && useradd -r -g polaris -d ${POLARIS_HOME} polaris \
+RUN groupadd -r polaris && useradd -r -g polaris -d ${POLARIS_HOME} -m polaris \
     && mkdir -p ${POLARIS_HOME}/config ${POLARIS_HOME}/logs
 
 RUN curl -fsSL \
     "https://github.com/apache/polaris/releases/download/apache-polaris-${POLARIS_VERSION}/polaris-bin-${POLARIS_VERSION}.tgz" \
-    | tar -xzf - -C /opt \
-    && mv /opt/polaris-bin-${POLARIS_VERSION} ${POLARIS_HOME}/dist \
+    | tar -xzf - -C /tmp \
+    && mv /tmp/polaris-bin-${POLARIS_VERSION} ${POLARIS_HOME}/dist \
     && chown -R polaris:polaris ${POLARIS_HOME}
 
 WORKDIR ${POLARIS_HOME}

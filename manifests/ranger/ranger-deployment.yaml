@@ -97,7 +97,8 @@ spec:
               mkdir -p ${ADMIN_HOME}/ews/logs
               mkdir -p ${CONF}
 
-              # Copy conf.dist -> conf on first run
+              # Copy conf.dist -> conf on first run.
+              # MUST happen before the XML patch below so that ranger-admin-site.xml exists.
               if [ -d "${CONF}.dist" ]; then
                 cp -rn ${CONF}.dist/. ${CONF}/
               fi
@@ -114,7 +115,10 @@ spec:
                 cp /usr/share/java/postgresql.jar ${WEBAPP_LIB}/postgresql.jar
               fi
 
-              # Patch ranger-admin-site.xml with PostgreSQL JDBC settings
+              # Patch ranger-admin-site.xml with PostgreSQL JDBC settings.
+              # Uses upsert logic: updates existing keys and INSERTS missing ones
+              # (e.g. ranger.jpa.jdbc.dialect is absent from the stock distribution XML).
+              # This block runs AFTER conf.dist is copied so ${SITE} is guaranteed to exist.
               SITE=${CONF}/ranger-admin-site.xml
               DB_URL="jdbc:postgresql://${RANGER_DB_HOST:-postgresql.prod.svc.cluster.local}:${RANGER_DB_PORT:-5432}/${RANGER_DB_NAME:-ranger}"
               python3 - <<PYEOF
@@ -129,22 +133,43 @@ spec:
                 'ranger.jpa.jdbc.dialect':   'org.eclipse.persistence.platform.database.PostgreSQLPlatform',
                 'ranger.jpa.showsql':        'false',
               }
-              for prop in root.findall('property'):
-                  name = prop.find('name')
-                  val  = prop.find('value')
-                  if name is not None and name.text in patches:
-                      if val is not None:
-                          val.text = patches[name.text]
+              existing = {p.find('name').text: p for p in root.findall('property') if p.find('name') is not None}
+              for k, v in patches.items():
+                  if k in existing:
+                      val = existing[k].find('value')
+                      if val is not None: val.text = v
+                  else:
+                      prop = ET.SubElement(root, 'property')
+                      ET.SubElement(prop, 'name').text  = k
+                      ET.SubElement(prop, 'value').text = v
               tree.write('${SITE}', xml_declaration=True, encoding='UTF-8')
               PYEOF
 
               # Spring loads classpath:ranger-admin-site.xml (root of WEB-INF/classes/)
-              # so symlink conf/  XMLs to classes/ root
-              ln -sf ${CONF}/ranger-admin-site.xml         ${CLASSES}/ranger-admin-site.xml
-              ln -sf ${CONF}/ranger-admin-default-site.xml ${CLASSES}/ranger-admin-default-site.xml
+              # so symlink conf/ XMLs to classes/ root.
+              ln -sf ${CONF}/ranger-admin-site.xml          ${CLASSES}/ranger-admin-site.xml
+              ln -sf ${CONF}/ranger-admin-default-site.xml  ${CLASSES}/ranger-admin-default-site.xml
               ln -sf ${CONF}/security-applicationContext.xml ${CLASSES}/security-applicationContext.xml
 
-              exec /entrypoint.sh
+              # db_setup.py runs on first boot (no .setup_done marker).
+              # On subsequent restarts it is skipped — all schema/patches are already in PG.
+              if [ ! -f "/opt/ranger/data/.setup_done" ]; then
+                echo "[init] First boot — running db_setup.py..."
+                cd ${ADMIN_HOME}
+                cp /opt/ranger/install.properties ${ADMIN_HOME}/install.properties
+                python3 db_setup.py || true
+                touch /opt/ranger/data/.setup_done
+                echo "[init] db_setup.py complete."
+              fi
+
+              ${ADMIN_HOME}/ews/ranger-admin-services.sh start
+              # Block: tail the Tomcat log so the container stays alive.
+              # Wait up to 30s for the log file to appear before falling back to sleep.
+              LOG_WAIT=0
+              while [ ! -f ${ADMIN_HOME}/ews/logs/ranger-admin-*.log ] && [ $LOG_WAIT -lt 30 ]; do
+                sleep 1; LOG_WAIT=$((LOG_WAIT+1))
+              done
+              exec tail -f ${ADMIN_HOME}/ews/logs/ranger-admin-*.log 2>/dev/null || exec sleep infinity
           ports:
             - name: http
               containerPort: 6080
