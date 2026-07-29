@@ -41,6 +41,53 @@ data:
     postgres_core_file=db/postgres/xa_core_db_postgres.sql
     sqlserver_core_file=db/sqlserver/xa_core_db_sqlserver.sql
     sqlanywhere_core_file=db/sqlanywhere/xa_core_db_sqlanywhere.sql
+
+  ranger-admin-site-perf-patch.xml: |
+    <!--
+    Performance-critical Ranger Admin settings for TB-scale concurrent loads.
+
+    Design: Ranger plugins cache all policies locally and evaluate them IN-PROCESS
+    (no network call per query). The Admin server is only contacted every
+    ranger.plugin.policy.pollIntervalMs (30 000 ms) to refresh the cache.
+    These settings ensure the Admin can serve many simultaneous plugin poll
+    requests without exhausting its DB connection pool or JVM heap.
+    -->
+    <configuration>
+      <!-- DB connection pool: enough for all plugin services polling in parallel.
+           8 services × 2 connections each = 16; add 4 for UI/API headroom. -->
+      <property>
+        <name>ranger.jpa.jdbc.maxpoolsize</name>
+        <value>20</value>
+      </property>
+      <property>
+        <name>ranger.jpa.jdbc.minpoolsize</name>
+        <value>5</value>
+      </property>
+      <!-- Keep idle connections alive to avoid reconnect overhead mid-load. -->
+      <property>
+        <name>ranger.jpa.jdbc.maxidletime</name>
+        <value>600</value>
+      </property>
+      <!-- Async audit: audit writes never block the policy-decision path.
+           Audit events are queued in memory and flushed to the DB in a
+           background thread — zero latency added to data queries. -->
+      <property>
+        <name>ranger.async.audit.worker.pool.size</name>
+        <value>4</value>
+      </property>
+      <property>
+        <name>ranger.async.audit.queue.size</name>
+        <value>10000</value>
+      </property>
+      <!-- Policy download pagination: large policy sets are served in pages
+           to avoid single mega-responses that stall Tomcat request threads. -->
+      <property>
+        <name>ranger.policyengine.trie.prefilter.enabled</name>
+        <value>true</value>
+      </property>
+      <!-- JVM: prefer G1GC for large heap, reduces stop-the-world pauses
+           during peak policy cache reload storms. Set in JAVA_OPTS below. -->
+    </configuration>
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -132,6 +179,15 @@ spec:
                 'ranger.jpa.jdbc.password':  '${RANGER_DB_PASS}',
                 'ranger.jpa.jdbc.dialect':   'org.eclipse.persistence.platform.database.PostgreSQLPlatform',
                 'ranger.jpa.showsql':        'false',
+                # Performance: DB connection pool sizing for TB-scale plugin polling
+                'ranger.jpa.jdbc.maxpoolsize':  '20',
+                'ranger.jpa.jdbc.minpoolsize':  '5',
+                'ranger.jpa.jdbc.maxidletime':  '600',
+                # Async audit: audit writes queue in memory, never block policy decisions
+                'ranger.async.audit.worker.pool.size': '4',
+                'ranger.async.audit.queue.size':       '10000',
+                # Trie prefilter: fast policy evaluation using prefix tree
+                'ranger.policyengine.trie.prefilter.enabled': 'true',
               }
               existing = {p.find('name').text: p for p in root.findall('property') if p.find('name') is not None}
               for k, v in patches.items():
@@ -161,6 +217,18 @@ spec:
                 touch /opt/ranger/data/.setup_done
                 echo "[init] db_setup.py complete."
               fi
+
+              # ── Performance: set JAVA_OPTS for G1GC + large heap before Tomcat starts.
+              # G1GC reduces stop-the-world pause time on the 4Gi heap vs. default
+              # ParallelGC, which is critical when 8 plugins simultaneously poll for
+              # policy updates while a TB-scale load is running.
+              export JAVA_OPTS="-Xms1g -Xmx3500m \
+                -XX:+UseG1GC \
+                -XX:G1HeapRegionSize=16m \
+                -XX:MaxGCPauseMillis=200 \
+                -XX:+ParallelRefProcEnabled \
+                -Djava.security.egd=file:/dev/./urandom"
+              export RANGER_ADMIN_JAVA_OPTS="${JAVA_OPTS}"
 
               ${ADMIN_HOME}/ews/ranger-admin-services.sh start
               # Block: tail the Tomcat log so the container stays alive.
@@ -217,10 +285,15 @@ spec:
               mountPath: /opt/ranger/data
           resources:
             requests:
-              memory: 512Mi
+              # Ranger Admin (Tomcat + EclipseLink JPA) needs at least 1.5Gi
+              # under normal load. 512Mi causes GC pressure during policy sync
+              # storms when many plugins poll simultaneously at TB-load time.
+              memory: 1.5Gi
               cpu: 500m
             limits:
-              memory: 2Gi
+              # 4Gi headroom ensures policy cache (all services × all policies)
+              # fits in heap without triggering GC during concurrent plugin polls.
+              memory: 4Gi
               cpu: "2"
           readinessProbe:
             httpGet:

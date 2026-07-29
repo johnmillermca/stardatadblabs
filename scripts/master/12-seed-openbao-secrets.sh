@@ -385,6 +385,40 @@ else
   ok "prometheus-credentials"
 fi
 
+# ─── 18. RBAC Users (Kerberos principals + Ranger local users) ────────────────
+# One password per RBAC persona, stored in OpenBao and read by:
+#   - 15-seed-rbac-principals.sh (creates Kerberos principals)
+#   - 16-seed-ranger-rbac.sh     (creates Ranger local users)
+ensure_ns prod
+if bao_secret_exists "secret/data/rbac/users"; then
+  skip "rbac-users"
+else
+  PA_PASS=$(gen_password)
+  CA_PASS=$(gen_password)
+  CD_PASS=$(gen_password)
+  PRA_PASS=$(gen_password)
+  PRD_PASS=$(gen_password)
+  SA_PASS=$(gen_password)
+  SD_PASS=$(gen_password)
+  bao_write "secret/data/rbac/users" \
+    "platform_admin-password=${PA_PASS}" \
+    "caching_admin_user-password=${CA_PASS}" \
+    "caching_dev_user-password=${CD_PASS}" \
+    "processing_admin_user-password=${PRA_PASS}" \
+    "processing_dev_user-password=${PRD_PASS}" \
+    "streaming_admin_user-password=${SA_PASS}" \
+    "streaming_dev_user-password=${SD_PASS}"
+  kube_secret rbac-users prod \
+    "platform_admin-password=${PA_PASS}" \
+    "caching_admin_user-password=${CA_PASS}" \
+    "caching_dev_user-password=${CD_PASS}" \
+    "processing_admin_user-password=${PRA_PASS}" \
+    "processing_dev_user-password=${PRD_PASS}" \
+    "streaming_admin_user-password=${SA_PASS}" \
+    "streaming_dev_user-password=${SD_PASS}"
+  ok "rbac-users"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -406,8 +440,11 @@ printf "  %-38s %-15s  %s\n" "doris-credentials"            "prod"            "s
 printf "  %-38s %-15s  %s\n" "jupyterhub-credentials"       "prod"            "secret/data/jupyterhub/credentials"
 printf "  %-38s %-15s  %s\n" "kestra-credentials"           "prod"            "secret/data/kestra/credentials"
 printf "  %-38s %-15s  %s\n" "sqlmesh-credentials"          "prod"            "secret/data/sqlmesh/credentials"
-printf "  %-38s %-15s  %s\n" "grafana-credentials"          "monitoring"     "secret/data/grafana/credentials"
-printf "  %-38s %-15s  %s\n" "prometheus-credentials"       "monitoring"     "secret/data/prometheus/credentials"
+printf "  %-38s %-15s  %s\n" "grafana-credentials"          "monitoring"      "secret/data/grafana/credentials"
+printf "  %-38s %-15s  %s\n" "prometheus-credentials"       "monitoring"      "secret/data/prometheus/credentials"
+printf "  %-38s %-15s  %s\n" "rbac-users"                   "prod"            "secret/data/rbac/users"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 log "Secret seeding complete. You may now apply ArgoCD apps."
+log "Next: sudo bash scripts/master/15-seed-rbac-principals.sh"
+log "Then: sudo bash scripts/master/16-seed-ranger-rbac.sh"
