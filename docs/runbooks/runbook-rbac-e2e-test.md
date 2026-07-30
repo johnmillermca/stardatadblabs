@@ -942,7 +942,851 @@ Expected final output of step 4: `73/73 passed`.
 
 ---
 
-## 16. Known Limitations (Lab vs. Production)
+---
+
+## 16. New User — `account_admin` (Global Superuser, All Zones)
+
+This section walks through creating a **brand-new** Kerberos principal and Ranger user, adding them to `account_admin`, and verifying they can perform privileged operations in every zone.
+
+Use the name `test_super_user` throughout. Replace it with your real username if needed.
+
+### 16.1 Create Kerberos principal
+
+```bash
+KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}')
+
+# Create principal with a known password
+kubectl exec -n prod "${KDC_POD}" -- \
+  kadmin.local -q "addprinc -pw SuperPass1! test_super_user@STARDATADBLABS.LOCAL"
+
+# Verify it was created
+kubectl exec -n prod "${KDC_POD}" -- \
+  kadmin.local -q "getprinc test_super_user@STARDATADBLABS.LOCAL" 2>&1 \
+  | grep -E 'Principal:|Expiration'
+```
+
+**Expected:** `Principal: test_super_user@STARDATADBLABS.LOCAL` with no "does not exist" error.
+
+### 16.2 Export keytab and store as K8s Secret
+
+```bash
+# Export keytab inside KDC pod
+kubectl exec -n prod "${KDC_POD}" -- \
+  kadmin.local -q "ktadd -k /tmp/test-super-user.keytab test_super_user@STARDATADBLABS.LOCAL"
+
+# Copy keytab from pod to local
+kubectl cp prod/${KDC_POD}:/tmp/test-super-user.keytab /tmp/test-super-user.keytab
+
+# Store as K8s Secret
+kubectl create secret generic test-super-user-keytab \
+  --from-file=keytab=/tmp/test-super-user.keytab \
+  -n prod \
+  && echo "Keytab secret created"
+```
+
+### 16.3 Create Ranger user and add to `account_admin`
+
+```bash
+RANGER_PASS=$(kubectl get secret ranger-db-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+RANGER_AUTH="admin:${RANGER_PASS}"
+
+# Get account_admin group id
+ACCT_GID=$(curl -sf -u "${RANGER_AUTH}" \
+  "http://192.168.1.50:30680/service/xusers/groups" \
+  | python3 -c "
+import sys,json
+for g in json.load(sys.stdin).get('vXGroups',[]):
+    if g['name']=='account_admin': print(g['id'])
+")
+echo "account_admin group id: ${ACCT_GID}"
+
+# Create user
+USER_RESP=$(curl -s -u "${RANGER_AUTH}" \
+  -H "Content-Type: application/json" \
+  -X POST "http://192.168.1.50:30680/service/xusers/users" \
+  -d "{
+    \"name\":\"test_super_user\",
+    \"firstName\":\"Test\",
+    \"lastName\":\"SuperUser\",
+    \"password\":\"SuperPass1!\",
+    \"userRoleList\":[\"ROLE_SYS_ADMIN\"],
+    \"groupIdList\":[${ACCT_GID}],
+    \"groupNameList\":[\"account_admin\"]
+  }")
+USER_ID=$(echo "${USER_RESP}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+echo "Created user id: ${USER_ID}"
+
+# Explicitly link user to group (Ranger ignores groupIdList on POST)
+curl -s -u "${RANGER_AUTH}" \
+  -H "Content-Type: application/json" \
+  -X POST "http://192.168.1.50:30680/service/xusers/groupusers" \
+  -d "{\"name\":\"account_admin\",\"userId\":${USER_ID},\"groupId\":${ACCT_GID}}" \
+  -o /dev/null && echo "Group link created"
+```
+
+### 16.4 Verify user exists in Ranger
+
+```bash
+curl -sf -u "${RANGER_AUTH}" \
+  "http://192.168.1.50:30680/service/xusers/users/${USER_ID}" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    print(f\"  name={d['name']}  role={d.get('userRoleList',['?'])[0]}\")"
+```
+
+**Expected:** `name=test_super_user  role=ROLE_SYS_ADMIN`
+
+### 16.5 Test — CACHING_ZONE (Doris full access)
+
+```bash
+FE_POD=$(kubectl get pod -n prod -l app=doris-fe \
+  -o jsonpath='{.items[0].metadata.name}')
+DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+
+# Create the user in Doris (Doris has its own user store)
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_PASS}" \
+    -e "CREATE USER IF NOT EXISTS 'test_super_user'@'%' IDENTIFIED BY 'SuperPass1!';
+        GRANT ALL ON *.* TO 'test_super_user'@'%';" 2>/dev/null
+
+# SELECT — should succeed
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_super_user -p"SuperPass1!" \
+    -e "SHOW DATABASES; USE analytics; SELECT * FROM users LIMIT 3;" 2>&1 \
+  | grep -v Warning
+```
+
+**Expected:** Database list and rows returned.
+
+```bash
+# DDL — should succeed (full admin)
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_super_user -p"SuperPass1!" \
+    -e "USE analytics;
+        CREATE TABLE IF NOT EXISTS super_test (id INT)
+          DISTRIBUTED BY HASH(id) BUCKETS 1
+          PROPERTIES ('replication_num'='1');
+        INSERT INTO super_test VALUES (1),(2),(3);
+        SELECT * FROM super_test;
+        DROP TABLE super_test;" 2>&1 \
+  | grep -v Warning
+```
+
+**Expected:** Table created, rows inserted/selected, table dropped — no errors.
+
+### 16.6 Test — PROCESSING_ZONE (Ranger policy check)
+
+```bash
+# Confirm test_super_user inherits account_admin policy coverage in PROCESSING_ZONE
+curl -sf -u "${RANGER_AUTH}" \
+  "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=spark_service&zoneName=PROCESSING_ZONE&pageSize=100" \
+  | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'account_admin' in item.get('groups',[]):
+            accesses=[a['type'] for a in item.get('accesses',[])]
+            print(f'  ✓ {p[\"name\"]}  account_admin accesses: {accesses}')
+" 2>/dev/null
+
+# OpenSearch — create and delete index (full admin)
+curl -sf -X PUT http://192.168.1.50:30920/super-test-index \
+  -H "Content-Type: application/json" \
+  -d '{"settings":{"number_of_shards":1,"number_of_replicas":0}}' \
+  | python3 -c "import sys,json; print('  created:', json.load(sys.stdin).get('acknowledged'))"
+
+curl -sf -X DELETE http://192.168.1.50:30920/super-test-index \
+  | python3 -c "import sys,json; print('  deleted:', json.load(sys.stdin).get('acknowledged'))"
+```
+
+**Expected:** Policy shows `account_admin` with full access types. OpenSearch create + delete both `True`.
+
+### 16.7 Test — STREAMING_ZONE (Ranger policy check)
+
+```bash
+# Confirm account_admin coverage in STREAMING_ZONE
+for svc in kafka_service schema_registry_service debezium_service akhq_service; do
+  curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=${svc}&zoneName=STREAMING_ZONE&pageSize=100" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'account_admin' in item.get('groups',[]):
+            print(f'  ✓ ${svc} / {p[\"name\"]}')
+            break
+" 2>/dev/null
+done
+```
+
+**Expected:** `✓` for every streaming service — `kafka_service`, `schema_registry_service`, `debezium_service`, `akhq_service`.
+
+### 16.8 Cleanup — remove test_super_user
+
+```bash
+# Drop from Doris
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_PASS}" \
+    -e "DROP USER IF EXISTS 'test_super_user'@'%';" 2>/dev/null
+
+# Delete from Ranger (use USER_ID captured in 16.3)
+curl -s -u "${RANGER_AUTH}" \
+  -X DELETE "http://192.168.1.50:30680/service/xusers/users/${USER_ID}?forceDelete=true" \
+  -o /dev/null && echo "Ranger user deleted"
+
+# Remove Kerberos principal
+kubectl exec -n prod "${KDC_POD}" -- \
+  kadmin.local -q "delprinc -force test_super_user@STARDATADBLABS.LOCAL"
+
+# Remove K8s Secret
+kubectl delete secret test-super-user-keytab -n prod --ignore-not-found
+```
+
+---
+
+## 17. New User — Per-Zone Admin
+
+This section creates one new user per admin group (`caching_admin`, `processing_admin`, `streaming_admin`) and verifies each can perform **full administrative operations** only within their assigned zone.
+
+Use names `test_cache_admin`, `test_proc_admin`, `test_stream_admin`.
+
+### 17.1 Create Kerberos principals (all three)
+
+```bash
+KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}')
+
+for user in test_cache_admin test_proc_admin test_stream_admin; do
+  kubectl exec -n prod "${KDC_POD}" -- \
+    kadmin.local -q "addprinc -pw AdminPass1! ${user}@STARDATADBLABS.LOCAL"
+  echo "  ✓ principal: ${user}@STARDATADBLABS.LOCAL"
+done
+
+# Verify all three
+kubectl exec -n prod "${KDC_POD}" -- \
+  kadmin.local -q "listprincs" 2>/dev/null | grep test_
+```
+
+### 17.2 Create Ranger users and link to their groups
+
+```bash
+RANGER_PASS=$(kubectl get secret ranger-db-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+RANGER_AUTH="admin:${RANGER_PASS}"
+
+# Fetch group ids
+declare -A GROUP_IDS
+for grp in caching_admin processing_admin streaming_admin; do
+  gid=$(curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/xusers/groups" \
+    | python3 -c "
+import sys,json
+for g in json.load(sys.stdin).get('vXGroups',[]):
+    if g['name']=='${grp}': print(g['id'])
+")
+  GROUP_IDS[$grp]=$gid
+  echo "  ${grp} id=${gid}"
+done
+
+# Create and link each user
+declare -A USER_IDS
+for pair in "test_cache_admin:caching_admin" "test_proc_admin:processing_admin" "test_stream_admin:streaming_admin"; do
+  user="${pair%%:*}"
+  grp="${pair##*:}"
+  gid="${GROUP_IDS[$grp]}"
+
+  resp=$(curl -s -u "${RANGER_AUTH}" \
+    -H "Content-Type: application/json" \
+    -X POST "http://192.168.1.50:30680/service/xusers/users" \
+    -d "{\"name\":\"${user}\",\"firstName\":\"Test\",\"lastName\":\"Admin\",
+         \"password\":\"AdminPass1!\",\"userRoleList\":[\"ROLE_USER\"],
+         \"groupIdList\":[${gid}],\"groupNameList\":[\"${grp}\"]}")
+  uid=$(echo "${resp}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+  USER_IDS[$user]=$uid
+
+  # Explicit group link
+  curl -s -u "${RANGER_AUTH}" -H "Content-Type: application/json" \
+    -X POST "http://192.168.1.50:30680/service/xusers/groupusers" \
+    -d "{\"name\":\"${grp}\",\"userId\":${uid},\"groupId\":${gid}}" -o /dev/null
+
+  echo "  ✓ ${user} (id=${uid}) → ${grp}"
+done
+```
+
+### 17.3 Test — `test_cache_admin` in CACHING_ZONE
+
+```bash
+FE_POD=$(kubectl get pod -n prod -l app=doris-fe \
+  -o jsonpath='{.items[0].metadata.name}')
+DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+
+# Create Doris user
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_PASS}" \
+    -e "CREATE USER IF NOT EXISTS 'test_cache_admin'@'%' IDENTIFIED BY 'AdminPass1!';
+        GRANT ALL ON *.* TO 'test_cache_admin'@'%';" 2>/dev/null
+
+# Full DDL/DML — should succeed
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_cache_admin -p"AdminPass1!" \
+    -e "SHOW DATABASES;
+        USE analytics;
+        CREATE TABLE IF NOT EXISTS cache_admin_test (id INT)
+          DISTRIBUTED BY HASH(id) BUCKETS 1
+          PROPERTIES ('replication_num'='1');
+        INSERT INTO cache_admin_test VALUES (10),(20);
+        SELECT * FROM cache_admin_test;
+        DROP TABLE cache_admin_test;" 2>&1 \
+  | grep -v Warning
+```
+
+**Expected:** All statements succeed — DDL, INSERT, SELECT, DROP.
+
+```bash
+# Ranger policy confirmation: caching_admin in caching-admin-all
+curl -sf -u "${RANGER_AUTH}" \
+  "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=doris_service&zoneName=CACHING_ZONE&pageSize=100" \
+  | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'caching_admin' in item.get('groups',[]):
+            print(f'  ✓ {p[\"name\"]}  accesses={[a[\"type\"] for a in item.get(\"accesses\",[])]}')"
+```
+
+**Expected:** `caching-admin-all` and `caching-admin-polaris-catalog` with full access types.
+
+### 17.4 Test — `test_proc_admin` in PROCESSING_ZONE
+
+```bash
+# Ranger policy confirmation: processing_admin in PROCESSING_ZONE policies
+for svc in spark_service sqlmesh_service kestra_service opensearch_service polaris_service; do
+  curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=${svc}&zoneName=PROCESSING_ZONE&pageSize=100" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'processing_admin' in item.get('groups',[]):
+            print(f'  ✓ ${svc} / {p[\"name\"]}')" 2>/dev/null
+done
+```
+
+**Expected:** `✓` for all 5 processing services.
+
+```bash
+# OpenSearch — full admin operations (index create + delete)
+curl -sf -X PUT http://192.168.1.50:30920/proc-admin-test-index \
+  -H "Content-Type: application/json" \
+  -d '{"settings":{"number_of_shards":1,"number_of_replicas":0}}' \
+  | python3 -c "import sys,json; print('  created:', json.load(sys.stdin).get('acknowledged'))"
+
+curl -sf -X DELETE http://192.168.1.50:30920/proc-admin-test-index \
+  | python3 -c "import sys,json; print('  deleted:', json.load(sys.stdin).get('acknowledged'))"
+
+# Kestra — create and delete a workflow
+curl -sf -X POST http://192.168.1.50:30880/api/v1/flows \
+  -H "Content-Type: application/x-yaml" \
+  --data-binary '
+id: proc-admin-test-flow
+namespace: prod
+tasks:
+  - id: log
+    type: io.kestra.core.tasks.log.Log
+    message: "processing_admin test"
+' | python3 -c "import sys,json; d=json.load(sys.stdin); print('  flow:', d.get('id'))"
+
+curl -sf -X DELETE http://192.168.1.50:30880/api/v1/flows/prod/proc-admin-test-flow \
+  -o /dev/null -w "  Kestra delete: HTTP %{http_code}\n"
+```
+
+**Expected:** OpenSearch `True`/`True`. Kestra flow created and deleted without error.
+
+### 17.5 Test — `test_stream_admin` in STREAMING_ZONE
+
+```bash
+# Ranger policy confirmation: streaming_admin in STREAMING_ZONE policies
+for svc in kafka_service schema_registry_service debezium_service akhq_service; do
+  curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=${svc}&zoneName=STREAMING_ZONE&pageSize=100" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'streaming_admin' in item.get('groups',[]):
+            print(f'  ✓ ${svc} / {p[\"name\"]}')" 2>/dev/null
+done
+```
+
+**Expected:** `✓` for all 4 streaming services.
+
+```bash
+# Kafka — full admin: create topic, produce, consume, delete topic
+KAFKA_PASS=$(kubectl get secret kafka-app-user -n prod \
+  -o jsonpath='{.data.password}' | base64 -d | tr -d '\n')
+
+kubectl run stream-admin-test --rm -it --restart=Never -n prod \
+  --image=bitnami/kafka:3.9 \
+  --env="BOOTSTRAP=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092" \
+  --env="KAFKA_PASS=${KAFKA_PASS}" \
+  -- bash -c '
+    echo "security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"${KAFKA_PASS}\";" > /tmp/c.props
+
+    kafka-topics.sh --bootstrap-server ${BOOTSTRAP} --command-config /tmp/c.props \
+      --create --if-not-exists --topic stream-admin-test --partitions 1 --replication-factor 1 \
+      && echo "  topic created"
+
+    echo "admin-test-message" | kafka-console-producer.sh \
+      --bootstrap-server ${BOOTSTRAP} --producer.config /tmp/c.props \
+      --topic stream-admin-test && echo "  produced"
+
+    kafka-console-consumer.sh --bootstrap-server ${BOOTSTRAP} \
+      --consumer.config /tmp/c.props --topic stream-admin-test \
+      --from-beginning --max-messages 1 --timeout-ms 5000 && echo "  consumed"
+
+    kafka-topics.sh --bootstrap-server ${BOOTSTRAP} --command-config /tmp/c.props \
+      --delete --topic stream-admin-test && echo "  topic deleted"
+  ' 2>/dev/null
+```
+
+**Expected:** topic created → produced → consumed → topic deleted.
+
+```bash
+# Schema Registry — register and delete a schema
+curl -sf -X POST http://192.168.1.54:30810/subjects/stream-admin-test-value/versions \
+  -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+  -d '{"schema":"{\"type\":\"record\",\"name\":\"AdminTest\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}' \
+  | python3 -c "import sys,json; print('  schema id:', json.load(sys.stdin).get('id'))"
+
+curl -sf -X DELETE http://192.168.1.54:30810/subjects/stream-admin-test-value \
+  | python3 -m json.tool
+```
+
+**Expected:** Schema registered (returns numeric id), then deleted.
+
+### 17.6 Cleanup — remove per-zone admin users
+
+```bash
+FE_POD=$(kubectl get pod -n prod -l app=doris-fe \
+  -o jsonpath='{.items[0].metadata.name}')
+DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+
+# Doris
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_PASS}" \
+    -e "DROP USER IF EXISTS 'test_cache_admin'@'%';" 2>/dev/null
+
+# Ranger — delete all three users (USER_IDS set in 17.2)
+for user in test_cache_admin test_proc_admin test_stream_admin; do
+  uid="${USER_IDS[$user]}"
+  [[ -n "${uid}" ]] && \
+    curl -s -u "${RANGER_AUTH}" \
+      -X DELETE "http://192.168.1.50:30680/service/xusers/users/${uid}?forceDelete=true" \
+      -o /dev/null && echo "  Deleted Ranger user: ${user} (id=${uid})"
+done
+
+# Kerberos
+for user in test_cache_admin test_proc_admin test_stream_admin; do
+  kubectl exec -n prod "${KDC_POD}" -- \
+    kadmin.local -q "delprinc -force ${user}@STARDATADBLABS.LOCAL" 2>/dev/null
+  echo "  Deleted principal: ${user}"
+done
+```
+
+---
+
+## 18. New User — Per-Zone Dev
+
+This section creates one new user per dev group (`caching_dev`, `processing_dev`, `streaming_dev`) and verifies that each can only **read** within their zone — writes, DDL, and cross-zone access are all denied.
+
+Use names `test_cache_dev`, `test_proc_dev`, `test_stream_dev`.
+
+### 18.1 Create Kerberos principals (all three)
+
+```bash
+KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}')
+
+for user in test_cache_dev test_proc_dev test_stream_dev; do
+  kubectl exec -n prod "${KDC_POD}" -- \
+    kadmin.local -q "addprinc -pw DevPass1! ${user}@STARDATADBLABS.LOCAL"
+  echo "  ✓ principal: ${user}@STARDATADBLABS.LOCAL"
+done
+
+# Verify
+kubectl exec -n prod "${KDC_POD}" -- \
+  kadmin.local -q "listprincs" 2>/dev/null | grep test_
+```
+
+### 18.2 Create Ranger users and link to their dev groups
+
+```bash
+RANGER_PASS=$(kubectl get secret ranger-db-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+RANGER_AUTH="admin:${RANGER_PASS}"
+
+# Fetch dev group ids
+declare -A DEV_GROUP_IDS
+for grp in caching_dev processing_dev streaming_dev; do
+  gid=$(curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/xusers/groups" \
+    | python3 -c "
+import sys,json
+for g in json.load(sys.stdin).get('vXGroups',[]):
+    if g['name']=='${grp}': print(g['id'])
+")
+  DEV_GROUP_IDS[$grp]=$gid
+  echo "  ${grp} id=${gid}"
+done
+
+# Create and link each dev user
+declare -A DEV_USER_IDS
+for pair in "test_cache_dev:caching_dev" "test_proc_dev:processing_dev" "test_stream_dev:streaming_dev"; do
+  user="${pair%%:*}"
+  grp="${pair##*:}"
+  gid="${DEV_GROUP_IDS[$grp]}"
+
+  resp=$(curl -s -u "${RANGER_AUTH}" \
+    -H "Content-Type: application/json" \
+    -X POST "http://192.168.1.50:30680/service/xusers/users" \
+    -d "{\"name\":\"${user}\",\"firstName\":\"Test\",\"lastName\":\"Dev\",
+         \"password\":\"DevPass1!\",\"userRoleList\":[\"ROLE_USER\"],
+         \"groupIdList\":[${gid}],\"groupNameList\":[\"${grp}\"]}")
+  uid=$(echo "${resp}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+  DEV_USER_IDS[$user]=$uid
+
+  # Explicit group link
+  curl -s -u "${RANGER_AUTH}" -H "Content-Type: application/json" \
+    -X POST "http://192.168.1.50:30680/service/xusers/groupusers" \
+    -d "{\"name\":\"${grp}\",\"userId\":${uid},\"groupId\":${gid}}" -o /dev/null
+
+  echo "  ✓ ${user} (id=${uid}) → ${grp}"
+done
+```
+
+### 18.3 Test — `test_cache_dev` in CACHING_ZONE
+
+```bash
+FE_POD=$(kubectl get pod -n prod -l app=doris-fe \
+  -o jsonpath='{.items[0].metadata.name}')
+DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+
+# Create Doris user (read-only grant)
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_PASS}" \
+    -e "CREATE USER IF NOT EXISTS 'test_cache_dev'@'%' IDENTIFIED BY 'DevPass1!';
+        GRANT SELECT ON analytics.* TO 'test_cache_dev'@'%';" 2>/dev/null
+
+# ✓ SELECT — should succeed
+echo "--- SELECT (expect: rows) ---"
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_cache_dev -p"DevPass1!" \
+    -e "USE analytics; SELECT user_id, email FROM users LIMIT 3;" 2>&1 \
+  | grep -v Warning
+
+# ✗ INSERT — should be denied
+echo "--- INSERT (expect: error/denied) ---"
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_cache_dev -p"DevPass1!" \
+    -e "USE analytics; INSERT INTO users VALUES (999,'evil@bad.com','hacker');" 2>&1 \
+  | grep -v Warning
+
+# ✗ DROP — should be denied
+echo "--- DROP TABLE (expect: error/denied) ---"
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_cache_dev -p"DevPass1!" \
+    -e "USE analytics; DROP TABLE users;" 2>&1 \
+  | grep -v Warning
+
+# ✗ CREATE — should be denied
+echo "--- CREATE TABLE (expect: error/denied) ---"
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u test_cache_dev -p"DevPass1!" \
+    -e "USE analytics; CREATE TABLE dev_test (id INT)
+        DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES ('replication_num'='1');" 2>&1 \
+  | grep -v Warning
+```
+
+**Expected results:**
+
+| Operation | Expected outcome |
+|---|---|
+| `SELECT` | ✓ Returns rows (email masked if Ranger plugin active) |
+| `INSERT` | ✗ Error: `Access denied` or `permission denied` |
+| `DROP TABLE` | ✗ Error: `Access denied` or `permission denied` |
+| `CREATE TABLE` | ✗ Error: `Access denied` or `permission denied` |
+
+```bash
+# Ranger policy confirmation: caching_dev appears as second policyItem (read-only)
+curl -sf -u "${RANGER_AUTH}" \
+  "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=doris_service&zoneName=CACHING_ZONE&pageSize=100" \
+  | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    if p.get('name')=='caching-dev-read':
+        for item in p.get('policyItems',[]):
+            if 'caching_dev' in item.get('groups',[]):
+                print(f'  ✓ caching-dev-read  accesses={[a[\"type\"] for a in item[\"accesses\"]]}')"
+```
+
+**Expected:** `accesses=['select']` — read-only confirmed.
+
+### 18.4 Test — `test_proc_dev` in PROCESSING_ZONE
+
+```bash
+# Ranger policy confirmation: processing_dev in PROCESSING_ZONE policies (read-only policyItem)
+for svc in spark_service sqlmesh_service kestra_service opensearch_service polaris_service; do
+  curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=${svc}&zoneName=PROCESSING_ZONE&pageSize=100" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'processing_dev' in item.get('groups',[]):
+            accesses=[a['type'] for a in item.get('accesses',[])]
+            print(f'  ✓ ${svc}  processing_dev accesses={accesses}')" 2>/dev/null
+done
+```
+
+**Expected:** Each processing service shows `processing_dev` with `['_READ']` only.
+
+```bash
+# OpenSearch — dev can read but not delete an index
+curl -sf -X PUT http://192.168.1.50:30920/proc-dev-test-index \
+  -H "Content-Type: application/json" \
+  -d '{"settings":{"number_of_shards":1,"number_of_replicas":0}}' \
+  | python3 -c "import sys,json; print('  setup index created:', json.load(sys.stdin).get('acknowledged'))"
+
+# ✓ Read — should succeed (no auth on this lab OpenSearch)
+echo "--- GET index (expect: index info) ---"
+curl -sf "http://192.168.1.50:30920/proc-dev-test-index" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('  index exists:', 'proc-dev-test-index' in d)"
+
+# ✗ Delete — would be denied by Ranger when plugin active
+echo "--- DELETE index (expect: denied when Ranger plugin active; succeeds in lab) ---"
+curl -sf -X DELETE http://192.168.1.50:30920/proc-dev-test-index \
+  | python3 -c "import sys,json; print('  deleted:', json.load(sys.stdin).get('acknowledged'))"
+```
+
+> **Note:** OpenSearch security plugin is disabled in this lab — delete will succeed at the API level. The Ranger `processing_dev` policy restricts to `_READ` only; this will be enforced once the security plugin is enabled.
+
+### 18.5 Test — `test_stream_dev` in STREAMING_ZONE
+
+```bash
+# Ranger policy confirmation: streaming_dev in STREAMING_ZONE
+# Topics: streaming_dev policyItem in streaming-admin-kafka-all (consume/describe only)
+curl -sf -u "${RANGER_AUTH}" \
+  "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=kafka_service&zoneName=STREAMING_ZONE&pageSize=100" \
+  | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'streaming_dev' in item.get('groups',[]):
+            accesses=[a['type'] for a in item.get('accesses',[])]
+            print(f'  ✓ {p[\"name\"]}  streaming_dev accesses={accesses}')"
+```
+
+**Expected:**
+- `streaming-admin-kafka-all`: `streaming_dev` → `['consume', 'describe']`
+- `streaming-dev-kafka-consumergroup`: `streaming_dev` → `['consume', 'describe']` (scoped to `dev-*`)
+
+```bash
+KAFKA_PASS=$(kubectl get secret kafka-app-user -n prod \
+  -o jsonpath='{.data.password}' | base64 -d | tr -d '\n')
+
+# Setup: create a topic as admin first
+kubectl run stream-dev-setup --rm -it --restart=Never -n prod \
+  --image=bitnami/kafka:3.9 \
+  --env="BOOTSTRAP=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092" \
+  --env="KAFKA_PASS=${KAFKA_PASS}" \
+  -- bash -c '
+    echo "security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"${KAFKA_PASS}\";" > /tmp/c.props
+    kafka-topics.sh --bootstrap-server ${BOOTSTRAP} --command-config /tmp/c.props \
+      --create --if-not-exists --topic dev-test-topic --partitions 1 --replication-factor 1
+    echo "dev-consume-me" | kafka-console-producer.sh \
+      --bootstrap-server ${BOOTSTRAP} --producer.config /tmp/c.props \
+      --topic dev-test-topic
+    echo "  setup: topic created and message produced"
+  ' 2>/dev/null
+
+# ✓ CONSUME — streaming_dev can consume
+echo "--- CONSUME (expect: dev-consume-me) ---"
+kubectl run stream-dev-consume --rm -it --restart=Never -n prod \
+  --image=bitnami/kafka:3.9 \
+  --env="BOOTSTRAP=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092" \
+  --env="KAFKA_PASS=${KAFKA_PASS}" \
+  -- bash -c '
+    echo "security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"${KAFKA_PASS}\";" > /tmp/c.props
+    kafka-console-consumer.sh --bootstrap-server ${BOOTSTRAP} \
+      --consumer.config /tmp/c.props --topic dev-test-topic \
+      --from-beginning --max-messages 1 --timeout-ms 5000
+  ' 2>/dev/null
+```
+
+**Expected:** `dev-consume-me` printed — consume succeeds.
+
+```bash
+# ✓ DESCRIBE (list topics) — should succeed
+kubectl run stream-dev-describe --rm -it --restart=Never -n prod \
+  --image=bitnami/kafka:3.9 \
+  --env="BOOTSTRAP=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092" \
+  --env="KAFKA_PASS=${KAFKA_PASS}" \
+  -- bash -c '
+    echo "security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"${KAFKA_PASS}\";" > /tmp/c.props
+    kafka-topics.sh --bootstrap-server ${BOOTSTRAP} --command-config /tmp/c.props --list
+  ' 2>/dev/null
+```
+
+**Expected:** Topic list returned without error.
+
+```bash
+# ✗ Schema Registry — dev can read subjects but not delete them
+echo "--- List schemas (expect: array) ---"
+curl -sf http://192.168.1.54:30810/subjects | python3 -m json.tool
+
+echo "--- Register schema as dev (expect: allowed per tag _READ policy) ---"
+curl -sf -X POST http://192.168.1.54:30810/subjects/dev-test-value/versions \
+  -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+  -d '{"schema":"{\"type\":\"record\",\"name\":\"DevTest\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}' \
+  | python3 -c "import sys,json; print('  result:', json.load(sys.stdin))"
+```
+
+> **Note:** Schema Registry has no auth in this lab — all operations succeed. The Ranger `streaming_dev` policy restricts to `_READ` only; this will be enforced once Schema Registry is integrated with the Ranger plugin.
+
+### 18.6 Test — cross-zone isolation (dev must not access other zones)
+
+A `caching_dev` user must have no access to PROCESSING_ZONE or STREAMING_ZONE services.
+
+```bash
+# caching_dev has NO policy item in any PROCESSING_ZONE service
+echo "=== caching_dev must NOT appear in PROCESSING_ZONE ==="
+for svc in spark_service sqlmesh_service kestra_service opensearch_service polaris_service; do
+  result=$(curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=${svc}&zoneName=PROCESSING_ZONE&pageSize=100" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'caching_dev' in item.get('groups',[]):
+            print('FOUND')
+" 2>/dev/null)
+  if [[ -z "${result}" ]]; then
+    echo "  ✓ ${svc} — caching_dev correctly absent"
+  else
+    echo "  ✗ ${svc} — caching_dev unexpectedly present!"
+  fi
+done
+
+echo ""
+echo "=== streaming_dev must NOT appear in CACHING_ZONE ==="
+for svc in doris_service polaris_service; do
+  result=$(curl -sf -u "${RANGER_AUTH}" \
+    "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=${svc}&zoneName=CACHING_ZONE&pageSize=100" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ps=d if isinstance(d,list) else d.get('policies',[])
+for p in ps:
+    for item in p.get('policyItems',[]):
+        if 'streaming_dev' in item.get('groups',[]):
+            print('FOUND')
+" 2>/dev/null)
+  if [[ -z "${result}" ]]; then
+    echo "  ✓ ${svc} — streaming_dev correctly absent"
+  else
+    echo "  ✗ ${svc} — streaming_dev unexpectedly present!"
+  fi
+done
+```
+
+**Expected:** All `✓` — dev groups have no policy coverage outside their own zone.
+
+### 18.7 Cleanup — remove dev test users
+
+```bash
+FE_POD=$(kubectl get pod -n prod -l app=doris-fe \
+  -o jsonpath='{.items[0].metadata.name}')
+DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+
+# Doris
+kubectl exec -n prod "${FE_POD}" -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_PASS}" \
+    -e "DROP USER IF EXISTS 'test_cache_dev'@'%';" 2>/dev/null
+
+# Kafka topic cleanup
+kubectl run stream-dev-cleanup --rm -it --restart=Never -n prod \
+  --image=bitnami/kafka:3.9 \
+  --env="BOOTSTRAP=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092" \
+  --env="KAFKA_PASS=${KAFKA_PASS}" \
+  -- bash -c '
+    echo "security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"${KAFKA_PASS}\";" > /tmp/c.props
+    kafka-topics.sh --bootstrap-server ${BOOTSTRAP} --command-config /tmp/c.props \
+      --delete --topic dev-test-topic 2>/dev/null || true
+  ' 2>/dev/null
+
+# Schema Registry
+curl -sf -X DELETE http://192.168.1.54:30810/subjects/dev-test-value \
+  -o /dev/null && echo "Schema deleted"
+
+# OpenSearch
+curl -sf -X DELETE http://192.168.1.50:30920/proc-dev-test-index \
+  -o /dev/null && echo "Index deleted"
+
+# Ranger — delete all three dev users
+for user in test_cache_dev test_proc_dev test_stream_dev; do
+  uid="${DEV_USER_IDS[$user]}"
+  [[ -n "${uid}" ]] && \
+    curl -s -u "${RANGER_AUTH}" \
+      -X DELETE "http://192.168.1.50:30680/service/xusers/users/${uid}?forceDelete=true" \
+      -o /dev/null && echo "  Deleted Ranger user: ${user} (id=${uid})"
+done
+
+# Kerberos
+for user in test_cache_dev test_proc_dev test_stream_dev; do
+  kubectl exec -n prod "${KDC_POD}" -- \
+    kadmin.local -q "delprinc -force ${user}@STARDATADBLABS.LOCAL" 2>/dev/null
+  echo "  Deleted principal: ${user}"
+done
+```
+
+---
+
+## 19. Known Limitations (Lab vs. Production)
 
 | Item | Lab state | Production fix |
 |---|---|---|
