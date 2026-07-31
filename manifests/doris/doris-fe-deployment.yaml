@@ -85,7 +85,6 @@ data:
     priority_networks = 10.244.0.0/16
     # ── Ranger RBAC ──────────────────────────────────────────────────────────
     access_controller_type = ranger-doris
-    ranger_doris_default_security_conf_path = /opt/apache-doris/fe/ranger-conf
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -159,7 +158,11 @@ spec:
             - name: fe-meta
               mountPath: /opt/apache-doris/fe/doris-meta
             - name: ranger-config
-              mountPath: /opt/apache-doris/fe/ranger-conf
+              mountPath: /opt/apache-doris/fe/conf/ranger-doris-security.xml
+              subPath: ranger-doris-security.xml
+            - name: ranger-config
+              mountPath: /opt/apache-doris/fe/conf/ranger-doris-audit.xml
+              subPath: ranger-doris-audit.xml
           resources:
             requests:
               memory: 512Mi
