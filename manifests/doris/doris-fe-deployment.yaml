@@ -23,23 +23,23 @@ data:
     <?xml version="1.0" encoding="UTF-8"?>
     <configuration>
       <property>
-        <name>ranger.plugin.hive.policy.source.impl</name>
+        <name>ranger.plugin.doris.policy.source.impl</name>
         <value>org.apache.ranger.admin.client.RangerAdminRESTClient</value>
       </property>
       <property>
-        <name>ranger.plugin.hive.service.name</name>
+        <name>ranger.plugin.doris.service.name</name>
         <value>doris</value>
       </property>
       <property>
-        <name>ranger.plugin.hive.policy.rest.url</name>
+        <name>ranger.plugin.doris.policy.rest.url</name>
         <value>http://ranger-admin.prod.svc.cluster.local:6080</value>
       </property>
       <property>
-        <name>ranger.plugin.hive.policy.pollIntervalMs</name>
+        <name>ranger.plugin.doris.policy.pollIntervalMs</name>
         <value>30000</value>
       </property>
       <property>
-        <name>ranger.plugin.hive.policy.cache.dir</name>
+        <name>ranger.plugin.doris.policy.cache.dir</name>
         <value>/opt/apache-doris/fe/ranger-cache</value>
       </property>
     </configuration>
