@@ -84,8 +84,7 @@ data:
     advertised_address = doris-fe-0.doris-fe-headless.prod.svc.cluster.local
     priority_networks = 10.244.0.0/16
     # ── Ranger RBAC ──────────────────────────────────────────────────────────
-    access_controller_type = ranger
-    ranger_service_type = hive
+    access_controller_type = ranger-doris
     ranger_doris_default_security_conf_path = /opt/apache-doris/fe/ranger-conf
 ---
 apiVersion: v1
