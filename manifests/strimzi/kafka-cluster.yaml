@@ -12,7 +12,69 @@
 #               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
 #               hostPath: /home/local-path-provisioner/
 #                 pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
+# Ranger      : Image latest-kafka-4.2.0-ranger includes ranger-kafka-plugin JARs.
+#               ConfigMap kafka-ranger-config mounts security+audit XMLs into
+#               /mnt/ranger-conf/ via KafkaNodePool template.pod.volumes +
+#               template.kafkaContainer.volumeMounts (KafkaNodePool propagates
+#               volumes correctly; Kafka CR template.pod.volumes does NOT).
+#               KAFKA_CLASSPATH=/mnt/ranger-conf adds XMLs to the JVM classpath.
+#               Authorizer: spec.kafka.authorization.type=custom +
+#                 authorizerClass=RangerKafkaAuthorizer (NOT config{} — Strimzi
+#                 strips authorizer.class.name from config silently).
+#               allow.everyone.if.no.acl.found=true provides fallback access if
+#               Ranger Admin is unreachable at broker startup.
+#               KRaft mode — no ZooKeeper. zookeeper.connect in Ranger service
+#               config is a schema-required dummy value, ignored at runtime.
+#               Plugin connects via bootstrap.servers + SASL_PLAINTEXT/SCRAM.
 # =============================================================================
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-ranger-config
+  namespace: prod
+data:
+  ranger-kafka-security.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <configuration>
+      <property>
+        <name>ranger.plugin.kafka.policy.source.impl</name>
+        <value>org.apache.ranger.admin.client.RangerAdminRESTClient</value>
+      </property>
+      <property>
+        <name>ranger.plugin.kafka.service.name</name>
+        <value>kafka</value>
+      </property>
+      <property>
+        <name>ranger.plugin.kafka.policy.rest.url</name>
+        <value>http://ranger-admin.prod.svc.cluster.local:6080</value>
+      </property>
+      <property>
+        <name>ranger.plugin.kafka.policy.pollIntervalMs</name>
+        <value>30000</value>
+      </property>
+      <property>
+        <name>ranger.plugin.kafka.policy.cache.dir</name>
+        <value>/tmp/ranger-kafka-cache</value>
+      </property>
+    </configuration>
+  ranger-kafka-audit.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <configuration>
+      <property>
+        <name>xasecure.audit.is.enabled</name>
+        <value>true</value>
+      </property>
+      <property>
+        <name>xasecure.audit.db.is.enabled</name>
+        <value>false</value>
+      </property>
+      <property>
+        <name>xasecure.audit.solr.is.enabled</name>
+        <value>false</value>
+      </property>
+    </configuration>
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -77,6 +139,21 @@ spec:
       # on the next boot, widening the window where the operator races controller
       # election and stamps NotReady on the Kafka CR.
       terminationGracePeriodSeconds: 120
+      # ── Ranger config XMLs ────────────────────────────────────────────────
+      # template.pod.volumes in KafkaNodePool propagates to the StrimziPodSet
+      # pod spec correctly (unlike Kafka CR template.pod.volumes which does not).
+      # Strimzi only allows mountPaths under /mnt (enforced by operator).
+      volumes:
+        - name: ranger-config
+          configMap:
+            name: kafka-ranger-config
+    kafkaContainer:
+      env:
+        - name: KAFKA_CLASSPATH
+          value: /mnt/ranger-conf
+      volumeMounts:
+        - name: ranger-config
+          mountPath: /mnt/ranger-conf
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -91,7 +168,7 @@ spec:
   kafka:
     version: 4.2.0
     metadataVersion: "4.2-IV1"
-    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
+    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger
     listeners:
       - name: plain
         port: 9092
@@ -108,7 +185,20 @@ spec:
         configuration:
           bootstrap:
             nodePort: 30093
+    # ── Ranger Kafka Authorizer ───────────────────────────────────────────────
+    # Strimzi exposes spec.kafka.authorization for custom authorizer classes.
+    # Setting authorizer.class.name in config{} is silently stripped by the
+    # operator (it is a protected key managed via this dedicated stanza only).
+    # type=custom + authorizerClass is the correct approach for any third-party
+    # authorizer (Ranger, OPA, etc.).
+    # allow.everyone.if.no.acl.found=true: safety fallback so brokers don't
+    # deny all traffic if Ranger Admin is unreachable at startup.
+    authorization:
+      type: custom
+      authorizerClass: org.apache.ranger.authorization.kafka.authorizer.RangerKafkaAuthorizer
+      supportsAdminApi: false
     config:
+      allow.everyone.if.no.acl.found: "true"
       offsets.topic.replication.factor: "1"
       transaction.state.log.replication.factor: "1"
       transaction.state.log.min.isr: "1"

@@ -32,7 +32,22 @@ config:
     cluster.name: opensearch-prod
     network.host: 0.0.0.0
     discovery.type: single-node
-    plugins.security.disabled: true
+    # ── Ranger RBAC ───────────────────────────────────────────────────────────
+    # Security plugin enabled — policies synced from Ranger Admin every 30s.
+    # plugin type: elasticsearch (OpenSearch uses the elasticsearch service type)
+    plugins.security.disabled: false
+    plugins.security.ssl.http.enabled: false
+    plugins.security.ssl.transport.enabled: false
+    plugins.security.ssl.transport.enforce_hostname_verification: false
+    plugins.security.allow_default_init_securityindex: true
+    plugins.security.authcz.admin_dn:
+      - "CN=admin,OU=client,O=client,L=test,C=DE"
+    plugins.security.audit.type: internal_opensearch
+    # Ranger authorization backend
+    plugins.security.authorization.ranger.enabled: true
+    plugins.security.authorization.ranger.url: http://ranger-admin.prod.svc.cluster.local:6080
+    plugins.security.authorization.ranger.service_name: opensearch
+    plugins.security.authorization.ranger.policy_poll_interval_ms: 30000
 
 persistence:
   enabled: true

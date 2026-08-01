@@ -65,7 +65,8 @@ OpenBao path: `secret/data/ranger/credentials`
 |---|---|---|---|
 | `doris` | hive | Apache Doris 4.0.7 RBAC | REST API (see below) |
 | `doris_service` | hive | Legacy Doris hive-type service | Manual UI |
-| `kafka_service` | kafka | Strimzi Kafka broker | Manual UI |
+| `kafka` | kafka | Strimzi Kafka 4.2.0 broker | Manual UI (see [`docs/kafka.md`](kafka.md)) |
+| `opensearch` | elasticsearch | OpenSearch 3.7.0 | Manual UI (see [`docs/opensearch.md`](opensearch.md)) |
 
 ### Re-registering the `doris` service
 

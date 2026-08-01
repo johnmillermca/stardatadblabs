@@ -188,6 +188,13 @@ spec:
                 'ranger.async.audit.queue.size':       '10000',
                 # Trie prefilter: fast policy evaluation using prefix tree
                 'ranger.policyengine.trie.prefilter.enabled': 'true',
+                # ── Kerberos SPNEGO for Ranger Admin UI ──────────────────────
+                # Enables negotiate/SPNEGO so browsers and curl can authenticate
+                # using Kerberos tickets. Uses svc/ranger principal from KDC.
+                'ranger.spnego.kerberos.enabled':      'true',
+                'ranger.spnego.kerberos.principal':    'HTTP/ranger-admin.prod.svc.cluster.local@STARDATADBLABS.LOCAL',
+                'ranger.spnego.kerberos.keytab':       '/etc/security/keytabs/ranger.service.keytab',
+                'ranger.krb.browser-useragents.regex': 'Mozilla,Opera,Chrome',
               }
               existing = {p.find('name').text: p for p in root.findall('property') if p.find('name') is not None}
               for k, v in patches.items():
@@ -283,6 +290,9 @@ spec:
               subPath: install.properties
             - name: ranger-data
               mountPath: /opt/ranger/data
+            - name: ranger-spnego-keytab
+              mountPath: /etc/security/keytabs/ranger.service.keytab
+              subPath: ranger.service.keytab
           resources:
             requests:
               # Ranger Admin (Tomcat + EclipseLink JPA) needs at least 1.5Gi
@@ -309,6 +319,9 @@ spec:
         - name: ranger-data
           persistentVolumeClaim:
             claimName: ranger-data
+        - name: ranger-spnego-keytab
+          secret:
+            secretName: ranger-spnego-keytab
 ---
 apiVersion: v1
 kind: Service
