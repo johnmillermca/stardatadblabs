@@ -82,11 +82,11 @@ data:
         <value>false</value>
       </property>
       <property>
-        <name>username</name>
+        <name>ranger.plugin.kafka.policy.rest.client.username</name>
         <value>kafka-app-user</value>
       </property>
       <property>
-        <name>password</name>
+        <name>ranger.plugin.kafka.policy.rest.client.password</name>
         <value>mJnehIiUo9zzg4qTPVK8LmLeuC0yNM2T</value>
       </property>
     </configuration>
