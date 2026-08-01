@@ -148,6 +148,17 @@ spec:
           configMap:
             name: kafka-ranger-config
     kafkaContainer:
+      env:
+        # CLASSPATH is the seed variable read by kafka-run-class.sh; all
+        # internal lib dirs are appended to it. Setting it here puts
+        # /mnt/ranger-conf on the JVM classpath so RangerConfiguration can
+        # resolve ranger-kafka-security.xml and ranger-kafka-audit.xml via
+        # ClassLoader.getResource() — which is how RangerPluginConfig loads
+        # its config files.
+        # NOTE: KAFKA_CLASSPATH (the previous name) is not read by any script
+        # in the Strimzi/Kafka image — it was a no-op.
+        - name: CLASSPATH
+          value: /mnt/ranger-conf
       volumeMounts:
         - name: ranger-config
           mountPath: /mnt/ranger-conf
