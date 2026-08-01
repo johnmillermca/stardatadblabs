@@ -72,6 +72,23 @@ data:
         <name>ranger.plugin.kafka.policy.cache.dir</name>
         <value>/tmp/ranger-kafka-cache</value>
       </property>
+      <!--
+        Credentials used by the Ranger plugin to authenticate against Ranger Admin
+        when downloading policies. Must match the username configured in the Ranger
+        kafka service (policy.download.auth.users = kafka-app-user).
+      -->
+      <property>
+        <name>ranger.plugin.kafka.policy.rest.supports.policy.deltas</name>
+        <value>false</value>
+      </property>
+      <property>
+        <name>username</name>
+        <value>kafka-app-user</value>
+      </property>
+      <property>
+        <name>password</name>
+        <value>mJnehIiUo9zzg4qTPVK8LmLeuC0yNM2T</value>
+      </property>
     </configuration>
   ranger-kafka-audit.xml: |
     <?xml version="1.0" encoding="UTF-8"?>
