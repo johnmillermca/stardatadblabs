@@ -58,6 +58,18 @@ data:
         <name>ranger.plugin.kafka.policy.cache.dir</name>
         <value>/tmp/ranger-kafka-cache</value>
       </property>
+      <!--
+        Suppress WARN ShellBasedUnixGroupsMapping: Ranger's Hadoop UGI tries to
+        resolve every Kafka principal (including Strimzi TLS DNs like
+        CN=strimzi-kafka-kafka,O=io.strimzi) as a local Unix user via `id`.
+        These are not OS users so the lookup always fails with a noisy WARN on
+        every broker heartbeat. StaticMapping returns an empty group list
+        without shelling out, silencing the warnings entirely.
+      -->
+      <property>
+        <name>hadoop.security.group.mapping</name>
+        <value>org.apache.hadoop.security.StaticMapping</value>
+      </property>
     </configuration>
   ranger-kafka-audit.xml: |
     <?xml version="1.0" encoding="UTF-8"?>
