@@ -39,9 +39,10 @@ data:
     <?xml version="1.0" encoding="UTF-8"?>
     <!--
       Hadoop Configuration loaded by RangerBasePlugin via ClassLoader.getResource().
-      Sets StaticMapping so Hadoop UGI stops shelling out to 'id' for every Kafka
-      principal (Strimzi TLS DNs, SCRAM usernames) — silences the flood of:
+      Sets NullGroupsMapping so Hadoop UGI returns empty groups for any principal
+      without shelling out to 'id' — silences the flood of:
         WARN ShellBasedUnixGroupsMapping: unable to return groups for user ...
+      NullGroupsMapping exists in hadoop-common-3.3.6 (StaticMapping does not).
     -->
     <configuration>
       <property>
