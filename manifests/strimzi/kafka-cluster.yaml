@@ -193,10 +193,20 @@ spec:
     # authorizer (Ranger, OPA, etc.).
     # allow.everyone.if.no.acl.found=true: safety fallback so brokers don't
     # deny all traffic if Ranger Admin is unreachable at startup.
+    #
+    # supportsAdminApi MUST be true for Ranger (and any authorizer that handles
+    # all request types). When false, Strimzi routes admin calls through a
+    # legacy code path that bypasses the authorizer — but the broker still
+    # invokes the authorizer for DESCRIBE_CLUSTER / metadata requests, so the
+    # Topic Operator's AdminClient send-queue times out while Ranger's thread
+    # pool is blocked waiting on policy download from Ranger Admin.
+    # Setting true lets all admin calls go through Ranger normally; the
+    # allow.everyone.if.no.acl.found fallback covers the entity-operator user
+    # until an explicit policy is set.
     authorization:
       type: custom
       authorizerClass: org.apache.ranger.authorization.kafka.authorizer.RangerKafkaAuthorizer
-      supportsAdminApi: false
+      supportsAdminApi: true
     config:
       allow.everyone.if.no.acl.found: "true"
       offsets.topic.replication.factor: "1"
