@@ -36,9 +36,14 @@ ARG HADOOP_VERSION=3.3.6
 #   woodstox-core             — XML streaming (RangerBasePlugin reads security.xml)
 #   stax2-api                 — StAX2 API (woodstox dependency)
 #   commons-configuration2    — commons config (hadoop-common dependency)
+#   commons-lang              — org.apache.commons.lang.StringUtils used by RangerPluginConfig
+#                               NOTE: this is commons-lang 2.x (org.apache.commons.lang),
+#                               NOT commons-lang3 (org.apache.commons.lang3). Both have
+#                               different Maven coordinates and are not interchangeable.
 RUN RANGER="https://repo1.maven.org/maven2/org/apache/ranger" \
     && HADOOP="https://repo1.maven.org/maven2/org/apache/hadoop" \
-    && COMMONS="https://repo1.maven.org/maven2/org/apache/commons" \
+    && COMMONS="https://repo1.maven.org/maven2/commons-lang" \
+    && COMMONS_APACHE="https://repo1.maven.org/maven2/org/apache/commons" \
     && FASTERXML="https://repo1.maven.org/maven2/com/fasterxml/woodstox" \
     && CODEHAUS="https://repo1.maven.org/maven2/org/codehaus/woodstox" \
     && HADOOP_TP="https://repo1.maven.org/maven2/org/apache/hadoop/thirdparty" \
@@ -52,6 +57,7 @@ RUN RANGER="https://repo1.maven.org/maven2/org/apache/ranger" \
     && curl -fsSL "${HADOOP_TP}/hadoop-shaded-guava/1.1.1/hadoop-shaded-guava-1.1.1.jar"                                 -o "${L}/hadoop-shaded-guava-1.1.1.jar" \
     && curl -fsSL "${FASTERXML}/woodstox-core/5.4.0/woodstox-core-5.4.0.jar"                                             -o "${L}/woodstox-core-5.4.0.jar" \
     && curl -fsSL "${CODEHAUS}/stax2-api/4.2.1/stax2-api-4.2.1.jar"                                                      -o "${L}/stax2-api-4.2.1.jar" \
-    && curl -fsSL "${COMMONS}/commons-configuration2/2.10.1/commons-configuration2-2.10.1.jar"                            -o "${L}/commons-configuration2-2.10.1.jar"
+    && curl -fsSL "${COMMONS_APACHE}/commons-configuration2/2.10.1/commons-configuration2-2.10.1.jar"                    -o "${L}/commons-configuration2-2.10.1.jar" \
+    && curl -fsSL "${COMMONS}/commons-lang/2.6/commons-lang-2.6.jar"                                                     -o "${L}/commons-lang-2.6.jar"
 
 USER 1000
