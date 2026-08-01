@@ -46,7 +46,7 @@ data:
     <configuration>
       <property>
         <name>hadoop.security.group.mapping</name>
-        <value>org.apache.hadoop.security.StaticMapping</value>
+        <value>org.apache.hadoop.security.NullGroupsMapping</value>
       </property>
     </configuration>
   ranger-kafka-security.xml: |
