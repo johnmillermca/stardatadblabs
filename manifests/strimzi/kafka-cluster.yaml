@@ -45,6 +45,20 @@ data:
       NullGroupsMapping exists in hadoop-common-3.3.6 (StaticMapping does not).
     -->
     <configuration>
+      <!--
+        Use simple (non-Kerberos) auth so UserGroupInformation.getLoginUser()
+        succeeds without a keytab. Without this, MiscUtil.getUGILoginUser()
+        attempts a Kerberos login, fails, and the PolicyRefresher background
+        thread corrupts the policy engine with a null result → all denied.
+      -->
+      <property>
+        <name>hadoop.security.authentication</name>
+        <value>simple</value>
+      </property>
+      <property>
+        <name>hadoop.security.authorization</name>
+        <value>false</value>
+      </property>
       <property>
         <name>hadoop.security.group.mapping</name>
         <value>org.apache.hadoop.security.NullGroupsMapping</value>
