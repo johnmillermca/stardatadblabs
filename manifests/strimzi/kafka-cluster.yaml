@@ -230,7 +230,7 @@ spec:
   kafka:
     version: 4.2.0
     metadataVersion: "4.2-IV1"
-    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v4
+    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v5
     listeners:
       - name: plain
         port: 9092

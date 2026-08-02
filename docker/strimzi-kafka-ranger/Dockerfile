@@ -136,4 +136,10 @@ USER root
 COPY --from=compiler /build/ranger-kafka-plugin-patched.jar /opt/kafka/libs/ranger-kafka-plugin-2.7.0.jar
 COPY --from=downloader /jars/ /opt/kafka/libs/
 
+# Add a passwd entry for UID 1000 so UnixLoginModule.login() can resolve the
+# username via getpwuid(). Without this, System.getProperty("user.name") is null
+# in the JVM and MiscUtil.getUGILoginUser() throws NullPointerException on every
+# Ranger PolicyRefresher cycle, eventually corrupting the policy engine.
+RUN echo "kafka:x:1000:0:Kafka:/opt/kafka:/sbin/nologin" >> /etc/passwd
+
 USER 1000
