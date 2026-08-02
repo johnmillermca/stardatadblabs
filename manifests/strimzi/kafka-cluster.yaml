@@ -205,6 +205,14 @@ spec:
         # in the Strimzi/Kafka image — it was a no-op.
         - name: CLASSPATH
           value: /mnt/ranger-conf
+        # Ranger's MiscUtil.getUGILoginUser() calls UnixLoginModule which reads
+        # System.getProperty("user.name"). The broker runs as UID 1000 with no
+        # /etc/passwd entry, so user.name is null → NullPointerException in
+        # UnixPrincipal → "Error getting UGI" on every PolicyRefresher cycle →
+        # eventually corrupts the policy engine. Setting user.name explicitly
+        # gives UnixLoginModule a valid non-null name to construct the principal.
+        - name: KAFKA_OPTS
+          value: "-Duser.name=kafka"
       volumeMounts:
         - name: ranger-config
           mountPath: /mnt/ranger-conf
