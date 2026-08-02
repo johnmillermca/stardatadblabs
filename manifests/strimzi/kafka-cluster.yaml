@@ -327,6 +327,17 @@ spec:
       # NOTE: startupProbe is NOT in the userOperator CRD schema (only topicOperator
       # supports it). terminationGracePeriodSeconds is controlled by the entityOperator
       # Deployment — no spec.template on the Kafka CR (not in CRD schema either).
+      #
+      # secretPrefix is not needed — KafkaUser secrets are named after the user.
+      # reconciliationIntervalSeconds default 120s is fine.
+      #
+      # aclsAdminApiSupported=false: Ranger does not implement the Kafka ACL store
+      # API (acls(), createAcls(), deleteAcls() all throw UnsupportedOperationException).
+      # Setting this false stops the User Operator from calling DESCRIBE_ACLS /
+      # CREATE_ACLS, eliminating the AclCache failed to update errors and the
+      # KafkaUser NotReady condition. SCRAM credential management is unaffected —
+      # it uses the ALTER_USER_SCRAM_CREDENTIALS API, not ACLs.
+      aclsAdminApiSupported: false
       resources:
         requests:
           memory: 128Mi
