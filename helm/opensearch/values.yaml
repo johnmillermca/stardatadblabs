@@ -32,22 +32,43 @@ config:
     cluster.name: opensearch-prod
     network.host: 0.0.0.0
     discovery.type: single-node
-    # ── Ranger RBAC ───────────────────────────────────────────────────────────
-    # Security plugin enabled — policies synced from Ranger Admin every 30s.
-    # plugin type: elasticsearch (OpenSearch uses the elasticsearch service type)
-    plugins.security.disabled: false
-    plugins.security.ssl.http.enabled: false
-    plugins.security.ssl.transport.enabled: false
+
+    # ── Transport SSL (required by opensearch-security plugin >= 3.x) ─────────
+    # Certs mounted from secret opensearch-tls-certs at /usr/share/opensearch/config/tls/
+    plugins.security.ssl.transport.enabled: true
+    plugins.security.ssl.transport.pemcert_filepath: tls/node.pem
+    plugins.security.ssl.transport.pemkey_filepath: tls/node-key.pem
+    plugins.security.ssl.transport.pemtrustedcas_filepath: tls/root-ca.pem
     plugins.security.ssl.transport.enforce_hostname_verification: false
+
+    # ── HTTP SSL (disabled — plain HTTP on 9200 inside the cluster) ───────────
+    plugins.security.ssl.http.enabled: false
+
+    # ── Security plugin ───────────────────────────────────────────────────────
+    plugins.security.disabled: false
     plugins.security.allow_default_init_securityindex: true
     plugins.security.authcz.admin_dn:
-      - "CN=admin,OU=client,O=client,L=test,C=DE"
+      - "CN=admin,O=opensearch-cluster,C=US"
+    plugins.security.nodes_dn:
+      - "CN=opensearch-cluster-master-0,O=opensearch-cluster,C=US"
     plugins.security.audit.type: internal_opensearch
-    # Ranger authorization backend
+
+    # ── Ranger authorization backend ──────────────────────────────────────────
     plugins.security.authorization.ranger.enabled: true
     plugins.security.authorization.ranger.url: http://ranger-admin.prod.svc.cluster.local:6080
     plugins.security.authorization.ranger.service_name: opensearch
     plugins.security.authorization.ranger.policy_poll_interval_ms: 30000
+
+# ── TLS certs secret mount ────────────────────────────────────────────────────
+extraVolumes:
+  - name: tls-certs
+    secret:
+      secretName: opensearch-tls-certs
+
+extraVolumeMounts:
+  - name: tls-certs
+    mountPath: /usr/share/opensearch/config/tls
+    readOnly: true
 
 persistence:
   enabled: true
