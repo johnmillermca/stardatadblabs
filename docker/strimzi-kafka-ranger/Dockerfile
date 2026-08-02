@@ -29,7 +29,7 @@
 # Use the Strimzi base image itself as the compiler context — it has the JRE
 # and all Kafka + Ranger JARs already on /opt/kafka/libs/. We install javac
 # via the same JDK package that matches the installed JRE.
-FROM 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v3 AS compiler
+FROM 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v5 AS compiler
 
 ARG RANGER_VERSION=2.7.0
 

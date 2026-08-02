@@ -356,9 +356,14 @@ public class RangerKafkaAuthorizer implements Authorizer {
     return AuthorizationResult.DENIED;
   }
 
+  // Ranger does not maintain an ACL store — policy decisions are made exclusively
+  // via the Ranger policy engine. Returning an empty iterable instead of throwing
+  // UnsupportedOperationException allows the Strimzi User Operator AclCache to
+  // initialise successfully (it calls DESCRIBE_ACLS on startup). The empty result
+  // is correct: there are no native Kafka ACLs to enumerate when Ranger is active.
   @Override
   public Iterable<AclBinding> acls(AclBindingFilter filter) {
-    logger.error("(getting) acls is not supported by Ranger for Kafka");
-    throw new UnsupportedOperationException("(getting) acls is not supported by Ranger for Kafka");
+    logger.debug("acls() called — Ranger does not store ACLs; returning empty iterable");
+    return java.util.Collections.emptyList();
   }
 }
