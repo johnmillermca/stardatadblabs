@@ -54,10 +54,10 @@ config:
     plugins.security.audit.type: internal_opensearch
 
     # ── Ranger authorization backend ──────────────────────────────────────────
-    plugins.security.authorization.ranger.enabled: true
-    plugins.security.authorization.ranger.url: http://ranger-admin.prod.svc.cluster.local:6080
-    plugins.security.authorization.ranger.service_name: opensearch
-    plugins.security.authorization.ranger.policy_poll_interval_ms: 30000
+    # NOTE: Ranger authz for OpenSearch requires the ranger-opensearch-plugin JAR
+    # installed in the image and configured via security config.yml authz backend,
+    # NOT via opensearch.yml settings (those would cause SettingsException on boot).
+    # Ranger integration is pending — security plugin is active with internal authz.
 
 # ── TLS certs secret mount ────────────────────────────────────────────────────
 extraVolumes:
