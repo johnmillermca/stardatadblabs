@@ -1,42 +1,75 @@
 # Runbook 10 — Apache Ranger: User Management, Policy Workflows & Testing
 
-> **Ranger Admin UI:** `http://192.168.1.50:30680` · **Credentials:** `admin / Priya1982`  
-> **Namespace:** `prod` · **Version:** Apache Ranger 2.7.0  
-> **Related runbooks:** [08 — Security & Access](runbook-08-security-access.md)
+> **Ranger Admin UI:** `http://192.168.1.50:30680` · **Credentials:** `admin / Priya1982`
+> **Namespace:** `prod` · **Version:** Apache Ranger 2.7.0
+> **Related runbooks:** [01 — OpenBao](runbook-01-openbao.md) · [08 — Security & Access](runbook-08-security-access.md)
 
 ---
 
 ## 1. Architecture Overview
 
-Ranger acts as the **central policy engine** for all services in the platform.
-Each service runs a Ranger plugin that polls Ranger Admin every 30 seconds and
-caches policies locally. Authorization decisions are made **in-process** — no
-network call per request.
+Every user identity in this platform passes through **three security layers** in order:
 
 ```
-Client Request
-    │
+┌─────────────────────────────────────────────────────────────────────┐
+│  Layer 1 — OpenBao (Secret Manager)                                 │
+│  Stores ALL credentials: Ranger admin password, Kafka SCRAM         │
+│  passwords, Doris passwords, Kerberos keytabs.                      │
+│  Path: secret/data/ranger/credentials                               │
+│        secret/data/kafka/credentials                                │
+│        secret/data/kerberos/credentials                             │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 2 — Kerberos KDC (Authentication for Hadoop-ecosystem)       │
+│  Answers: "Who are you?" for Kerberized services (Spark, HDFS).     │
+│  Realm: STARDATADBLABS.LOCAL · KDC: kerberos-kdc.kerberos.svc      │
+│  Required for: service principals, keytab-based auth.               │
+│  NOT required for: Kafka SCRAM users, Doris SQL users.              │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 3 — Apache Ranger (Authorization)                            │
+│  Answers: "What are you allowed to do?" for ALL services.           │
+│  Ranger Admin: http://ranger-admin.prod.svc.cluster.local:6080      │
+│  Plugin polls every 30s — decisions made in-process, no I/O.       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**How the three layers interact for a Kafka request:**
+
+```
+Client (alice, SCRAM password from OpenBao K8s secret)
+    │  SASL_PLAINTEXT + SCRAM-SHA-512
     ▼
-Service (Kafka / Doris / OpenSearch)
-    │
+Kafka Broker — validates SCRAM credential (Layer 1 origin)
+    │  identity confirmed: "alice"
     ▼
-Ranger Plugin (in-process, on the service JVM)
-    │
+RangerKafkaAuthorizer — checks in-memory policy cache (Layer 3)
+    │  policy match: alice → topic=orders → publish → Allow
     ▼
-Policy Cache (local — refreshed every 30s from Ranger Admin)
-    │
+Request proceeds
+```
+
+**For a Kerberized service (Spark):**
+```
+Spark executor (keytab stored as K8s secret, origin: OpenBao / KDC)
+    │  kinit with keytab → obtains TGT from KDC (Layer 2)
     ▼
-Allow / Deny  (sub-millisecond, no I/O on the hot path)
+Service validates Kerberos ticket
+    │  identity confirmed: "spark/worker1.local@STARDATADBLABS.LOCAL"
+    ▼
+Ranger plugin checks policy (Layer 3)
+    ▼
+Allow / Deny
 ```
 
 ### Key Concepts
 
 | Concept | Description |
 |---|---|
-| **Service** | A named plugin registration — one per data system (`kafka`, `doris`, `opensearch`) |
-| **Policy** | Rule: resource + users/groups + allowed operations. Policies are *additive* — any matching allow wins |
+| **OpenBao** | Source of truth for all credentials — Ranger admin password, service passwords, keytabs. Path `secret/data/ranger/credentials` |
+| **Kerberos principal** | Identity for Hadoop-ecosystem services — format `name/host@REALM`. Required for Spark, HDFS. **Not** used for Kafka SCRAM or Doris SQL |
+| **Ranger Service** | A named plugin registration — one per data system (`kafka`, `doris`, `opensearch`) |
+| **Ranger Policy** | Rule: resource + users/groups + allowed operations. Policies are *additive* — any matching allow wins |
 | **Resource** | What is protected — Kafka topic/consumergroup/cluster, Doris database/table/column, OpenSearch index |
-| **User** | Identity that must match exactly how the service reports it (SCRAM username for Kafka, SQL login for Doris) |
+| **Ranger User** | Identity that must match exactly how the service reports it (SCRAM username for Kafka, SQL login for Doris, Kerberos principal for Spark) |
 | **Group** | Collection of users. Adding a user to a group grants all the group's policy permissions automatically |
 | **`public` group** | Special group — every Ranger user is implicitly a member. Policies on `public` apply to *all* users |
 
@@ -108,24 +141,103 @@ Allow / Deny  (sub-millisecond, no I/O on the hot path)
 
 ---
 
-## 5. Adding a New User
+## 5. Adding a New User — All Layers
 
-Adding a user requires three steps: (a) create the service-level identity,
-(b) register the user in Ranger, (c) add them to a policy or group.
+Adding a user requires up to **four steps** depending on the service.
+The table below shows which steps apply:
 
-### Step A — Register user in Ranger user store
+| Step | Kafka | Doris | Kerberized service (Spark) |
+|---|---|---|---|
+| A — Store credential in OpenBao | ✅ (after K8s secret created) | ✅ | ✅ (keytab) |
+| B — Create Kerberos principal + keytab | ❌ not needed | ❌ not needed | ✅ required |
+| C — Create service-level identity | ✅ KafkaUser CR | ✅ CREATE USER in SQL | ✅ keytab K8s secret |
+| D — Register in Ranger + add to policy | ✅ | ✅ | ✅ |
+
+### Step A — Store credential in OpenBao
+
+All user credentials should be stored in OpenBao so they can be injected into
+pods via the agent sidecar and audited centrally.
+
+```bash
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+
+# Store alice's Kafka password (after generating KafkaUser — see step C)
+ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
+bao kv put secret/kafka/users/alice \
+  username="alice" \
+  password="${ALICE_PASS}" \
+  service="kafka" \
+  created_by="admin"
+
+# Store alice's Doris password
+bao kv put secret/doris/users/alice \
+  username="alice" \
+  password="AliceDoris1!" \
+  service="doris" \
+  created_by="admin"
+
+# Read back to verify
+bao kv get secret/kafka/users/alice
+```
+
+### Step B — Create Kerberos principal (Spark / Hadoop services only)
+
+> **Skip this step for Kafka SCRAM users and Doris SQL users.**
+
+```bash
+# Create the user principal in the KDC
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "addprinc -pw AliceKrb1! alice@STARDATADBLABS.LOCAL"
+
+# Export a keytab for passwordless auth (pods use keytabs, not passwords)
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "ktadd -k /tmp/alice.keytab alice@STARDATADBLABS.LOCAL"
+
+# Copy the keytab from the KDC pod
+KDC_POD=$(kubectl get pod -n kerberos -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl cp kerberos/${KDC_POD}:/tmp/alice.keytab /tmp/alice.keytab
+
+# Verify the keytab
+klist -ekt /tmp/alice.keytab
+
+# Store keytab as a K8s secret (for pod mounting)
+kubectl create secret generic alice-keytab \
+  --from-file=alice.keytab=/tmp/alice.keytab \
+  -n prod \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Also store the keytab in OpenBao as a backup
+bao kv put secret/kerberos/users/alice \
+  principal="alice@STARDATADBLABS.LOCAL" \
+  keytab_secret="alice-keytab" \
+  created_by="admin"
+```
+
+### Step C — Create the service-level identity
+
+See service-specific sections (6, 7) below.
+
+### Step D — Register user in Ranger user store and add to policy
 
 **Via UI:**
 1. Open `http://192.168.1.50:30680` → login as `admin / Priya1982`
 2. Top menu: **Settings → Users / Groups / Roles**
 3. Click **Add New User**
 4. Fill: **Username** (must exactly match what the service reports), **Password** (Ranger UI only — not the service credential), **Role** = `ROLE_USER`
-5. Optionally assign a Group
-6. Click **Save**
+5. Optionally assign a Group → click **Save**
 
 **Via REST API:**
 ```bash
-curl -su admin:Priya1982 \
+# Retrieve Ranger admin password from OpenBao
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+
+curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/xusers/secure/users \
   -H "Content-Type: application/json" \
   -d '{
@@ -139,8 +251,7 @@ curl -su admin:Priya1982 \
   }'
 ```
 
-### Step B — Assign to a group (via UI)
-
+**Assign to a group (via UI):**
 1. **Settings → Users / Groups / Roles → Users**
 2. Open the user → click the **Groups** tab → search for the group → Add
 
@@ -181,10 +292,26 @@ ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | b
 echo "Alice's Kafka password: $ALICE_PASS"
 ```
 
-### 6.2 Register alice in Ranger
+### 6.2 Store credential in OpenBao and register in Ranger
 
 ```bash
-curl -su admin:Priya1982 \
+# Strimzi generates the SCRAM password and stores it in a K8s secret.
+# Retrieve it and mirror it into OpenBao for central auditing.
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+
+ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
+
+bao kv put secret/kafka/users/alice \
+  username="alice" \
+  password="${ALICE_PASS}" \
+  service="kafka"
+
+# Register alice in Ranger (password retrieved from OpenBao)
+RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+
+curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/xusers/secure/users \
   -H "Content-Type: application/json" \
   -d '{
@@ -309,25 +436,48 @@ kafka-console-producer.sh \
 
 ## 7. Doris — User Workflow & Testing
 
-### 7.1 Create the Doris SQL user
+### 7.1 Store credential in OpenBao first
 
 ```bash
-DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
-  -o jsonpath='{.data.admin-password}' | base64 -d)
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+
+# Store alice's Doris password in OpenBao before creating the SQL user
+bao kv put secret/doris/users/alice \
+  username="alice" \
+  password="AliceDoris1!" \
+  service="doris" \
+  created_by="admin"
+
+# Verify
+bao kv get secret/doris/users/alice
+```
+
+### 7.2 Create the Doris SQL user (password sourced from OpenBao)
+
+```bash
+# Retrieve the Doris root password from OpenBao
+DORIS_ROOT_PASS=$(bao kv get -field=admin-password secret/doris/credentials)
+
+# Retrieve alice's password from OpenBao
+ALICE_DORIS_PASS=$(bao kv get -field=password secret/doris/users/alice)
 
 kubectl exec -n prod deploy/doris-fe -it -- \
-  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_PASS}" \
-  -e "CREATE USER 'alice'@'%' IDENTIFIED BY 'AliceDoris1!';"
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
+  -e "CREATE USER 'alice'@'%' IDENTIFIED BY '${ALICE_DORIS_PASS}';"
 ```
 
 > In Ranger-managed Doris, you still need `CREATE USER` in Doris, but permissions
 > are controlled by Ranger policies. The Doris-native privilege check is overridden
 > by the Ranger plugin — so no additional `GRANT` in SQL is required.
 
-### 7.2 Register alice in Ranger
+### 7.3 Register alice in Ranger (password from OpenBao)
 
 ```bash
-curl -su admin:Priya1982 \
+RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+
+curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/xusers/secure/users \
   -H "Content-Type: application/json" \
   -d '{
@@ -339,7 +489,7 @@ curl -su admin:Priya1982 \
   }'
 ```
 
-### 7.3 Create a scoped Doris policy
+### 7.4 Create a scoped Doris policy
 
 ```bash
 curl -su admin:Priya1982 \
@@ -366,7 +516,7 @@ curl -su admin:Priya1982 \
   }'
 ```
 
-### 7.4 Test: SELECT access (should be allowed)
+### 7.5 Test: SELECT access (should be allowed)
 
 ```bash
 kubectl run doris-test -n prod --rm -it --restart=Never \
@@ -378,7 +528,7 @@ kubectl run doris-test -n prod --rm -it --restart=Never \
 # Denied:   ERROR 1105 (HY000): Access denied
 ```
 
-### 7.5 Test: INSERT access (should be denied)
+### 7.6 Test: INSERT access (should be denied)
 
 ```bash
 kubectl run doris-test -n prod --rm -it --restart=Never \
@@ -389,7 +539,7 @@ kubectl run doris-test -n prod --rm -it --restart=Never \
 # Expected: ERROR 1105 (HY000): Access denied
 ```
 
-### 7.6 Add column-level data masking (optional)
+### 7.7 Add column-level data masking (optional)
 
 1. Ranger Admin → **Access Manager → doris**
 2. Click the **Masking** tab → **Add New Policy**
@@ -439,7 +589,16 @@ curl -su admin:admin \
 ## 9. Deleting a User — Full Cleanup
 
 > **Order matters:** remove from policies first, then delete the service identity,
-> then delete from Ranger. Reversing this order leaves dangling policy references.
+> then delete from Ranger, then revoke Kerberos principal, then delete from OpenBao.
+
+| Step | Kafka | Doris | Kerberized service |
+|---|---|---|---|
+| 1 — Remove from Ranger policies | ✅ | ✅ | ✅ |
+| 2 — Delete service identity | ✅ KafkaUser CR | ✅ DROP USER | ✅ K8s secret |
+| 3 — Delete Ranger user | ✅ | ✅ | ✅ |
+| 4 — Delete Kerberos principal | ❌ | ❌ | ✅ |
+| 5 — Delete from OpenBao | ✅ | ✅ | ✅ |
+| 6 — Verify cleanup | ✅ | ✅ | ✅ |
 
 ### Step 1 — Find all policies referencing the user
 
@@ -507,8 +666,14 @@ curl -su admin:admin \
 ### Step 4 — Delete the Ranger user
 
 ```bash
+# Retrieve Ranger admin password from OpenBao
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+
 # Find the Ranger user ID
-RANGER_USER_ID=$(curl -su admin:Priya1982 \
+RANGER_USER_ID=$(curl -su "admin:${RANGER_PASS}" \
   "http://192.168.1.50:30680/service/xusers/users?pageSize=100" | \
   python3 -c "
 import sys, json
@@ -520,24 +685,106 @@ for u in json.load(sys.stdin)['vXUsers']:
 echo "Ranger user ID: ${RANGER_USER_ID}"
 
 # Delete the user
-curl -su admin:Priya1982 \
+curl -su "admin:${RANGER_PASS}" \
   -X DELETE \
   "http://192.168.1.50:30680/service/xusers/users/${RANGER_USER_ID}?forceDelete=true"
 ```
 
-### Step 5 — Verify cleanup
+### Step 5 — Delete the Kerberos principal (Spark / Hadoop users only)
+
+> **Skip for Kafka SCRAM users and Doris SQL users.**
 
 ```bash
-curl -su admin:Priya1982 \
+# Delete the KDC principal
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "delprinc -force alice@STARDATADBLABS.LOCAL"
+
+# Delete the K8s secret holding the keytab
+kubectl delete secret alice-keytab -n prod
+
+# Verify the principal is gone
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "getprinc alice@STARDATADBLABS.LOCAL" 2>&1 | \
+  grep -i "does not exist\|Principal does not exist" && echo "OK — principal deleted"
+```
+
+### Step 6 — Delete from OpenBao
+
+```bash
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+
+# Delete Kafka credential (soft delete — restorable)
+bao kv delete secret/kafka/users/alice
+
+# Delete Doris credential
+bao kv delete secret/doris/users/alice
+
+# Delete Kerberos entry (if created)
+bao kv delete secret/kerberos/users/alice
+
+# Permanently destroy all versions (irreversible — use only when sure)
+# bao kv metadata delete secret/kafka/users/alice
+
+# Verify all paths are gone
+bao kv list secret/kafka/users/  2>/dev/null | grep alice && \
+  echo "WARNING: alice still in OpenBao kafka/users" || echo "OK — kafka/users/alice deleted"
+bao kv list secret/doris/users/  2>/dev/null | grep alice && \
+  echo "WARNING: alice still in OpenBao doris/users" || echo "OK — doris/users/alice deleted"
+```
+
+### Step 7 — Verify full cleanup
+
+```bash
+export BAO_ADDR="http://192.168.1.50:30820"
+export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+
+# 1. Check no Ranger policies still reference alice
+curl -su "admin:${RANGER_PASS}" \
   "http://192.168.1.50:30680/service/plugins/policies?pageSize=500" | \
   python3 -c "
 import sys, json
 raw = sys.stdin.read()
 if 'alice' in raw:
-    print('WARNING: alice still referenced in policies — check manually')
+    print('WARNING: alice still referenced in Ranger policies')
 else:
-    print('OK — alice fully removed from all policies')
+    print('OK — Ranger policies clean')
 "
+
+# 2. Check Ranger user is gone
+curl -su "admin:${RANGER_PASS}" \
+  "http://192.168.1.50:30680/service/xusers/users?pageSize=100" | \
+  python3 -c "
+import sys, json
+users = [u['name'] for u in json.load(sys.stdin)['vXUsers']]
+if 'alice' in users:
+    print('WARNING: alice still in Ranger user store')
+else:
+    print('OK — Ranger user store clean')
+"
+
+# 3. Check Kerberos principal is gone (Spark users only)
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "listprincs" 2>/dev/null | grep "alice@" && \
+  echo "WARNING: alice Kerberos principal still exists" || \
+  echo "OK — Kerberos clean"
+
+# 4. Check K8s secrets are gone
+kubectl get secret alice -n prod 2>/dev/null && \
+  echo "WARNING: alice K8s secret still exists" || echo "OK — K8s secret gone"
+kubectl get kafkauser alice -n prod 2>/dev/null && \
+  echo "WARNING: KafkaUser alice still exists" || echo "OK — KafkaUser gone"
+
+# 5. Check OpenBao entries are deleted
+bao kv get secret/kafka/users/alice 2>/dev/null && \
+  echo "WARNING: alice still in OpenBao kafka/users" || echo "OK — OpenBao kafka clean"
+bao kv get secret/doris/users/alice 2>/dev/null && \
+  echo "WARNING: alice still in OpenBao doris/users" || echo "OK — OpenBao doris clean"
+
+echo "=== Cleanup verification complete ==="
 ```
 
 ---
