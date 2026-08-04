@@ -158,28 +158,38 @@ The table below shows which steps apply:
 All user credentials should be stored in OpenBao so they can be injected into
 pods via the agent sidecar and audited centrally.
 
-```bash
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+> **Note:** The `bao` CLI lives **inside the `openbao-0` pod**, not on the master
+> node. All OpenBao operations from the master use `curl` against the HTTP API
+> (`http://192.168.1.50:30820/v1/...`) with an `X-Vault-Token` header.
+> KV v2 write/read paths require the `/data/` prefix (e.g. `secret/data/...`).
 
-# Store alice's Kafka password (after generating KafkaUser — see step C)
+```bash
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+
+# ── IMPORTANT: complete Step C first (create KafkaUser CR) so the K8s
+# secret exists before reading the password below. ────────────────────
+
+# Store alice's Kafka password (read from K8s secret created by Strimzi)
 ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
-bao kv put secret/kafka/users/alice \
-  username="alice" \
-  password="${ALICE_PASS}" \
-  service="kafka" \
-  created_by="admin"
+
+curl -sf -X POST \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"data\":{\"username\":\"alice\",\"password\":\"${ALICE_PASS}\",\"service\":\"kafka\",\"created_by\":\"admin\"}}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" && echo "Kafka credential stored"
 
 # Store alice's Doris password
-bao kv put secret/doris/users/alice \
-  username="alice" \
-  password="AliceDoris1!" \
-  service="doris" \
-  created_by="admin"
+curl -sf -X POST \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"username":"alice","password":"AliceDoris1!","service":"doris","created_by":"admin"}}' \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "Doris credential stored"
 
 # Read back to verify
-bao kv get secret/kafka/users/alice
+curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" | python3 -m json.tool
 ```
 
 ### Step B — Create Kerberos principal (Spark / Hadoop services only)
@@ -209,11 +219,15 @@ kubectl create secret generic alice-keytab \
   -n prod \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Also store the keytab in OpenBao as a backup
-bao kv put secret/kerberos/users/alice \
-  principal="alice@STARDATADBLABS.LOCAL" \
-  keytab_secret="alice-keytab" \
-  created_by="admin"
+# Also store the keytab metadata in OpenBao as a backup
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+
+curl -sf -X POST \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"principal":"alice@STARDATADBLABS.LOCAL","keytab_secret":"alice-keytab","created_by":"admin"}}' \
+  "${BAO_ADDR}/v1/secret/data/kerberos/users/alice" && echo "Kerberos entry stored"
 ```
 
 ### Step C — Create the service-level identity
@@ -231,11 +245,13 @@ See service-specific sections (6, 7) below.
 
 **Via REST API:**
 ```bash
-# Retrieve Ranger admin password from OpenBao
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
-RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+# Retrieve Ranger admin password from OpenBao via curl
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+RANGER_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/xusers/secure/users \
@@ -297,19 +313,22 @@ echo "Alice's Kafka password: $ALICE_PASS"
 ```bash
 # Strimzi generates the SCRAM password and stores it in a K8s secret.
 # Retrieve it and mirror it into OpenBao for central auditing.
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
 
 ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
 
-bao kv put secret/kafka/users/alice \
-  username="alice" \
-  password="${ALICE_PASS}" \
-  service="kafka"
+curl -sf -X POST \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"data\":{\"username\":\"alice\",\"password\":\"${ALICE_PASS}\",\"service\":\"kafka\"}}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" && echo "Stored in OpenBao"
 
 # Register alice in Ranger (password retrieved from OpenBao)
-RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+RANGER_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/xusers/secure/users \
@@ -439,29 +458,39 @@ kafka-console-producer.sh \
 ### 7.1 Store credential in OpenBao first
 
 ```bash
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
 
 # Store alice's Doris password in OpenBao before creating the SQL user
-bao kv put secret/doris/users/alice \
-  username="alice" \
-  password="AliceDoris1!" \
-  service="doris" \
-  created_by="admin"
+curl -sf -X POST \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"username":"alice","password":"AliceDoris1!","service":"doris","created_by":"admin"}}' \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "Stored in OpenBao"
 
 # Verify
-bao kv get secret/doris/users/alice
+curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice" | python3 -m json.tool
 ```
 
 ### 7.2 Create the Doris SQL user (password sourced from OpenBao)
 
 ```bash
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+
 # Retrieve the Doris root password from OpenBao
-DORIS_ROOT_PASS=$(bao kv get -field=admin-password secret/doris/credentials)
+DORIS_ROOT_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 # Retrieve alice's password from OpenBao
-ALICE_DORIS_PASS=$(bao kv get -field=password secret/doris/users/alice)
+ALICE_DORIS_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['password'])")
 
 kubectl exec -n prod deploy/doris-fe -it -- \
   mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
@@ -475,7 +504,13 @@ kubectl exec -n prod deploy/doris-fe -it -- \
 ### 7.3 Register alice in Ranger (password from OpenBao)
 
 ```bash
-RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+
+RANGER_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/xusers/secure/users \
@@ -667,10 +702,12 @@ curl -su admin:admin \
 
 ```bash
 # Retrieve Ranger admin password from OpenBao
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
-RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+RANGER_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 # Find the Ranger user ID
 RANGER_USER_ID=$(curl -su "admin:${RANGER_PASS}" \
@@ -711,36 +748,48 @@ kubectl exec -n kerberos deploy/kerberos-kdc -- \
 ### Step 6 — Delete from OpenBao
 
 ```bash
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
 
-# Delete Kafka credential (soft delete — restorable)
-bao kv delete secret/kafka/users/alice
+# Soft-delete latest version (restorable with undelete)
+curl -sf -X DELETE \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" && echo "kafka/users/alice deleted"
 
-# Delete Doris credential
-bao kv delete secret/doris/users/alice
+curl -sf -X DELETE \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "doris/users/alice deleted"
 
-# Delete Kerberos entry (if created)
-bao kv delete secret/kerberos/users/alice
+curl -sf -X DELETE \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/kerberos/users/alice" 2>/dev/null && echo "kerberos/users/alice deleted"
 
 # Permanently destroy all versions (irreversible — use only when sure)
-# bao kv metadata delete secret/kafka/users/alice
+# curl -sf -X DELETE \
+#   -H "X-Vault-Token: ${ROOT_TOKEN}" \
+#   "${BAO_ADDR}/v1/secret/metadata/kafka/users/alice"
 
-# Verify all paths are gone
-bao kv list secret/kafka/users/  2>/dev/null | grep alice && \
-  echo "WARNING: alice still in OpenBao kafka/users" || echo "OK — kafka/users/alice deleted"
-bao kv list secret/doris/users/  2>/dev/null | grep alice && \
-  echo "WARNING: alice still in OpenBao doris/users" || echo "OK — doris/users/alice deleted"
+# Verify: 404 = deleted, 200 = still present
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice")
+[ "$STATUS" = "404" ] && echo "OK — kafka/users/alice gone" || echo "WARNING: still present (HTTP $STATUS)"
+
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice")
+[ "$STATUS" = "404" ] && echo "OK — doris/users/alice gone" || echo "WARNING: still present (HTTP $STATUS)"
 ```
 
 ### Step 7 — Verify full cleanup
 
 ```bash
-export BAO_ADDR="http://192.168.1.50:30820"
-export BAO_TOKEN=$(sudo cat /root/openbao-init-keys.json | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])")
-RANGER_PASS=$(bao kv get -field=admin-password secret/ranger/credentials)
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+RANGER_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 # 1. Check no Ranger policies still reference alice
 curl -su "admin:${RANGER_PASS}" \
@@ -778,11 +827,16 @@ kubectl get secret alice -n prod 2>/dev/null && \
 kubectl get kafkauser alice -n prod 2>/dev/null && \
   echo "WARNING: KafkaUser alice still exists" || echo "OK — KafkaUser gone"
 
-# 5. Check OpenBao entries are deleted
-bao kv get secret/kafka/users/alice 2>/dev/null && \
-  echo "WARNING: alice still in OpenBao kafka/users" || echo "OK — OpenBao kafka clean"
-bao kv get secret/doris/users/alice 2>/dev/null && \
-  echo "WARNING: alice still in OpenBao doris/users" || echo "OK — OpenBao doris clean"
+# 5. Check OpenBao entries are deleted (404 = gone, anything else = warning)
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice")
+[ "$STATUS" = "404" ] && echo "OK — OpenBao kafka clean" || echo "WARNING: kafka/users/alice still present (HTTP $STATUS)"
+
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/users/alice")
+[ "$STATUS" = "404" ] && echo "OK — OpenBao doris clean" || echo "WARNING: doris/users/alice still present (HTTP $STATUS)"
 
 echo "=== Cleanup verification complete ==="
 ```
