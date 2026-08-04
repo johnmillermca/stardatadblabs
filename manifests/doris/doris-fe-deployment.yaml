@@ -2,22 +2,34 @@
 # Apache Doris FE (Frontend) — ConfigMap + PVC + StatefulSet
 # Namespace : prod
 # Node      : worker1.local
-# Access    : http://192.168.1.50:30030 (HTTP/WebUI) jdbc:mysql://192.168.1.50:30090
+# Access    : http://192.168.1.50:30030 (HTTP/WebUI)
+#             jdbc:mysql://192.168.1.50:30090 (MySQL — routes through krb-doris-guard)
 # Secret    : doris-credentials  (key: admin-password)
 # PVC       : 100Gi on /home (worker1.local)
-# NOTE      : StatefulSet + enable_fqdn_mode ensures BdbJE stores a stable FQDN
-#             (doris-fe-0.doris-fe-headless.prod.svc.cluster.local) instead of the
-#             ephemeral pod IP, so FE survives reboots without getting stuck in
-#             feType:UNKNOWN.
+#
+# Kerberos enforcement — krb-doris-guard sidecar:
+#   Doris 4.0.x has no native Kerberos/GSSAPI. The krb-doris-guard sidecar
+#   implements KDC enforcement at the MySQL protocol layer.
+#
+#   Architecture:
+#     Client → :19030 (guard) → KDC check → :9030 (Doris FE)
+#
+#   The guard:
+#     1. Intercepts the MySQL HandshakeResponse and extracts the username.
+#     2. Runs:  kinit -V -n <username>@REALM </dev/null
+#        to check whether the KDC principal exists.
+#     3. If the principal does NOT exist → MySQL ERR_Packet 1045 (Access denied)
+#        with message:
+#          "principal <user>@REALM not found in Kerberos KDC"
+#     4. If the principal DOES exist → transparent proxy to Doris :9030.
+#        Doris validates the password; Ranger enforces authorization.
+#
+#   The Service routes port 9030 → guard port 19030 (not Doris port 9030).
+#   Doris FE is only accessible via the guard; port 9030 is not exposed directly.
+#   root is exempt (EXEMPT_USERS=root) so admin operations are unaffected.
+#
 # Ranger    : Image fe-4.0.7-ranger includes ranger-hive-plugin JARs on classpath.
 #             Ranger config XMLs are mounted from doris-ranger-config ConfigMap.
-# Kerberos  : krb5.conf mounted from kerberos-integration-config at
-#             /etc/krb5.conf.d/cluster.conf (included by base /etc/krb5.conf).
-#             Toggle: kerberos-integration-config data.kerberos.enabled
-#             When enabled=true: doris-keytab also mounted at
-#             /etc/security/keytabs/doris.service.keytab for future LDAP/SPNEGO
-#             integration. No Doris fe.conf change needed at this phase —
-#             Doris 4.0.x does not support native GSSAPI; keytab is pre-staged.
 # =============================================================================
 ---
 apiVersion: v1
@@ -138,6 +150,47 @@ spec:
             - name: fe-config-rw
               mountPath: /config-rw
       containers:
+        # ── krb-doris-guard sidecar ──────────────────────────────────────────
+        # Listens on :19030, validates KDC principal, proxies to Doris :9030.
+        # Built from docker/krb-doris-guard/ — see build-and-push.sh.
+        - name: krb-doris-guard
+          image: 192.168.1.50:30500/krb-doris-guard:1.0.0
+          env:
+            - name: KDC_REALM
+              value: "STARDATADBLABS.LOCAL"
+            - name: KRB5_CONFIG
+              value: "/etc/krb5.conf.d/cluster.conf"
+            - name: DORIS_HOST
+              value: "127.0.0.1"
+            - name: DORIS_PORT
+              value: "9030"
+            - name: LISTEN_PORT
+              value: "19030"
+            - name: EXEMPT_USERS
+              value: "root"
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - name: guard-mysql
+              containerPort: 19030
+          volumeMounts:
+            - name: krb5-conf
+              mountPath: /etc/krb5.conf.d/cluster.conf
+              subPath: krb5.conf
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 200m
+          readinessProbe:
+            tcpSocket:
+              port: 19030
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+        # ── Doris FE ─────────────────────────────────────────────────────────
         - name: doris-fe
           image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger
           command:

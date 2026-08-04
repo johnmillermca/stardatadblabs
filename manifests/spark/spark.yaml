@@ -1,17 +1,31 @@
 # =============================================================================
 # Apache Spark 3.5.1 — 1 master + 3 workers
 # Image    : 192.168.1.50:30500/apache/spark:3.5.1
-# Access   : http://192.168.1.5x:30707  (Master UI)
-#            spark://192.168.1.5x:30777 (RPC)
+# Access   : http://192.168.1.5x:30707  (Master UI — no auth gate)
+#            spark://192.168.1.5x:30777 (RPC — via krb-spark-guard)
+#
+# Kerberos enforcement — krb-spark-guard sidecar:
+#   Spark standalone has no auth gate on port 7077. The krb-spark-guard sidecar
+#   implements KDC enforcement at the TCP connection level.
+#
+#   Architecture:
+#     spark-submit-krb → POST :7078/auth (guard HTTP API) → KDC keytab check
+#                     → X-Krb-Token header → TCP :7077 (guard RPC proxy)
+#                                         → :17077 (real Spark master, internal)
+#
+#   The guard:
+#     1. HTTP API (:7078): accepts {username, keytab_b64}, verifies keytab
+#        against the KDC (kinit -kt), returns a short-lived token.
+#     2. RPC proxy (:7077): expects first line "X-Krb-Token: <token>\n",
+#        validates the token, then transparently forwards to Spark :17077.
+#
+#   The real Spark master listens on :17077 (internal only).
+#   The Service exposes :7077 → guard's RPC proxy.
+#   Use spark-submit-krb (installed in the guard image) instead of spark-submit.
+#
 # Kerberos : krb5.conf mounted from kerberos-integration-config at
 #            /etc/krb5.conf.d/cluster.conf on master and all workers.
-#            spark-keytab (svc/spark@STARDATADBLABS.LOCAL) mounted at
-#            /etc/security/keytabs/spark.service.keytab on master.
-#            Toggle: kerberos-integration-config data.kerberos.enabled
-#            When enabled=true, add to spark-submit:
-#              --conf spark.kerberos.enabled=true
-#              --conf spark.kerberos.principal=<user>@STARDATADBLABS.LOCAL
-#              --conf spark.kerberos.keytab=/path/to/user.keytab
+#            spark-keytab (svc/spark@STARDATADBLABS.LOCAL) mounted on master.
 # =============================================================================
 ---
 apiVersion: v1
@@ -28,10 +42,16 @@ spec:
     app: spark
     component: master
   ports:
+    # RPC port → krb-spark-guard proxy (:7077). Guard validates KDC before forwarding.
     - name: rpc
       port: 7077
       targetPort: 7077
       nodePort: 30777
+    # Guard HTTP auth API — exposed so spark-submit-krb can call it from outside
+    - name: guard-auth
+      port: 7078
+      targetPort: 7078
+      nodePort: 30778
     - name: ui
       port: 8080
       targetPort: 8080
@@ -48,6 +68,7 @@ spec:
     app: spark
     component: master
   ports:
+    # Workers connect directly to the master via headless DNS — through guard
     - name: rpc
       port: 7077
 ---
@@ -87,6 +108,54 @@ spec:
                       - worker2.local
                       - worker3.local
       containers:
+        # ── krb-spark-guard sidecar ──────────────────────────────────────────
+        # Port 7077: RPC proxy — validates X-Krb-Token before forwarding to :17077
+        # Port 7078: HTTP auth API — POST /auth {username,keytab_b64} → token
+        # Built from docker/krb-spark-guard/ — see build-and-push.sh.
+        - name: krb-spark-guard
+          image: 192.168.1.50:30500/krb-spark-guard:1.0.0
+          env:
+            - name: KDC_REALM
+              value: "STARDATADBLABS.LOCAL"
+            - name: KRB5_CONFIG
+              value: "/etc/krb5.conf.d/cluster.conf"
+            - name: SPARK_HOST
+              value: "127.0.0.1"
+            - name: SPARK_PORT
+              value: "17077"
+            - name: LISTEN_RPC_PORT
+              value: "7077"
+            - name: LISTEN_AUTH_PORT
+              value: "7078"
+            - name: TOKEN_TTL
+              value: "300"
+            - name: LOG_LEVEL
+              value: "INFO"
+          ports:
+            - name: guard-rpc
+              containerPort: 7077
+            - name: guard-auth
+              containerPort: 7078
+          volumeMounts:
+            - name: krb5-conf
+              mountPath: /etc/krb5.conf.d/cluster.conf
+              subPath: krb5.conf
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 200m
+          readinessProbe:
+            tcpSocket:
+              port: 7077
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+        # ── Spark Master (internal port 17077) ───────────────────────────────
+        # Listens on 17077 — NOT exposed by the Service directly.
+        # Only the krb-spark-guard sidecar (127.0.0.1:7077) forwards to it.
         - name: spark-master
           image: 192.168.1.50:30500/apache/spark:3.5.1
           command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
@@ -95,13 +164,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # ── Kerberos: point JVM JAAS at the cluster krb5.conf ─────────────
-            # SPARK_DAEMON_JAVA_OPTS is passed to the master JVM at startup.
-            # When kerberos.enabled=true, jobs using GSSAPI will find the KDC.
             - name: SPARK_DAEMON_JAVA_OPTS
               value: "-Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf"
+            # Tell Spark master to bind on port 17077 (guard proxies 7077→17077)
+            - name: SPARK_MASTER_PORT
+              value: "17077"
           ports:
-            - containerPort: 7077
+            - containerPort: 17077
             - containerPort: 8080
           volumeMounts:
             # krb5.conf: included by /etc/krb5.conf via includedir — JVM JAAS

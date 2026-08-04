@@ -6,8 +6,14 @@
 #             ConfigMap is the git source of truth; apply it manually when changed).
 #
 # KERBEROS TOGGLE
-#   kerberos_auth_domain.http_enabled: false   ← default (Kerberos disabled)
-#   kerberos_auth_domain.http_enabled: true    ← Kerberos enabled
+#   kerberos_auth_domain.http_enabled: true    ← active (KDC-enforced)
+#   basic_internal_auth_domain.http_enabled: false ← disabled (admin cert only)
+#
+# ENFORCEMENT MODEL
+#   Only SPNEGO (Kerberos ticket) authentication is active for HTTP clients.
+#   No KDC principal → kinit fails → no ticket → HTTP 401.
+#   The admin user is exempt: securityadmin.sh uses TLS client cert (admin_dn),
+#   not Basic auth, so it works regardless of this setting.
 #
 #   When enabling Kerberos:
 #     1. Flip kerberos-integration-config data.kerberos.enabled to "true"
@@ -75,15 +81,21 @@ data:
             authentication_backend:
               type: noop
 
-          # ── HTTP Basic against internal users database (always active) ───────
+          # ── HTTP Basic — DISABLED for KDC enforcement ─────────────────────
+          # Disabled so that only Kerberos SPNEGO is accepted for HTTP clients.
+          # A user without a KDC principal cannot get a ticket → HTTP 401.
+          # NOTE: The OpenSearch admin user authenticates via TLS client cert
+          # (admin_dn: CN=admin,O=opensearch-cluster) used by securityadmin.sh —
+          # that path bypasses this auth domain entirely and is unaffected.
+          # To re-enable Basic (fallback mode): set http_enabled: true below.
           basic_internal_auth_domain:
-            description: "Authenticate via HTTP Basic against internal users database"
-            http_enabled: true
+            description: "HTTP Basic — disabled; SPNEGO is the only HTTP auth method"
+            http_enabled: false
             transport_enabled: true
             order: 4
             http_authenticator:
               type: basic
-              challenge: true
+              challenge: false
             authentication_backend:
               type: intern
 

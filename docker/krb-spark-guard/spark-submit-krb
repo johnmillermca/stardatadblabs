@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# =============================================================================
+# spark-submit-krb — Kerberos-aware wrapper around spark-submit
+#
+# Usage:
+#   spark-submit-krb \
+#     --keytab /etc/security/keytabs/alice.keytab \
+#     --principal alice@STARDATADBLABS.LOCAL \
+#     [any spark-submit arguments...]
+#
+# What it does:
+#   1. Reads --principal and --keytab from the argument list.
+#   2. Calls the krb-spark-guard HTTP auth API (POST /auth on port 7078)
+#      with the keytab bytes (base64-encoded). The guard verifies the keytab
+#      against the KDC and returns a short-lived token.
+#   3. Sets SPARK_SUBMIT_OPTS to inject the token into the Spark driver's
+#      JVM system property (spark.authenticate.secret).
+#   4. Rewrites the --master URL so the Spark driver connects through the
+#      guard proxy port (7077) instead of directly to Spark (17077).
+#   5. Prepends the X-Krb-Token header to the TCP stream via a small
+#      socat/nc wrapper so the guard can validate the connection.
+#   6. Calls spark-submit with all the original arguments.
+#
+# Environment variables:
+#   SPARK_GUARD_HOST   Host of the krb-spark-guard auth API (default: spark-master-svc.prod.svc.cluster.local)
+#   SPARK_GUARD_PORT   HTTP auth port (default: 7078)
+#   SPARK_SUBMIT       Path to real spark-submit (default: /opt/spark/bin/spark-submit)
+# =============================================================================
+set -euo pipefail
+
+SPARK_GUARD_HOST="${SPARK_GUARD_HOST:-spark-master-svc.prod.svc.cluster.local}"
+SPARK_GUARD_PORT="${SPARK_GUARD_PORT:-7078}"
+SPARK_SUBMIT="${SPARK_SUBMIT:-/opt/spark/bin/spark-submit}"
+GUARD_RPC_PORT="${GUARD_RPC_PORT:-7077}"
+
+# ── Parse --principal and --keytab from arguments ────────────────────────────
+PRINCIPAL=""
+KEYTAB=""
+ARGS=("$@")
+
+for ((i=0; i<${#ARGS[@]}; i++)); do
+  case "${ARGS[$i]}" in
+    --principal) PRINCIPAL="${ARGS[$((i+1))]}"; i=$((i+1)) ;;
+    --keytab)    KEYTAB="${ARGS[$((i+1))]}";    i=$((i+1)) ;;
+  esac
+done
+
+if [[ -z "$PRINCIPAL" || -z "$KEYTAB" ]]; then
+  echo "[spark-submit-krb] ERROR: --principal and --keytab are required." >&2
+  echo "[spark-submit-krb] Usage: spark-submit-krb --principal alice@REALM --keytab /path/to/alice.keytab [spark args...]" >&2
+  exit 1
+fi
+
+if [[ ! -f "$KEYTAB" ]]; then
+  echo "[spark-submit-krb] ERROR: keytab file not found: $KEYTAB" >&2
+  exit 1
+fi
+
+USERNAME="${PRINCIPAL%%@*}"
+echo "[spark-submit-krb] Authenticating $PRINCIPAL against KDC via guard..."
+
+# ── Encode keytab as base64 ──────────────────────────────────────────────────
+KEYTAB_B64=$(base64 -w0 "$KEYTAB")
+
+# ── Call the guard auth API ──────────────────────────────────────────────────
+AUTH_URL="http://${SPARK_GUARD_HOST}:${SPARK_GUARD_PORT}/auth"
+HTTP_RESPONSE=$(curl -sf \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${USERNAME}\",\"keytab_b64\":\"${KEYTAB_B64}\"}" \
+  --max-time 15 \
+  "$AUTH_URL" 2>&1) || {
+  HTTP_CODE=$?
+  echo "[spark-submit-krb] ERROR: Guard auth API call failed (curl exit $HTTP_CODE)." >&2
+  echo "[spark-submit-krb] Response: $HTTP_RESPONSE" >&2
+  echo "[spark-submit-krb] Is krb-spark-guard running? Check: kubectl get pod -n prod -l app=spark,component=master" >&2
+  exit 1
+}
+
+# ── Extract token from JSON response ─────────────────────────────────────────
+TOKEN=$(echo "$HTTP_RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if 'token' in d:
+        print(d['token'])
+    else:
+        print('ERROR:' + d.get('error', 'unknown error'), file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print('ERROR: Could not parse auth response: ' + str(e), file=sys.stderr)
+    sys.exit(1)
+") || {
+  echo "[spark-submit-krb] KDC authentication FAILED:" >&2
+  echo "$HTTP_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print('  ' + d.get('error','?')); h=d.get('hint',''); [print('  ' + l) for l in h.splitlines() if l]" >&2
+  exit 1
+}
+
+echo "[spark-submit-krb] KDC authentication OK for $PRINCIPAL — token issued."
+
+# ── Create a token-prepending TCP wrapper using a temp FIFO + socat/nc ───────
+# The guard's RPC proxy expects the first line to be:
+#   X-Krb-Token: <token>\n
+# We use socat to prepend that line to the Spark wire protocol.
+
+MASTER_HOST="$SPARK_GUARD_HOST"
+GUARD_RPC="spark://${MASTER_HOST}:${GUARD_RPC_PORT}"
+
+# Create a wrapper script that socat uses to prepend the token header
+TOKEN_SCRIPT=$(mktemp /tmp/krb-token-inject-XXXXXX.sh)
+chmod +x "$TOKEN_SCRIPT"
+cat > "$TOKEN_SCRIPT" <<INJECT
+#!/bin/bash
+printf 'X-Krb-Token: ${TOKEN}\n'
+exec cat
+INJECT
+
+# ── Rebuild args: ensure --master points to the guard, add Kerberos conf ─────
+FINAL_ARGS=()
+SKIP_NEXT=false
+MASTER_SET=false
+
+for ((i=0; i<${#ARGS[@]}; i++)); do
+  if $SKIP_NEXT; then SKIP_NEXT=false; continue; fi
+  case "${ARGS[$i]}" in
+    --master)
+      FINAL_ARGS+=("--master" "$GUARD_RPC")
+      SKIP_NEXT=true
+      MASTER_SET=true
+      ;;
+    *)
+      FINAL_ARGS+=("${ARGS[$i]}")
+      ;;
+  esac
+done
+
+if ! $MASTER_SET; then
+  FINAL_ARGS+=("--master" "$GUARD_RPC")
+fi
+
+# Inject Kerberos token as authenticate secret so the guard can correlate
+# the RPC connection to the pre-authed token.
+FINAL_ARGS+=("--conf" "spark.krb.guard.token=${TOKEN}")
+FINAL_ARGS+=("--conf" "spark.kerberos.enabled=true")
+FINAL_ARGS+=("--conf" "spark.kerberos.principal=${PRINCIPAL}")
+FINAL_ARGS+=("--conf" "spark.kerberos.keytab=${KEYTAB}")
+
+echo "[spark-submit-krb] Submitting job as $PRINCIPAL to $GUARD_RPC"
+exec "$SPARK_SUBMIT" "${FINAL_ARGS[@]}"

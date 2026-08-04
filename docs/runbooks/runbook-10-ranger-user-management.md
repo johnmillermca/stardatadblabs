@@ -271,6 +271,20 @@ Replace `alice` / `AliceKrb1!` / `AliceDoris1!` with the real username and passw
 > **OpenBao note:** The `bao` CLI is inside the `openbao-0` pod only.
 > All operations from `master.local` use `curl`. KV v2 paths need `/data/` prefix.
 
+> **Enforcement model (as of current deployment):**
+>
+> | Service | Auth gate | KDC enforced at protocol level? |
+> |---|---|---|
+> | Kafka | GSSAPI only (port 9093) — no SCRAM for users | ✅ Yes — ticket required |
+> | OpenSearch | SPNEGO only — Basic auth disabled | ✅ Yes — ticket required |
+> | Doris | SQL password (Doris 4.x has no GSSAPI) | ⚠️ Procedural — KDC principal is prerequisite for SQL user creation |
+> | Spark | No cluster-level auth gate | ⚠️ Procedural — keytab required per-job |
+>
+> Steps 1–2 (KDC principal + keytab) are mandatory for **all services**.
+> Without them, Kafka and OpenSearch refuse connection at the protocol layer.
+> Doris and Spark rely on the operational procedure: the SQL user and keytab secret
+> are only created after the KDC principal exists. See §5.6 for full details.
+
 ### Step 1 — Create the Kerberos principal
 
 Every user starts here. This creates the single identity that flows through all services.
@@ -314,9 +328,11 @@ kubectl exec -n prod deploy/kerberos-kdc -- rm -f /tmp/alice.keytab
 rm -f /tmp/alice.keytab
 ```
 
-### Step 3 — Create the Kafka SCRAM user
+### Step 3 — Register the Kafka user (GSSAPI — no password needed)
 
-Kafka uses SCRAM-SHA-512 — Strimzi generates and manages the credential.
+Kafka now uses **GSSAPI only**. A `KafkaUser` CR is still required so Strimzi registers
+the username with the User Operator and Ranger can track the identity — but the
+authentication is done by the Kerberos ticket from Step 1/2, not a SCRAM password.
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -328,17 +344,18 @@ metadata:
   labels:
     strimzi.io/cluster: strimzi-kafka
 spec:
-  authentication:
-    type: scram-sha-512
+  # No authentication block — user connects via GSSAPI (Kerberos ticket).
+  # Strimzi registers the username so Ranger can assign policies to it.
+  # The KDC principal alice@STARDATADBLABS.LOCAL is the actual credential.
 EOF
 
-# Wait for Strimzi to provision the SCRAM credential
+# Verify the KafkaUser was accepted (Ready=True, no auth secret created)
 kubectl wait kafkauser alice -n prod --for=condition=Ready --timeout=60s
-
-# Retrieve the generated password (needed for testing)
-ALICE_KAFKA_PASS=$(kubectl get secret alice -n prod \
-  -o jsonpath='{.data.password}' | base64 -d)
-echo "Kafka SCRAM password: ${ALICE_KAFKA_PASS}"
+kubectl get kafkauser alice -n prod -o wide
+# Note: no K8s Secret named "alice" will be created (no SCRAM credential).
+# alice connects to Kafka with:
+#   kinit -kt /path/to/alice.keytab alice@STARDATADBLABS.LOCAL
+#   then use GSSAPI on bootstrap:9093
 ```
 
 ### Step 4 — Create the Doris SQL user
@@ -366,26 +383,62 @@ kubectl exec -n prod statefulset/doris-fe -it -- \
   -e "SELECT user, host FROM mysql.user WHERE user='alice';"
 ```
 
-### Step 5 — Create the OpenSearch user
+### Step 5 — Register the OpenSearch user (SPNEGO — no password needed)
+
+OpenSearch now uses **SPNEGO only**. HTTP Basic is disabled.
+The user must exist in OpenSearch's internal user store so that roles/backend_roles
+can be assigned to the Kerberos identity after SPNEGO authentication maps the
+principal name to the OpenSearch username.
+
+The `securityadmin.sh` tool authenticates via TLS client cert (`admin_dn`) — it is
+unaffected by the Basic auth disable.
 
 ```bash
-OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
-  -o jsonpath='{.data.opensearch-password}' | base64 -d)
+# admin credentials are only used by securityadmin.sh via TLS cert — not Basic auth
+# Use the security REST API (which requires admin TLS cert authentication):
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+    -backup /tmp/os-backup -icl -nhnv \
+    -cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    -cert   /usr/share/opensearch/config/tls/admin.pem \
+    -key    /usr/share/opensearch/config/tls/admin-key.pem \
+    -h localhost -p 9200 2>/dev/null
 
-curl -sk -u "admin:${OPENSEARCH_PASS}" \
-  -X PUT "https://192.168.1.53:30920/_plugins/_security/api/internalusers/alice" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "password":      "AliceOS1!",
-    "backend_roles": ["readall"],
-    "attributes":    {}
-  }'
-# Expected: {"status":"CREATED","message":"User alice has been created."}
+  python3 - <<'PYEOF'
+import yaml, json
+
+# Load existing internal_users
+with open('/tmp/os-backup/internal_users.yml') as f:
+    users = yaml.safe_load(f)
+
+# Add alice — no password hash needed; SPNEGO supplies the identity.
+# backend_roles controls what alice can access in OpenSearch.
+users['alice'] = {
+    'hash': '',
+    'reserved': False,
+    'hidden': False,
+    'backend_roles': ['readall'],
+    'attributes': {},
+    'description': 'alice — Kerberos SPNEGO identity, no password'
+}
+
+with open('/tmp/os-backup/internal_users.yml', 'w') as f:
+    yaml.dump(users, f, default_flow_style=False)
+print('alice added to internal_users')
+PYEOF
+
+  /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+    -f /tmp/os-backup/internal_users.yml -t internalusers -icl -nhnv \
+    -cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    -cert   /usr/share/opensearch/config/tls/admin.pem \
+    -key    /usr/share/opensearch/config/tls/admin-key.pem \
+    -h localhost -p 9200 2>&1 | tail -3
+"
+# Expected: Done with success
+# alice can now authenticate via SPNEGO only — no password works.
 ```
 
-### Step 6 — Store all credentials in OpenBao
-
-Single source of truth for all of alice's credentials across every service.
+### Step 6 — Store credentials in OpenBao
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
@@ -393,31 +446,20 @@ KEYS_FILE="${HOME}/openbao-init-keys.json"
 [ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
-# Kafka SCRAM password (mirror from K8s secret)
-ALICE_KAFKA_PASS=$(kubectl get secret alice -n prod \
-  -o jsonpath='{.data.password}' | base64 -d)
-curl -sf -X POST \
-  -H "X-Vault-Token: ${ROOT_TOKEN}" -H "Content-Type: application/json" \
-  -d "{\"data\":{\"username\":\"alice\",\"password\":\"${ALICE_KAFKA_PASS}\",\"service\":\"kafka\",\"created_by\":\"admin\"}}" \
-  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" && echo "Kafka stored"
-
-# Doris SQL password
+# Doris SQL password (the only service-level password that still exists)
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" -H "Content-Type: application/json" \
   -d '{"data":{"username":"alice","password":"AliceDoris1!","service":"doris","created_by":"admin"}}' \
   "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "Doris stored"
 
-# OpenSearch password
+# Kerberos principal + keytab metadata (source of truth for all Kerberos services)
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" -H "Content-Type: application/json" \
-  -d '{"data":{"username":"alice","password":"AliceOS1!","service":"opensearch","created_by":"admin"}}' \
-  "${BAO_ADDR}/v1/secret/data/opensearch/users/alice" && echo "OpenSearch stored"
-
-# Kerberos principal metadata
-curl -sf -X POST \
-  -H "X-Vault-Token: ${ROOT_TOKEN}" -H "Content-Type: application/json" \
-  -d '{"data":{"principal":"alice@STARDATADBLABS.LOCAL","keytab_secret":"alice-keytab","created_by":"admin"}}' \
+  -d '{"data":{"principal":"alice@STARDATADBLABS.LOCAL","keytab_secret":"alice-keytab","services":["kafka","opensearch","spark"],"created_by":"admin"}}' \
   "${BAO_ADDR}/v1/secret/data/kerberos/users/alice" && echo "Kerberos stored"
+
+# NOTE: No Kafka SCRAM password — Kafka auth is now GSSAPI (keytab above).
+# NOTE: No OpenSearch password — OpenSearch auth is now SPNEGO (keytab above).
 ```
 
 ### Step 7 — Register in Ranger and assign groups
@@ -463,12 +505,12 @@ for u in json.load(sys.stdin)['vXUsers']:
 
 **What alice can do after group assignment (before any scoped policies):**
 
-| Service | Access from group membership |
-|---|---|
-| Kafka | `streaming_dev` → produce/consume on topics covered by group policies |
-| Doris | `processing_dev` → SELECT on databases covered by group policies |
-| OpenSearch | No Ranger authz yet — access via `readall` backend role in internal users |
-| Spark | No cluster-level auth — job-level Kerberos keytab governs data source access |
+| Service | Auth method | Access from group membership |
+|---|---|---|
+| Kafka | GSSAPI — ticket from `alice-keytab` | `streaming_dev` → produce/consume on topics covered by group policies |
+| Doris | SQL password `AliceDoris1!` | `processing_dev` → SELECT on databases covered by group policies |
+| OpenSearch | SPNEGO — ticket from `alice-keytab` | `readall` backend role → read all indices |
+| Spark | keytab per-job | Accesses Kafka/OpenSearch as alice; Ranger enforces at data source |
 
 ---
 

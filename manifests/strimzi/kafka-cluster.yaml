@@ -3,12 +3,22 @@
 # Namespace   : prod
 # Node        : worker4.local (pinned via pod affinity on KafkaNodePool)
 # Topology    : 1 combined controller+broker (KRaft) — single replica
+#
 # Listeners   :
-#   PLAIN    port 9092 — SCRAM-SHA-512 in-cluster      (always active)
-#   EXTERNAL port 9094 → NodePort 30093 — SCRAM-SHA-512 external  (always active)
-#   KRB      port 9093 — GSSAPI/Kerberos in-cluster    (kerberos.enabled=true only)
-# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (SCRAM)
-#              strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 (GSSAPI)
+#   INTERNAL port 9092 — SCRAM-SHA-512, in-cluster only
+#             Used exclusively by Strimzi operators (topic/user operator) and
+#             internal Ranger plugin polling. NOT exposed to end-users.
+#   KRB      port 9093 — GSSAPI/Kerberos, in-cluster
+#             THE ONLY USER-FACING LISTENER.
+#             Requires a valid Kerberos TGT (kinit / keytab).
+#             No KDC principal = no ticket = connection refused at SASL handshake.
+#
+# NOTE: External SCRAM NodePort (9094/30093) has been REMOVED.
+#       Users must authenticate via Kerberos on port 9093.
+#       allow.everyone.if.no.acl.found=false — unknown users are hard-denied.
+#
+# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (operators)
+#               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 (users/GSSAPI)
 # Kafka ver   : 4.2.0 (matches installed Strimzi operator)
 # PVC         : 250Gi on /home (worker4.local) — reclaimPolicy: Retain
 #               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
@@ -23,19 +33,16 @@
 #               Authorizer: spec.kafka.authorization.type=custom +
 #                 authorizerClass=RangerKafkaAuthorizer (NOT config{} — Strimzi
 #                 strips authorizer.class.name from config silently).
-#               allow.everyone.if.no.acl.found=true provides fallback access if
-#               Ranger Admin is unreachable at broker startup.
+#               allow.everyone.if.no.acl.found=false — hard deny for unknown users.
 #               KRaft mode — no ZooKeeper. zookeeper.connect in Ranger service
 #               config is a schema-required dummy value, ignored at runtime.
-#               Plugin connects via bootstrap.servers + SASL_PLAINTEXT/SCRAM.
-# Kerberos    : GSSAPI listener (port 9093) is defined when kerberos.enabled=true.
-#               Toggle: kerberos-integration-config data.kerberos.enabled
+#               Plugin connects via bootstrap:9092 + SASL_PLAINTEXT/SCRAM.
+# Kerberos    : GSSAPI listener (port 9093) — active, KDC-enforced.
 #               Principal: svc/kafka@STARDATADBLABS.LOCAL (secret: kafka-keytab)
 #               Ranger sees stripped username (alice, not alice@STARDATADBLABS.LOCAL)
-#               because sasl.kerberos.principal.to.local.rules strips the realm.
-#               SCRAM listeners remain active — Strimzi internal components use them.
-#               To enable: uncomment the KRB listener block below + the keytab
-#               volume/mount blocks, then commit and let ArgoCD reconcile.
+#               because sasl.kerberos.principal.to.local.rules: DEFAULT strips realm.
+#               Inter-broker protocol: SCRAM-SHA-512 on port 9092 (overrides Strimzi
+#               auto-detection which would otherwise set GSSAPI and crash the broker).
 # =============================================================================
 
 ---
@@ -246,13 +253,13 @@ spec:
             items:
               - key: krb5.conf
                 path: krb5.conf
-        # ── Kerberos volumes (kerberos.enabled=true) — uncomment together ──
-        #- name: kafka-keytab
-        #  secret:
-        #    secretName: kafka-keytab
-        #- name: kafka-jaas
-        #  configMap:
-        #    name: kafka-gssapi-jaas
+        # ── Kerberos volumes (active) ──────────────────────────────────────
+        - name: kafka-keytab
+          secret:
+            secretName: kafka-keytab
+        - name: kafka-jaas
+          configMap:
+            name: kafka-gssapi-jaas
     kafkaContainer:
       env:
         # CLASSPATH is the seed variable read by kafka-run-class.sh; all
@@ -271,13 +278,14 @@ spec:
         # UnixPrincipal → "Error getting UGI" on every PolicyRefresher cycle →
         # eventually corrupts the policy engine. Setting user.name explicitly
         # gives UnixLoginModule a valid non-null name to construct the principal.
-        # When kerberos.enabled=true (KRB listener active), also add:
-        #   -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
-        # and uncomment the kafka-jaas volumeMount below.
+        # JAAS config is required so the JVM can find the KafkaServer entry
+        # for GSSAPI. Without this flag the broker crashes with:
+        #   "Could not find a 'KafkaServer' entry in the JAAS configuration"
         - name: KAFKA_OPTS
           value: >-
             -Duser.name=kafka
             -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
+            -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
       volumeMounts:
         - name: ranger-config
           mountPath: /mnt/ranger-conf
@@ -285,12 +293,11 @@ spec:
         - name: krb5-conf
           mountPath: /mnt/krb5-conf/cluster.conf
           subPath: krb5.conf
-        # ── Kerberos keytab + JAAS mounts (kerberos.enabled=true) ──────────
-        # Uncomment both when activating the KRB listener.
-        #- name: kafka-keytab
-        #  mountPath: /mnt/kafka-keytab
-        #- name: kafka-jaas
-        #  mountPath: /mnt/kafka-jaas
+        # ── Kerberos keytab + JAAS mounts (active) ─────────────────────────
+        - name: kafka-keytab
+          mountPath: /mnt/kafka-keytab
+        - name: kafka-jaas
+          mountPath: /mnt/kafka-jaas
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -307,69 +314,67 @@ spec:
     metadataVersion: "4.2-IV1"
     image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v6
     listeners:
+      # ── Internal SCRAM listener — operators + Ranger plugin ONLY ─────────
+      # Strimzi topic/user operators and the Ranger plugin use this listener.
+      # Users MUST NOT connect here. KDC enforcement is on port 9093 (krb).
       - name: plain
         port: 9092
         type: internal
         tls: false
         authentication:
           type: scram-sha-512
-      - name: external
-        port: 9094
-        type: nodeport
+      # ── Kerberos GSSAPI listener — USER-FACING, KDC-enforced ─────────────
+      # This is the ONLY listener users connect to. A valid Kerberos TGT is
+      # required. No KDC principal → kinit fails → no ticket → SASL rejected.
+      # Inter-broker protocol is overridden to SCRAM-SHA-512 (see config below)
+      # so adding this GSSAPI listener does NOT break broker-to-broker comms.
+      # Client config:
+      #   security.protocol=SASL_PLAINTEXT
+      #   sasl.mechanism=GSSAPI
+      #   sasl.kerberos.service.name=svc
+      #   bootstrap.servers=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093
+      - name: krb
+        port: 9093
+        type: internal
         tls: false
         authentication:
-          type: scram-sha-512
-        configuration:
-          bootstrap:
-            nodePort: 30093
-      # ── Kerberos GSSAPI listener (kerberos.enabled=true) ─────────────────
-      # To enable: uncomment this block AND uncomment the keytab+jaas
-      # volumes/mounts in KafkaNodePool above AND add the JAAS flag to KAFKA_OPTS.
-      # SCRAM listeners above remain active for Strimzi operators + existing clients.
-      # Client config: security.protocol=SASL_PLAINTEXT, sasl.mechanism=GSSAPI,
-      #   sasl.kerberos.service.name=svc, bootstrap=<bootstrap>:9093
-      #- name: krb
-      #  port: 9093
-      #  type: internal
-      #  tls: false
-      #  authentication:
-      #    type: custom
-      #    sasl: true
-      #    listenerConfig:
-      #      sasl.enabled.mechanisms: GSSAPI
-      #      sasl.kerberos.service.name: svc
-      #      listener.name.krb.gssapi.sasl.jaas.config: >-
-      #        com.sun.security.auth.module.Krb5LoginModule required
-      #        useKeyTab=true
-      #        storeKey=true
-      #        keyTab="/mnt/kafka-keytab/keytab"
-      #        principal="svc/kafka@STARDATADBLABS.LOCAL"
-      #        isInitiator=false;
-      #      sasl.kerberos.principal.to.local.rules: DEFAULT
+          type: custom
+          sasl: true
+          listenerConfig:
+            sasl.enabled.mechanisms: GSSAPI
+            sasl.kerberos.service.name: svc
+            listener.name.krb.gssapi.sasl.jaas.config: >-
+              com.sun.security.auth.module.Krb5LoginModule required
+              useKeyTab=true
+              storeKey=true
+              keyTab="/mnt/kafka-keytab/keytab"
+              principal="svc/kafka@STARDATADBLABS.LOCAL"
+              isInitiator=false;
+            sasl.kerberos.principal.to.local.rules: DEFAULT
     # ── Ranger Kafka Authorizer ───────────────────────────────────────────────
-    # Strimzi exposes spec.kafka.authorization for custom authorizer classes.
-    # Setting authorizer.class.name in config{} is silently stripped by the
-    # operator (it is a protected key managed via this dedicated stanza only).
     # type=custom + authorizerClass is the correct approach for any third-party
-    # authorizer (Ranger, OPA, etc.).
-    # allow.everyone.if.no.acl.found=true: safety fallback so brokers don't
-    # deny all traffic if Ranger Admin is unreachable at startup.
-    #
-    # supportsAdminApi MUST be true for Ranger (and any authorizer that handles
-    # all request types). When false, Strimzi routes admin calls through a
-    # legacy code path that bypasses the authorizer — but the broker still
-    # invokes the authorizer for DESCRIBE_CLUSTER / metadata requests, so the
-    # Topic Operator's AdminClient send-queue times out while Ranger's thread
-    # pool is blocked waiting on policy download from Ranger Admin.
-    # Setting true lets all admin calls go through Ranger normally; the
-    # allow.everyone.if.no.acl.found fallback covers the entity-operator user
-    # until an explicit policy is set.
+    # authorizer (Ranger, OPA, etc.). Setting authorizer.class.name in config{}
+    # is silently stripped by the operator.
+    # supportsAdminApi=true: required for Ranger — routes all admin calls through
+    # the authorizer normally. Without it the Topic Operator times out.
+    # allow.everyone.if.no.acl.found=false: HARD DENY for unknown users.
+    # A user with a valid KDC principal+ticket authenticates fine but still needs
+    # an explicit Ranger Allow policy. Without it they are denied.
     authorization:
       type: custom
       authorizerClass: org.apache.ranger.authorization.kafka.authorizer.RangerKafkaAuthorizer
       supportsAdminApi: true
     config:
-      allow.everyone.if.no.acl.found: "true"
+      allow.everyone.if.no.acl.found: "false"
+      # ── Inter-broker protocol override — CRITICAL for GSSAPI listener ────
+      # When Strimzi detects any GSSAPI listener it auto-sets inter-broker
+      # protocol to GSSAPI, which breaks broker comms (no inter-broker keytab
+      # for GSSAPI). Explicitly setting SCRAM-SHA-512 here overrides that
+      # auto-detection and keeps inter-broker traffic on the plain:9092 SCRAM
+      # listener. This is the fix for the previous crash:
+      #   "sasl.mechanism.inter.broker.protocol=GSSAPI but no KafkaServer entry"
+      sasl.mechanism.inter.broker.protocol: SCRAM-SHA-512
+      inter.broker.listener.name: plain
       offsets.topic.replication.factor: "1"
       transaction.state.log.replication.factor: "1"
       transaction.state.log.min.isr: "1"
