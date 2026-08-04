@@ -143,25 +143,93 @@ Allow / Deny
 
 ## 5. Adding a New User — All Layers
 
-Adding a user requires up to **four steps** depending on the service.
-The table below shows which steps apply:
+> **OpenBao note:** The `bao` CLI lives **inside the `openbao-0` pod** only.
+> All OpenBao operations from `master.local` use `curl` against the HTTP API.
+> KV v2 paths require the `/data/` prefix: `secret/data/<path>`.
 
-| Step | Kafka | Doris | Kerberized service (Spark) |
+The correct **execution order** differs by service:
+
+| Execution order | Kafka | Doris | Kerberized service (Spark) |
 |---|---|---|---|
-| A — Store credential in OpenBao | ✅ (after K8s secret created) | ✅ | ✅ (keytab) |
-| B — Create Kerberos principal + keytab | ❌ not needed | ❌ not needed | ✅ required |
-| C — Create service-level identity | ✅ KafkaUser CR | ✅ CREATE USER in SQL | ✅ keytab K8s secret |
-| D — Register in Ranger + add to policy | ✅ | ✅ | ✅ |
+| **1 — Create service identity first** | ✅ KafkaUser CR → K8s secret | ✅ Doris CREATE USER | ✅ Kerberos principal + keytab |
+| **2 — Store credential in OpenBao** | ✅ mirror K8s secret | ✅ store password | ✅ store keytab metadata |
+| **3 — Register in Ranger + policy** | ✅ | ✅ | ✅ |
 
-### Step A — Store credential in OpenBao
+---
 
-All user credentials should be stored in OpenBao so they can be injected into
-pods via the agent sidecar and audited centrally.
+### Step 1 — Create the service-level identity
 
-> **Note:** The `bao` CLI lives **inside the `openbao-0` pod**, not on the master
-> node. All OpenBao operations from the master use `curl` against the HTTP API
-> (`http://192.168.1.50:30820/v1/...`) with an `X-Vault-Token` header.
-> KV v2 write/read paths require the `/data/` prefix (e.g. `secret/data/...`).
+**Kafka — create the KafkaUser CR (Strimzi generates the SCRAM password)**
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: alice
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  authentication:
+    type: scram-sha-512
+EOF
+
+# Wait until Strimzi has created the K8s secret with the SCRAM password
+kubectl wait kafkauser alice -n prod --for=condition=Ready --timeout=60s
+
+# Confirm the secret exists and retrieve the password
+ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
+echo "Alice Kafka password: ${ALICE_PASS}"
+```
+
+**Doris — create the SQL user**
+
+```bash
+# Retrieve the Doris root password from OpenBao
+BAO_ADDR="http://192.168.1.50:30820"
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
+DORIS_ROOT_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
+
+kubectl exec -n prod deploy/doris-fe -it -- \
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
+  -e "CREATE USER 'alice'@'%' IDENTIFIED BY 'AliceDoris1!';"
+```
+
+**Kerberized service (Spark) — create KDC principal and keytab**
+
+> Skip for Kafka SCRAM and Doris SQL users.
+
+```bash
+# Create the principal
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "addprinc -pw AliceKrb1! alice@STARDATADBLABS.LOCAL"
+
+# Export keytab
+kubectl exec -n kerberos deploy/kerberos-kdc -- \
+  kadmin.local -q "ktadd -k /tmp/alice.keytab alice@STARDATADBLABS.LOCAL"
+
+# Copy keytab to master
+KDC_POD=$(kubectl get pod -n kerberos -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl cp kerberos/${KDC_POD}:/tmp/alice.keytab /tmp/alice.keytab
+klist -ekt /tmp/alice.keytab   # verify
+
+# Store as a K8s secret for pod mounting
+kubectl create secret generic alice-keytab \
+  --from-file=alice.keytab=/tmp/alice.keytab \
+  -n prod \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+---
+
+### Step 2 — Store credential in OpenBao
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
@@ -169,87 +237,47 @@ KEYS_FILE="${HOME}/openbao-init-keys.json"
 [ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
-# ── IMPORTANT: complete Step C first (create KafkaUser CR) so the K8s
-# secret exists before reading the password below. ────────────────────
-
-# Store alice's Kafka password (read from K8s secret created by Strimzi)
+# Kafka — mirror the SCRAM password from the K8s secret into OpenBao
 ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
-
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"data\":{\"username\":\"alice\",\"password\":\"${ALICE_PASS}\",\"service\":\"kafka\",\"created_by\":\"admin\"}}" \
   "${BAO_ADDR}/v1/secret/data/kafka/users/alice" && echo "Kafka credential stored"
 
-# Store alice's Doris password
+# Doris — store the password used in CREATE USER above
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"data":{"username":"alice","password":"AliceDoris1!","service":"doris","created_by":"admin"}}' \
   "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "Doris credential stored"
 
-# Read back to verify
-curl -sf \
-  -H "X-Vault-Token: ${ROOT_TOKEN}" \
-  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" | python3 -m json.tool
-```
-
-### Step B — Create Kerberos principal (Spark / Hadoop services only)
-
-> **Skip this step for Kafka SCRAM users and Doris SQL users.**
-
-```bash
-# Create the user principal in the KDC
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
-  kadmin.local -q "addprinc -pw AliceKrb1! alice@STARDATADBLABS.LOCAL"
-
-# Export a keytab for passwordless auth (pods use keytabs, not passwords)
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
-  kadmin.local -q "ktadd -k /tmp/alice.keytab alice@STARDATADBLABS.LOCAL"
-
-# Copy the keytab from the KDC pod
-KDC_POD=$(kubectl get pod -n kerberos -l app=kerberos-kdc \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl cp kerberos/${KDC_POD}:/tmp/alice.keytab /tmp/alice.keytab
-
-# Verify the keytab
-klist -ekt /tmp/alice.keytab
-
-# Store keytab as a K8s secret (for pod mounting)
-kubectl create secret generic alice-keytab \
-  --from-file=alice.keytab=/tmp/alice.keytab \
-  -n prod \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# Also store the keytab metadata in OpenBao as a backup
-BAO_ADDR="http://192.168.1.50:30820"
-KEYS_FILE="${HOME}/openbao-init-keys.json"
-[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
-
+# Kerberos (Spark only) — store keytab metadata
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"data":{"principal":"alice@STARDATADBLABS.LOCAL","keytab_secret":"alice-keytab","created_by":"admin"}}' \
   "${BAO_ADDR}/v1/secret/data/kerberos/users/alice" && echo "Kerberos entry stored"
+
+# Verify Kafka entry
+curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/kafka/users/alice" | python3 -m json.tool
 ```
 
-### Step C — Create the service-level identity
+---
 
-See service-specific sections (6, 7) below.
-
-### Step D — Register user in Ranger user store and add to policy
+### Step 3 — Register in Ranger and add to a policy
 
 **Via UI:**
 1. Open `http://192.168.1.50:30680` → login as `admin / Priya1982`
 2. Top menu: **Settings → Users / Groups / Roles**
 3. Click **Add New User**
-4. Fill: **Username** (must exactly match what the service reports), **Password** (Ranger UI only — not the service credential), **Role** = `ROLE_USER`
-5. Optionally assign a Group → click **Save**
+4. Fill: **Username** = `alice` (must match exactly what the service reports), **Password** = any Ranger UI password, **Role** = `ROLE_USER`
+5. Optionally assign a Group (e.g. `streaming_dev`) → click **Save**
 
 **Via REST API:**
 ```bash
-# Retrieve Ranger admin password from OpenBao via curl
 BAO_ADDR="http://192.168.1.50:30820"
 KEYS_FILE="${HOME}/openbao-init-keys.json"
 [ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
@@ -281,15 +309,14 @@ curl -su "admin:${RANGER_PASS}" \
 
 ## 6. Kafka — User Workflow & Testing
 
-### 6.1 Create the Kafka credential (KafkaUser CR)
+> **Full setup is in Section 5.** Complete Steps 1→2→3 there first, then
+> use the commands below to test and manage Kafka policies.
 
-Kafka uses SCRAM-SHA-512. Strimzi manages the credential — you declare the user
-as a `KafkaUser` resource and Strimzi generates a random password stored in a K8s secret.
+### 6.1 Quick-start: create alice and get her password
 
-Add to `manifests/strimzi/kafka-cluster.yaml` (or a separate file):
-
-```yaml
----
+```bash
+# Step 1: create the KafkaUser CR
+kubectl apply -f - <<'EOF'
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
 metadata:
@@ -300,39 +327,34 @@ metadata:
 spec:
   authentication:
     type: scram-sha-512
-```
+EOF
 
-```bash
-# Apply and wait for Ready
-kubectl apply -f manifests/strimzi/kafka-cluster.yaml
-kubectl get kafkauser alice -n prod
-# NAME    CLUSTER         AUTHENTICATION   READY
-# alice   strimzi-kafka   scram-sha-512    True
+# Wait for Strimzi to provision the SCRAM credential
+kubectl wait kafkauser alice -n prod --for=condition=Ready --timeout=60s
 
-# Get the generated password
+# Retrieve the generated password
 ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
-echo "Alice's Kafka password: $ALICE_PASS"
-```
+echo "Alice Kafka password: ${ALICE_PASS}"
 
-### 6.2 Store credential in OpenBao and register in Ranger
-
-```bash
-# Strimzi generates the SCRAM password and stores it in a K8s secret.
-# Retrieve it and mirror it into OpenBao for central auditing.
+# Step 2: mirror password into OpenBao
 BAO_ADDR="http://192.168.1.50:30820"
 KEYS_FILE="${HOME}/openbao-init-keys.json"
 [ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
-
-ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
-
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"data\":{\"username\":\"alice\",\"password\":\"${ALICE_PASS}\",\"service\":\"kafka\"}}" \
   "${BAO_ADDR}/v1/secret/data/kafka/users/alice" && echo "Stored in OpenBao"
+```
 
-# Register alice in Ranger (password retrieved from OpenBao)
+### 6.2 Register in Ranger
+
+```bash
+BAO_ADDR="http://192.168.1.50:30820"
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 RANGER_PASS=$(curl -sf \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
