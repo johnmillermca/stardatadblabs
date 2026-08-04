@@ -165,7 +165,9 @@ pods via the agent sidecar and audited centrally.
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 # ── IMPORTANT: complete Step C first (create KafkaUser CR) so the K8s
 # secret exists before reading the password below. ────────────────────
@@ -221,7 +223,9 @@ kubectl create secret generic alice-keytab \
 
 # Also store the keytab metadata in OpenBao as a backup
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 curl -sf -X POST \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
@@ -247,7 +251,9 @@ See service-specific sections (6, 7) below.
 ```bash
 # Retrieve Ranger admin password from OpenBao via curl
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 RANGER_PASS=$(curl -sf \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
@@ -314,7 +320,9 @@ echo "Alice's Kafka password: $ALICE_PASS"
 # Strimzi generates the SCRAM password and stores it in a K8s secret.
 # Retrieve it and mirror it into OpenBao for central auditing.
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 ALICE_PASS=$(kubectl get secret alice -n prod -o jsonpath='{.data.password}' | base64 -d)
 
@@ -459,7 +467,9 @@ kafka-console-producer.sh \
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 # Store alice's Doris password in OpenBao before creating the SQL user
 curl -sf -X POST \
@@ -478,7 +488,9 @@ curl -sf \
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 # Retrieve the Doris root password from OpenBao
 DORIS_ROOT_PASS=$(curl -sf \
@@ -505,7 +517,9 @@ kubectl exec -n prod deploy/doris-fe -it -- \
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 RANGER_PASS=$(curl -sf \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
@@ -703,7 +717,9 @@ curl -su admin:admin \
 ```bash
 # Retrieve Ranger admin password from OpenBao
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 RANGER_PASS=$(curl -sf \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
@@ -749,7 +765,9 @@ kubectl exec -n kerberos deploy/kerberos-kdc -- \
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 # Soft-delete latest version (restorable with undelete)
 curl -sf -X DELETE \
@@ -785,7 +803,9 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 RANGER_PASS=$(curl -sf \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
