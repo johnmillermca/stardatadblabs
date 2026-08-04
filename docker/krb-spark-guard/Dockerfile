@@ -17,12 +17,15 @@
 # =============================================================================
 FROM 192.168.1.50:30500/rockylinux:9
 
-# Install Kerberos client (kinit, kdestroy) + Python — baked in
+# Install Kerberos client (kinit, kdestroy) + Python — baked in.
+# NOTE: Do NOT add 'curl' here — rockylinux:9 ships curl-minimal which
+# conflicts with the full curl package (both provide 'curl').
+# The spark-submit-krb wrapper uses curl, but it runs on the CLIENT machine
+# (where spark-submit is invoked), not inside this sidecar image.
 RUN dnf install -y \
       krb5-libs \
       krb5-workstation \
       python3 \
-      curl \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 

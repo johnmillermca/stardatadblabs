@@ -306,6 +306,10 @@ async def handle_rpc_connection(
                 client_reader.readuntil(b"\n"),
                 timeout=5.0
             )
+        except asyncio.IncompleteReadError:
+            # K8s TCP probe opens + immediately closes — not an error, ignore silently
+            log.debug("Empty connection from %s (K8s probe or immediate close)", peer)
+            return
         except asyncio.TimeoutError:
             _close_with_msg(client_writer,
                             "REJECTED: no X-Krb-Token header received within 5s. "
@@ -348,6 +352,8 @@ async def handle_rpc_connection(
 
     except ConnectionRefusedError:
         log.error("Cannot connect to Spark master at %s:%d", SPARK_HOST, SPARK_PORT)
+    except asyncio.IncompleteReadError:
+        log.debug("Incomplete read from %s (connection closed cleanly)", peer)
     except Exception as exc:
         log.exception("RPC handler error from %s: %s", peer, exc)
     finally:
