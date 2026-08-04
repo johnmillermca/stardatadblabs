@@ -21,11 +21,10 @@ Every user identity in this platform passes through **three security layers** in
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer 2 — Kerberos KDC (Authentication for Hadoop-ecosystem)       │
 │  Answers: "Who are you?" for Kerberized services (Spark, HDFS).     │
-│  Realm: STARDATADBLABS.LOCAL · KDC: kerberos-kdc.kerberos.svc      │
+│  Realm: STARDATADBLABS.LOCAL · KDC: kerberos-kdc.prod.svc          │
+│  Namespace: prod · Deployment: kerberos-kdc                         │
 │  Required for: service principals, keytab-based auth.               │
 │  NOT required for: Kafka SCRAM users, Doris SQL users.              │
-│  ⚠️  NOT YET DEPLOYED in this cluster — Kerberos commands in this   │
-│  runbook are for reference only. Skip all Kerberos steps.           │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer 3 — Apache Ranger (Authorization)                            │
 │  Answers: "What are you allowed to do?" for ALL services.           │
@@ -64,15 +63,14 @@ Allow / Deny
 
 ### Key Concepts
 
-> ⚠️ **Kerberos is NOT deployed in this cluster.** All Kerberos steps in this runbook are
-> reference material for when it is added. **Adding a user to Kerberos does NOT grant access
-> to Doris.** Doris uses SQL authentication — a Kerberos principal and a Doris SQL user are
-> completely independent. Doris access requires: (1) `CREATE USER` in Doris SQL, (2) a Ranger policy.
+> ⚠️ **Kerberos does NOT grant Doris access.** Doris uses SQL authentication — a Kerberos
+> principal and a Doris SQL user are completely independent. Doris access requires:
+> (1) `CREATE USER` in Doris SQL, (2) a Ranger policy. Kerberos is used for Spark/HDFS only.
 
 | Concept | Description |
 |---|---|
 | **OpenBao** | Source of truth for all credentials — Ranger admin password, service passwords, keytabs. Path `secret/data/ranger/credentials` |
-| **Kerberos principal** | Identity for Hadoop-ecosystem services — format `name/host@REALM`. Required for Spark, HDFS. **Not** used for Kafka SCRAM or Doris SQL. **Not deployed yet.** |
+| **Kerberos principal** | Identity for Hadoop-ecosystem services — format `name/host@REALM`. Required for Spark, HDFS. **Not** used for Kafka SCRAM or Doris SQL. KDC: `kerberos-kdc.prod.svc.cluster.local`, realm `STARDATADBLABS.LOCAL` |
 | **Ranger Service** | A named plugin registration — one per data system (`kafka`, `doris`, `opensearch`) |
 | **Ranger Policy** | Rule: resource + users/groups + allowed operations. Policies are *additive* — any matching allow wins |
 | **Resource** | What is protected — Kafka topic/consumergroup/cluster, Doris database/table/column, OpenSearch index |
@@ -210,22 +208,22 @@ kubectl exec -n prod statefulset/doris-fe -it -- \
 
 **Kerberized service (Spark) — create KDC principal and keytab**
 
-> ⚠️ **Skip — Kerberos is NOT deployed in this cluster.** These commands are reference
-> material for a future Kerberos deployment. `kerberos` namespace does not exist.
+> Skip for Kafka SCRAM and Doris SQL users. KDC runs at `kerberos-kdc.prod.svc.cluster.local`,
+> realm `STARDATADBLABS.LOCAL`, in the `prod` namespace.
 
 ```bash
 # Create the principal
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
+kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "addprinc -pw AliceKrb1! alice@STARDATADBLABS.LOCAL"
 
 # Export keytab
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
+kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "ktadd -k /tmp/alice.keytab alice@STARDATADBLABS.LOCAL"
 
 # Copy keytab to master
-KDC_POD=$(kubectl get pod -n kerberos -l app=kerberos-kdc \
+KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc \
   -o jsonpath='{.items[0].metadata.name}')
-kubectl cp kerberos/${KDC_POD}:/tmp/alice.keytab /tmp/alice.keytab
+kubectl cp prod/${KDC_POD}:/tmp/alice.keytab /tmp/alice.keytab
 klist -ekt /tmp/alice.keytab   # verify
 
 # Store as a K8s secret for pod mounting
@@ -775,20 +773,18 @@ curl -su "admin:${RANGER_PASS}" \
 
 ### Step 5 — Delete the Kerberos principal (Spark / Hadoop users only)
 
-> ⚠️ **Skip — Kerberos is NOT deployed in this cluster.** The `kerberos` namespace does not
-> exist. These commands are reference material for a future Kerberos deployment.
-> Skip for Kafka SCRAM users and Doris SQL users.
+> Skip for Kafka SCRAM users and Doris SQL users. KDC is in the `prod` namespace.
 
 ```bash
 # Delete the KDC principal
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
+kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "delprinc -force alice@STARDATADBLABS.LOCAL"
 
 # Delete the K8s secret holding the keytab
 kubectl delete secret alice-keytab -n prod
 
 # Verify the principal is gone
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
+kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "getprinc alice@STARDATADBLABS.LOCAL" 2>&1 | \
   grep -i "does not exist\|Principal does not exist" && echo "OK — principal deleted"
 ```
@@ -867,12 +863,11 @@ else:
     print('OK — Ranger user store clean')
 "
 
-# 3. Check Kerberos principal is gone (Spark users only — SKIP: Kerberos not deployed)
-# kubectl exec -n kerberos deploy/kerberos-kdc -- \
-#   kadmin.local -q "listprincs" 2>/dev/null | grep "alice@" && \
-#   echo "WARNING: alice Kerberos principal still exists" || \
-#   echo "OK — Kerberos clean"
-echo "OK — Kerberos not deployed, skipping"
+# 3. Check Kerberos principal is gone (Spark users only)
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "listprincs" 2>/dev/null | grep "alice@" && \
+  echo "WARNING: alice Kerberos principal still exists" || \
+  echo "OK — Kerberos clean"
 
 # 4. Check K8s secrets are gone
 kubectl get secret alice -n prod 2>/dev/null && \
