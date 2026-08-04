@@ -4,9 +4,11 @@
 # Node        : worker4.local (pinned via pod affinity on KafkaNodePool)
 # Topology    : 1 combined controller+broker (KRaft) — single replica
 # Listeners   :
-#   PLAIN  port 9092 — SCRAM-SHA-512 in-cluster
-#   EXTERNAL port 9094 → NodePort 30093 — external access
-# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+#   PLAIN    port 9092 — SCRAM-SHA-512 in-cluster      (always active)
+#   EXTERNAL port 9094 → NodePort 30093 — SCRAM-SHA-512 external  (always active)
+#   KRB      port 9093 — GSSAPI/Kerberos in-cluster    (kerberos.enabled=true only)
+# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (SCRAM)
+#              strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 (GSSAPI)
 # Kafka ver   : 4.2.0 (matches installed Strimzi operator)
 # PVC         : 250Gi on /home (worker4.local) — reclaimPolicy: Retain
 #               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
@@ -17,7 +19,7 @@
 #               /mnt/ranger-conf/ via KafkaNodePool template.pod.volumes +
 #               template.kafkaContainer.volumeMounts (KafkaNodePool propagates
 #               volumes correctly; Kafka CR template.pod.volumes does NOT).
-#               KAFKA_CLASSPATH=/mnt/ranger-conf adds XMLs to the JVM classpath.
+#               CLASSPATH=/mnt/ranger-conf adds XMLs to the JVM classpath.
 #               Authorizer: spec.kafka.authorization.type=custom +
 #                 authorizerClass=RangerKafkaAuthorizer (NOT config{} — Strimzi
 #                 strips authorizer.class.name from config silently).
@@ -26,6 +28,14 @@
 #               KRaft mode — no ZooKeeper. zookeeper.connect in Ranger service
 #               config is a schema-required dummy value, ignored at runtime.
 #               Plugin connects via bootstrap.servers + SASL_PLAINTEXT/SCRAM.
+# Kerberos    : GSSAPI listener (port 9093) is defined when kerberos.enabled=true.
+#               Toggle: kerberos-integration-config data.kerberos.enabled
+#               Principal: svc/kafka@STARDATADBLABS.LOCAL (secret: kafka-keytab)
+#               Ranger sees stripped username (alice, not alice@STARDATADBLABS.LOCAL)
+#               because sasl.kerberos.principal.to.local.rules strips the realm.
+#               SCRAM listeners remain active — Strimzi internal components use them.
+#               To enable: uncomment the KRB listener block below + the keytab
+#               volume/mount blocks, then commit and let ArgoCD reconcile.
 # =============================================================================
 
 ---
@@ -193,6 +203,18 @@ spec:
         - name: ranger-config
           configMap:
             name: kafka-ranger-config
+        # ── Kerberos volume (kerberos.enabled=true) ────────────────────────
+        # Uncomment when activating the KRB listener above.
+        #- name: kafka-keytab
+        #  secret:
+        #    secretName: kafka-keytab
+        # ── krb5.conf from platform toggle ConfigMap ───────────────────────
+        - name: krb5-conf
+          configMap:
+            name: kerberos-integration-config
+            items:
+              - key: krb5.conf
+                path: krb5.conf
     kafkaContainer:
       env:
         # CLASSPATH is the seed variable read by kafka-run-class.sh; all
@@ -212,10 +234,28 @@ spec:
         # eventually corrupts the policy engine. Setting user.name explicitly
         # gives UnixLoginModule a valid non-null name to construct the principal.
         - name: KAFKA_OPTS
-          value: "-Duser.name=kafka"
+          value: >-
+            -Duser.name=kafka
+            -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
+        # ── Kerberos flags (kerberos.enabled=true) ────────────────────────
+        # Uncomment when activating the KRB listener.
+        #- name: KAFKA_OPTS
+        #  value: >-
+        #    -Duser.name=kafka
+        #    -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
+        #    -Dsun.security.krb5.debug=false
+        #    -Djava.security.auth.login.config=/mnt/kafka-keytab/jaas.conf
       volumeMounts:
         - name: ranger-config
           mountPath: /mnt/ranger-conf
+        # krb5.conf mount (always present — harmless when Kerberos disabled)
+        - name: krb5-conf
+          mountPath: /mnt/krb5-conf/cluster.conf
+          subPath: krb5.conf
+        # ── Kerberos keytab mount (kerberos.enabled=true) ──────────────────
+        # Uncomment when activating the KRB listener.
+        #- name: kafka-keytab
+        #  mountPath: /mnt/kafka-keytab
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -247,6 +287,32 @@ spec:
         configuration:
           bootstrap:
             nodePort: 30093
+      # ── Kerberos GSSAPI listener (kerberos.enabled=true) ─────────────────
+      # Uncomment this block to activate. Requires:
+      #   1. kafka-keytab K8s secret to exist (it does — svc/kafka@REALM)
+      #   2. Uncomment kafka-keytab volume + volumeMount blocks in KafkaNodePool
+      #   3. Uncommenting KAFKA_OPTS kerberos flags in kafkaContainer.env
+      # SCRAM listeners above remain active for Strimzi operators + existing clients.
+      # Client config: security.protocol=SASL_PLAINTEXT, sasl.mechanism=GSSAPI,
+      #   sasl.kerberos.service.name=svc, bootstrap=<bootstrap>:9093
+      #- name: krb
+      #  port: 9093
+      #  type: internal
+      #  tls: false
+      #  authentication:
+      #    type: custom
+      #    sasl: true
+      #    listenerConfig:
+      #      sasl.enabled.mechanisms: GSSAPI
+      #      sasl.kerberos.service.name: svc
+      #      listener.name.krb.gssapi.sasl.jaas.config: >-
+      #        com.sun.security.auth.module.Krb5LoginModule required
+      #        useKeyTab=true
+      #        storeKey=true
+      #        keyTab="/mnt/kafka-keytab/keytab"
+      #        principal="svc/kafka@STARDATADBLABS.LOCAL"
+      #        isInitiator=false;
+      #      sasl.kerberos.principal.to.local.rules: DEFAULT
     # ── Ranger Kafka Authorizer ───────────────────────────────────────────────
     # Strimzi exposes spec.kafka.authorization for custom authorizer classes.
     # Setting authorizer.class.name in config{} is silently stripped by the

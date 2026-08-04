@@ -1,0 +1,72 @@
+# =============================================================================
+# Kerberos Integration — Platform Toggle ConfigMap
+# Namespace : prod
+# Purpose   : Single source of truth for Kerberos client auth enablement across
+#             all platform services (Kafka, Doris, Spark, OpenSearch).
+#
+# TOGGLE
+#   kerberos.enabled = "false"  → services use their current auth (SCRAM, SQL password, basic)
+#   kerberos.enabled = "true"   → services activate Kerberos/GSSAPI auth paths
+#
+#   Changing the toggle requires a rolling restart of each affected service:
+#     Kafka   : kubectl rollout restart statefulset/strimzi-kafka-combined -n prod
+#     Doris   : kubectl rollout restart statefulset/doris-fe -n prod
+#     Spark   : kubectl rollout restart deploy/spark-master deploy/spark-worker -n prod
+#     OpenSearch: kubectl rollout restart statefulset/opensearch-cluster-master -n prod
+#
+# KRB5 CONFIG
+#   The krb5.conf entry is mounted into every service pod at:
+#     /etc/krb5.conf.d/cluster.conf
+#   The base OS /etc/krb5.conf uses "includedir /etc/krb5.conf.d/" so this
+#   file is automatically included without overwriting the system krb5.conf.
+#   (Spark already has kinit; Doris and OpenSearch have the krb5 client libs
+#    but no kinit binary — service-side GSSAPI still works via JVM JAAS.)
+#
+# PRINCIPALS (already provisioned in KDC)
+#   svc/kafka@STARDATADBLABS.LOCAL      → secret: kafka-keytab      key: keytab
+#   svc/doris@STARDATADBLABS.LOCAL      → secret: doris-keytab      key: keytab
+#   svc/spark@STARDATADBLABS.LOCAL      → secret: spark-keytab      key: keytab
+#   svc/opensearch@STARDATADBLABS.LOCAL → secret: opensearch-keytab key: keytab
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kerberos-integration-config
+  namespace: prod
+  labels:
+    app: kerberos-integration
+    argocd.argoproj.io/instance: kerberos
+data:
+  # ── Platform toggle ──────────────────────────────────────────────────────────
+  # "false" = Kerberos disabled (default). Each service uses its own auth.
+  # "true"  = Kerberos enabled. Services mount keytabs and activate GSSAPI/SPNEGO.
+  kerberos.enabled: "false"
+
+  # ── Realm metadata (read by init scripts and runbook tooling) ────────────────
+  realm:  "STARDATADBLABS.LOCAL"
+  kdc:    "kerberos-kdc.prod.svc.cluster.local"
+  kadmin: "kerberos-kadmin.prod.svc.cluster.local"
+
+  # ── krb5.conf ────────────────────────────────────────────────────────────────
+  # Mounted into service pods at /etc/krb5.conf.d/cluster.conf
+  # Included automatically via "includedir /etc/krb5.conf.d/" in base krb5.conf.
+  krb5.conf: |
+    [libdefaults]
+        default_realm = STARDATADBLABS.LOCAL
+        dns_lookup_realm = false
+        dns_lookup_kdc = false
+        ticket_lifetime = 24h
+        renew_lifetime = 7d
+        forwardable = true
+
+    [realms]
+        STARDATADBLABS.LOCAL = {
+            kdc = kerberos-kdc.prod.svc.cluster.local
+            admin_server = kerberos-kadmin.prod.svc.cluster.local
+        }
+
+    [domain_realm]
+        .prod.svc.cluster.local = STARDATADBLABS.LOCAL
+        .cluster.local          = STARDATADBLABS.LOCAL
+        cluster.local           = STARDATADBLABS.LOCAL

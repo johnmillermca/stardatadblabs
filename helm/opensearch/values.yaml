@@ -18,7 +18,9 @@ image:
   tag: "3.7.0"
   pullPolicy: IfNotPresent
 
-opensearchJavaOpts: "-Xms1g -Xmx1g"
+opensearchJavaOpts: >-
+  -Xms1g -Xmx1g
+  -Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf
 
 extraEnvs:
   - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
@@ -59,15 +61,39 @@ config:
     # NOT via opensearch.yml settings (those would cause SettingsException on boot).
     # Ranger integration is pending — security plugin is active with internal authz.
 
-# ── TLS certs secret mount ────────────────────────────────────────────────────
+# ── TLS certs + Kerberos mounts ──────────────────────────────────────────────
+# Kerberos toggle: kerberos-integration-config data.kerberos.enabled
+# When enabled=true: enable kerberos_auth_domain in config.yml and apply via
+#   securityadmin.sh (see runbook-11). The keytab + krb5.conf are pre-mounted
+#   here regardless of toggle so no restart is needed when enabling Kerberos.
+#   Principal: svc/opensearch@STARDATADBLABS.LOCAL (secret: opensearch-keytab)
 extraVolumes:
   - name: tls-certs
     secret:
       secretName: opensearch-tls-certs
+  # krb5.conf — always mounted; included by /etc/krb5.conf via includedir
+  - name: krb5-conf
+    configMap:
+      name: kerberos-integration-config
+      items:
+        - key: krb5.conf
+          path: krb5.conf
+  # opensearch-keytab — svc/opensearch@STARDATADBLABS.LOCAL
+  - name: opensearch-keytab
+    secret:
+      secretName: opensearch-keytab
 
 extraVolumeMounts:
   - name: tls-certs
     mountPath: /usr/share/opensearch/config/tls
+    readOnly: true
+  - name: krb5-conf
+    mountPath: /etc/krb5.conf.d/cluster.conf
+    subPath: krb5.conf
+    readOnly: true
+  - name: opensearch-keytab
+    mountPath: /etc/security/keytabs/opensearch.service.keytab
+    subPath: keytab
     readOnly: true
 
 persistence:

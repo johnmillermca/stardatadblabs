@@ -11,6 +11,13 @@
 #             feType:UNKNOWN.
 # Ranger    : Image fe-4.0.7-ranger includes ranger-hive-plugin JARs on classpath.
 #             Ranger config XMLs are mounted from doris-ranger-config ConfigMap.
+# Kerberos  : krb5.conf mounted from kerberos-integration-config at
+#             /etc/krb5.conf.d/cluster.conf (included by base /etc/krb5.conf).
+#             Toggle: kerberos-integration-config data.kerberos.enabled
+#             When enabled=true: doris-keytab also mounted at
+#             /etc/security/keytabs/doris.service.keytab for future LDAP/SPNEGO
+#             integration. No Doris fe.conf change needed at this phase —
+#             Doris 4.0.x does not support native GSSAPI; keytab is pre-staged.
 # =============================================================================
 ---
 apiVersion: v1
@@ -163,6 +170,17 @@ spec:
             - name: ranger-config
               mountPath: /opt/apache-doris/fe/conf/ranger-doris-audit.xml
               subPath: ranger-doris-audit.xml
+            # ── Kerberos (Phase 1 — prep, no auth change) ────────────────────
+            # krb5.conf included by /etc/krb5.conf via includedir — gives JVM
+            # JAAS the correct KDC address when Kerberos is later enabled.
+            - name: krb5-conf
+              mountPath: /etc/krb5.conf.d/cluster.conf
+              subPath: krb5.conf
+            # doris-keytab is pre-staged; used when LDAP/SPNEGO auth is enabled
+            # (Phase 5 — requires FreeIPA or 389-DS LDAP server).
+            - name: doris-keytab
+              mountPath: /etc/security/keytabs/doris.service.keytab
+              subPath: keytab
           resources:
             requests:
               memory: 512Mi
@@ -189,3 +207,13 @@ spec:
         - name: ranger-config
           configMap:
             name: doris-ranger-config
+        # ── Kerberos volumes ─────────────────────────────────────────────────
+        - name: krb5-conf
+          configMap:
+            name: kerberos-integration-config
+            items:
+              - key: krb5.conf
+                path: krb5.conf
+        - name: doris-keytab
+          secret:
+            secretName: doris-keytab

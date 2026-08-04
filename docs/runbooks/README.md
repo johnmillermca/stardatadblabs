@@ -21,6 +21,7 @@ This directory contains detailed operational runbooks for every application depl
 | [08](runbook-08-security-access.md) | **Security & Access** | Kerberos KDC, Apache Ranger 2.4, Private Registry | 30680, 30500 |
 | [09](runbook-09-incident-postmortem.md) | **Incident Post-Mortem** | Post-reboot degraded platform — root causes & permanent fixes for OpenBao, Strimzi/Kafka, Schema Registry, Debezium, Doris FE/BE, Polaris, ArgoCD | — |
 | [10](runbook-10-ranger-user-management.md) | **Ranger User Management** | Apache Ranger 2.7.0 — adding users, policy workflows, testing access, deleting users for Kafka and Doris | 30680 |
+| [11](runbook-11-kerberos-integration.md) | **Kerberos Client Auth Integration** | MIT Kerberos KDC — platform toggle, adding users, enabling GSSAPI on Kafka/OpenSearch/Spark, Doris identity alignment | 88 (KDC), 749 (kadmin) |
 
 ---
 

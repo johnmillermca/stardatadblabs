@@ -1,0 +1,142 @@
+# =============================================================================
+# OpenSearch Security — config.yml
+# Namespace : prod
+# Purpose   : Defines authentication domains for OpenSearch Security plugin.
+#             Applied via securityadmin.sh (NOT a file on pod disk — this
+#             ConfigMap is the git source of truth; apply it manually when changed).
+#
+# KERBEROS TOGGLE
+#   kerberos_auth_domain.http_enabled: false   ← default (Kerberos disabled)
+#   kerberos_auth_domain.http_enabled: true    ← Kerberos enabled
+#
+#   When enabling Kerberos:
+#     1. Flip kerberos-integration-config data.kerberos.enabled to "true"
+#     2. Edit this ConfigMap: set kerberos_auth_domain.http_enabled: true
+#     3. Apply via securityadmin.sh (see runbook-11 §4.3):
+#          kubectl exec -n prod opensearch-cluster-master-0 -- \
+#            /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+#            -f /tmp/config.yml -icl -nhnv \
+#            -cacert /usr/share/opensearch/config/tls/root-ca.pem \
+#            -cert   /usr/share/opensearch/config/tls/admin.pem \
+#            -key    /usr/share/opensearch/config/tls/admin-key.pem \
+#            -h opensearch-cluster-master-0.prod.svc.cluster.local
+#
+# KERBEROS KEYTAB
+#   Principal: svc/opensearch@STARDATADBLABS.LOCAL
+#   Mounted at: /etc/security/keytabs/opensearch.service.keytab
+#   (via opensearch-keytab secret in helm/opensearch/values.yaml)
+#
+# NOTE: This ConfigMap is NOT auto-mounted into the OpenSearch pod.
+#       It is the reference copy. To apply changes, kubectl cp this file
+#       into the pod and run securityadmin.sh.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensearch-security-config
+  namespace: prod
+  labels:
+    app: opensearch
+    argocd.argoproj.io/instance: opensearch
+data:
+  config.yml: |
+    _meta:
+      type: "config"
+      config_version: 2
+
+    config:
+      dynamic:
+        http:
+          anonymous_auth_enabled: false
+          xff:
+            enabled: false
+            internalProxies: '192\.168\.0\.10|192\.168\.0\.11'
+
+        authc:
+          # ── Kerberos SPNEGO (kerberos.enabled=true) ─────────────────────────
+          # Default: http_enabled: false — Kerberos auth is disabled.
+          # To enable: set http_enabled: true and apply via securityadmin.sh.
+          # Principal: svc/opensearch@STARDATADBLABS.LOCAL
+          # Keytab: /etc/security/keytabs/opensearch.service.keytab
+          # strip_realm_from_principal: true → Ranger sees "alice" not
+          #   "alice@STARDATADBLABS.LOCAL" — must match Ranger username exactly.
+          kerberos_auth_domain:
+            http_enabled: false
+            transport_enabled: false
+            order: 1
+            http_authenticator:
+              type: kerberos
+              challenge: true
+              config:
+                krb_debug: false
+                strip_realm_from_principal: true
+                krb_service_principal: svc/opensearch@STARDATADBLABS.LOCAL
+                krb_keytab_path: /etc/security/keytabs/opensearch.service.keytab
+            authentication_backend:
+              type: noop
+
+          # ── HTTP Basic against internal users database (always active) ───────
+          basic_internal_auth_domain:
+            description: "Authenticate via HTTP Basic against internal users database"
+            http_enabled: true
+            transport_enabled: true
+            order: 4
+            http_authenticator:
+              type: basic
+              challenge: true
+            authentication_backend:
+              type: intern
+
+          # ── Proxy auth (disabled) ─────────────────────────────────────────────
+          proxy_auth_domain:
+            description: "Authenticate via proxy"
+            http_enabled: false
+            transport_enabled: false
+            order: 3
+            http_authenticator:
+              type: proxy
+              challenge: false
+              config:
+                user_header: "x-proxy-user"
+                roles_header: "x-proxy-roles"
+            authentication_backend:
+              type: noop
+
+          # ── JWT auth (disabled) ───────────────────────────────────────────────
+          jwt_auth_domain:
+            description: "Authenticate via Json Web Token"
+            http_enabled: false
+            transport_enabled: false
+            order: 0
+            http_authenticator:
+              type: jwt
+              challenge: false
+              config:
+                signing_key: ""
+                jwt_header: "Authorization"
+            authentication_backend:
+              type: noop
+
+          # ── Client cert auth (disabled) ───────────────────────────────────────
+          clientcert_auth_domain:
+            description: "Authenticate via SSL client certificates"
+            http_enabled: false
+            transport_enabled: false
+            order: 2
+            http_authenticator:
+              type: clientcert
+              config:
+                username_attribute: cn
+              challenge: false
+            authentication_backend:
+              type: noop
+
+        authz:
+          # No external authz backends configured — roles managed via Ranger
+          # (ranger-opensearch-plugin, pending Phase 4 implementation).
+          roles_from_ranger:
+            http_enabled: false
+            transport_enabled: false
+            authorization_backend:
+              type: noop

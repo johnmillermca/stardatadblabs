@@ -1,8 +1,17 @@
 # =============================================================================
-# Apache Spark 3.5.1 — 1 master + 3 workers — workers only
-# Image  : 192.168.1.50:30500/apache/spark:3.5.1
-# Access : http://192.168.1.5x:30707  (Master UI)
-#          spark://192.168.1.5x:30777 (RPC)
+# Apache Spark 3.5.1 — 1 master + 3 workers
+# Image    : 192.168.1.50:30500/apache/spark:3.5.1
+# Access   : http://192.168.1.5x:30707  (Master UI)
+#            spark://192.168.1.5x:30777 (RPC)
+# Kerberos : krb5.conf mounted from kerberos-integration-config at
+#            /etc/krb5.conf.d/cluster.conf on master and all workers.
+#            spark-keytab (svc/spark@STARDATADBLABS.LOCAL) mounted at
+#            /etc/security/keytabs/spark.service.keytab on master.
+#            Toggle: kerberos-integration-config data.kerberos.enabled
+#            When enabled=true, add to spark-submit:
+#              --conf spark.kerberos.enabled=true
+#              --conf spark.kerberos.principal=<user>@STARDATADBLABS.LOCAL
+#              --conf spark.kerberos.keytab=/path/to/user.keytab
 # =============================================================================
 ---
 apiVersion: v1
@@ -78,9 +87,25 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # ── Kerberos: point JVM JAAS at the cluster krb5.conf ─────────────
+            # SPARK_DAEMON_JAVA_OPTS is passed to the master JVM at startup.
+            # When kerberos.enabled=true, jobs using GSSAPI will find the KDC.
+            - name: SPARK_DAEMON_JAVA_OPTS
+              value: "-Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf"
           ports:
             - containerPort: 7077
             - containerPort: 8080
+          volumeMounts:
+            # krb5.conf: included by /etc/krb5.conf via includedir — JVM JAAS
+            # uses this to locate kerberos-kdc.prod.svc.cluster.local
+            - name: krb5-conf
+              mountPath: /etc/krb5.conf.d/cluster.conf
+              subPath: krb5.conf
+            # spark-keytab: svc/spark@STARDATADBLABS.LOCAL — used by Spark
+            # daemons when authenticating to Kerberized data sources (HDFS etc.)
+            - name: spark-keytab
+              mountPath: /etc/security/keytabs/spark.service.keytab
+              subPath: keytab
           resources:
             requests:
               memory: 512Mi
@@ -88,6 +113,16 @@ spec:
             limits:
               memory: 4Gi
               cpu: "2"
+      volumes:
+        - name: krb5-conf
+          configMap:
+            name: kerberos-integration-config
+            items:
+              - key: krb5.conf
+                path: krb5.conf
+        - name: spark-keytab
+          secret:
+            secretName: spark-keytab
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -137,8 +172,15 @@ spec:
               value: "4g"
             - name: SPARK_WORKER_CORES
               value: "4"
+            # ── Kerberos: point JVM JAAS at the cluster krb5.conf ─────────────
+            - name: SPARK_DAEMON_JAVA_OPTS
+              value: "-Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf"
           ports:
             - containerPort: 8081
+          volumeMounts:
+            - name: krb5-conf
+              mountPath: /etc/krb5.conf.d/cluster.conf
+              subPath: krb5.conf
           resources:
             requests:
               memory: 1Gi
@@ -146,3 +188,10 @@ spec:
             limits:
               memory: 4Gi
               cpu: "4"
+      volumes:
+        - name: krb5-conf
+          configMap:
+            name: kerberos-integration-config
+            items:
+              - key: krb5.conf
+                path: krb5.conf
