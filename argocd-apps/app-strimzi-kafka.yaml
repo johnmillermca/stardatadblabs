@@ -35,6 +35,16 @@ spec:
       kind: ClusterRoleBinding
       jsonPointers:
         - /
+    # aclsAdminApiSupported is not declared in the Strimzi 1.1.0 CRD schema.
+    # ArgoCD ServerSideApply rejects it as "field not declared in schema" causing
+    # a ComparisonError → Unknown sync status. Suppress the field-level diff here;
+    # the field is still written by kubectl replace (field manager: kubectl-replace)
+    # and honoured at runtime — we just stop ArgoCD from diffing it.
+    - group: "kafka.strimzi.io"
+      kind: Kafka
+      name: strimzi-kafka
+      jqPathExpressions:
+        - .spec.entityOperator.userOperator.aclsAdminApiSupported
   syncPolicy:
     automated:
       prune: false

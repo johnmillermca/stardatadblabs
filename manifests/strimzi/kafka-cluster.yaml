@@ -39,6 +39,42 @@
 # =============================================================================
 
 ---
+# ── Kafka GSSAPI JAAS configuration (kerberos.enabled=true) ────────────────
+# Kafka requires a server-side JAAS file with a 'KafkaServer' stanza when any
+# listener uses GSSAPI. The KRB listener config supplies the client-facing JAAS
+# via listenerConfig, but the JVM still requires java.security.auth.login.config
+# to point at a file containing a KafkaServer entry.
+# This ConfigMap is mounted at /mnt/kafka-jaas/jaas.conf.
+# The KAFKA_OPTS env var must include:
+#   -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
+#   -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
+# Principal: svc/kafka@STARDATADBLABS.LOCAL, keytab: /mnt/kafka-keytab/keytab
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-gssapi-jaas
+  namespace: prod
+  labels:
+    argocd.argoproj.io/instance: strimzi-kafka
+data:
+  jaas.conf: |
+    KafkaServer {
+      com.sun.security.auth.module.Krb5LoginModule required
+      useKeyTab=true
+      storeKey=true
+      keyTab="/mnt/kafka-keytab/keytab"
+      principal="svc/kafka@STARDATADBLABS.LOCAL"
+      isInitiator=false;
+    };
+
+    KafkaClient {
+      com.sun.security.auth.module.Krb5LoginModule required
+      useKeyTab=true
+      storeKey=true
+      keyTab="/mnt/kafka-keytab/keytab"
+      principal="svc/kafka@STARDATADBLABS.LOCAL";
+    };
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -203,17 +239,20 @@ spec:
         - name: ranger-config
           configMap:
             name: kafka-ranger-config
-        # ── Kerberos keytab volume (kerberos.enabled=true) ─────────────────
-        - name: kafka-keytab
-          secret:
-            secretName: kafka-keytab
-        # ── krb5.conf from platform toggle ConfigMap ───────────────────────
+        # ── krb5.conf — always present ─────────────────────────────────────
         - name: krb5-conf
           configMap:
             name: kerberos-integration-config
             items:
               - key: krb5.conf
                 path: krb5.conf
+        # ── Kerberos volumes (kerberos.enabled=true) — uncomment together ──
+        #- name: kafka-keytab
+        #  secret:
+        #    secretName: kafka-keytab
+        #- name: kafka-jaas
+        #  configMap:
+        #    name: kafka-gssapi-jaas
     kafkaContainer:
       env:
         # CLASSPATH is the seed variable read by kafka-run-class.sh; all
@@ -232,28 +271,26 @@ spec:
         # UnixPrincipal → "Error getting UGI" on every PolicyRefresher cycle →
         # eventually corrupts the policy engine. Setting user.name explicitly
         # gives UnixLoginModule a valid non-null name to construct the principal.
+        # When kerberos.enabled=true (KRB listener active), also add:
+        #   -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
+        # and uncomment the kafka-jaas volumeMount below.
         - name: KAFKA_OPTS
           value: >-
             -Duser.name=kafka
             -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
-        # ── Kerberos flags (kerberos.enabled=true) ────────────────────────
-        # Uncomment when activating the KRB listener.
-        #- name: KAFKA_OPTS
-        #  value: >-
-        #    -Duser.name=kafka
-        #    -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
-        #    -Dsun.security.krb5.debug=false
-        #    -Djava.security.auth.login.config=/mnt/kafka-keytab/jaas.conf
       volumeMounts:
         - name: ranger-config
           mountPath: /mnt/ranger-conf
-        # krb5.conf mount (always present — harmless when Kerberos disabled)
+        # krb5.conf — always mounted (harmless when Kerberos disabled)
         - name: krb5-conf
           mountPath: /mnt/krb5-conf/cluster.conf
           subPath: krb5.conf
-        # ── Kerberos keytab mount (kerberos.enabled=true) ──────────────────
-        - name: kafka-keytab
-          mountPath: /mnt/kafka-keytab
+        # ── Kerberos keytab + JAAS mounts (kerberos.enabled=true) ──────────
+        # Uncomment both when activating the KRB listener.
+        #- name: kafka-keytab
+        #  mountPath: /mnt/kafka-keytab
+        #- name: kafka-jaas
+        #  mountPath: /mnt/kafka-jaas
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -286,28 +323,29 @@ spec:
           bootstrap:
             nodePort: 30093
       # ── Kerberos GSSAPI listener (kerberos.enabled=true) ─────────────────
+      # To enable: uncomment this block AND uncomment the keytab+jaas
+      # volumes/mounts in KafkaNodePool above AND add the JAAS flag to KAFKA_OPTS.
       # SCRAM listeners above remain active for Strimzi operators + existing clients.
       # Client config: security.protocol=SASL_PLAINTEXT, sasl.mechanism=GSSAPI,
       #   sasl.kerberos.service.name=svc, bootstrap=<bootstrap>:9093
-      # To disable: comment this block back out + comment out keytab volume/mount below.
-      - name: krb
-        port: 9093
-        type: internal
-        tls: false
-        authentication:
-          type: custom
-          sasl: true
-          listenerConfig:
-            sasl.enabled.mechanisms: GSSAPI
-            sasl.kerberos.service.name: svc
-            listener.name.krb.gssapi.sasl.jaas.config: >-
-              com.sun.security.auth.module.Krb5LoginModule required
-              useKeyTab=true
-              storeKey=true
-              keyTab="/mnt/kafka-keytab/keytab"
-              principal="svc/kafka@STARDATADBLABS.LOCAL"
-              isInitiator=false;
-            sasl.kerberos.principal.to.local.rules: DEFAULT
+      #- name: krb
+      #  port: 9093
+      #  type: internal
+      #  tls: false
+      #  authentication:
+      #    type: custom
+      #    sasl: true
+      #    listenerConfig:
+      #      sasl.enabled.mechanisms: GSSAPI
+      #      sasl.kerberos.service.name: svc
+      #      listener.name.krb.gssapi.sasl.jaas.config: >-
+      #        com.sun.security.auth.module.Krb5LoginModule required
+      #        useKeyTab=true
+      #        storeKey=true
+      #        keyTab="/mnt/kafka-keytab/keytab"
+      #        principal="svc/kafka@STARDATADBLABS.LOCAL"
+      #        isInitiator=false;
+      #      sasl.kerberos.principal.to.local.rules: DEFAULT
     # ── Ranger Kafka Authorizer ───────────────────────────────────────────────
     # Strimzi exposes spec.kafka.authorization for custom authorizer classes.
     # Setting authorizer.class.name in config{} is silently stripped by the
