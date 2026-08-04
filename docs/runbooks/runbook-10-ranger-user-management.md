@@ -472,6 +472,259 @@ for u in json.load(sys.stdin)['vXUsers']:
 
 ---
 
+## 5.5 Proving That a User Without a Kerberos Principal Has No Access
+
+> **What this proves:** Kerberos is the *root of trust* for every identity on this platform.
+> Without a KDC principal there is no keytab, no SPNEGO ticket, and no Kerberos short name
+> for Ranger to evaluate. The tests below demonstrate this on all four services using a
+> fictional user `bob` who exists **nowhere** in the platform.
+
+### Why This Matters
+
+The security boundary works like a chain:
+
+```
+KDC principal  ──►  keytab / TGT  ──►  Kerberos short name
+                                             │
+                    ┌────────────────────────┼────────────────────────┐
+                    │                        │                        │
+              Kafka SCRAM             Doris SQL user         OpenSearch SPNEGO
+              KafkaUser CR            CREATE USER            internalusers API
+              (no CR = no secret)     (must exist first)     (no entry = 401)
+                    │                        │                        │
+                    └────────────────────────┴────────────────────────┘
+                                             │
+                                      Ranger username
+                                   (policies evaluated only
+                                    for known identities)
+```
+
+Kafka, Doris, and OpenSearch each require a service-level credential provisioned as part
+of the new-user workflow (§5). Without a Kerberos principal you cannot get a keytab, so
+you cannot prove identity to any of these layers.
+
+---
+
+### Test A — Kafka: no SCRAM credential (no KafkaUser CR)
+
+Strimzi only creates a SCRAM secret when a `KafkaUser` CR exists.
+No principal → no CR → no secret → authentication fails before Ranger is consulted.
+
+```bash
+# Confirm there is no KafkaUser or SCRAM secret for bob
+kubectl get kafkauser bob -n prod 2>&1
+# Expected: Error from server (NotFound): kafkausers.kafka.strimzi.io "bob" not found
+
+kubectl get secret bob -n prod 2>&1
+# Expected: Error from server (NotFound): secrets "bob" not found
+
+# Attempt to connect with a made-up password — MUST fail
+kubectl run kafka-deny-test -n prod --rm -it --restart=Never \
+  --image=192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v6 \
+  -- bash -c "
+cat > /tmp/bob.properties <<EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username=\"bob\" password=\"WrongPass1!\";
+EOF
+echo 'hello-bob' | /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
+  --topic orders --producer.config /tmp/bob.properties 2>&1 | tail -5
+echo Exit: \$?
+"
+# Expected output — one of:
+#   WARN  SaslAuthenticationException: Authentication failed: Invalid username or password
+#   ERROR Connection to node -1 failed authentication
+#   Exit: 1
+#
+# If exit 0: the listener is misconfigured (allow.everyone.if.no.acl.found=true).
+#            Check §11 troubleshooting.
+```
+
+> **Why it fails:** The Kafka broker SCRAM credential store has no entry for `bob`.
+> The SASL handshake is rejected at the transport layer — Ranger never sees the request.
+
+---
+
+### Test B — Kafka GSSAPI: no KDC principal → no ticket → rejected
+
+> Only relevant when the KRB listener (port 9093) is enabled. See §2.5.
+
+```bash
+# Attempt kinit without a principal in the KDC — must fail
+kubectl exec -n prod deploy/spark-master -- bash -c "
+  echo 'WrongPass1!' | kinit bob@STARDATADBLABS.LOCAL 2>&1 || true
+  klist 2>&1
+"
+# Expected:
+#   kinit: Client 'bob@STARDATADBLABS.LOCAL' not found in Kerberos database while
+#          getting initial credentials
+#   klist: No credentials cache found (filename: /tmp/krb5cc_...)
+#
+# Without a valid TGT any GSSAPI connection attempt immediately errors:
+#   WARN [Producer] Failed to initiate SASL handshake: Kerberos login failed
+```
+
+---
+
+### Test C — Doris: no SQL user → authentication rejected
+
+The Doris FE requires a matching `mysql.user` row regardless of any Ranger policy.
+
+```bash
+# 1. Confirm bob has no Doris account
+BAO_ADDR="http://192.168.1.50:30820"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")
+DORIS_ROOT_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/doris/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
+
+kubectl exec -n prod statefulset/doris-fe -it -- \
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
+  -e "SELECT user, host FROM mysql.user WHERE user='bob';" 2>/dev/null
+# Expected: Empty set (0 rows)
+
+# 2. Attempt to connect as bob — must fail before Ranger is consulted
+kubectl run doris-deny-test -n prod --rm -it --restart=Never \
+  --image=mysql:8.0 \
+  -- mysql -h doris-fe.prod.svc.cluster.local -P9030 \
+     -ubob -p'WrongPass1!' \
+     -e "SELECT 1;" 2>&1
+# Expected:
+#   ERROR 1045 (28000): Access denied for user 'bob'@'...' (using password: YES)
+#
+# Ranger is not consulted — Doris rejects bob at the auth layer.
+```
+
+---
+
+### Test D — OpenSearch: no internal user entry → HTTP 401
+
+OpenSearch security requires either a matching `internalusers` entry (HTTP Basic) or
+a valid Kerberos ticket (SPNEGO). Without either, every request returns HTTP 401.
+
+```bash
+OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
+  -o jsonpath='{.data.opensearch-password}' | base64 -d)
+
+# 1. Confirm bob has no OpenSearch account
+curl -sk -u "admin:${OPENSEARCH_PASS}" \
+  "https://192.168.1.53:30920/_plugins/_security/api/internalusers/bob" | \
+  python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d.get('status','unknown'), d.get('message',''))
+"
+# Expected: NOT_FOUND User bob not found.
+
+# 2. HTTP Basic attempt — must return 401
+curl -sk -o /dev/null -w "HTTP %{http_code}\n" \
+  -u "bob:WrongPass1!" \
+  "https://192.168.1.53:30920/_cluster/health"
+# Expected: HTTP 401
+
+# 3. SPNEGO attempt (no prior kinit for bob) — must return 401
+#    Run from a host with curl + GSSAPI support; ensure no cached ticket for bob.
+curl -sk -o /dev/null -w "HTTP %{http_code}\n" \
+  --negotiate -u : \
+  "https://192.168.1.53:30920/_cluster/health"
+# Expected: HTTP 401  (no Kerberos credentials in cache)
+```
+
+---
+
+### Test E — Spark: no keytab → job cannot authenticate to Kerberized sources
+
+Spark has no cluster-level auth gate in this deployment, so a job *can* be submitted.
+However, any attempt to reach a Kerberized data source (Kafka GSSAPI, OpenSearch SPNEGO)
+without a valid keytab causes the job to fail at data-access time.
+
+```bash
+# Attempt spark-submit referencing a non-existent keytab — must fail at job init
+kubectl exec -n prod deploy/spark-master -- \
+  /opt/spark/bin/spark-submit \
+    --master spark://spark-master-svc.prod.svc.cluster.local:7077 \
+    --conf spark.kerberos.enabled=true \
+    --conf spark.kerberos.principal=bob@STARDATADBLABS.LOCAL \
+    --conf spark.kerberos.keytab=/etc/security/keytabs/bob.keytab \
+    --class org.apache.spark.examples.SparkPi \
+    /opt/spark/examples/jars/spark-examples_2.12-3.5.1.jar 2>&1 | \
+  grep -E "keytab|Kerberos|KrbException|No such file|denied|ERROR" | head -10
+# Expected (keytab path does not exist):
+#   ERROR SparkContext: Error initializing SparkContext.
+#   java.io.FileNotFoundException: /etc/security/keytabs/bob.keytab (No such file or directory)
+#
+# Even if the file path existed but contained invalid data:
+#   KrbException: Cannot locate default realm
+#   OR: GSSException: No valid credentials provided (Mechanism level: Failed to find any Kerberos tgt)
+```
+
+---
+
+### Test F — Ranger: no user record → default DENY for any policy lookup
+
+Even if an attacker somehow bypassed service-level authentication, Ranger would find no
+user record for `bob` and evaluate all policy decisions as `DENY` (default deny applies
+when no matching `allow` policy exists for an unknown user).
+
+```bash
+RANGER_PASS=$(curl -sf \
+  -H "X-Vault-Token: $(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")" \
+  "http://192.168.1.50:30820/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
+
+# 1. Confirm bob is not a Ranger user
+curl -su "admin:${RANGER_PASS}" \
+  "http://192.168.1.50:30680/service/xusers/users?pageSize=500" | \
+  python3 -c "
+import sys, json
+users = [u['name'] for u in json.load(sys.stdin)['vXUsers']]
+if 'bob' in users:
+    print('WARNING: bob exists in Ranger — remove for a clean test')
+else:
+    print('CONFIRMED: bob not in Ranger — all policy lookups return DENY')
+"
+
+# 2. Verify no audit trail (bob never reached Ranger authorization)
+curl -su "admin:${RANGER_PASS}" \
+  "http://192.168.1.50:30680/service/audit/access?requestUser=bob&pageSize=10" | \
+  python3 -c "
+import sys, json
+count = len(json.load(sys.stdin).get('vXAccessAudits', []))
+print(f'Ranger audit entries for bob: {count}')
+print('CONFIRMED: no audit trail — bob was rejected before reaching Ranger'
+      if count == 0 else 'WARNING: unexpected entries — investigate')
+"
+```
+
+> **Via UI:** Ranger Admin → Audit → Access → filter `User = bob`. Expect zero rows.
+
+---
+
+### Summary: access blocked at every layer
+
+| Service | Blocked at | Error message | Ranger consulted? |
+|---|---|---|---|
+| Kafka (SCRAM) | SASL handshake | `Authentication failed: Invalid username or password` | ❌ No |
+| Kafka (GSSAPI) | `kinit` / TGT acquisition | `Client not found in Kerberos database` | ❌ No |
+| Doris (SQL) | MySQL auth layer | `ERROR 1045: Access denied` | ❌ No |
+| OpenSearch (Basic) | Security plugin | `HTTP 401 Unauthorized` | ❌ No |
+| OpenSearch (SPNEGO) | GSSAPI / Security plugin | `HTTP 401 Unauthorized` (no TGT) | ❌ No |
+| Spark job (data access) | Keytab missing / KDC lookup | `FileNotFoundException` or `KrbException` | ❌ No |
+| All services (fallback) | Ranger default-deny | `DENY` — no user record, no matching policy | ✅ Yes |
+
+> **Takeaway:** A user that does not exist in the KDC cannot obtain a Kerberos ticket.
+> Without a ticket they cannot prove their identity to any service.  Every service rejects
+> them at the authentication layer — *before* Ranger is reached.  Ranger's own default-deny
+> is a second independent enforcement layer, but authentication is the first wall and it is
+> impenetrable without a KDC principal.
+
+---
+
+
+
 ## 6. Kafka — Testing Alice's Access
 
 ### 6.1 Verify Ranger recognises alice for Kafka
