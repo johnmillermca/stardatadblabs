@@ -24,6 +24,8 @@ Every user identity in this platform passes through **three security layers** in
 │  Realm: STARDATADBLABS.LOCAL · KDC: kerberos-kdc.kerberos.svc      │
 │  Required for: service principals, keytab-based auth.               │
 │  NOT required for: Kafka SCRAM users, Doris SQL users.              │
+│  ⚠️  NOT YET DEPLOYED in this cluster — Kerberos commands in this   │
+│  runbook are for reference only. Skip all Kerberos steps.           │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer 3 — Apache Ranger (Authorization)                            │
 │  Answers: "What are you allowed to do?" for ALL services.           │
@@ -62,10 +64,15 @@ Allow / Deny
 
 ### Key Concepts
 
+> ⚠️ **Kerberos is NOT deployed in this cluster.** All Kerberos steps in this runbook are
+> reference material for when it is added. **Adding a user to Kerberos does NOT grant access
+> to Doris.** Doris uses SQL authentication — a Kerberos principal and a Doris SQL user are
+> completely independent. Doris access requires: (1) `CREATE USER` in Doris SQL, (2) a Ranger policy.
+
 | Concept | Description |
 |---|---|
 | **OpenBao** | Source of truth for all credentials — Ranger admin password, service passwords, keytabs. Path `secret/data/ranger/credentials` |
-| **Kerberos principal** | Identity for Hadoop-ecosystem services — format `name/host@REALM`. Required for Spark, HDFS. **Not** used for Kafka SCRAM or Doris SQL |
+| **Kerberos principal** | Identity for Hadoop-ecosystem services — format `name/host@REALM`. Required for Spark, HDFS. **Not** used for Kafka SCRAM or Doris SQL. **Not deployed yet.** |
 | **Ranger Service** | A named plugin registration — one per data system (`kafka`, `doris`, `opensearch`) |
 | **Ranger Policy** | Rule: resource + users/groups + allowed operations. Policies are *additive* — any matching allow wins |
 | **Resource** | What is protected — Kafka topic/consumergroup/cluster, Doris database/table/column, OpenSearch index |
@@ -196,14 +203,15 @@ DORIS_ROOT_PASS=$(curl -sf \
   "${BAO_ADDR}/v1/secret/data/doris/credentials" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
-kubectl exec -n prod deploy/doris-fe -it -- \
+kubectl exec -n prod statefulset/doris-fe -it -- \
   mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
   -e "CREATE USER 'alice'@'%' IDENTIFIED BY 'AliceDoris1!';"
 ```
 
 **Kerberized service (Spark) — create KDC principal and keytab**
 
-> Skip for Kafka SCRAM and Doris SQL users.
+> ⚠️ **Skip — Kerberos is NOT deployed in this cluster.** These commands are reference
+> material for a future Kerberos deployment. `kerberos` namespace does not exist.
 
 ```bash
 # Create the principal
@@ -526,7 +534,7 @@ ALICE_DORIS_PASS=$(curl -sf \
   "${BAO_ADDR}/v1/secret/data/doris/users/alice" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['password'])")
 
-kubectl exec -n prod deploy/doris-fe -it -- \
+kubectl exec -n prod statefulset/doris-fe -it -- \
   mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
   -e "CREATE USER 'alice'@'%' IDENTIFIED BY '${ALICE_DORIS_PASS}';"
 ```
@@ -723,7 +731,7 @@ kubectl get secret alice -n prod   # should return: NotFound
 ```bash
 DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
-kubectl exec -n prod deploy/doris-fe -it -- \
+kubectl exec -n prod statefulset/doris-fe -it -- \
   mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_PASS}" \
   -e "DROP USER 'alice'@'%';"
 ```
@@ -767,7 +775,9 @@ curl -su "admin:${RANGER_PASS}" \
 
 ### Step 5 — Delete the Kerberos principal (Spark / Hadoop users only)
 
-> **Skip for Kafka SCRAM users and Doris SQL users.**
+> ⚠️ **Skip — Kerberos is NOT deployed in this cluster.** The `kerberos` namespace does not
+> exist. These commands are reference material for a future Kerberos deployment.
+> Skip for Kafka SCRAM users and Doris SQL users.
 
 ```bash
 # Delete the KDC principal
@@ -857,11 +867,12 @@ else:
     print('OK — Ranger user store clean')
 "
 
-# 3. Check Kerberos principal is gone (Spark users only)
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
-  kadmin.local -q "listprincs" 2>/dev/null | grep "alice@" && \
-  echo "WARNING: alice Kerberos principal still exists" || \
-  echo "OK — Kerberos clean"
+# 3. Check Kerberos principal is gone (Spark users only — SKIP: Kerberos not deployed)
+# kubectl exec -n kerberos deploy/kerberos-kdc -- \
+#   kadmin.local -q "listprincs" 2>/dev/null | grep "alice@" && \
+#   echo "WARNING: alice Kerberos principal still exists" || \
+#   echo "OK — Kerberos clean"
+echo "OK — Kerberos not deployed, skipping"
 
 # 4. Check K8s secrets are gone
 kubectl get secret alice -n prod 2>/dev/null && \
@@ -893,7 +904,7 @@ echo "=== Cleanup verification complete ==="
 | Policy version stays at `-1` | Plugin can't download policies — wrong auth credentials or user not in `policy.download.auth.users` | Check `ranger-kafka-security.xml` credentials in ConfigMap `kafka-ranger-config`. Verify the plugin auth user (`kafka-app-user`) exists in Ranger |
 | Kafka: everyone allowed without a policy | `allow.everyone.if.no.acl.found=true` in broker config | Expected for lab. For production set to `false` in `kafka-cluster.yaml` and commit |
 | KafkaUser stuck `NotReady` | AclCache error (old image) | Ensure image is `ranger-v6` or later. Check user-operator logs: `kubectl logs -n prod deploy/strimzi-kafka-entity-operator -c user-operator --tail=50` |
-| Doris: Ranger policy exists but still denied | Doris Ranger plugin cache stale | Restart Doris FE pod: `kubectl rollout restart deploy/doris-fe -n prod` |
+| Doris: Ranger policy exists but still denied | Doris Ranger plugin cache stale | Restart Doris FE pod: `kubectl rollout restart statefulset/doris-fe -n prod` |
 | Ranger Admin pod not starting | PostgreSQL connection failed | `kubectl logs -n prod deploy/ranger-admin --tail=50`. Check secret `ranger-db-credentials` |
 | Audit logs not visible in UI | Audit endpoint not configured | Ranger → Audit → Access. Logs use `internal_opensearch` backend. If OpenSearch is down, audit writes may fail silently |
 
