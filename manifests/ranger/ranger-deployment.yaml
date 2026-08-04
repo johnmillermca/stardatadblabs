@@ -192,11 +192,9 @@ spec:
                 # Enables negotiate/SPNEGO so browsers and curl can authenticate
                 # using Kerberos tickets. Uses svc/ranger principal from KDC.
                 # ── Kerberos SPNEGO for Ranger Admin UI ──────────────────────────
-                # ranger-spnego-keytab is always mounted (HTTP/ranger-admin@REALM).
-                # Set enabled=false here to disable SPNEGO (plain HTTP Basic only).
-                # To enable: set to 'true' AND flip kerberos-integration-config
-                #   data.kerberos.enabled to "true", then restart ranger-admin.
-                'ranger.spnego.kerberos.enabled':      'false',
+                # ranger-spnego-keytab is mounted (HTTP/ranger-admin@REALM).
+                # To disable: set to 'false' and restart ranger-admin.
+                'ranger.spnego.kerberos.enabled':      'true',
                 'ranger.spnego.kerberos.principal':    'HTTP/ranger-admin.prod.svc.cluster.local@STARDATADBLABS.LOCAL',
                 'ranger.spnego.kerberos.keytab':       '/etc/security/keytabs/ranger.service.keytab',
                 'ranger.krb.browser-useragents.regex': 'Mozilla,Opera,Chrome',

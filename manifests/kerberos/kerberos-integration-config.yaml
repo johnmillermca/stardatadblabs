@@ -39,9 +39,9 @@ metadata:
     argocd.argoproj.io/instance: kerberos
 data:
   # ── Platform toggle ──────────────────────────────────────────────────────────
-  # "false" = Kerberos disabled (default). Each service uses its own auth.
+  # "false" = Kerberos disabled. Each service uses its own auth.
   # "true"  = Kerberos enabled. Services mount keytabs and activate GSSAPI/SPNEGO.
-  kerberos.enabled: "false"
+  kerberos.enabled: "true"
 
   # ── Realm metadata (read by init scripts and runbook tooling) ────────────────
   realm:  "STARDATADBLABS.LOCAL"

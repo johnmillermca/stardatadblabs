@@ -55,14 +55,13 @@ data:
 
         authc:
           # ── Kerberos SPNEGO (kerberos.enabled=true) ─────────────────────────
-          # Default: http_enabled: false — Kerberos auth is disabled.
-          # To enable: set http_enabled: true and apply via securityadmin.sh.
           # Principal: svc/opensearch@STARDATADBLABS.LOCAL
           # Keytab: /etc/security/keytabs/opensearch.service.keytab
           # strip_realm_from_principal: true → Ranger sees "alice" not
           #   "alice@STARDATADBLABS.LOCAL" — must match Ranger username exactly.
+          # To disable: set http_enabled: false and apply via securityadmin.sh.
           kerberos_auth_domain:
-            http_enabled: false
+            http_enabled: true
             transport_enabled: false
             order: 1
             http_authenticator:

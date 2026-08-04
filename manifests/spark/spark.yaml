@@ -78,6 +78,14 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
+                  # Restrict to workers that have the spark image cached.
+                  # worker4/worker5 are unreachable by SSH and don't have the image.
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker1.local
+                      - worker2.local
+                      - worker3.local
       containers:
         - name: spark-master
           image: 192.168.1.50:30500/apache/spark:3.5.1
@@ -151,6 +159,12 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: DoesNotExist
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker1.local
+                      - worker2.local
+                      - worker3.local
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
