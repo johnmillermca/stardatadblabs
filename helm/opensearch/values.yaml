@@ -43,8 +43,12 @@ config:
     plugins.security.ssl.transport.pemtrustedcas_filepath: tls/root-ca.pem
     plugins.security.ssl.transport.enforce_hostname_verification: false
 
-    # ── HTTP SSL (disabled — plain HTTP on 9200 inside the cluster) ───────────
-    plugins.security.ssl.http.enabled: false
+    # ── HTTP SSL (enabled — required for securityadmin.sh REST API access) ────
+    # admin_dn cert is used by securityadmin.sh to apply security config changes.
+    plugins.security.ssl.http.enabled: true
+    plugins.security.ssl.http.pemcert_filepath: tls/node.pem
+    plugins.security.ssl.http.pemkey_filepath: tls/node-key.pem
+    plugins.security.ssl.http.pemtrustedcas_filepath: tls/root-ca.pem
 
     # ── Security plugin ───────────────────────────────────────────────────────
     plugins.security.disabled: false
