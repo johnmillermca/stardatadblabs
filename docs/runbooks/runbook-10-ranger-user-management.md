@@ -883,45 +883,99 @@ done
 
 
 
-## 6. Kafka — Testing Alice's Access
+## 6. Kafka — Testing a New Kerberos User (GSSAPI)
 
-### 6.1 Verify Ranger recognises alice for Kafka
+> **Auth model:** Kafka only accepts connections on port 9093 (GSSAPI).
+> There is no SCRAM listener for users. A valid Kerberos keytab is the only credential.
+> Port 9092 is reserved for Strimzi operators only.
+
+### 6.1 Prerequisites — verify keytab secret exists
 
 ```bash
+# alice-keytab must exist in the prod namespace (created in §5 Step 2)
+kubectl get secret alice-keytab -n prod \
+  -o jsonpath='{.metadata.name}' && echo " — keytab secret OK"
+# Expected: alice-keytab — keytab secret OK
+
+# KafkaUser CR must exist (created in §5 Step 3)
+kubectl get kafkauser alice -n prod
+# Expected: NAME    CLUSTER         AUTHENTICATION   READY
+#           alice   strimzi-kafka                    True
+```
+
+### 6.2 Step-by-step: obtain a TGT and produce a message via GSSAPI
+
+All commands run from inside the `spark-master` pod because it has `kinit`, the
+cluster `krb5.conf`, and access to alice's keytab secret.
+
+```bash
+# 1. Copy alice's keytab into the spark-master pod temporarily
+kubectl cp prod/$(kubectl get secret alice-keytab -n prod \
+    -o jsonpath='{.metadata.name}')/..data/keytab /tmp/alice.keytab 2>/dev/null || \
+  kubectl exec -n prod deploy/kerberos-kdc -- \
+    kadmin.local -q "ktadd -norandkey -k /tmp/alice-test.keytab alice@STARDATADBLABS.LOCAL" && \
+  KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc -o jsonpath='{.items[0].metadata.name}') && \
+  kubectl cp prod/${KDC_POD}:/tmp/alice-test.keytab /tmp/alice-test.keytab
+
+MASTER_POD=$(kubectl get pod -n prod -l app=spark,component=master \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl cp /tmp/alice-test.keytab prod/${MASTER_POD}:/tmp/alice.keytab
+
+# 2. Obtain a Kerberos TGT using the keytab
+kubectl exec -n prod deploy/spark-master -- bash -c "
+  KRB5_CONFIG=/etc/krb5.conf.d/cluster.conf \
+  kinit -kt /tmp/alice.keytab alice@STARDATADBLABS.LOCAL
+  klist
+"
+# Expected:
+#   Credentials cache: FILE:/tmp/krb5cc_0
+#   Principal: alice@STARDATADBLABS.LOCAL
+#   Issued    Expires   Principal
+#   <date>    <date>    krbtgt/STARDATADBLABS.LOCAL@STARDATADBLABS.LOCAL
+
+# 3. Produce a test message to the 'orders' topic via GSSAPI on port 9093
+kubectl exec -n prod deploy/spark-master -- bash -c "
+cat > /tmp/alice-gssapi.properties <<EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=GSSAPI
+sasl.kerberos.service.name=svc
+sasl.jaas.config=com.sun.security.auth.module.Krb5LoginModule required \
+  useTicketCache=true;
+EOF
+
+echo 'kerberos-test-message-from-alice' | \
+  /opt/spark/jars/../bin/../bin/../bin/../bin/kafka-console-producer.sh \
+    --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 \
+    --topic orders \
+    --producer.config /tmp/alice-gssapi.properties 2>&1
+echo \"Produce exit: \$?\"
+"
+# Expected: Produce exit: 0
+# Denied (no Ranger policy): ERROR_CODE=29 (NOT_AUTHORIZED) — add Ranger policy first (§6.3)
+# Auth failed (bad keytab):  WARN SaslHandshakeException — check keytab with klist -kt
+```
+
+### 6.3 Create a Ranger policy for alice on Kafka
+
+Ranger enforces what alice can do after the GSSAPI handshake succeeds.
+Ranger sees username `alice` (realm stripped by `sasl.kerberos.principal.to.local.rules: DEFAULT`).
+
+```bash
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")
 RANGER_PASS=$(curl -sf \
-  -H "X-Vault-Token: $(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "http://192.168.1.50:30820/v1/secret/data/ranger/credentials" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
-# List all kafka policies that include alice (directly or via group)
-curl -su "admin:${RANGER_PASS}" \
-  "http://192.168.1.50:30680/service/plugins/policies?serviceName=kafka&pageSize=100" | \
-  python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for p in d.get('policies', []):
-    users = [u for item in p.get('policyItems',[]) for u in item.get('users',[])]
-    groups = [g for item in p.get('policyItems',[]) for g in item.get('groups',[])]
-    if 'alice' in users or 'streaming_dev' in groups or 'public' in groups:
-        print(f'  Policy {p[\"id\"]:>4}  {p[\"name\"]:<35}  users={users}  groups={groups}')
-"
-```
-
-### 6.2 Create a scoped Kafka policy for alice (optional)
-
-By default alice inherits `streaming_dev` group policies.
-To grant access to a specific topic only:
-
-```bash
 curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/plugins/policies \
   -H "Content-Type: application/json" \
   -d '{
     "service":   "kafka",
-    "name":      "alice-orders-rw",
+    "name":      "alice-orders-gssapi",
     "isEnabled": true,
     "resources": {
-      "topic": {"values":["orders","orders.*"],"isExcludes":false,"isRecursive":false}
+      "topic": {"values":["orders"],"isExcludes":false,"isRecursive":false}
     },
     "policyItems": [{
       "users":       ["alice"],
@@ -933,125 +987,182 @@ curl -su "admin:${RANGER_PASS}" \
       "delegateAdmin": false
     }]
   }'
+# Wait up to 30s for Ranger plugin to reload the policy cache
 ```
 
-### 6.3 Test: produce (SCRAM-SHA-512)
+### 6.4 Test: produce (GSSAPI — full end-to-end)
 
 ```bash
-ALICE_KAFKA_PASS=$(kubectl get secret alice -n prod \
-  -o jsonpath='{.data.password}' | base64 -d)
+MASTER_POD=$(kubectl get pod -n prod -l app=spark,component=master \
+  -o jsonpath='{.items[0].metadata.name}')
 
-kubectl run kafka-test -n prod --rm -it --restart=Never \
-  --image=192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v6 \
-  -- bash -c "
-cat > /tmp/client.properties <<EOF
-security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
-  username=\"alice\" password=\"${ALICE_KAFKA_PASS}\";
-EOF
-echo 'hello-from-alice' | /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
-  --topic orders --producer.config /tmp/client.properties
-echo Exit: \$?
-"
-# Expected: exit 0 → Ranger allowed
-# Denied:   WARN [Producer clientId=…] Got error produce response with correlation id … ERROR_CODE=29 (NOT_AUTHORIZED)
-```
+kubectl exec -n prod ${MASTER_POD} -- bash -c "
+  # Ensure TGT is still valid (or re-kinit)
+  klist 2>/dev/null | grep -q 'alice@STARDATADBLABS' || \
+    kinit -kt /tmp/alice.keytab alice@STARDATADBLABS.LOCAL
 
-### 6.4 Test: consume (SCRAM-SHA-512)
-
-```bash
-ALICE_KAFKA_PASS=$(kubectl get secret alice -n prod \
-  -o jsonpath='{.data.password}' | base64 -d)
-
-kubectl run kafka-consume -n prod --rm -it --restart=Never \
-  --image=192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v6 \
-  -- bash -c "
-cat > /tmp/client.properties <<EOF
-security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
-  username=\"alice\" password=\"${ALICE_KAFKA_PASS}\";
-EOF
-/opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
-  --topic orders --consumer.config /tmp/client.properties \
-  --from-beginning --max-messages 5 --timeout-ms 10000
-"
-# Expected: messages printed or "[5 messages consumed]"
-# Denied:   WARN Not authorized to read from topic orders
-```
-
-### 6.5 Test: GSSAPI (when KRB listener enabled)
-
-> Only applicable when the KRB listener is uncommented and deployed (port 9093).
-> See §2.5 to enable it.
-
-```bash
-# Obtain a TGT from inside a pod that has kinit
-kubectl exec -n prod deploy/spark-master -- bash -c "
-  kinit -kt /etc/security/keytabs/alice.keytab alice@STARDATADBLABS.LOCAL
-  klist
-  cat > /tmp/krb.properties <<EOF
+cat > /tmp/alice-gssapi.properties <<'EOF'
 security.protocol=SASL_PLAINTEXT
 sasl.mechanism=GSSAPI
 sasl.kerberos.service.name=svc
 sasl.jaas.config=com.sun.security.auth.module.Krb5LoginModule required useTicketCache=true;
 EOF
-  /opt/spark/bin/kafka-console-producer.sh \
-    --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 \
-    --topic orders --producer.config /tmp/krb.properties
+
+  echo 'alice-produce-test-$(date +%s)' | \
+    /opt/kafka/bin/kafka-console-producer.sh \
+      --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 \
+      --topic orders \
+      --producer.config /tmp/alice-gssapi.properties 2>&1
+  echo \"Produce exit: \$?\"
 "
-# Ranger sees username: alice (realm stripped)
-# Policy match: alice → topic=orders → publish → Allow
+# Expected: Produce exit: 0
+# Denied:   ERROR [Producer] NOT_AUTHORIZED — Ranger policy not yet applied (wait 30s)
 ```
 
-### 6.6 Check Ranger audit logs for Kafka
+### 6.5 Test: consume (GSSAPI — full end-to-end)
 
 ```bash
+kubectl exec -n prod ${MASTER_POD} -- bash -c "
+  klist 2>/dev/null | grep -q 'alice@STARDATADBLABS' || \
+    kinit -kt /tmp/alice.keytab alice@STARDATADBLABS.LOCAL
+
+  /opt/kafka/bin/kafka-console-consumer.sh \
+    --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 \
+    --topic orders \
+    --consumer.config /tmp/alice-gssapi.properties \
+    --from-beginning --max-messages 3 --timeout-ms 10000 2>&1
+  echo \"Consume exit: \$?\"
+"
+# Expected: 1–3 messages printed, then exit 0
+# Denied:   WARN Not authorized to read from partition orders-0
+```
+
+### 6.6 Test: verify Kerberos identity in Ranger audit
+
+```bash
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")
 RANGER_PASS=$(curl -sf \
-  -H "X-Vault-Token: $(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "http://192.168.1.50:30820/v1/secret/data/ranger/credentials" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
 curl -su "admin:${RANGER_PASS}" \
-  "http://192.168.1.50:30680/service/audit/access?serviceType=kafka&requestUser=alice&pageSize=20" | \
+  "http://192.168.1.50:30680/service/audit/access?serviceType=kafka&requestUser=alice&pageSize=10" | \
   python3 -c "
 import sys, json
-for a in json.load(sys.stdin).get('vXAccessAudits', []):
-    print(a.get('eventTime',''), a.get('requestUser',''), a.get('resourcePath',''),
-          a.get('action',''), 'ALLOW' if a.get('accessResult')==1 else 'DENY')
+audits = json.load(sys.stdin).get('vXAccessAudits', [])
+print(f'Ranger audit entries for alice on Kafka: {len(audits)}')
+for a in audits[:5]:
+    print(f'  {a[\"eventTime\"]}  {a[\"requestUser\"]}  {a[\"resourcePath\"]}  '\
+          f'{a[\"action\"]}  {\"ALLOW\" if a[\"accessResult\"]==1 else \"DENY\"}')
 "
-# Or via UI: http://192.168.1.50:30680 → Audit → Access → filter User=alice, Service=kafka
+# Expected: entries showing alice ALLOW publish/consume on topic=orders
+# Via UI: http://192.168.1.50:30680 → Audit → Access → User=alice, Service=kafka
+```
+
+### 6.7 Test: confirm user without KDC principal is rejected (GSSAPI)
+
+```bash
+# Try kinit for a non-existent principal — must fail at the KDC
+kubectl exec -n prod deploy/spark-master -- bash -c "
+  KRB5_CONFIG=/etc/krb5.conf.d/cluster.conf \
+  kinit -V newuser@STARDATADBLABS.LOCAL </dev/null 2>&1 || true
+"
+# Expected:
+#   kinit: Client 'newuser@STARDATADBLABS.LOCAL' not found in Kerberos database
+#
+# Without a TGT, any GSSAPI connect attempt gives:
+#   GSSException: No valid credentials provided
 ```
 
 ---
 
-## 7. Doris — Testing Alice's Access
+## 7. Doris — Testing a New Kerberos User (krb-doris-guard)
 
-> Doris uses SQL password auth. Kerberos principal and SQL user share the same username
-> but authenticate independently. A Kerberos ticket does NOT log you in to Doris.
+> **Auth model:** The `krb-doris-guard` sidecar intercepts every MySQL connection on
+> port 9030/19030. It checks whether the connecting username exists as a KDC principal
+> before the connection reaches Doris. A user whose principal is missing gets a MySQL
+> `ERROR 1045` from the guard — Doris never sees the connection.
 
-### 7.1 What Ranger controls in Doris
+### 7.1 Architecture reminder
 
-When `access_controller_type = ranger-doris` is set in `fe.conf`, Doris replaces its
-native privilege check with a Ranger decision on every query. No SQL `GRANT` is needed —
-Ranger policies are the sole source of access rights.
+```
+Client (mysql / JDBC)
+  │
+  ▼ port 9030 (Service → targetPort 19030)
+krb-doris-guard sidecar
+  ├─ extracts username from MySQL HandshakeResponse
+  ├─ runs: kinit -V -n <username>@REALM </dev/null
+  │         KDC says NOT FOUND → MySQL ERR 1045 → connection closed
+  │         KDC says found     → proxy to Doris :9030
+  ▼ port 9030 (loopback inside pod)
+Doris FE — validates SQL password, then Ranger enforces policies
+```
 
-**Alice's access when in `processing_dev`:**
-- `SELECT` on databases covered by group policies
-- `CREATE` in default database (via `public` group policy 94)
-- `SELECT` on information_schema (via `public` group policy 95)
-
-### 7.2 Create a scoped Doris policy for alice
+### 7.2 Prerequisites — verify SQL user exists
 
 ```bash
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")
+DORIS_ROOT_PASS=$(curl -sf \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "http://192.168.1.50:30820/v1/secret/data/doris/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
+
+# Connect via root (exempt from KDC check) and verify alice SQL user exists
+kubectl exec -n prod statefulset/doris-fe -- \
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
+  -e "SELECT user, host, authentication_string FROM mysql.user WHERE user='alice';" 2>/dev/null
+# Expected: alice  %  <password_hash>
+```
+
+### 7.3 Test: connect as alice through the guard (KDC check + Doris auth)
+
+```bash
+# This goes through the guard: Service port 9030 → guard :19030 → Doris :9030
+kubectl run doris-krb-test -n prod --rm -it --restart=Never \
+  --image=mysql:8.0 \
+  -- mysql -h doris-fe.prod.svc.cluster.local -P9030 \
+     -ualice -p'AliceDoris1!' \
+     -e "SELECT USER(), DATABASE();" 2>&1
+# Expected:
+#   USER()              DATABASE()
+#   alice@<pod-ip>      (null)
+#
+# Guard log (kubectl logs -n prod doris-fe-0 -c krb-doris-guard --tail=5):
+#   INFO Login attempt: user='alice' from ('10.x.x.x', xxxxx)
+#   INFO ALLOWED user='alice' — forwarding to Doris
+```
+
+### 7.4 Test: confirm user without KDC principal is blocked by the guard
+
+This is the key KDC enforcement test for Doris.
+
+```bash
+# 'newuser' has no KDC principal and no SQL user — guard blocks first
+kubectl run doris-guard-test -n prod --rm -it --restart=Never \
+  --image=mysql:8.0 \
+  -- mysql -h doris-fe.prod.svc.cluster.local -P9030 \
+     -unewuser -p'AnyPassword1!' \
+     -e "SELECT 1;" 2>&1
+# Expected:
+#   ERROR 1045 (28000): Access denied for user 'newuser'@'%':
+#   principal newuser@STARDATADBLABS.LOCAL not found in Kerberos KDC.
+#   Create the principal first: kadmin.local -q "addprinc newuser@STARDATADBLABS.LOCAL"
+#
+# Guard log:
+#   WARNING BLOCKED user='newuser' from (...) — not in KDC
+```
+
+### 7.5 Test: grant Ranger policy and verify SELECT works
+
+```bash
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")
 RANGER_PASS=$(curl -sf \
-  -H "X-Vault-Token: $(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")" \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "http://192.168.1.50:30820/v1/secret/data/ranger/credentials" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
+# Create a Ranger policy allowing alice SELECT on analytics.*
 curl -su "admin:${RANGER_PASS}" \
   -X POST http://192.168.1.50:30680/service/plugins/policies \
   -H "Content-Type: application/json" \
@@ -1061,214 +1172,391 @@ curl -su "admin:${RANGER_PASS}" \
     "isEnabled": true,
     "resources": {
       "database": {"values":["analytics"],"isExcludes":false,"isRecursive":false},
-      "table":    {"values":["*"],         "isExcludes":false,"isRecursive":false},
-      "column":   {"values":["*"],         "isExcludes":false,"isRecursive":false}
+      "table":    {"values":["*"],"isExcludes":false,"isRecursive":false},
+      "column":   {"values":["*"],"isExcludes":false,"isRecursive":false}
     },
     "policyItems": [{
-      "users":      ["alice"],
-      "groups":     [],
-      "accesses":   [{"type":"select","isAllowed":true}],
-      "conditions": [],
-      "delegateAdmin": false
+      "users": ["alice"], "groups": [],
+      "accesses": [{"type":"select","isAllowed":true}],
+      "conditions": [], "delegateAdmin": false
     }]
   }'
-```
 
-### 7.3 Test: SELECT (should be allowed)
-
-```bash
-kubectl run doris-test -n prod --rm -it --restart=Never \
+# Wait 30s for Ranger plugin to reload, then test
+sleep 30
+kubectl run doris-select-test -n prod --rm -it --restart=Never \
   --image=mysql:8.0 \
   -- mysql -h doris-fe.prod.svc.cluster.local -P9030 \
      -ualice -p'AliceDoris1!' \
-     -e "SELECT DATABASE(), USER(); SELECT * FROM analytics.orders LIMIT 5;"
-# Expected: rows returned (Ranger: Allow)
-# Denied:   ERROR 1105 (HY000): Access denied; user 'alice' has no privilege on …
+     -e "SELECT * FROM analytics.orders LIMIT 3;" 2>&1
+# Expected: rows returned
+# Denied:   ERROR 1105 (HY000): Access denied; user alice has no privilege
 ```
 
-### 7.4 Test: INSERT (should be denied — not in policy)
+### 7.6 Test: INSERT is denied by Ranger (not in policy)
 
 ```bash
-kubectl run doris-test -n prod --rm -it --restart=Never \
+kubectl run doris-insert-test -n prod --rm -it --restart=Never \
   --image=mysql:8.0 \
   -- mysql -h doris-fe.prod.svc.cluster.local -P9030 \
      -ualice -p'AliceDoris1!' \
-     -e "INSERT INTO analytics.orders VALUES (999, 'test-row');"
-# Expected: ERROR 1105 (HY000): Access denied (Ranger: Deny)
+     -e "INSERT INTO analytics.orders VALUES (9999, 'test');" 2>&1
+# Expected: ERROR 1105 (HY000): Access denied (Ranger: DENY — insert not in policy)
 ```
 
-### 7.5 Test: verify Ranger decision (audit log)
+### 7.7 Verify Ranger audit for Doris
 
 ```bash
-RANGER_PASS=$(curl -sf \
-  -H "X-Vault-Token: $(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")" \
-  "http://192.168.1.50:30820/v1/secret/data/ranger/credentials" | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
-
 curl -su "admin:${RANGER_PASS}" \
-  "http://192.168.1.50:30680/service/audit/access?serviceType=hive&requestUser=alice&pageSize=20" | \
+  "http://192.168.1.50:30680/service/audit/access?serviceType=hive&requestUser=alice&pageSize=10" | \
   python3 -c "
 import sys, json
-for a in json.load(sys.stdin).get('vXAccessAudits', []):
-    result = 'ALLOW' if a.get('accessResult')==1 else 'DENY'
-    print(a.get('eventTime',''), result, a.get('action',''), a.get('resourcePath',''))
+audits = json.load(sys.stdin).get('vXAccessAudits', [])
+print(f'Ranger Doris audit entries for alice: {len(audits)}')
+for a in audits[:5]:
+    print(f'  {a[\"eventTime\"]}  {\"ALLOW\" if a[\"accessResult\"]==1 else \"DENY\"}  '\
+          f'{a[\"action\"]}  {a[\"resourcePath\"]}')
 "
-# Or via UI: http://192.168.1.50:30680 → Audit → Access → filter User=alice, Service=doris
+# Expected: ALLOW entries for SELECT, DENY entry for INSERT
+# Via UI: http://192.168.1.50:30680 → Audit → Access → User=alice, Service=doris
 ```
-
-### 7.6 Optional: column-level masking
-
-1. Ranger Admin → **Access Manager → doris**
-2. Click the **Masking** tab → **Add New Policy**
-3. Resource: `database=analytics`, `table=customers`, `column=email`
-4. User: `alice` → Masking Option: **MASK** (shows `xxxx` in query result)
-5. **Save** → active within 30 seconds
 
 ---
 
-## 8. Spark — Testing Alice's Access
+## 8. Spark — Testing a New Kerberos User (krb-spark-guard)
 
-Spark in this cluster has no cluster-level authentication. Kerberos applies at the
-**job level** — the keytab controls what data sources the job can reach, not whether
-the job can run.
+> **Auth model:** The `krb-spark-guard` sidecar controls port 7077 (Spark RPC).
+> Users must authenticate via the guard HTTP API (port 7078) with their keytab.
+> The guard verifies the keytab against the KDC, issues a short-lived token,
+> and the `spark-submit-krb` wrapper injects that token as the first TCP line.
+> Without a valid KDC keytab the connection to port 7077 is rejected.
 
-### 8.1 Submit a job as alice (keytab auth)
+### 8.1 Architecture reminder
+
+```
+spark-submit-krb --principal alice@REALM --keytab alice.keytab [...]
+    │
+    ├─1─ POST :7078/auth  {username:"alice", keytab_b64:"<base64>"}
+    │         Guard runs: kinit -kt <keytab> alice@REALM
+    │         ✅ KDC accepts → token issued (TTL 300s)
+    │         ❌ principal not in KDC → HTTP 403
+    │
+    └─2─ TCP :7077  first line: "X-Krb-Token: <token>\n"
+              ✅ token valid → forward to Spark master :17077
+              ❌ missing header / no token → rejected
+```
+
+### 8.2 Prerequisites — verify alice keytab exists and guard is running
 
 ```bash
-# Mount alice's keytab into the spark-master pod (or pass via spark-submit secrets)
-kubectl exec -n prod deploy/spark-master -- \
-  /opt/spark/bin/spark-submit \
+# alice-keytab secret must exist
+kubectl get secret alice-keytab -n prod -o jsonpath='{.metadata.name}' && echo " OK"
+# Expected: alice-keytab OK
+
+# Guard must be running
+kubectl get pod -n prod -l app=spark,component=master \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}  {.name} ready={.ready}{"\n"}{end}{end}'
+# Expected:
+#   spark-master-<hash>
+#     krb-spark-guard ready=true
+#     spark-master ready=true
+
+# Guard logs should show both servers started
+kubectl logs -n prod -l app=spark,component=master -c krb-spark-guard --tail=5
+# Expected:
+#   INFO krb-spark-guard RPC proxy on :7077 → spark master 127.0.0.1:17077
+#   INFO krb-spark-guard HTTP auth API on :7078 — realm STARDATADBLABS.LOCAL
+```
+
+### 8.3 Step-by-step: authenticate alice against the guard
+
+```bash
+# 1. Get alice's keytab bytes (from the K8s secret)
+kubectl get secret alice-keytab -n prod \
+  -o jsonpath='{.data.keytab}' > /tmp/alice-keytab-b64.txt
+# The secret value is already base64-encoded — use it directly
+
+ALICE_KEYTAB_B64=$(cat /tmp/alice-keytab-b64.txt)
+
+# 2. Call the guard HTTP auth API — guard verifies keytab against KDC
+AUTH_RESPONSE=$(curl -sf \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"alice\",\"keytab_b64\":\"${ALICE_KEYTAB_B64}\"}" \
+  "http://192.168.1.50:30778/auth")
+echo "${AUTH_RESPONSE}"
+# Expected:
+#   {"token": "abc123...", "expires_in": 300}
+#
+# Guard log:
+#   INFO AUTH ALLOWED user='alice' from (...) — token issued (TTL 300s)
+#
+# If principal NOT in KDC:
+#   HTTP 403: {"error": "Principal alice@STARDATADBLABS.LOCAL does not exist in KDC",
+#              "hint": "Create the principal: kadmin.local -q \"addprinc alice@REALM\""}
+
+# 3. Extract the token
+ALICE_TOKEN=$(echo "${AUTH_RESPONSE}" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+echo "Token: ${ALICE_TOKEN}"
+```
+
+### 8.4 Test: submit a Spark job via spark-submit-krb
+
+The `spark-submit-krb` wrapper (installed in the guard image) handles steps 8.3 and
+the token injection automatically.
+
+```bash
+# Copy alice's keytab to the spark-master pod
+kubectl cp /tmp/alice-keytab-b64.txt prod/$(kubectl get pod -n prod \
+  -l app=spark,component=master -o jsonpath='{.items[0].metadata.name}'):/tmp/alice-keytab-b64.txt
+
+kubectl exec -n prod deploy/spark-master -- bash -c "
+  # Decode keytab from base64
+  base64 -d /tmp/alice-keytab-b64.txt > /tmp/alice.keytab
+
+  # spark-submit-krb calls the guard auth API, injects token, rewrites --master
+  SPARK_GUARD_HOST=spark-master-svc.prod.svc.cluster.local \
+  SPARK_GUARD_PORT=7078 \
+  SPARK_SUBMIT=/opt/spark/bin/spark-submit \
+  /usr/local/bin/spark-submit-krb \
+    --principal alice@STARDATADBLABS.LOCAL \
+    --keytab /tmp/alice.keytab \
+    --master spark://spark-master-svc.prod.svc.cluster.local:7077 \
+    --class org.apache.spark.examples.SparkPi \
+    /opt/spark/examples/jars/spark-examples_2.12-3.5.1.jar 10 2>&1
+"
+# Expected:
+#   [spark-submit-krb] Authenticating alice@STARDATADBLABS.LOCAL against KDC via guard...
+#   [spark-submit-krb] KDC authentication OK for alice@STARDATADBLABS.LOCAL — token issued.
+#   [spark-submit-krb] Submitting job as alice@STARDATADBLABS.LOCAL to spark://...:7077
+#   ...
+#   Pi is roughly 3.14...
+```
+
+### 8.5 Test: confirm user without KDC principal is blocked by the guard
+
+```bash
+# newuser has no KDC principal — guard rejects at the auth API
+curl -sf \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"username":"newuser","keytab_b64":"aW52YWxpZA=="}' \
+  "http://192.168.1.50:30778/auth" | python3 -m json.tool
+# Expected HTTP 403:
+# {
+#   "error": "Principal newuser@STARDATADBLABS.LOCAL does not exist in KDC",
+#   "hint": "Create the principal: kadmin.local -q \"addprinc newuser@REALM\"\n
+#            Then export keytab: kadmin.local -q \"ktadd -k /tmp/newuser.keytab ...\""
+# }
+#
+# Guard log:
+#   WARNING AUTH DENIED user='newuser' from (...): Principal ... does not exist in KDC
+
+# Attempting to connect to port 7077 directly (no token) is also blocked
+kubectl run spark-raw-test -n prod --rm --restart=Never \
+  --image=busybox -- sh -c \
+  "echo 'hello' | nc spark-master-svc.prod.svc.cluster.local 7077; echo exit \$?" 2>&1
+# Expected output contains:
+#   [krb-spark-guard] REJECTED: first bytes are not an X-Krb-Token header.
+```
+
+### 8.6 Test: Spark job data access via Kafka GSSAPI (end-to-end Kerberos chain)
+
+With a valid token the job runs under alice's Kerberos identity. Any data source
+access (Kafka GSSAPI, OpenSearch SPNEGO) uses alice's TGT — Ranger enforces policy.
+
+```bash
+kubectl exec -n prod deploy/spark-master -- bash -c "
+  base64 -d /tmp/alice-keytab-b64.txt > /tmp/alice.keytab
+
+  SPARK_GUARD_HOST=spark-master-svc.prod.svc.cluster.local \
+  SPARK_GUARD_PORT=7078 \
+  SPARK_SUBMIT=/opt/spark/bin/spark-submit \
+  /usr/local/bin/spark-submit-krb \
+    --principal alice@STARDATADBLABS.LOCAL \
+    --keytab /tmp/alice.keytab \
     --master spark://spark-master-svc.prod.svc.cluster.local:7077 \
     --conf spark.kerberos.enabled=true \
     --conf spark.kerberos.principal=alice@STARDATADBLABS.LOCAL \
-    --conf spark.kerberos.keytab=/etc/security/keytabs/keytab \
-    --class org.example.MyApp \
-    /path/to/app.jar
-# The job authenticates as alice@STARDATADBLABS.LOCAL to Kerberized data sources.
-# Ranger controls what alice can access in Kafka / Doris / HDFS from within the job.
-```
-
-### 8.2 What Ranger governs in Spark jobs
-
-When a Spark job reads from Kafka or queries Doris, Ranger evaluates alice's policies:
-
-| Data source accessed from Spark | How Ranger sees alice | Policy needed |
-|---|---|---|
-| Kafka topic via Kafka client | SCRAM username `alice` or GSSAPI `alice` | Kafka `publish`/`consume` policy |
-| Doris table via JDBC | SQL username `alice` | Doris `select` policy |
-| OpenSearch index | HTTP user `alice` (SPNEGO) | OpenSearch policy (pending Ranger plugin) |
-
-### 8.3 Verify alice's Ranger policies cover Spark job access
-
-```bash
-RANGER_PASS=$(curl -sf \
-  -H "X-Vault-Token: $(python3 -c "import json; print(json.load(open('${HOME}/openbao-init-keys.json'))['root_token'])")" \
-  "http://192.168.1.50:30820/v1/secret/data/ranger/credentials" | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
-
-# Check kafka + doris policies for alice
-for svc in kafka hive; do
-  echo "=== $svc ==="
-  curl -su "admin:${RANGER_PASS}" \
-    "http://192.168.1.50:30680/service/plugins/policies?serviceType=${svc}&pageSize=100" | \
-    python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for p in d.get('policies', []):
-    for item in p.get('policyItems', []):
-        if 'alice' in item.get('users', []) or \
-           any(g in item.get('groups', []) for g in ['processing_dev','streaming_dev','public']):
-            print(f'  Policy {p[\"id\"]}  {p[\"name\"]}  → {[a[\"type\"] for a in item.get(\"accesses\",[])]}')
+    --conf spark.kerberos.keytab=/tmp/alice.keytab \
+    --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 \
+    --class org.apache.spark.examples.SparkPi \
+    /opt/spark/examples/jars/spark-examples_2.12-3.5.1.jar 5 2>&1 | tail -5
 "
-done
+# The job authenticates as alice@STARDATADBLABS.LOCAL
+# Ranger Kafka audit will show alice producing/consuming under GSSAPI identity
 ```
 
 ---
 
-## 9. OpenSearch — Testing Alice's Access
+## 9. OpenSearch — Testing a New Kerberos User (SPNEGO)
 
-> **Current state:** OpenSearch authentication uses Kerberos SPNEGO (for HTTPS requests)
-> and HTTP Basic auth as fallback. Ranger authorization plugin JAR is not yet installed —
-> Ranger policies for OpenSearch are defined but not enforced. Access is controlled by
-> OpenSearch built-in roles (`readall`, `all_access`, etc.).
+> **Auth model:** OpenSearch accepts **SPNEGO only** for HTTP clients.
+> HTTP Basic auth is disabled. A user must have a valid Kerberos TGT to connect.
+> The admin user connects via TLS client cert (`securityadmin.sh`), not Basic auth.
 
-### 9.1 How alice is authorised in OpenSearch today
-
-Alice was created with `backend_roles: ["readall"]` in Step 5.
-The `readall` backend role maps to read-only access on all indices via OpenSearch built-in roles.
-
-**What `readall` allows:**
-- `GET /<index>/_search`
-- `GET /<index>/_doc/<id>`
-- `GET /_cat/indices`
-
-**What `readall` denies:**
-- `PUT /<index>/_doc/` (write)
-- `DELETE /<index>` (delete)
-- `PUT /<index>` (create index)
-
-### 9.2 Test: read access (should be allowed)
+### 9.1 Prerequisites — verify alice is registered in OpenSearch
 
 ```bash
-OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
-  -o jsonpath='{.data.opensearch-password}' | base64 -d)
-
-# Test as alice using HTTP Basic (HTTPS because SSL is now enabled)
-curl -sk -u "alice:AliceOS1!" \
-  "https://192.168.1.53:30920/_cat/indices?v"
-# Expected: list of indices alice can see
-
-curl -sk -u "alice:AliceOS1!" \
-  "https://192.168.1.53:30920/orders/_search?pretty&size=3"
-# Expected: search results or {"hits":{"total":…}}
-# Denied:   {"status":403,"error":{"type":"security_exception"…}}
+# Check alice exists in OpenSearch internal users (applied via securityadmin.sh in §5)
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+    -backup /tmp/os-verify -icl -nhnv \
+    -cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    -cert   /usr/share/opensearch/config/tls/admin.pem \
+    -key    /usr/share/opensearch/config/tls/admin-key.pem \
+    -h localhost -p 9200 2>/dev/null
+  python3 -c \"
+import yaml
+with open('/tmp/os-verify/internal_users.yml') as f:
+    u = yaml.safe_load(f)
+if 'alice' in u:
+    print('alice found — backend_roles:', u['alice'].get('backend_roles','?'))
+else:
+    print('alice NOT found — run §5 Step 5 to register her')
+\"
+"
+# Expected: alice found — backend_roles: ['readall']
 ```
 
-### 9.3 Test: write access (should be denied for readall role)
+### 9.2 Step-by-step: obtain a TGT and authenticate via SPNEGO
+
+Run from `master.local` (which has `kinit` and can reach the KDC).
 
 ```bash
-curl -sk -u "alice:AliceOS1!" \
-  -X PUT "https://192.168.1.53:30920/orders/_doc/999" \
-  -H "Content-Type: application/json" \
-  -d '{"test":"alice-write-attempt"}'
-# Expected: {"status":403,"error":{"type":"security_exception"…}}
-```
-
-### 9.4 Test: SPNEGO authentication (Kerberos enabled)
-
-> Requires a client machine with `kinit` and the cluster `krb5.conf`.
-
-```bash
-# First, copy the cluster krb5.conf to your client machine
+# 1. Write cluster krb5.conf to local file
 kubectl get cm kerberos-integration-config -n prod \
   -o jsonpath='{.data.krb5\.conf}' > /tmp/krb5-cluster.conf
 
-# Obtain a TGT
-KRB5_CONFIG=/tmp/krb5-cluster.conf kinit alice@STARDATADBLABS.LOCAL
+# 2. Decode alice's keytab from the K8s secret
+kubectl get secret alice-keytab -n prod \
+  -o jsonpath='{.data.keytab}' | base64 -d > /tmp/alice.keytab
 
-# Test SPNEGO auth (HTTP Negotiate)
-curl -sk --negotiate -u : \
+# 3. Obtain a TGT using the keytab (non-interactive)
+KRB5_CONFIG=/tmp/krb5-cluster.conf \
+  kinit -kt /tmp/alice.keytab alice@STARDATADBLABS.LOCAL
+
+# Verify TGT was issued
+klist
+# Expected:
+#   Credentials cache: FILE:/tmp/krb5cc_<uid>
+#   Principal: alice@STARDATADBLABS.LOCAL
+#   Issued    Expires   Principal
+#   <date>    <date>    krbtgt/STARDATADBLABS.LOCAL@STARDATADBLABS.LOCAL
+
+# 4. Test SPNEGO auth against OpenSearch cluster health
+KRB5_CONFIG=/tmp/krb5-cluster.conf \
+  curl -sk --negotiate -u : \
   "https://192.168.1.53:30920/_cluster/health?pretty"
-# Expected: {"status":"green","cluster_name":"opensearch-cluster",…}
-# Denied:   {"status":401,"error":{"reason":"Authentication finally failed"}}
+# Expected:
+#   {
+#     "cluster_name": "opensearch-prod",
+#     "status": "green",
+#     ...
+#   }
+# If 401: SPNEGO not negotiated — check krb5.conf points to correct KDC
+# If 403: alice authenticated but lacks permission — check backend_roles
 ```
 
-### 9.5 Change OpenSearch role for alice
+### 9.3 Test: HTTP Basic is rejected (SPNEGO-only mode)
 
-To grant alice write access, update her backend role:
+With Basic auth disabled, password-based access must return 401.
 
 ```bash
-OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
-  -o jsonpath='{.data.opensearch-password}' | base64 -d)
+# Attempt HTTP Basic — must be rejected even with correct password
+curl -sk -o /dev/null -w "HTTP %{http_code}\n" \
+  -u "alice:AliceDoris1!" \
+  "https://192.168.1.53:30920/_cluster/health"
+# Expected: HTTP 401
+# (Basic auth is disabled — only SPNEGO/Negotiate is accepted)
+```
 
-curl -sk -u "admin:${OPENSEARCH_PASS}" \
-  -X PUT "https://192.168.1.53:30920/_plugins/_security/api/internalusers/alice" \
+### 9.4 Test: read an index via SPNEGO (alice has readall role)
+
+```bash
+# List indices
+KRB5_CONFIG=/tmp/krb5-cluster.conf \
+  curl -sk --negotiate -u : \
+  "https://192.168.1.53:30920/_cat/indices?v&h=index,docs.count,store.size"
+# Expected: list of index names with doc counts
+
+# Search orders index
+KRB5_CONFIG=/tmp/krb5-cluster.conf \
+  curl -sk --negotiate -u : \
+  "https://192.168.1.53:30920/orders/_search?pretty&size=3" | \
+  python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+hits=d.get('hits',{}).get('hits',[])
+print(f'Returned {len(hits)} hits (readall role allows search)')
+"
+# Expected: Returned N hits (readall role allows search)
+```
+
+### 9.5 Test: write is denied by readall role
+
+```bash
+KRB5_CONFIG=/tmp/krb5-cluster.conf \
+  curl -sk --negotiate -u : \
+  -o /dev/null -w "HTTP %{http_code}\n" \
+  -X PUT "https://192.168.1.53:30920/orders/_doc/9999" \
   -H "Content-Type: application/json" \
-  -d '{
-    "password":      "AliceOS1!",
-    "backend_roles": ["readall", "readall_and_monitor"],
-    "attributes":    {}
-  }'
+  -d '{"test":"alice-write-spnego"}'
+# Expected: HTTP 403
+# (readall role does not include write permission)
+```
+
+### 9.6 Test: confirm user without KDC principal is rejected (SPNEGO)
+
+```bash
+# No TGT in cache for newuser — SPNEGO has nothing to present
+kdestroy 2>/dev/null; klist 2>&1 || true
+# Expected: klist: No credentials cache found
+
+# Attempt with no ticket — must return 401
+curl -sk -o /dev/null -w "HTTP %{http_code}\n" \
+  --negotiate -u : \
+  "https://192.168.1.53:30920/_cluster/health"
+# Expected: HTTP 401
+# OpenSearch returns: {"error":{"reason":"Authentication finally failed"},"status":401}
+
+# Attempt with a made-up password (Basic auth is disabled) — also 401
+curl -sk -o /dev/null -w "HTTP %{http_code}\n" \
+  -u "newuser:WrongPass1!" \
+  "https://192.168.1.53:30920/_cluster/health"
+# Expected: HTTP 401
+```
+
+### 9.7 Upgrade alice's role to allow writes
+
+```bash
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+    -backup /tmp/os-upgrade -icl -nhnv \
+    -cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    -cert   /usr/share/opensearch/config/tls/admin.pem \
+    -key    /usr/share/opensearch/config/tls/admin-key.pem \
+    -h localhost -p 9200 2>/dev/null
+
+  python3 - <<'PYEOF'
+import yaml
+with open('/tmp/os-upgrade/internal_users.yml') as f:
+    users = yaml.safe_load(f)
+users['alice']['backend_roles'] = ['readall', 'readall_and_monitor']
+with open('/tmp/os-upgrade/internal_users.yml', 'w') as f:
+    yaml.dump(users, f, default_flow_style=False)
+print('alice backend_roles updated')
+PYEOF
+
+  /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+    -f /tmp/os-upgrade/internal_users.yml -t internalusers -icl -nhnv \
+    -cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    -cert   /usr/share/opensearch/config/tls/admin.pem \
+    -key    /usr/share/opensearch/config/tls/admin-key.pem \
+    -h localhost -p 9200 2>&1 | tail -3
+"
+# Expected: Done with success
 ```
 
 Available backend roles:
