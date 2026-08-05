@@ -447,34 +447,25 @@ confirm alice can query it, then confirm she is denied on resources with no poli
 
 #### Create test objects (as root)
 
+> **Note:** `kubectl exec` without `-it` has no TTY — mysql exits immediately if no `-e`
+> flag is given. Always use `-e` to pass SQL. The heredoc `<<'SQL'` pattern does not work
+> with `kubectl exec`; use `-e` with semicolons instead.
+
 ```bash
 DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
 
 kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
-  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" 2>/dev/null <<'SQL'
--- Create a test database and table
-CREATE DATABASE IF NOT EXISTS rbac_test;
-USE rbac_test;
-CREATE TABLE IF NOT EXISTS orders (
-  id     INT,
-  amount DECIMAL(10,2),
-  status VARCHAR(32)
-) DISTRIBUTED BY HASH(id) BUCKETS 1
-PROPERTIES ("replication_num" = "1");
-
--- Insert a test row
-INSERT INTO orders VALUES (1, 99.50, 'shipped');
-
--- Create a second table alice should NOT be able to see
-CREATE TABLE IF NOT EXISTS payments (
-  id     INT,
-  amount DECIMAL(10,2)
-) DISTRIBUTED BY HASH(id) BUCKETS 1
-PROPERTIES ("replication_num" = "1");
-
-SELECT 'Test objects created' AS status;
-SQL
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
+  -e "CREATE DATABASE IF NOT EXISTS rbac_test;
+      CREATE TABLE IF NOT EXISTS rbac_test.orders (
+        id INT, amount DECIMAL(10,2), status VARCHAR(32)
+      ) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1');
+      INSERT INTO rbac_test.orders VALUES (1, 99.50, 'shipped');
+      CREATE TABLE IF NOT EXISTS rbac_test.payments (
+        id INT, amount DECIMAL(10,2)
+      ) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1');
+      SELECT 'Test objects created' AS status;" 2>/dev/null
 ```
 
 #### Grant alice SELECT on `rbac_test.orders` via Ranger
@@ -513,13 +504,17 @@ echo "Waiting 35s for Ranger policy to propagate..."
 sleep 35
 ```
 
+> **Password note:** Use **single quotes** when setting `ALICE_PASS` — double quotes with
+> `\!` store the backslash literally and mysql authenticates with the wrong password.
+
 #### Test 1 — alice CAN query `rbac_test.orders` (expect rows)
 
 ```bash
-ALICE_PASS="AliceDoris1\!"
+# Single quotes — no history expansion, no backslash stored
+ALICE_PASS='AliceDoris1!'
 
 kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
-  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" 2>/dev/null \
+  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" \
   -e "SELECT * FROM rbac_test.orders;"
 # Expected:
 # id  amount  status
@@ -530,7 +525,7 @@ kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
 
 ```bash
 kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
-  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" 2>/dev/null \
+  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" \
   -e "SELECT * FROM rbac_test.payments;"
 # Expected:
 # ERROR 1105 (HY000): Permission denied: user [alice] does not have privilege
@@ -541,7 +536,7 @@ kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
 
 ```bash
 kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
-  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" 2>/dev/null \
+  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" \
   -e "CREATE TABLE rbac_test.alice_test (id INT) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1');"
 # Expected:
 # ERROR 1105 (HY000): Permission denied: user [alice] does not have privilege
