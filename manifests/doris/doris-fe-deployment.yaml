@@ -104,6 +104,9 @@ data:
     priority_networks = 10.244.0.0/16
     # ── Ranger RBAC ──────────────────────────────────────────────────────────
     access_controller_type = ranger-doris
+    # root is exempt from Ranger access control so system-level DDL
+    # (ALTER SYSTEM ADD BACKEND, CREATE USER, GRANT, etc.) always works.
+    access_controller_bypass_users = root
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
