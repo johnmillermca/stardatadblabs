@@ -436,6 +436,151 @@ kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
 # alice %
 ```
 
+### Step 4.1 — Test alice's Doris privileges
+
+This step verifies the full Ranger enforcement loop for alice in Doris:
+create a test database and table as `root`, grant alice access via a Ranger policy,
+confirm alice can query it, then confirm she is denied on resources with no policy.
+
+> Run after Step 7 (Ranger registration) is complete — alice must exist in Ranger
+> before policies can reference her.
+
+#### Create test objects (as root)
+
+```bash
+DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" 2>/dev/null <<'SQL'
+-- Create a test database and table
+CREATE DATABASE IF NOT EXISTS rbac_test;
+USE rbac_test;
+CREATE TABLE IF NOT EXISTS orders (
+  id     INT,
+  amount DECIMAL(10,2),
+  status VARCHAR(32)
+) DISTRIBUTED BY HASH(id) BUCKETS 1
+PROPERTIES ("replication_num" = "1");
+
+-- Insert a test row
+INSERT INTO orders VALUES (1, 99.50, 'shipped');
+
+-- Create a second table alice should NOT be able to see
+CREATE TABLE IF NOT EXISTS payments (
+  id     INT,
+  amount DECIMAL(10,2)
+) DISTRIBUTED BY HASH(id) BUCKETS 1
+PROPERTIES ("replication_num" = "1");
+
+SELECT 'Test objects created' AS status;
+SQL
+```
+
+#### Grant alice SELECT on `rbac_test.orders` via Ranger
+
+```bash
+BAO_ADDR="http://192.168.1.50:30820"
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
+RANGER_PASS=$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
+
+curl -su "admin:${RANGER_PASS}" \
+  -X POST http://192.168.1.50:30680/service/plugins/policies \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service":   "doris",
+    "name":      "alice-rbac-test-orders",
+    "isEnabled": true,
+    "resources": {
+      "database": {"values": ["rbac_test"], "isExcludes": false, "isRecursive": false},
+      "table":    {"values": ["orders"],    "isExcludes": false, "isRecursive": false},
+      "column":   {"values": ["*"],         "isExcludes": false, "isRecursive": false}
+    },
+    "policyItems": [{
+      "users":       ["alice"],
+      "groups":      [],
+      "accesses":    [{"type": "select", "isAllowed": true}],
+      "conditions":  [],
+      "delegateAdmin": false
+    }]
+  }' | python3 -c "import sys,json; d=json.load(sys.stdin); print('Policy ID:', d.get('id'), '| Name:', d.get('name'))"
+
+echo "Waiting 35s for Ranger policy to propagate..."
+sleep 35
+```
+
+#### Test 1 — alice CAN query `rbac_test.orders` (expect rows)
+
+```bash
+ALICE_PASS="AliceDoris1\!"
+
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" 2>/dev/null \
+  -e "SELECT * FROM rbac_test.orders;"
+# Expected:
+# id  amount  status
+# 1   99.50   shipped
+```
+
+#### Test 2 — alice CANNOT query `rbac_test.payments` (no policy → deny)
+
+```bash
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" 2>/dev/null \
+  -e "SELECT * FROM rbac_test.payments;"
+# Expected:
+# ERROR 1105 (HY000): Permission denied: user [alice] does not have privilege
+#   for [SELECT] command on [rbac_test].[payments].[*]
+```
+
+#### Test 3 — alice CANNOT create tables (no CREATE policy)
+
+```bash
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+  mysql -h127.0.0.1 -P9030 -ualice -p"${ALICE_PASS}" 2>/dev/null \
+  -e "CREATE TABLE rbac_test.alice_test (id INT) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1');"
+# Expected:
+# ERROR 1105 (HY000): Permission denied: user [alice] does not have privilege
+#   for [CREATE] command on [rbac_test]
+```
+
+#### Test 4 — verify in Ranger audit log
+
+```bash
+sleep 5  # allow audit events to flush
+curl -su "admin:${RANGER_PASS}" \
+  "http://192.168.1.50:30680/service/audit/access?serviceType=hive&requestUser=alice&pageSize=10" | \
+  python3 -c "
+import sys, json
+entries = json.load(sys.stdin).get('vXAccessAudits', [])
+for e in entries:
+    print(f\"{e.get('accessType','?'):8} | {'ALLOW' if e.get('accessResult')==1 else 'DENY ':5} | {e.get('resourcePath','?')}\")"
+# Expected — three entries visible:
+#   select   | ALLOW | /rbac_test/orders/*
+#   select   | DENY  | /rbac_test/payments/*
+#   create   | DENY  | /rbac_test
+```
+
+#### Cleanup test objects (optional)
+
+```bash
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" 2>/dev/null \
+  -e "DROP DATABASE IF EXISTS rbac_test;"
+
+# Remove the test Ranger policy
+POLICY_ID=$(curl -su "admin:${RANGER_PASS}" \
+  "http://192.168.1.50:30680/service/plugins/policies?serviceName=doris&policyName=alice-rbac-test-orders" | \
+  python3 -c "import sys,json; pl=json.load(sys.stdin).get('policies',[]); print(pl[0]['id'] if pl else '')")
+[ -n "${POLICY_ID}" ] && curl -su "admin:${RANGER_PASS}" \
+  -X DELETE "http://192.168.1.50:30680/service/plugins/policies/${POLICY_ID}" && \
+  echo "Policy ${POLICY_ID} deleted"
+```
+
 ### Step 5 — Register the OpenSearch user (SPNEGO — no password needed)
 
 OpenSearch now uses **SPNEGO only**. HTTP Basic is disabled.
