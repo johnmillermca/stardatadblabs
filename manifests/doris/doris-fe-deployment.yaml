@@ -45,9 +45,13 @@ data:
         <name>ranger.plugin.doris.policy.source.impl</name>
         <value>org.apache.ranger.admin.client.RangerAdminRESTClient</value>
       </property>
+      <!-- Service name changed from 'doris' (hive type) to 'doris2' (doris-native type).
+           The native type has catalog/database/table/column resource hierarchy which
+           matches what RangerDorisResource sends — the hive type only has database/table/column
+           and cannot match column-level checks that include the catalog dimension. -->
       <property>
         <name>ranger.plugin.doris.service.name</name>
-        <value>doris</value>
+        <value>doris2</value>
       </property>
       <property>
         <name>ranger.plugin.doris.policy.rest.url</name>
@@ -63,7 +67,7 @@ data:
       </property>
       <!-- Super-users bypass Ranger policy checks entirely.
            root needs this to run system DDL (ALTER SYSTEM ADD BACKEND,
-           CREATE USER, GRANT) which have no Hive plugin equivalent.
+           CREATE USER, GRANT) which have no equivalent access type.
            Property sourced from RangerBasePlugin.setSuperUsersAndGroups
            via the .super.users suffix. -->
       <property>
