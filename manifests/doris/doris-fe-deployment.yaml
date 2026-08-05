@@ -61,11 +61,13 @@ data:
         <name>ranger.plugin.doris.policy.cache.dir</name>
         <value>/opt/apache-doris/fe/ranger-cache</value>
       </property>
-      <!-- Users listed here bypass Ranger policy checks entirely.
+      <!-- Super-users bypass Ranger policy checks entirely.
            root needs this to run system DDL (ALTER SYSTEM ADD BACKEND,
-           CREATE USER, GRANT) which have no Hive plugin equivalent. -->
+           CREATE USER, GRANT) which have no Hive plugin equivalent.
+           Property sourced from RangerBasePlugin.setSuperUsersAndGroups
+           via the .super.users suffix. -->
       <property>
-        <name>ranger.plugin.doris.super.user</name>
+        <name>ranger.plugin.doris.super.users</name>
         <value>root</value>
       </property>
     </configuration>
