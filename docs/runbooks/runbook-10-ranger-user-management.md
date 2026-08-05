@@ -100,6 +100,8 @@ kubectl rollout restart deploy/spark-master deploy/spark-worker -n prod
 kubectl rollout restart statefulset/doris-fe -n prod
 
 # Step 3 — disable OpenSearch SPNEGO via securityadmin.sh
+# Note: pyyaml is not available in the OpenSearch container (AL2023, non-root).
+# Uses Python stdlib re module only — see §2.4 for full explanation.
 kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
   mkdir -p /tmp/backup-secconfig
   /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
@@ -110,12 +112,20 @@ kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
     -h localhost -p 9200 2>/dev/null
 
   python3 - <<'PYEOF'
-import yaml
+import re
 with open('/tmp/backup-secconfig/config.yml') as f:
-    doc = yaml.safe_load(f)
-doc['config']['dynamic']['authc']['kerberos_auth_domain']['http_enabled'] = False
+    text = f.read()
+lines = text.splitlines()
+out = []
+in_krb = False
+for line in lines:
+    if 'kerberos_auth_domain:' in line:
+        in_krb = True
+    if in_krb and re.match(r'\s+http_enabled\s*:', line):
+        line = re.sub(r'(http_enabled\s*:\s*).*', r'\g<1>false', line)
+    out.append(line)
 with open('/tmp/backup-secconfig/config.yml', 'w') as f:
-    yaml.dump(doc, f, default_flow_style=False)
+    f.write('\n'.join(out) + '\n')
 print('Kerberos disabled in config')
 PYEOF
 
@@ -126,6 +136,9 @@ PYEOF
     -key    /usr/share/opensearch/config/tls/admin-key.pem \
     -h localhost -p 9200 2>&1 | tail -5
 "
+# Expected output:
+# Kerberos disabled in config
+# Done with success
 
 # Step 4 — disable Ranger SPNEGO (optional)
 #   In manifests/ranger/ranger-deployment.yaml set:
@@ -381,6 +394,23 @@ kubectl get kafkauser alice -n prod -o wide
 
 Doris uses SQL authentication. The username must match the Kerberos short name (`alice`).
 
+> **Known gotchas — read before running:**
+>
+> 1. **Always specify `-c doris-fe`** — the FE pod has a `krb-doris-guard` sidecar as the
+>    default container. Without `-c doris-fe`, kubectl exec targets the sidecar which has
+>    no `mysql` binary: `exec: "mysql": executable file not found in $PATH`.
+>
+> 2. **Escape `!` in passwords** — bash history expansion treats `!` as a special character
+>    in double-quoted strings. Use `\!` inside double-quotes:
+>    `"AliceDoris1\!"` not `"AliceDoris1!"`.
+>
+> 3. **`root` user, not `admin`** — the `admin-password` secret sets the `root` user's
+>    password via the `DORIS_ROOT_PASSWORD` env var on first boot. Use `-uroot`, not `-uadmin`.
+>    The `admin` user exists but has limited privileges.
+>
+> 4. **BE must be alive** — `CREATE USER` requires a live backend. If `SHOW BACKENDS\G`
+>    shows `Alive: false`, fix BE registration first (see [BE not registering with FE](../doris.md#be-not-registering-with-fe)).
+
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
 KEYS_FILE="${HOME}/openbao-init-keys.json"
@@ -392,14 +422,18 @@ DORIS_ROOT_PASS=$(curl -sf \
   "${BAO_ADDR}/v1/secret/data/doris/credentials" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
-kubectl exec -n prod statefulset/doris-fe -it -- \
+# -c doris-fe is required — default container is krb-doris-guard (no mysql)
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
   mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
-  -e "CREATE USER 'alice'@'%' IDENTIFIED BY 'AliceDoris1!';"
+  -e "CREATE USER 'alice'@'%' IDENTIFIED BY 'AliceDoris1\!';"
 
 # Verify
-kubectl exec -n prod statefulset/doris-fe -it -- \
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
   mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
   -e "SELECT user, host FROM mysql.user WHERE user='alice';"
+# Expected:
+# user  host
+# alice %
 ```
 
 ### Step 5 — Register the OpenSearch user (SPNEGO — no password needed)

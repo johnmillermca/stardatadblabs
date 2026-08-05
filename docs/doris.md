@@ -308,6 +308,71 @@ kubectl rollout status statefulset/doris-fe -n prod --timeout=300s
 > kubectl annotate application doris -n argocd argocd.argoproj.io/refresh=hard --overwrite
 > ```
 
+### Ranger `doris` Service Definition — Missing Access Types
+
+The Ranger `doris` service uses the `hive` service definition (type ID 3). The default
+hive definition does **not** include Doris-specific access types (`node`, `admin`, `grant`,
+`load`, `usage`, `show_view`). Without these, any user — including `root` — is denied
+system-level DDL even if they hold native Doris `Node_priv`:
+
+```
+ERROR 1105 (HY000): Access denied; you need (at least one of) the (NODE) privilege(s)
+```
+
+These access types have been added to the hive service definition via the Ranger REST API
+and are implied by `all`. The `all - global` policy (ID 87) grants all of them to `root`.
+Do not remove them — if the Ranger service definition is ever recreated from scratch,
+re-add using:
+
+```bash
+BAO_ADDR="http://192.168.1.50:30820"
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
+RANGER_PASS=$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
+
+# Fetch current hive service def, add Doris-specific types, push back
+curl -sf -u "admin:${RANGER_PASS}" \
+  "http://192.168.1.50:30680/service/plugins/definitions/3" > /tmp/hive-svcdef.json
+
+python3 - <<'PYEOF'
+import json
+with open('/tmp/hive-svcdef.json') as f:
+    d = json.load(f)
+existing = {a['name'] for a in d['accessTypes']}
+max_id = max(a['itemId'] for a in d['accessTypes'])
+new_types = [
+    {"name": "node",      "label": "Node",      "impliedGrants": []},
+    {"name": "admin",     "label": "Admin",     "impliedGrants": []},
+    {"name": "grant",     "label": "Grant",     "impliedGrants": []},
+    {"name": "load",      "label": "Load",      "impliedGrants": []},
+    {"name": "usage",     "label": "Usage",     "impliedGrants": []},
+    {"name": "show_view", "label": "Show View", "impliedGrants": []},
+]
+for t in new_types:
+    if t['name'] not in existing:
+        max_id += 1
+        t['itemId'] = max_id
+        d['accessTypes'].append(t)
+for a in d['accessTypes']:
+    if a['name'] == 'all':
+        for extra in ['node', 'admin', 'grant', 'load', 'usage', 'show_view']:
+            if extra not in a.get('impliedGrants', []):
+                a.setdefault('impliedGrants', []).append(extra)
+with open('/tmp/hive-svcdef-patched.json', 'w') as f:
+    json.dump(d, f, indent=2)
+print('Patched')
+PYEOF
+
+curl -sf -u "admin:${RANGER_PASS}" \
+  -X PUT "http://192.168.1.50:30680/service/plugins/definitions/3" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/hive-svcdef-patched.json | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print('Updated. Access types:', len(d.get('accessTypes',[])))"
+```
+
 ### Troubleshooting Ranger
 
 | Symptom | Cause | Fix |
@@ -317,6 +382,7 @@ kubectl rollout status statefulset/doris-fe -n prod --timeout=300s
 | `ranger.plugin.hive.*` properties ignored | Wrong property prefix | Use `ranger.plugin.doris.*` |
 | `404 RANGER_ERROR_SERVICE_NOT_FOUND` | Service not registered in Ranger Admin | Run the REST API registration command above |
 | Policies not applying after creation | Poll interval not elapsed | Wait 30s or restart FE pod |
+| `Access denied; you need (NODE) privilege` for `root` | Hive service def missing `node` access type | Re-add Doris access types to hive service def (see above) |
 
 ---
 
@@ -344,4 +410,67 @@ kubectl rollout restart statefulset/doris-fe -n prod
 ```bash
 kubectl logs -n prod -l app=doris-be | grep -i "heartbeat\|FE\|register"
 # Should show: successful heartbeat to FE at doris-fe-headless.prod.svc.cluster.local
+```
+
+If the BE is running but logs show `waiting to receive first heartbeat from frontend`:
+
+1. **BE was running before FE restarted** — the BE's entrypoint only self-registers on pod
+   start. Restart the BE so it re-runs registration:
+   ```bash
+   kubectl rollout restart deployment/doris-be -n prod
+   kubectl rollout status deployment/doris-be -n prod
+   ```
+
+2. **Stale hostname registration** — when `enable_fqdn_mode=true` is set in `fe.conf`, the
+   BE pod may self-register using its pod hostname (e.g. `doris-be-574d976cb9-nq76s`) instead
+   of its IP. The FE cannot resolve the pod hostname and reports
+   `java.net.UnknownHostException`. Drop the stale entry and re-add by IP:
+   ```bash
+   DORIS_ADMIN_PASS=$(kubectl get secret doris-credentials -n prod \
+     -o jsonpath='{.data.admin-password}' | base64 -d)
+   BE_IP=$(kubectl get pod -n prod -l app=doris-be -o jsonpath='{.items[0].status.podIP}')
+
+   kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+     mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ADMIN_PASS}" \
+     -e "ALTER SYSTEM DROPP BACKEND '<stale-hostname>:9050';"
+
+   kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+     mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ADMIN_PASS}" \
+     -e "ALTER SYSTEM ADD BACKEND '${BE_IP}:9050';"
+   ```
+
+3. **Cluster ID mismatch** — if the FE metadata PVC was wiped or the FE reinitialised, the
+   stored cluster ID in the BE's storage directory will not match FE's. The BE logs show:
+   ```
+   invalid cluster id. ignore. Record cluster id=<BE_ID>, Invalid cluster_id=<FE_ID>
+   ```
+   Fix by updating the BE's stored cluster ID to match FE:
+   ```bash
+   # Get FE cluster ID
+   kubectl exec -n prod statefulset/doris-fe -c doris-fe -- \
+     cat /opt/apache-doris/fe/doris-meta/image/VERSION
+   # Note the clusterId= value
+
+   # Overwrite BE's stored cluster ID
+   BE_POD=$(kubectl get pod -n prod -l app=doris-be -o jsonpath='{.items[0].metadata.name}')
+   kubectl exec -n prod ${BE_POD} -c doris-be -- \
+     bash -c "echo '<FE_CLUSTER_ID>' > /opt/apache-doris/be/storage/cluster_id"
+
+   # Restart BE to reload
+   kubectl rollout restart deployment/doris-be -n prod
+   ```
+   Then drop and re-add the BE backend entry (see step 2 above).
+
+### `kubectl exec` defaults to wrong container
+
+The FE pod has two containers: `doris-fe` and `krb-doris-guard`. `kubectl exec` without
+`-c doris-fe` defaults to `krb-doris-guard` which has no `mysql` binary:
+
+```
+error: exec: "mysql": executable file not found in $PATH
+```
+
+Always specify the container explicitly:
+```bash
+kubectl exec -n prod statefulset/doris-fe -c doris-fe -- mysql ...
 ```
