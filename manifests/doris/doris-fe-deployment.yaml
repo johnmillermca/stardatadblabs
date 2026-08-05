@@ -61,6 +61,13 @@ data:
         <name>ranger.plugin.doris.policy.cache.dir</name>
         <value>/opt/apache-doris/fe/ranger-cache</value>
       </property>
+      <!-- Users listed here bypass Ranger policy checks entirely.
+           root needs this to run system DDL (ALTER SYSTEM ADD BACKEND,
+           CREATE USER, GRANT) which have no Hive plugin equivalent. -->
+      <property>
+        <name>ranger.plugin.doris.super.user</name>
+        <value>root</value>
+      </property>
     </configuration>
   ranger-doris-audit.xml: |
     <?xml version="1.0" encoding="UTF-8"?>
@@ -104,9 +111,8 @@ data:
     priority_networks = 10.244.0.0/16
     # ── Ranger RBAC ──────────────────────────────────────────────────────────
     access_controller_type = ranger-doris
-    # root is exempt from Ranger access control so system-level DDL
-    # (ALTER SYSTEM ADD BACKEND, CREATE USER, GRANT, etc.) always works.
-    access_controller_bypass_users = root
+    # root bypass is configured in ranger-doris-security.xml via
+    # ranger.plugin.doris.super.user — no fe.conf entry needed.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
