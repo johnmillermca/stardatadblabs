@@ -141,6 +141,10 @@ PYEOF
 OpenSearch security config lives in a distributed index, not a file.
 Changes require `securityadmin.sh` — a pod restart alone is not enough.
 
+> **Note:** The OpenSearch container runs on Amazon Linux 2023 as a non-root user. `pyyaml` is not available and
+> cannot be installed (`dnf` requires root, `pip` is absent). The script below uses only Python's built-in `re`
+> module which is always present.
+
 ```bash
 # Enable SPNEGO
 kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
@@ -153,20 +157,33 @@ kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
     -h localhost -p 9200 2>/dev/null
 
   python3 - <<'PYEOF'
-import yaml
+import re
+
 with open('/tmp/backup-secconfig/config.yml') as f:
-    doc = yaml.safe_load(f)
-krb = doc['config']['dynamic']['authc']['kerberos_auth_domain']
-krb['http_enabled'] = True
-krb['order'] = 1
-if 'config' not in krb['http_authenticator']:
-    krb['http_authenticator']['config'] = {}
-krb['http_authenticator']['config']['krb_debug'] = False
-krb['http_authenticator']['config']['strip_realm_from_principal'] = True
-krb['http_authenticator']['config']['krb_service_principal'] = 'svc/opensearch@STARDATADBLABS.LOCAL'
-krb['http_authenticator']['config']['krb_keytab_path'] = '/etc/security/keytabs/opensearch.service.keytab'
+    text = f.read()
+
+lines = text.splitlines()
+out = []
+in_krb = False
+for line in lines:
+    if 'kerberos_auth_domain:' in line:
+        in_krb = True
+    if in_krb and re.match(r'\s+http_enabled\s*:', line):
+        line = re.sub(r'(http_enabled\s*:\s*).*', r'\g<1>true', line)
+    if in_krb and re.match(r'\s+order\s*:', line):
+        line = re.sub(r'(order\s*:\s*).*', r'\g<1>1', line)
+    if in_krb and re.match(r'\s+krb_debug\s*:', line):
+        line = re.sub(r'(krb_debug\s*:\s*).*', r'\g<1>false', line)
+    if in_krb and re.match(r'\s+strip_realm_from_principal\s*:', line):
+        line = re.sub(r'(strip_realm_from_principal\s*:\s*).*', r'\g<1>true', line)
+    if in_krb and re.match(r'\s+krb_service_principal\s*:', line):
+        line = re.sub(r'(krb_service_principal\s*:\s*).*', r'\g<1>svc/opensearch@STARDATADBLABS.LOCAL', line)
+    if in_krb and re.match(r'\s+krb_keytab_path\s*:', line):
+        line = re.sub(r'(krb_keytab_path\s*:\s*).*', r'\g<1>/etc/security/keytabs/opensearch.service.keytab', line)
+    out.append(line)
+
 with open('/tmp/backup-secconfig/config.yml', 'w') as f:
-    yaml.dump(doc, f, default_flow_style=False)
+    f.write('\n'.join(out) + '\n')
 print('Kerberos SPNEGO enabled')
 PYEOF
 
@@ -177,7 +194,9 @@ PYEOF
     -key    /usr/share/opensearch/config/tls/admin-key.pem \
     -h localhost -p 9200 2>&1 | tail -5
 "
-# Expected last line: Done with success
+# Expected output:
+# Kerberos SPNEGO enabled
+# Done with success
 ```
 
 ### 2.5 Kafka — enable GSSAPI listener (port 9093)
