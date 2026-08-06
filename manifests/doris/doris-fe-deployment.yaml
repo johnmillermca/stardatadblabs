@@ -65,6 +65,14 @@ data:
         <name>ranger.plugin.doris.policy.cache.dir</name>
         <value>/opt/apache-doris/fe/ranger-cache</value>
       </property>
+      <!-- Enable Ranger user store so group membership is resolved from
+           Ranger Admin rather than relying on the calling application to
+           supply group information. Required for group-based policies to
+           work — without this the plugin only evaluates user-level policies. -->
+      <property>
+        <name>ranger.plugin.doris.use.ranger.groups</name>
+        <value>true</value>
+      </property>
       <!-- Super-users bypass Ranger policy checks entirely.
            root needs this to run system DDL (ALTER SYSTEM ADD BACKEND,
            CREATE USER, GRANT) which have no equivalent access type.
