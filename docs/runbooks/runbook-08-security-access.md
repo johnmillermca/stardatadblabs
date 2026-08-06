@@ -1,8 +1,7 @@
-# Runbook 08 — Security & Access: Kerberos, Ranger, Private Registry
+# Runbook 08 — Security & Access: Kerberos, Private Registry
 
-> **Security namespace:** `security` · **Kerberos namespace:** `kerberos` · **Registry namespace:** `registry`  
-> **Ranger Admin UI:** `http://192.168.1.50:30680`  
-> **Private Registry:** `https://192.168.1.50:30500`  
+> **Kerberos namespace:** `kerberos` · **Registry namespace:** `registry`
+> **Private Registry:** `https://192.168.1.50:30500`
 > **Kerberos Realm:** `STARDATADBLABS.LOCAL`
 
 ---
@@ -19,19 +18,12 @@
 │  │  See Runbook 01 for full details                                  │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
-│  ┌─────────────────────────┐   ┌─────────────────────────────────────┐  │
-│  │  Kerberos KDC           │   │  Apache Ranger 2.4.0                │  │
-│  │  (kerberos namespace)   │   │  (security namespace)               │  │
-│  │  Realm: STARDATADBLABS  │   │  Admin UI: NodePort 30680           │  │
-│  │  KDC port: 88 TCP/UDP   │   │  RBAC + audit across all services   │  │
-│  │  kadmin port: 749 TCP   │   │  Backed by PostgreSQL (ranger DB)   │  │
-│  └────────────┬────────────┘   └────────────┬────────────────────────┘  │
-│               │ authenticates               │ policy enforcement         │
-│               │ service principals          │                            │
-│  ┌────────────▼─────────────────────────────▼────────────────────────┐  │
-│  │  Kerberized services:   Ranger-protected services:                │  │
-│  │  Spark, HDFS, HBase     Kafka, OpenSearch, Doris, Spark, HDFS    │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  Kerberos KDC (kerberos namespace)                               │   │
+│  │  Realm: STARDATADBLABS.LOCAL                                     │   │
+│  │  KDC port: 88 TCP/UDP  ·  kadmin port: 749 TCP                   │   │
+│  │  Authenticates: Kafka (GSSAPI), OpenSearch (SPNEGO), Spark jobs  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │  Private OCI Registry (registry namespace)                       │   │
@@ -232,162 +224,10 @@ kubectl exec -n kerberos deploy/kerberos-kdc -- \
 
 ---
 
-## 3. Apache Ranger — Fine-Grained Authorization
-
-### 3.1 What Is Apache Ranger?
-Apache Ranger provides **centralized, policy-based authorization** across the entire data platform. While Kerberos answers "who are you?", Ranger answers "what are you allowed to do?". It enforces:
-
-| Feature | Description |
-|---|---|
-| **Resource-based policies** | Allow/deny access to specific topics, tables, columns, indices |
-| **Row-level filtering** | Return only rows matching a filter expression per user/group |
-| **Column masking** | Auto-mask sensitive columns (e.g., show `****-XXXX` instead of SSN) |
-| **Audit logging** | Every access attempt is logged to HDFS, Solr, or Elasticsearch |
-| **User sync** | Sync users/groups from LDAP/AD |
-| **Tag-based policies** | Apply policies via metadata tags rather than explicit paths |
-
-### 3.2 Prerequisites
-```bash
-# 1. PostgreSQL must be running with the ranger database
-psql -U postgres -c "CREATE DATABASE ranger;"
-psql -U postgres -c "CREATE USER ranger WITH PASSWORD '<password>';"
-psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE ranger TO ranger;"
-
-# 2. Build and push the Ranger Docker image
-docker pull apache/ranger:2.4.0
-docker tag apache/ranger:2.4.0 192.168.1.50:30500/apache-ranger:2.7.0
-docker push 192.168.1.50:30500/apache-ranger:2.7.0
-
-# 3. Seed secrets
-sudo bash scripts/master/12-seed-openbao-secrets.sh
-```
-
-### 3.3 Deploy
-```bash
-# Via ArgoCD
-kubectl apply -f argocd-apps/app-ranger.yaml
-
-# Or manually
-kubectl apply -f manifests/ranger/ranger-deployment.yaml
-kubectl rollout status deployment/ranger-admin -n security
-```
-
-### 3.4 Access the Admin UI
-```bash
-# Get admin password
-RANGER_PASS=$(kubectl get secret ranger-db-credentials -n security \
-  -o jsonpath='{.data.admin-password}' | base64 -d)
-echo "Password: ${RANGER_PASS}"
-
-# Open in browser
-open http://192.168.1.50:30680
-
-# Login: admin / <password-above>
-```
-
-### 3.5 Ranger REST API
-```bash
-RANGER_PASS=$(kubectl get secret ranger-db-credentials -n security \
-  -o jsonpath='{.data.admin-password}' | base64 -d)
-
-# Check health
-curl -u admin:"${RANGER_PASS}" http://192.168.1.50:30680/service/public/v2/api/service
-
-# List all services (registered plugins)
-curl -u admin:"${RANGER_PASS}" \
-  http://192.168.1.50:30680/service/public/v2/api/service | python3 -m json.tool
-
-# List all policies for a service
-curl -u admin:"${RANGER_PASS}" \
-  "http://192.168.1.50:30680/service/public/v2/api/policy?serviceName=kafka-service" \
-  | python3 -m json.tool
-
-# Create a new policy
-curl -X POST -u admin:"${RANGER_PASS}" \
-  http://192.168.1.50:30680/service/public/v2/api/policy \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "allow-kafka-read",
-    "service": "kafka-service",
-    "isEnabled": true,
-    "resources": {
-      "topic": { "values": ["events-*"], "isRecursive": true }
-    },
-    "policyItems": [
-      {
-        "accesses": [{"type": "consume", "isAllowed": true}],
-        "users": ["kestra-user"],
-        "groups": ["data-engineers"],
-        "conditions": [],
-        "delegateAdmin": false
-      }
-    ]
-  }'
-
-# Delete a policy by ID
-curl -X DELETE -u admin:"${RANGER_PASS}" \
-  http://192.168.1.50:30680/service/public/v2/api/policy/<policy-id>
-```
-
-### 3.6 Register a Service Plugin
-
-To protect a new service (e.g., Kafka), register it in Ranger:
-
-```bash
-RANGER_PASS=$(kubectl get secret ranger-db-credentials -n security \
-  -o jsonpath='{.data.admin-password}' | base64 -d)
-
-# Register a Kafka service
-curl -X POST -u admin:"${RANGER_PASS}" \
-  http://192.168.1.50:30680/service/public/v2/api/service \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "kafka",
-    "name": "kafka-service",
-    "displayName": "Platform Kafka",
-    "isEnabled": true,
-    "configs": {
-      "bootstrap.servers": "kafka.streaming.svc.cluster.local:9092",
-      "security.protocol": "SASL_PLAINTEXT",
-      "sasl.mechanism": "PLAIN",
-      "username": "kafka-user",
-      "password": "<kafka-password>"
-    }
-  }'
-```
-
-### 3.7 Configure Ranger + Kerberos Integration
-```bash
-# Ranger Admin requires SPNEGO for Kerberos-protected UI/API
-# Add these properties to ranger-admin-site.xml:
-# xasecure.audit.destination.hdfs.config.conf.dir=/etc/krb5.conf
-# ranger.spnego.kerberos.principal=HTTP/ranger.security.svc.cluster.local@STARDATADBLABS.LOCAL
-# ranger.spnego.kerberos.keytab=/etc/security/keytabs/spnego.keytab
-
-# Create the SPNEGO principal
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
-  kadmin.local -q "addprinc -randkey HTTP/ranger.security.svc.cluster.local@STARDATADBLABS.LOCAL"
-kubectl exec -n kerberos deploy/kerberos-kdc -- \
-  kadmin.local -q "ktadd -k /tmp/spnego.keytab HTTP/ranger.security.svc.cluster.local@STARDATADBLABS.LOCAL"
-```
-
-### 3.8 Audit Log Access
-```bash
-# Ranger writes audit logs to the audit-log PVC
-# Access audit logs from inside the Ranger pod
-RANGER_POD=$(kubectl get pod -n security -l app=ranger-admin \
-  -o jsonpath='{.items[0].metadata.name}')
-
-kubectl exec -n security "${RANGER_POD}" -- \
-  tail -f /var/log/ranger/audit/RangerAudit.log | python3 -m json.tool
-```
-
----
-
-## 4. Private Docker Registry
+## 3. Private Docker Registry
 
 ### 4.1 What Is the Private Registry?
-A self-hosted OCI-compatible Docker registry deployed in the `registry` namespace. All platform-specific Docker images (Spark+Gluten+Velox, SQLMesh, MCP servers, Ranger, Polaris, etc.) are built and stored here, eliminating dependency on public image registries for production deployments.
+A self-hosted OCI-compatible Docker registry deployed in the `registry` namespace. All platform-specific Docker images (Spark+Gluten+Velox, SQLMesh, MCP servers, Polaris, etc.) are built and stored here, eliminating dependency on public image registries for production deployments.
 
 | Property | Value |
 |---|---|
@@ -620,7 +460,6 @@ All application credentials follow the **least privilege** pattern in OpenBao:
 | Grafana | `grafana-policy` | `secret/data/grafana/*` read |
 | Prometheus | `prometheus-policy` | `secret/data/prometheus/*` read |
 | Kestra | `kestra-policy` | `secret/data/kestra/*` read |
-| Ranger | `ranger-policy` | `secret/data/ranger/*` read |
 | Debezium | `debezium-policy` | `secret/data/debezium/*` read |
 | Admin | `platform-admin` | `secret/*` create/read/update/delete |
 
@@ -654,18 +493,7 @@ kubectl get pods -n kerberos
 kubectl logs -n kerberos deploy/kerberos-kdc | grep -i "error\|fail"
 ```
 
-### 7.2 Ranger Admin UI Not Loading
-```bash
-# Check Ranger pod status
-kubectl get pods -n security
-kubectl logs -n security deploy/ranger-admin --tail=50
-
-# Check PostgreSQL connectivity from Ranger
-kubectl exec -n security deploy/ranger-admin -- \
-  psql -h postgresql.databases.svc.cluster.local -U ranger -d ranger -c "\l"
-```
-
-### 7.3 Registry Push Fails — "x509: certificate signed by unknown authority"
+### 7.2 Registry Push Fails — "x509: certificate signed by unknown authority"
 ```bash
 # The registry cert is not trusted on the pushing machine
 # Copy and trust the certificate (see §4.6)
@@ -723,8 +551,6 @@ kubectl rollout restart deployment/spark-worker -n analytics
 | Verify keytab | `klist -ekt <keytab-file>` |
 | Obtain ticket | `kinit -kt <keytab> <principal>` |
 | Check ticket | `klist` |
-| Ranger health | `curl -u admin:<pass> http://192.168.1.50:30680/service/public/v2/api/service` |
-| List Ranger policies | `curl -u admin:<pass> http://192.168.1.50:30680/service/public/v2/api/policy` |
 | List registry images | `curl -sk https://192.168.1.50:30500/v2/_catalog` |
 | Registry GC | `kubectl exec -n registry deploy/private-registry -- registry garbage-collect /etc/docker/registry/config.yml` |
 | Rotate registry cert | `bash scripts/registry/06-registry-setup.sh` |

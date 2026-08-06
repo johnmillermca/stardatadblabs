@@ -1,7 +1,7 @@
 # PostgreSQL
 
 ## Overview
-PostgreSQL 17 — primary relational metadata store for the platform. Hosts databases for Apache Ranger, Apache Polaris, and general platform metadata.
+PostgreSQL 17 — primary relational metadata store for the platform. Hosts databases for Apache Polaris and general platform metadata.
 
 | Property | Value |
 |---|---|
@@ -10,7 +10,7 @@ PostgreSQL 17 — primary relational metadata store for the platform. Hosts data
 | Node | `master.local` (pinned) |
 | Internal | `postgresql.databases.svc.cluster.local:5432` |
 | External | `192.168.1.50:30532` |
-| Databases | `metadata` (default), `ranger`, `polaris` |
+| Databases | `metadata` (default), `polaris` |
 | Secret | `postgresql-credentials` |
 
 ## Prerequisites
@@ -48,7 +48,7 @@ psql -h localhost -U postgres -W
 ## Verify Databases
 ```sql
 \l
--- Should show: metadata, ranger, polaris
+-- Should show: metadata, polaris
 ```
 
 ## Backup

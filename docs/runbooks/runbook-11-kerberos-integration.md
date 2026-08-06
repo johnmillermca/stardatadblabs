@@ -2,13 +2,13 @@
 
 > **KDC:** `kerberos-kdc.prod.svc.cluster.local:88` · **Realm:** `STARDATADBLABS.LOCAL`
 > **Toggle:** `kubectl get cm kerberos-integration-config -n prod -o jsonpath='{.data.kerberos\.enabled}'`
-> **Related runbooks:** [01 — OpenBao](runbook-01-openbao.md) · [10 — Ranger User Management](runbook-10-ranger-user-management.md)
+> **Related runbooks:** [01 — OpenBao](runbook-01-openbao.md) · [08 — Security & Access](runbook-08-security-access.md)
 
 ---
 
 ## 1. Architecture
 
-Kerberos provides **authentication** (who are you?). Ranger provides **authorization** (what are you allowed to do?). They are independent layers — a Kerberos principal alone grants zero access to data.
+Kerberos provides **authentication** (who are you?). Each service's own authorization mechanism (Doris native GRANT/REVOKE, Kafka `allow.everyone.if.no.acl.found`, OpenSearch security plugin) controls what authenticated users can access.
 
 ```
 User gets a TGT from KDC
@@ -22,14 +22,12 @@ Client connects to service using GSSAPI/SPNEGO ticket
 Service validates ticket against its own keytab (mounted from K8s secret)
   │  Identity confirmed: "alice" (realm stripped)
   ▼
-Ranger plugin enforces policy: alice → resource → Allow/Deny
-  ▼
-Audit log written
+Service authorization: alice → resource → Allow/Deny
 ```
 
-**Identity namespace:** Ranger username = KDC principal name with realm stripped.
-`alice@STARDATADBLABS.LOCAL` → Ranger username `alice` → Doris SQL username `alice`.
-All three are the same string — single username governs access everywhere.
+**Identity convention:** KDC principal name with realm stripped = service username.
+`alice@STARDATADBLABS.LOCAL` → Kafka/OpenSearch/Doris username `alice`.
+The same short name is used consistently across all services.
 
 ---
 
@@ -59,9 +57,6 @@ kubectl rollout restart statefulset/doris-fe -n prod
 #    commit to git, ArgoCD reconciles → Strimzi rolls the broker
 
 # 4. For OpenSearch: apply updated config.yml via securityadmin.sh (see §6.3)
-
-# 5. For Ranger SPNEGO: set ranger.spnego.kerberos.enabled=true in
-#    ranger-deployment.yaml, commit, ArgoCD reconciles
 ```
 
 ### Disable Kerberos (platform-wide)
@@ -82,7 +77,6 @@ kubectl patch cm kerberos-integration-config -n prod \
 | Doris | `svc/doris@STARDATADBLABS.LOCAL` | `doris-keytab` | `keytab` |
 | Spark | `svc/spark@STARDATADBLABS.LOCAL` | `spark-keytab` | `keytab` |
 | OpenSearch | `svc/opensearch@STARDATADBLABS.LOCAL` | `opensearch-keytab` | `keytab` |
-| Ranger | `HTTP/ranger-admin.prod.svc.cluster.local@STARDATADBLABS.LOCAL` | `ranger-spnego-keytab` | `ranger.service.keytab` |
 
 Verify any keytab is valid:
 ```bash
@@ -156,7 +150,7 @@ kubectl exec -n prod statefulset/doris-fe -it -- \
 ```
 
 > Doris 4.0.x does not support native GSSAPI. A matching SQL username with the same
-> short name as the KDC principal ensures unified identity governance via Ranger.
+> short name as the KDC principal ensures unified identity governance via Doris native SQL GRANT/REVOKE.
 
 ### Step 4 — Store credentials in OpenBao
 
@@ -181,31 +175,22 @@ curl -sf -X POST \
   "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "Doris credential stored"
 ```
 
-### Step 5 — Register in Ranger and add to group
+### Step 5 — Grant Doris permissions
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
 KEYS_FILE="${HOME}/openbao-init-keys.json"
 [ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
-RANGER_PASS=$(curl -sf \
+DORIS_ROOT_PASS=$(curl -sf \
   -H "X-Vault-Token: ${ROOT_TOKEN}" \
-  "${BAO_ADDR}/v1/secret/data/ranger/credentials" | \
+  "${BAO_ADDR}/v1/secret/data/doris/credentials" | \
   python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['admin-password'])")
 
-# Register the user in Ranger
-curl -su "admin:${RANGER_PASS}" \
-  -X POST http://192.168.1.50:30680/service/xusers/secure/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name":          "alice",
-    "password":      "RangerUIPass1!",
-    "firstName":     "Alice",
-    "userRoleList":  ["ROLE_USER"],
-    "groupNameList": ["streaming_dev"]
-  }'
-# Adding alice to streaming_dev grants all kafka policies that apply to that group.
-# Change to processing_dev for Doris/Spark access, or add to both.
+# Grant privileges via Doris native SQL
+kubectl exec -n prod statefulset/doris-fe -it -- \
+  mysql -h127.0.0.1 -P9030 -uroot -p"${DORIS_ROOT_PASS}" \
+  -e "GRANT SELECT ON *.* TO 'alice'@'%';"
 ```
 
 ---
@@ -296,7 +281,7 @@ print(d['data']['config.yml'])
 # From a machine with a valid TGT (kinit alice@STARDATADBLABS.LOCAL first)
 curl --negotiate -u : \
   http://192.168.1.53:30920/_cluster/health
-# Expected: {"status":"green",...} with alice's Ranger roles applied
+# Expected: {"status":"green",...}
 ```
 
 ---
@@ -334,9 +319,7 @@ kubectl exec -n prod deploy/spark-master -- \
 ## 8. Removing a User
 
 ```bash
-# 1. Remove from all Ranger policies (see runbook-10 §9)
-
-# 2. Delete KDC principal
+# 1. Delete KDC principal
 kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "delprinc -force alice@STARDATADBLABS.LOCAL"
 
@@ -360,9 +343,7 @@ curl -sf -X DELETE -H "X-Vault-Token: ${ROOT_TOKEN}" \
 curl -sf -X DELETE -H "X-Vault-Token: ${ROOT_TOKEN}" \
   "${BAO_ADDR}/v1/secret/data/doris/users/alice" && echo "doris entry deleted"
 
-# 6. Delete Ranger user (see runbook-10 §9 Step 4)
-
-# 7. Verify KDC principal gone
+# 6. Verify KDC principal gone
 kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "listprincs" | grep "alice@" && \
   echo "WARNING: alice still in KDC" || echo "OK — KDC clean"
@@ -377,7 +358,6 @@ kubectl exec -n prod deploy/kerberos-kdc -- \
 | `kinit: KDC unreachable` | Pod can't reach `kerberos-kdc.prod.svc.cluster.local:88` | Check KDC pod: `kubectl get pod -n prod -l app=kerberos-kdc`. Check `krb5.conf` is mounted correctly |
 | `GSS-API error: No valid credentials` | Keytab not found or expired | Verify mount: `ls -la /etc/security/keytabs/`. Re-export keytab from KDC |
 | `Clock skew too great` | Time difference between client and KDC > 5 min | Sync NTP on all nodes. Check: `date` on worker nodes |
-| Ranger policy denies Kerberos user | Ranger username doesn't match KDC principal | Confirm `strip_realm_from_principal=true` in service config. Ranger username must be `alice` not `alice@STARDATADBLABS.LOCAL` |
 | Kafka GSSAPI listener `UNKNOWN_SERVER_ERROR` | `sasl.kerberos.service.name` mismatch | Client must use `sasl.kerberos.service.name=svc` (matches principal prefix `svc/kafka@`) |
 | OpenSearch SPNEGO returns 401 | `kerberos_auth_domain` not applied yet | Run `securityadmin.sh` — config.yml changes require explicit apply, not just pod restart |
 | Doris: Kerberos ticket doesn't work | Doris has no native GSSAPI support | Doris uses SQL password auth. Kerberos principal and Doris SQL user must share the same username but auth separately |

@@ -87,15 +87,15 @@ Examples:
 
 ```bash
 # Create a feature branch
-git checkout -b feature/add-ranger-deployment
+git checkout -b feature/add-kafka-topic
 
 # ... make changes ...
-git add -A && git commit -m "feat(ranger): add Apache Ranger manifests"
-git push origin feature/add-ranger-deployment
+git add -A && git commit -m "feat(kafka): add new topic configuration"
+git push origin feature/add-kafka-topic
 
 # Merge to main when ready (via PR or directly)
 git checkout main
-git merge feature/add-ranger-deployment
+git merge feature/add-kafka-topic
 git push origin main
 ```
 

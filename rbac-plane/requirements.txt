@@ -1,0 +1,33 @@
+# RBAC Control Plane — Python dependencies
+
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Auth
+pyjwt==2.10.1
+python-jose[cryptography]==3.3.0
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Cache
+redis[hiredis]==5.2.1
+
+# Service adapters
+aiomysql==0.2.0              # Doris (MySQL protocol)
+httpx==0.28.1                # OpenSearch REST API
+kubernetes-asyncio==30.3.2   # Kafka KafkaUser CRs + Spark ConfigMap
+
+# CLI
+typer[all]==0.13.1
+rich==13.9.4
+
+# Dev / testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+httpx==0.28.1

@@ -821,11 +821,11 @@ initContainers:
 
 ---
 
-### 15.15 Ranger, SQLMesh — RollingUpdate + RWO PVC
+### 15.15 SQLMesh — RollingUpdate + RWO PVC
 
-**Root cause**: Both had default `RollingUpdate` strategy with `ReadWriteOnce` PVCs.
+**Root cause**: Had default `RollingUpdate` strategy with `ReadWriteOnce` PVC.
 
-**Fix** (commit `e120ef5`): `strategy: Recreate` on both. `terminationGracePeriodSeconds: 60` on `ranger-admin`.
+**Fix** (commit `e120ef5`): `strategy: Recreate`. `terminationGracePeriodSeconds: 60`.
 
 ---
 
@@ -866,7 +866,6 @@ initContainers:
 | data-openbao-0 | 10Gi | ✅ Retain |
 | sqlmesh-models | 10Gi | ✅ Retain |
 | grafana | 10Gi | ✅ Retain |
-| ranger-data | 5Gi | ✅ Retain |
 | alertmanager-*-db | 5Gi | ✅ Retain |
 | hub-db-dir | 1Gi | ✅ Retain |
 | kerberos-data | 1Gi | ✅ Retain |

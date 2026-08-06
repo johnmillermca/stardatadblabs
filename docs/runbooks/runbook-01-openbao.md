@@ -58,7 +58,6 @@ OpenBao provides a **unified secret management plane** for the entire platform:
 │  │  secret/data/opensearch/credentials                               │  │
 │  │  secret/data/kestra/credentials                                   │  │
 │  │  secret/data/doris/credentials                                    │  │
-│  │  secret/data/ranger/credentials                                   │  │
 │  │  secret/data/kerberos/credentials                                 │  │
 │  │  secret/data/sqlmesh/credentials                                  │  │
 │  │  secret/data/polaris/credentials                                  │  │
@@ -296,7 +295,7 @@ bao kv metadata get secret/myapp/config
 sudo bash scripts/master/12-seed-openbao-secrets.sh
 ```
 
-This seeds credentials for: grafana, prometheus, postgresql, mongodb, kafka, opensearch, kestra, doris, ranger, kerberos, sqlmesh, polaris, akhq, schema-registry, debezium.
+This seeds credentials for: grafana, prometheus, postgresql, mongodb, kafka, opensearch, kestra, doris, kerberos, sqlmesh, polaris, akhq, schema-registry, debezium.
 
 ---
 

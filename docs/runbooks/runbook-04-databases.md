@@ -15,7 +15,7 @@
 │  ┌──────────────────────────────────────────────────┐                   │
 │  │  PostgreSQL 17 (bitnami/postgresql 18.8.0)       │                   │
 │  │  Port 5432 / NodePort 30532                      │                   │
-│  │  Databases: metadata | ranger | polaris          │                   │
+│  │  Databases: metadata | polaris                   │                   │
 │  │             kestra   | sqlmesh_state             │                   │
 │  │  Credentials: postgresql-credentials secret      │                   │
 │  │  Storage: PVC 20 Gi on local-path                │                   │
@@ -37,7 +37,6 @@
 └──────────────────────────────────────────────────────────────────────────┘
 
 Platform consumers:
-  Apache Ranger ────────► PostgreSQL (ranger database)
   Apache Polaris ───────► PostgreSQL (polaris database)
   Apache Kestra ────────► PostgreSQL (kestra database)
   SQLMesh ──────────────► PostgreSQL (sqlmesh_state database)
@@ -51,7 +50,7 @@ Platform consumers:
 ## 2. PostgreSQL 17
 
 ### 2.1 What Is PostgreSQL in This Platform?
-PostgreSQL 17 is the **primary relational metadata store**. It is the shared backend for multiple platform components: Ranger stores its policy engine data here, Polaris stores Iceberg catalog metadata here, Kestra stores workflow state here, and SQLMesh stores transformation state here. It also serves as the CDC source for Debezium.
+PostgreSQL 17 is the **primary relational metadata store**. It is the shared backend for multiple platform components: Polaris stores Iceberg catalog metadata here, Kestra stores workflow state here, and SQLMesh stores transformation state here. It also serves as the CDC source for Debezium.
 
 ### 2.2 Deploy
 ```bash

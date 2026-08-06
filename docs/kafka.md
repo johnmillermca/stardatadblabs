@@ -9,40 +9,10 @@ Strimzi-managed Kafka 4.2.0 in KRaft mode (single combined controller+broker), d
 | Bootstrap (internal) | `strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092` |
 | External NodePort | `30093` (SCRAM-SHA-512) |
 | Auth | SCRAM-SHA-512 |
-| Image | `192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger` |
+| Image | `192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0` |
 | Node | `worker4.local` (pinned) |
 | PVC | 250Gi `local-path` (Retain) |
 | Manifest | [`manifests/strimzi/kafka-cluster.yaml`](../manifests/strimzi/kafka-cluster.yaml) |
-
-## Ranger RBAC
-
-Kafka topic-level access control is enforced by the **Ranger Kafka plugin** baked into the custom broker image.
-
-| Property | Value |
-|---|---|
-| Authorizer class | `org.apache.ranger.authorization.kafka.authorizer.RangerKafkaAuthorizer` |
-| Ranger service name | `kafka` |
-| Policy poll interval | 30 s |
-| Config XMLs | `ConfigMap/kafka-ranger-config` → `/mnt/ranger-conf/` |
-| Fallback | `allow.everyone.if.no.acl.found=true` (safe open if Ranger unreachable) |
-
-### Custom image
-The `-ranger` image extends the standard Strimzi base with all required Ranger 2.7.0 + Hadoop 3.3.6 JARs:
-```bash
-podman build -t 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger \
-  docker/strimzi-kafka-ranger/
-podman push 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger
-```
-
-### Registering the `kafka` service in Ranger
-The Ranger service must exist before the broker starts downloading policies.
-Register it via the Ranger Admin UI at `http://192.168.1.50:30680`:
-
-1. **Access Manager → Service Manager** → click **+** next to **KAFKA**
-2. Set **Service Name** = `kafka`
-3. Set **Zookeeper Connect** = `strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092` (dummy; KRaft has no ZooKeeper — value is schema-required but ignored)
-4. Set **Bootstrap Servers** = `strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092`
-5. **Save**
 
 ## Deployment (ArgoCD)
 ArgoCD application: `argocd-apps/app-strimzi.yaml`
@@ -84,7 +54,7 @@ APP_PASS=$(kubectl get secret kafka-app-user -n prod \
   -o jsonpath='{.data.password}' | base64 -d)
 
 kubectl run kafka-client --rm -it --restart=Never \
-  --image 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger \
+  --image 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0 \
   -n prod \
   -- kafka-console-producer.sh \
     --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \

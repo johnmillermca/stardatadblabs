@@ -55,7 +55,6 @@ been collapsed into `prod`.
 | SQLMesh | 192.168.1.50:30500/sqlmesh | 0.99.0 | 30883 | single |
 | Apache Doris FE | 192.168.1.50:30500/doris | 2.1.x | 30030 | single FE |
 | Apache Doris BE | 192.168.1.50:30500/doris | 2.1.x | — | 3 replicas |
-| Apache Ranger | 192.168.1.50:30500/apache-ranger | 2.4.0 | 30860 | single |
 | Apache Polaris | 192.168.1.50:30500/apache-polaris | latest | 30882 | single |
 | Debezium | 192.168.1.50:30500/debezium | 2.5.x | 30083 | single |
 | Kerberos KDC | 192.168.1.50:30500/kerberos-kdc | — | 30088 | single |
@@ -127,7 +126,6 @@ Key secrets seeded by [`scripts/master/12-seed-openbao-secrets.sh`](../scripts/m
 | `sqlmesh-credentials` | prod | `secret/platform/sqlmesh` |
 | `grafana-credentials` | monitoring | `secret/monitoring/grafana` |
 | `jupyterhub-credentials` | prod | `secret/platform/jupyterhub` |
-| `ranger-db-credentials` | prod | `secret/platform/ranger` |
 | `polaris-db-credentials` | prod | `secret/platform/polaris` |
 
 Retrieve any secret:

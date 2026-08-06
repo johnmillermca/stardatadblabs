@@ -1,7 +1,7 @@
 # Kerberos KDC
 
 ## Overview
-MIT Kerberos Key Distribution Center deployed as a Kubernetes workload for centralized Kerberos authentication across the platform. Used for Hadoop-style service authentication and integration with Ranger, HDFS, HBase, and other Kerberized services.
+MIT Kerberos Key Distribution Center deployed as a Kubernetes workload for centralized Kerberos authentication across the platform. Used for Hadoop-style service authentication for Kerberized services.
 
 | Property | Value |
 |---|---|

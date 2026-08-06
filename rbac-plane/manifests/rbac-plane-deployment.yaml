@@ -1,0 +1,195 @@
+---
+# ── RBAC Control Plane — Kubernetes Manifests ─────────────
+# All resources deployed in the 'prod' namespace.
+#
+# Includes:
+#   - ConfigMap (non-secret config)
+#   - Secret    (credentials — seeded externally by 12-seed-openbao-secrets.sh)
+#   - Deployment
+#   - Service (ClusterIP + NodePort)
+#   - ServiceAccount + RBAC (for Kubernetes API access)
+#   - HorizontalPodAutoscaler
+
+# ── ServiceAccount ─────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rbac-plane
+  namespace: prod
+  labels:
+    app: rbac-plane
+
+---
+# ── ClusterRole: read/write KafkaUser CRs + ConfigMaps ────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rbac-plane
+rules:
+  - apiGroups: ["kafka.strimzi.io"]
+    resources: ["kafkausers"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rbac-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rbac-plane
+subjects:
+  - kind: ServiceAccount
+    name: rbac-plane
+    namespace: prod
+
+---
+# ── ConfigMap (non-secret config) ─────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rbac-plane-config
+  namespace: prod
+  labels:
+    app: rbac-plane
+data:
+  PG_HOST: "postgresql.prod.svc.cluster.local"
+  PG_PORT: "5432"
+  PG_DB:   "rbac"
+  PG_USER: "rbac"
+  PG_POOL_MAX: "20"
+  REDIS_URL: "redis://redis.prod.svc.cluster.local:6379/0"
+  CACHE_TTL: "30"
+  DORIS_HOST: "doris-fe.prod.svc.cluster.local"
+  DORIS_PORT: "9030"
+  DORIS_ADMIN_USER: "root"
+  OPENSEARCH_HOST: "opensearch-cluster-master.prod.svc.cluster.local"
+  OPENSEARCH_PORT: "9200"
+  OPENSEARCH_ADMIN_USER: "admin"
+  OPENSEARCH_VERIFY_SSL: "false"
+  KAFKA_NAMESPACE: "prod"
+  KAFKA_CLUSTER_NAME: "strimzi-kafka"
+  KAFKA_BOOTSTRAP: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+  SPARK_NAMESPACE: "prod"
+  SPARK_ALLOWLIST_CM: "spark-rbac-allowlist"
+  LOG_LEVEL: "INFO"
+
+---
+# ── Deployment ─────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rbac-plane
+  namespace: prod
+  labels:
+    app: rbac-plane
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: rbac-plane
+  template:
+    metadata:
+      labels:
+        app: rbac-plane
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: rbac-plane
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: rbac-plane
+          image: 192.168.1.50:30500/rbac-plane:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: rbac-plane-config
+            - secretRef:
+                name: rbac-plane-credentials
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+---
+# ── Service ────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: rbac-plane
+  namespace: prod
+  labels:
+    app: rbac-plane
+spec:
+  selector:
+    app: rbac-plane
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30850
+  type: NodePort
+
+---
+# ── HPA ───────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rbac-plane
+  namespace: prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rbac-plane
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

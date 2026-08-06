@@ -47,7 +47,6 @@ All platform applications are defined in `argocd-apps/`:
 | `doris` | `analytics` | `manifests/doris/` | 0 |
 | `polaris` | `catalog` | `manifests/polaris/` | 0 |
 | `sqlmesh` | `analytics` | `manifests/sqlmesh/` | 15 |
-| `ranger` | `security` | `manifests/ranger/` | 0 |
 | `kerberos` | `kerberos` | `manifests/kerberos/` | -5 |
 | `debezium` | `streaming` | `manifests/debezium/` | 10 |
 
