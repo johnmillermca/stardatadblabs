@@ -6,8 +6,8 @@
 #
 # Listeners   :
 #   INTERNAL port 9092 — SCRAM-SHA-512, in-cluster only
-#             Used exclusively by Strimzi operators (topic/user operator) and
-#             internal Ranger plugin polling. NOT exposed to end-users.
+#             Used exclusively by Strimzi operators (topic/user operator).
+#             NOT exposed to end-users.
 #   KRB      port 9093 — GSSAPI/Kerberos, in-cluster
 #             THE ONLY USER-FACING LISTENER.
 #             Requires a valid Kerberos TGT (kinit / keytab).
@@ -15,7 +15,6 @@
 #
 # NOTE: External SCRAM NodePort (9094/30093) has been REMOVED.
 #       Users must authenticate via Kerberos on port 9093.
-#       allow.everyone.if.no.acl.found=false — unknown users are hard-denied.
 #
 # Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (operators)
 #               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 (users/GSSAPI)
@@ -24,22 +23,9 @@
 #               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
 #               hostPath: /home/local-path-provisioner/
 #                 pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
-# Ranger      : Image latest-kafka-4.2.0-ranger includes ranger-kafka-plugin JARs.
-#               ConfigMap kafka-ranger-config mounts security+audit XMLs into
-#               /mnt/ranger-conf/ via KafkaNodePool template.pod.volumes +
-#               template.kafkaContainer.volumeMounts (KafkaNodePool propagates
-#               volumes correctly; Kafka CR template.pod.volumes does NOT).
-#               CLASSPATH=/mnt/ranger-conf adds XMLs to the JVM classpath.
-#               Authorizer: spec.kafka.authorization.type=custom +
-#                 authorizerClass=RangerKafkaAuthorizer (NOT config{} — Strimzi
-#                 strips authorizer.class.name from config silently).
-#               allow.everyone.if.no.acl.found=false — hard deny for unknown users.
-#               KRaft mode — no ZooKeeper. zookeeper.connect in Ranger service
-#               config is a schema-required dummy value, ignored at runtime.
-#               Plugin connects via bootstrap:9092 + SASL_PLAINTEXT/SCRAM.
 # Kerberos    : GSSAPI listener (port 9093) — active, KDC-enforced.
 #               Principal: svc/kafka@STARDATADBLABS.LOCAL (secret: kafka-keytab)
-#               Ranger sees stripped username (alice, not alice@STARDATADBLABS.LOCAL)
+#               Stripped username (alice, not alice@STARDATADBLABS.LOCAL)
 #               because sasl.kerberos.principal.to.local.rules: DEFAULT strips realm.
 #               Inter-broker protocol: SCRAM-SHA-512 on port 9092 (overrides Strimzi
 #               auto-detection which would otherwise set GSSAPI and crash the broker).
@@ -81,100 +67,6 @@ data:
       keyTab="/mnt/kafka-keytab/keytab"
       principal="svc/kafka@STARDATADBLABS.LOCAL";
     };
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kafka-ranger-config
-  namespace: prod
-data:
-  core-site.xml: |
-    <?xml version="1.0" encoding="UTF-8"?>
-    <!--
-      Hadoop Configuration loaded by RangerBasePlugin via ClassLoader.getResource().
-      Sets NullGroupsMapping so Hadoop UGI returns empty groups for any principal
-      without shelling out to 'id' — silences the flood of:
-        WARN ShellBasedUnixGroupsMapping: unable to return groups for user ...
-      NullGroupsMapping exists in hadoop-common-3.3.6 (StaticMapping does not).
-    -->
-    <configuration>
-      <!--
-        Use simple (non-Kerberos) auth so UserGroupInformation.getLoginUser()
-        succeeds without a keytab. Without this, MiscUtil.getUGILoginUser()
-        attempts a Kerberos login, fails, and the PolicyRefresher background
-        thread corrupts the policy engine with a null result → all denied.
-      -->
-      <property>
-        <name>hadoop.security.authentication</name>
-        <value>simple</value>
-      </property>
-      <property>
-        <name>hadoop.security.authorization</name>
-        <value>false</value>
-      </property>
-      <property>
-        <name>hadoop.security.group.mapping</name>
-        <value>org.apache.hadoop.security.NullGroupsMapping</value>
-      </property>
-    </configuration>
-  ranger-kafka-security.xml: |
-    <?xml version="1.0" encoding="UTF-8"?>
-    <configuration>
-      <property>
-        <name>ranger.plugin.kafka.policy.source.impl</name>
-        <value>org.apache.ranger.admin.client.RangerAdminRESTClient</value>
-      </property>
-      <property>
-        <name>ranger.plugin.kafka.service.name</name>
-        <value>kafka</value>
-      </property>
-      <property>
-        <name>ranger.plugin.kafka.policy.rest.url</name>
-        <value>http://ranger-admin.prod.svc.cluster.local:6080</value>
-      </property>
-      <property>
-        <name>ranger.plugin.kafka.policy.pollIntervalMs</name>
-        <value>30000</value>
-      </property>
-      <property>
-        <name>ranger.plugin.kafka.policy.cache.dir</name>
-        <value>/tmp/ranger-kafka-cache</value>
-      </property>
-      <!--
-        Credentials used by the Ranger plugin to authenticate against Ranger Admin
-        when downloading policies. Must match the username configured in the Ranger
-        kafka service (policy.download.auth.users = kafka-app-user).
-      -->
-      <property>
-        <name>ranger.plugin.kafka.policy.rest.supports.policy.deltas</name>
-        <value>false</value>
-      </property>
-      <property>
-        <name>ranger.plugin.kafka.policy.rest.client.username</name>
-        <value>kafka-app-user</value>
-      </property>
-      <property>
-        <name>ranger.plugin.kafka.policy.rest.client.password</name>
-        <value>mJnehIiUo9zzg4qTPVK8LmLeuC0yNM2T</value>
-      </property>
-    </configuration>
-  ranger-kafka-audit.xml: |
-    <?xml version="1.0" encoding="UTF-8"?>
-    <configuration>
-      <property>
-        <name>xasecure.audit.is.enabled</name>
-        <value>true</value>
-      </property>
-      <property>
-        <name>xasecure.audit.db.is.enabled</name>
-        <value>false</value>
-      </property>
-      <property>
-        <name>xasecure.audit.solr.is.enabled</name>
-        <value>false</value>
-      </property>
-    </configuration>
-
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
@@ -238,14 +130,7 @@ spec:
       # on the next boot, widening the window where the operator races controller
       # election and stamps NotReady on the Kafka CR.
       terminationGracePeriodSeconds: 120
-      # ── Ranger config XMLs ────────────────────────────────────────────────
-      # template.pod.volumes in KafkaNodePool propagates to the StrimziPodSet
-      # pod spec correctly (unlike Kafka CR template.pod.volumes which does not).
-      # Strimzi only allows mountPaths under /mnt (enforced by operator).
       volumes:
-        - name: ranger-config
-          configMap:
-            name: kafka-ranger-config
         # ── krb5.conf — always present ─────────────────────────────────────
         - name: krb5-conf
           configMap:
@@ -262,33 +147,14 @@ spec:
             name: kafka-gssapi-jaas
     kafkaContainer:
       env:
-        # CLASSPATH is the seed variable read by kafka-run-class.sh; all
-        # internal lib dirs are appended to it. Setting it here puts
-        # /mnt/ranger-conf on the JVM classpath so RangerConfiguration can
-        # resolve ranger-kafka-security.xml and ranger-kafka-audit.xml via
-        # ClassLoader.getResource() — which is how RangerPluginConfig loads
-        # its config files.
-        # NOTE: KAFKA_CLASSPATH (the previous name) is not read by any script
-        # in the Strimzi/Kafka image — it was a no-op.
-        - name: CLASSPATH
-          value: /mnt/ranger-conf
-        # Ranger's MiscUtil.getUGILoginUser() calls UnixLoginModule which reads
-        # System.getProperty("user.name"). The broker runs as UID 1000 with no
-        # /etc/passwd entry, so user.name is null → NullPointerException in
-        # UnixPrincipal → "Error getting UGI" on every PolicyRefresher cycle →
-        # eventually corrupts the policy engine. Setting user.name explicitly
-        # gives UnixLoginModule a valid non-null name to construct the principal.
         # JAAS config is required so the JVM can find the KafkaServer entry
         # for GSSAPI. Without this flag the broker crashes with:
         #   "Could not find a 'KafkaServer' entry in the JAAS configuration"
         - name: KAFKA_OPTS
           value: >-
-            -Duser.name=kafka
             -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
             -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
       volumeMounts:
-        - name: ranger-config
-          mountPath: /mnt/ranger-conf
         # krb5.conf — always mounted (harmless when Kerberos disabled)
         - name: krb5-conf
           mountPath: /mnt/krb5-conf/cluster.conf
@@ -312,10 +178,10 @@ spec:
   kafka:
     version: 4.2.0
     metadataVersion: "4.2-IV1"
-    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0-ranger-v6
+    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
     listeners:
-      # ── Internal SCRAM listener — operators + Ranger plugin ONLY ─────────
-      # Strimzi topic/user operators and the Ranger plugin use this listener.
+      # ── Internal SCRAM listener — operators ONLY ──────────────────────────
+      # Strimzi topic/user operators use this listener.
       # Users MUST NOT connect here. KDC enforcement is on port 9093 (krb).
       - name: plain
         port: 9092
@@ -351,21 +217,8 @@ spec:
               principal="svc/kafka@STARDATADBLABS.LOCAL"
               isInitiator=false;
             sasl.kerberos.principal.to.local.rules: DEFAULT
-    # ── Ranger Kafka Authorizer ───────────────────────────────────────────────
-    # type=custom + authorizerClass is the correct approach for any third-party
-    # authorizer (Ranger, OPA, etc.). Setting authorizer.class.name in config{}
-    # is silently stripped by the operator.
-    # supportsAdminApi=true: required for Ranger — routes all admin calls through
-    # the authorizer normally. Without it the Topic Operator times out.
-    # allow.everyone.if.no.acl.found=false: HARD DENY for unknown users.
-    # A user with a valid KDC principal+ticket authenticates fine but still needs
-    # an explicit Ranger Allow policy. Without it they are denied.
-    authorization:
-      type: custom
-      authorizerClass: org.apache.ranger.authorization.kafka.authorizer.RangerKafkaAuthorizer
-      supportsAdminApi: true
     config:
-      allow.everyone.if.no.acl.found: "false"
+      allow.everyone.if.no.acl.found: "true"
       # ── Inter-broker protocol override — CRITICAL for GSSAPI listener ────
       # When Strimzi detects any GSSAPI listener it auto-sets inter-broker
       # protocol to GSSAPI, which breaks broker comms (no inter-broker keytab
@@ -435,12 +288,10 @@ spec:
       # secretPrefix is not needed — KafkaUser secrets are named after the user.
       # reconciliationIntervalSeconds default 120s is fine.
       #
-      # aclsAdminApiSupported=false: Ranger does not implement the Kafka ACL store
-      # API (acls(), createAcls(), deleteAcls() all throw UnsupportedOperationException).
-      # Setting this false stops the User Operator from calling DESCRIBE_ACLS /
-      # CREATE_ACLS, eliminating the AclCache failed to update errors and the
-      # KafkaUser NotReady condition. SCRAM credential management is unaffected —
-      # it uses the ALTER_USER_SCRAM_CREDENTIALS API, not ACLs.
+      # aclsAdminApiSupported=false: stops the User Operator from calling
+      # DESCRIBE_ACLS / CREATE_ACLS, eliminating AclCache errors.
+      # SCRAM credential management is unaffected — it uses the
+      # ALTER_USER_SCRAM_CREDENTIALS API, not ACLs.
       aclsAdminApiSupported: false
       resources:
         requests:

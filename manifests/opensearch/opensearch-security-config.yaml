@@ -63,8 +63,8 @@ data:
           # ── Kerberos SPNEGO (kerberos.enabled=true) ─────────────────────────
           # Principal: svc/opensearch@STARDATADBLABS.LOCAL
           # Keytab: /etc/security/keytabs/opensearch.service.keytab
-          # strip_realm_from_principal: true → Ranger sees "alice" not
-          #   "alice@STARDATADBLABS.LOCAL" — must match Ranger username exactly.
+          # strip_realm_from_principal: true → principal is "alice" not
+          #   "alice@STARDATADBLABS.LOCAL"
           # To disable: set http_enabled: false and apply via securityadmin.sh.
           kerberos_auth_domain:
             http_enabled: true
@@ -143,11 +143,3 @@ data:
             authentication_backend:
               type: noop
 
-        authz:
-          # No external authz backends configured — roles managed via Ranger
-          # (ranger-opensearch-plugin, pending Phase 4 implementation).
-          roles_from_ranger:
-            http_enabled: false
-            transport_enabled: false
-            authorization_backend:
-              type: noop

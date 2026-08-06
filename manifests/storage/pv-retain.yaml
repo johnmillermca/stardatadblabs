@@ -410,33 +410,6 @@ spec:
               values:
                 - worker4.local
 ---
-# PVC 'ranger-data' (prod) on master.local
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: pvc-f2025e33-0c00-4cce-bbfc-44b78879460e
-spec:
-  capacity:
-    storage: 5Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: local-path
-  hostPath:
-    path: /home/local-path-provisioner/pvc-f2025e33-0c00-4cce-bbfc-44b78879460e_prod_ranger-data
-    type: DirectoryOrCreate
-  claimRef:
-    name: ranger-data
-    namespace: prod
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - master.local
----
 # PVC 'registry-data' (registry) on master.local
 apiVersion: v1
 kind: PersistentVolume

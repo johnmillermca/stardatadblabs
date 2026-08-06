@@ -7,8 +7,8 @@
 #
 # Usage:
 #   bash scripts/master/build-and-push-custom-images.sh           # build all
-#   bash scripts/master/build-and-push-custom-images.sh ranger     # single image
-#   bash scripts/master/build-and-push-custom-images.sh ranger polaris
+#   bash scripts/master/build-and-push-custom-images.sh polaris    # single image
+#   bash scripts/master/build-and-push-custom-images.sh polaris sqlmesh
 #
 # Safe to re-run — podman build uses layer cache, skips unchanged layers.
 # =============================================================================
@@ -29,14 +29,12 @@ FAILURES=()
 # Format: build_image "<name>" "<context-dir>" "<registry-path>:<tag>"
 # =============================================================================
 declare -A IMAGE_CONTEXT=(
-  [ranger]="docker/ranger"
   [polaris]="docker/polaris"
   [sqlmesh]="docker/sqlmesh"
   [jupyter-spark]="docker/jupyter-spark"
 )
 
 declare -A IMAGE_TAG=(
-  [ranger]="${REGISTRY}/apache-ranger:2.7.0"
   [polaris]="${REGISTRY}/apache-polaris:1.6.0"
   [sqlmesh]="${REGISTRY}/sqlmesh:0.99.0"
   [jupyter-spark]="${REGISTRY}/jupyter-spark:latest"
@@ -78,7 +76,7 @@ build_image() {
 if [[ $# -gt 0 ]]; then
   TARGETS=("$@")
 else
-  TARGETS=("ranger" "polaris" "sqlmesh" "jupyter-spark")
+  TARGETS=("polaris" "sqlmesh" "jupyter-spark")
 fi
 
 log "=== Building ${#TARGETS[@]} custom image(s) ==="

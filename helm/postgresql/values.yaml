@@ -3,7 +3,7 @@
 # Namespace   : prod
 # Access      : postgresql.prod.svc.cluster.local:5432  (internal)
 #               NodePort 192.168.1.50:30532             (external)
-# Databases   : metadata, kestra, sqlmesh_state, ranger, polaris
+# Databases   : metadata, kestra, sqlmesh_state, polaris
 # Secret      : postgresql-credentials (seeded by 12-seed-openbao-secrets.sh)
 # =============================================================================
 global:
@@ -45,7 +45,6 @@ primary:
       01-create-dbs.sql: |
         CREATE DATABASE kestra;
         CREATE DATABASE sqlmesh_state;
-        CREATE DATABASE ranger;
         CREATE DATABASE polaris;
       02-create-users.sh: |
         #!/bin/bash
@@ -53,11 +52,9 @@ primary:
         psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
           CREATE USER kestra   WITH PASSWORD '${KESTRA_DB_PASS:-changeme}';
           CREATE USER sqlmesh  WITH PASSWORD '${SQLMESH_DB_PASS:-changeme}';
-          CREATE USER ranger   WITH PASSWORD '${RANGER_DB_PASS:-changeme}';
           CREATE USER polaris  WITH PASSWORD '${POLARIS_DB_PASS:-changeme}';
           GRANT ALL PRIVILEGES ON DATABASE kestra       TO kestra;
           GRANT ALL PRIVILEGES ON DATABASE sqlmesh_state TO sqlmesh;
-          GRANT ALL PRIVILEGES ON DATABASE ranger       TO ranger;
           GRANT ALL PRIVILEGES ON DATABASE polaris      TO polaris;
         EOSQL
 

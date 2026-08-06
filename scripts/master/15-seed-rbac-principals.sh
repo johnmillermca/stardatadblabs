@@ -11,14 +11,10 @@
 # Usage: sudo bash scripts/master/15-seed-rbac-principals.sh
 # Safe to re-run — addprinc is skipped if principal already exists.
 #
-# Groups created in Kerberos (via Ranger group mapping):
-#   account_admin   — super group, all layers
-#   caching_admin   — CACHING_ZONE admin
-#   caching_dev     — CACHING_ZONE read-only
-#   processing_admin — PROCESSING_ZONE admin
-#   processing_dev  — PROCESSING_ZONE read-only
-#   streaming_admin — STREAMING_ZONE admin
-#   streaming_dev   — STREAMING_ZONE read-only
+# User principals:
+#   account_admin, caching_admin, caching_dev,
+#   processing_admin, processing_dev,
+#   streaming_admin, streaming_dev
 #
 # Service principals:
 #   svc/doris, svc/spark, svc/sqlmesh, svc/kestra,
@@ -146,5 +142,5 @@ kubectl exec -n ${NAMESPACE} ${KDC_POD} -- \
 log ""
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  Kerberos RBAC principals seeded successfully."
-log "  Next step: run  bash scripts/master/16-seed-ranger-rbac.sh"
+log "  Next step: run  bash scripts/master/17-verify-rbac.sh"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

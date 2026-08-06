@@ -59,12 +59,6 @@ config:
       - "CN=opensearch-cluster-master-0,O=opensearch-cluster,C=US"
     plugins.security.audit.type: internal_opensearch
 
-    # ── Ranger authorization backend ──────────────────────────────────────────
-    # NOTE: Ranger authz for OpenSearch requires the ranger-opensearch-plugin JAR
-    # installed in the image and configured via security config.yml authz backend,
-    # NOT via opensearch.yml settings (those would cause SettingsException on boot).
-    # Ranger integration is pending — security plugin is active with internal authz.
-
 # ── TLS certs + Kerberos mounts ──────────────────────────────────────────────
 # Kerberos toggle: kerberos-integration-config data.kerberos.enabled
 # When enabled=true: enable kerberos_auth_domain in config.yml and apply via

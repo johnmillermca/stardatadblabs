@@ -10,7 +10,6 @@
 # Supported services:
 #   postgresql   — postgres superuser password
 #   polaris      — Polaris PostgreSQL user password
-#   ranger       — Ranger PostgreSQL user password + Ranger admin UI password
 #   kerberos     — Kerberos KDC master + admin passwords
 #   doris        — Doris admin password
 #   grafana      — Grafana admin password
@@ -146,41 +145,6 @@ rotate_polaris() {
   roll_deployment prod polaris
 }
 
-rotate_ranger() {
-  log "=== Rotating Ranger PostgreSQL user password ==="
-  local NEW_DB_PASS; NEW_DB_PASS=$(gen_password)
-  # Preserve admin/tagsync/usersync/keyadmin passwords — only rotating DB pass
-  local OLD_ADMIN; OLD_ADMIN=$(bao_read "secret/data/ranger/credentials" "admin-password")
-  local OLD_TAG;   OLD_TAG=$(bao_read "secret/data/ranger/credentials" "tagsync-password")
-  local OLD_USER;  OLD_USER=$(bao_read "secret/data/ranger/credentials" "usersync-password")
-  local OLD_KEY;   OLD_KEY=$(bao_read "secret/data/ranger/credentials" "keyadmin-password")
-
-  pg_exec "ALTER ROLE ranger WITH PASSWORD '${NEW_DB_PASS}';" \
-    && ok "PostgreSQL role 'ranger' password updated"
-
-  bao_write "secret/data/ranger/credentials" \
-    "db-user=ranger" \
-    "db-password=${NEW_DB_PASS}" \
-    "db-root-password=$(bao_read 'secret/data/ranger/credentials' 'db-root-password')" \
-    "admin-password=${OLD_ADMIN}" \
-    "tagsync-password=${OLD_TAG}" \
-    "usersync-password=${OLD_USER}" \
-    "keyadmin-password=${OLD_KEY}"
-  ok "OpenBao secret/data/ranger/credentials updated"
-
-  kube_secret_update ranger-db-credentials prod \
-    "db-user=ranger" \
-    "db-password=${NEW_DB_PASS}" \
-    "db-root-password=$(bao_read 'secret/data/ranger/credentials' 'db-root-password')" \
-    "admin-password=${OLD_ADMIN}" \
-    "tagsync-password=${OLD_TAG}" \
-    "usersync-password=${OLD_USER}" \
-    "keyadmin-password=${OLD_KEY}"
-  ok "K8s secret ranger-db-credentials updated"
-
-  roll_deployment prod ranger
-}
-
 rotate_kerberos() {
   log "=== Rotating Kerberos admin password ==="
   local NEW_ADMIN; NEW_ADMIN=$(gen_password)
@@ -279,18 +243,17 @@ rotate_opensearch() {
 case "${SERVICE}" in
   postgresql)  rotate_postgresql ;;
   polaris)     rotate_polaris ;;
-  ranger)      rotate_ranger ;;
   kerberos)    rotate_kerberos ;;
   doris)       rotate_doris ;;
   grafana)     rotate_grafana ;;
   opensearch)  rotate_opensearch ;;
   "")
     echo "Usage: bash scripts/master/rotate-secret.sh <service>"
-    echo "Supported: postgresql polaris ranger kerberos doris grafana opensearch"
+    echo "Supported: postgresql polaris kerberos doris grafana opensearch"
     exit 1
     ;;
   *)
-    die "Unknown service '${SERVICE}'. Supported: postgresql polaris ranger kerberos doris grafana opensearch"
+    die "Unknown service '${SERVICE}'. Supported: postgresql polaris kerberos doris grafana opensearch"
     ;;
 esac
 

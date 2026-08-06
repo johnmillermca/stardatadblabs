@@ -17,7 +17,7 @@ For every new TCP connection it:
        ERROR 1045 (28000): Access denied — principal bob@REALM not found in KDC.
   6. If the principal DOES exist → forward the HandshakeResponse to Doris and
      transparently proxy all subsequent bytes in both directions.
-     Doris still validates the password; Ranger still enforces authorization.
+     Doris still validates the password and enforces authorization natively.
 
 Environment variables:
   KDC_REALM        Kerberos realm  (default: STARDATADBLABS.LOCAL)

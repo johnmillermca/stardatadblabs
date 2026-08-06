@@ -163,13 +163,6 @@ additionalScrapeConfigs:
     metrics_path: /metrics/
     scrape_interval: 30s
 
-  # Apache Ranger
-  - job_name: 'ranger'
-    static_configs:
-      - targets: ['ranger-admin.prod.svc.cluster.local:6080']
-    metrics_path: /metrics
-    scrape_interval: 60s
-
   # Apache Polaris catalog
   - job_name: 'polaris'
     static_configs:

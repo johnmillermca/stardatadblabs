@@ -22,84 +22,12 @@
 #        with message:
 #          "principal <user>@REALM not found in Kerberos KDC"
 #     4. If the principal DOES exist → transparent proxy to Doris :9030.
-#        Doris validates the password; Ranger enforces authorization.
+#        Doris validates the password; Doris enforces authorization natively.
 #
 #   The Service routes port 9030 → guard port 19030 (not Doris port 9030).
 #   Doris FE is only accessible via the guard; port 9030 is not exposed directly.
 #   root is exempt (EXEMPT_USERS=root) so admin operations are unaffected.
-#
-# Ranger    : Image fe-4.0.7-ranger includes ranger-hive-plugin JARs on classpath.
-#             Ranger config XMLs are mounted from doris-ranger-config ConfigMap.
 # =============================================================================
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: doris-ranger-config
-  namespace: prod
-data:
-  ranger-doris-security.xml: |
-    <?xml version="1.0" encoding="UTF-8"?>
-    <configuration>
-      <property>
-        <name>ranger.plugin.doris.policy.source.impl</name>
-        <value>org.apache.ranger.admin.client.RangerAdminRESTClient</value>
-      </property>
-      <!-- Service 'doris' now uses the native 'doris' service definition (ID 207)
-           with catalog/database/table/column resource hierarchy — matching exactly
-           what RangerDorisResource sends. The old hive-backed service was deleted. -->
-      <property>
-        <name>ranger.plugin.doris.service.name</name>
-        <value>doris</value>
-      </property>
-      <property>
-        <name>ranger.plugin.doris.policy.rest.url</name>
-        <value>http://ranger-admin.prod.svc.cluster.local:6080</value>
-      </property>
-      <property>
-        <name>ranger.plugin.doris.policy.pollIntervalMs</name>
-        <value>30000</value>
-      </property>
-      <property>
-        <name>ranger.plugin.doris.policy.cache.dir</name>
-        <value>/opt/apache-doris/fe/ranger-cache</value>
-      </property>
-      <!-- Enable Ranger user store so group membership is resolved from
-           Ranger Admin rather than relying on the calling application to
-           supply group information. Required for group-based policies to
-           work — without this the plugin only evaluates user-level policies.
-           Property key sourced from RangerPluginConfig bytecode:
-           propertyPrefix + ".use.rangerGroups" -->
-      <property>
-        <name>ranger.plugin.doris.use.rangerGroups</name>
-        <value>true</value>
-      </property>
-      <!-- Super-users bypass Ranger policy checks entirely.
-           root needs this to run system DDL (ALTER SYSTEM ADD BACKEND,
-           CREATE USER, GRANT) which have no equivalent access type.
-           Property sourced from RangerBasePlugin.setSuperUsersAndGroups
-           via the .super.users suffix. -->
-      <property>
-        <name>ranger.plugin.doris.super.users</name>
-        <value>root</value>
-      </property>
-    </configuration>
-  ranger-doris-audit.xml: |
-    <?xml version="1.0" encoding="UTF-8"?>
-    <configuration>
-      <property>
-        <name>xasecure.audit.is.enabled</name>
-        <value>true</value>
-      </property>
-      <property>
-        <name>xasecure.audit.db.is.enabled</name>
-        <value>false</value>
-      </property>
-      <property>
-        <name>xasecure.audit.solr.is.enabled</name>
-        <value>false</value>
-      </property>
-    </configuration>
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -124,10 +52,6 @@ data:
     enable_fqdn_mode = true
     advertised_address = doris-fe-0.doris-fe-headless.prod.svc.cluster.local
     priority_networks = 10.244.0.0/16
-    # ── Ranger RBAC ──────────────────────────────────────────────────────────
-    access_controller_type = ranger-doris
-    # root bypass is configured in ranger-doris-security.xml via
-    # ranger.plugin.doris.super.user — no fe.conf entry needed.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -216,7 +140,7 @@ spec:
 
         # ── Doris FE ─────────────────────────────────────────────────────────
         - name: doris-fe
-          image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger
+          image: 192.168.1.50:30500/apache/doris:fe-4.0.7
           command:
             - /opt/apache-doris/fe_entrypoint.sh
             - doris-fe-headless.prod.svc.cluster.local
@@ -241,12 +165,6 @@ spec:
               subPath: fe.conf
             - name: fe-meta
               mountPath: /opt/apache-doris/fe/doris-meta
-            - name: ranger-config
-              mountPath: /opt/apache-doris/fe/conf/ranger-doris-security.xml
-              subPath: ranger-doris-security.xml
-            - name: ranger-config
-              mountPath: /opt/apache-doris/fe/conf/ranger-doris-audit.xml
-              subPath: ranger-doris-audit.xml
             # ── Kerberos (Phase 1 — prep, no auth change) ────────────────────
             # krb5.conf included by /etc/krb5.conf via includedir — gives JVM
             # JAAS the correct KDC address when Kerberos is later enabled.
@@ -281,9 +199,6 @@ spec:
         - name: fe-meta
           persistentVolumeClaim:
             claimName: doris-fe-meta
-        - name: ranger-config
-          configMap:
-            name: doris-ranger-config
         # ── Kerberos volumes ─────────────────────────────────────────────────
         - name: krb5-conf
           configMap:

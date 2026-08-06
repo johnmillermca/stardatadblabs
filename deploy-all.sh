@@ -137,9 +137,9 @@ for APP in opensearch opensearch-dashboards; do
 done
 log_done "Search layer"
 
-# ── Step 12: Sync security + catalog layer ────────────────────────────────────
-log "Step 12: Sync security + catalog (ranger, polaris)"
-for APP in ranger polaris; do
+# ── Step 12: Sync catalog layer ───────────────────────────────────────────────
+log "Step 12: Sync catalog (polaris)"
+for APP in polaris; do
   if kubectl get application "${APP}" -n argocd &>/dev/null 2>&1; then
     argocd app sync "${APP}" --prune --timeout 300 2>/dev/null || \
       echo "  ⚠  ${APP} sync non-fatal"
@@ -229,8 +229,7 @@ echo "║    OpenSearch (3-node HA): opensearch-cluster-master.prod:9200        
 echo "║    OpenSearch NodePort:    http://192.168.1.50:30920                      ║"
 echo "║    OpenSearch Dashboards:  http://192.168.1.50:30601                      ║"
 echo "╠═══════════════════════════════════════════════════════════════════════════╣"
-echo "║  PROD NAMESPACE — Security / Catalog                                      ║"
-echo "║    Apache Ranger UI:       http://192.168.1.50:30680                      ║"
+echo "║  PROD NAMESPACE — Catalog                                                 ║"
 echo "║    Apache Polaris (REST):  http://192.168.1.50:30181                      ║"
 echo "╠═══════════════════════════════════════════════════════════════════════════╣"
 echo "║  PROD NAMESPACE — Analytics (HA)                                          ║"

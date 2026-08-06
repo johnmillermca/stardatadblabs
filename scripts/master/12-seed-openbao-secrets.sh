@@ -17,7 +17,6 @@
 #   schema-registry-credentials → prod
 #   opensearch-credentials      → prod
 #   kerberos-admin              → prod
-#   ranger-db-credentials       → prod
 #   polaris-db-credentials      → prod
 #   doris-credentials           → prod
 #   jupyterhub-credentials      → prod
@@ -228,37 +227,7 @@ else
   ok "kerberos-admin"
 fi
 
-# ─── 10. Apache Ranger ────────────────────────────────────────────────────────
-ensure_ns prod
-if bao_secret_exists "secret/data/ranger/credentials"; then
-  skip "ranger-db-credentials"
-else
-  RNG_DB=$(gen_password)
-  RNG_ROOT=$(gen_password)
-  RNG_ADMIN=$(gen_password)
-  RNG_TAGSYNC=$(gen_password)
-  RNG_USERSYNC=$(gen_password)
-  RNG_KEYADMIN=$(gen_password)
-  bao_write "secret/data/ranger/credentials" \
-    "db-user=ranger" \
-    "db-password=${RNG_DB}" \
-    "db-root-password=${RNG_ROOT}" \
-    "admin-password=${RNG_ADMIN}" \
-    "tagsync-password=${RNG_TAGSYNC}" \
-    "usersync-password=${RNG_USERSYNC}" \
-    "keyadmin-password=${RNG_KEYADMIN}"
-  kube_secret ranger-db-credentials prod \
-    "db-user=ranger" \
-    "db-password=${RNG_DB}" \
-    "db-root-password=${RNG_ROOT}" \
-    "admin-password=${RNG_ADMIN}" \
-    "tagsync-password=${RNG_TAGSYNC}" \
-    "usersync-password=${RNG_USERSYNC}" \
-    "keyadmin-password=${RNG_KEYADMIN}"
-  ok "ranger-db-credentials"
-fi
-
-# ─── 11. Apache Polaris — DB credentials ─────────────────────────────────────
+# ─── 10. Apache Polaris — DB credentials ─────────────────────────────────────
 ensure_ns prod
 if bao_secret_exists "secret/data/polaris/credentials"; then
   skip "polaris-db-credentials"
@@ -385,10 +354,9 @@ else
   ok "prometheus-credentials"
 fi
 
-# ─── 18. RBAC Users (Kerberos principals + Ranger local users) ────────────────
+# ─── 17. RBAC Users (Kerberos principals) ─────────────────────────────────────
 # One password per RBAC persona, stored in OpenBao and read by:
 #   - 15-seed-rbac-principals.sh (creates Kerberos principals)
-#   - 16-seed-ranger-rbac.sh     (creates Ranger local users)
 ensure_ns prod
 if bao_secret_exists "secret/data/rbac/users"; then
   skip "rbac-users"
@@ -433,7 +401,6 @@ printf "  %-38s %-15s  %s\n" "debezium-credentials"         "prod"            "s
 printf "  %-38s %-15s  %s\n" "schema-registry-credentials"  "prod"            "secret/data/schema-registry/credentials"
 printf "  %-38s %-15s  %s\n" "opensearch-credentials"       "prod"            "secret/data/opensearch/credentials"
 printf "  %-38s %-15s  %s\n" "kerberos-admin"               "prod"            "secret/data/kerberos/credentials"
-printf "  %-38s %-15s  %s\n" "ranger-db-credentials"        "prod"            "secret/data/ranger/credentials"
 printf "  %-38s %-15s  %s\n" "polaris-db-credentials"       "prod"            "secret/data/polaris/credentials"
 printf "  %-38s %-15s  %s\n" "polaris-bootstrap-credentials" "prod"           "secret/data/polaris/bootstrap"
 printf "  %-38s %-15s  %s\n" "doris-credentials"            "prod"            "secret/data/doris/credentials"
@@ -447,4 +414,3 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 log "Secret seeding complete. You may now apply ArgoCD apps."
 log "Next: sudo bash scripts/master/15-seed-rbac-principals.sh"
-log "Then: sudo bash scripts/master/16-seed-ranger-rbac.sh"

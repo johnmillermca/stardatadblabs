@@ -4,7 +4,7 @@
 #   streaming (kafka/strimzi, schema-registry, akhq, debezium),
 #   search (opensearch, opensearch-dashboards),
 #   analytics (doris, spark, jupyterhub, sqlmesh),
-#   security (ranger), catalog (polaris), orchestration (kestra),
+#   catalog (polaris), orchestration (kestra),
 #   registry, MCP servers
 #
 # HA sizing: 60 CPU req / 120 CPU lim  |  120 Gi mem req / 240 Gi lim
