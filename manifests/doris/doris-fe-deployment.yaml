@@ -45,13 +45,12 @@ data:
         <name>ranger.plugin.doris.policy.source.impl</name>
         <value>org.apache.ranger.admin.client.RangerAdminRESTClient</value>
       </property>
-      <!-- Service name changed from 'doris' (hive type) to 'doris2' (doris-native type).
-           The native type has catalog/database/table/column resource hierarchy which
-           matches what RangerDorisResource sends — the hive type only has database/table/column
-           and cannot match column-level checks that include the catalog dimension. -->
+      <!-- Service 'doris' now uses the native 'doris' service definition (ID 207)
+           with catalog/database/table/column resource hierarchy — matching exactly
+           what RangerDorisResource sends. The old hive-backed service was deleted. -->
       <property>
         <name>ranger.plugin.doris.service.name</name>
-        <value>doris2</value>
+        <value>doris</value>
       </property>
       <property>
         <name>ranger.plugin.doris.policy.rest.url</name>
