@@ -68,9 +68,11 @@ data:
       <!-- Enable Ranger user store so group membership is resolved from
            Ranger Admin rather than relying on the calling application to
            supply group information. Required for group-based policies to
-           work — without this the plugin only evaluates user-level policies. -->
+           work — without this the plugin only evaluates user-level policies.
+           Property key sourced from RangerPluginConfig bytecode:
+           propertyPrefix + ".use.rangerGroups" -->
       <property>
-        <name>ranger.plugin.doris.use.ranger.groups</name>
+        <name>ranger.plugin.doris.use.rangerGroups</name>
         <value>true</value>
       </property>
       <!-- Super-users bypass Ranger policy checks entirely.
