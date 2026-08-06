@@ -22,6 +22,7 @@ This directory contains detailed operational runbooks for every application depl
 | [09](runbook-09-incident-postmortem.md) | **Incident Post-Mortem** | Post-reboot degraded platform — root causes & permanent fixes for OpenBao, Strimzi/Kafka, Schema Registry, Debezium, Doris FE/BE, Polaris, ArgoCD | — |
 | [11](runbook-11-kerberos-integration.md) | **Kerberos Client Auth Integration** | MIT Kerberos KDC — platform toggle, adding users, enabling GSSAPI on Kafka/OpenSearch/Spark, Doris identity alignment | 88 (KDC), 749 (kadmin) |
 | [12](runbook-12-rbac-new-user-testing.md) | **RBAC New User Setup & Verification** | RBAC Control Plane — add users, bind roles, sync to Doris/Kafka/OpenSearch/Spark, verify access, offboard users | 30850 |
+| [13](runbook-13-user-groups-and-access-testing.md) | **User Groups, Role Binding & Access Testing** | Kerberos onboarding, `platform_admin` / `data_engineer` / `account_admin` user groups, end-to-end access tests, negative test (no KDC principal) | 30850, 88 |
 
 ---
 

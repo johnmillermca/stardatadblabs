@@ -42,7 +42,8 @@ _PERM_MAP = {
     "DROP":   "DROP_PRIV",
     "ALTER":  "ALTER_PRIV",
     "GRANT":  "GRANT_PRIV",
-    "ADMIN":  "ADMIN",
+    # ADMIN_PRIV uses a 3-part resource identifier (*.*.*) — handled specially below
+    "ADMIN":  "ADMIN_PRIV",
 }
 
 
@@ -90,12 +91,15 @@ class DorisAdapter:
                 # Revoke all existing privileges only if user already existed
                 # (REVOKE on a brand-new user with no grants will error in Doris)
                 if user_existed:
-                    try:
-                        await cur.execute(
-                            f"REVOKE ALL ON *.* FROM '{username}'@'%';"
-                        )
-                    except Exception:
-                        pass  # ignore if nothing to revoke
+                    for revoke_sql in [
+                        f"REVOKE ALL ON *.* FROM '{username}'@'%';",
+                        # ADMIN_PRIV lives on the 3-part identifier scope
+                        f"REVOKE ADMIN_PRIV ON *.*.* FROM '{username}'@'%';",
+                    ]:
+                        try:
+                            await cur.execute(revoke_sql)
+                        except Exception:
+                            pass  # ignore if not held
 
                 if not perms:
                     log.info("Doris: user %s → no permissions (revoke-only)", username)
@@ -116,7 +120,9 @@ class DorisAdapter:
                         continue
 
                     if perm_name == "ADMIN":
-                        resource = "*.*"
+                        # ADMIN_PRIV and NODE_PRIV require 3-part identifier in Doris
+                        # e.g. GRANT ADMIN_PRIV ON *.*.* TO 'user'@'%';
+                        resource = "*.*.*"
 
                     grants.setdefault(resource, set()).add(doris_priv)
 
