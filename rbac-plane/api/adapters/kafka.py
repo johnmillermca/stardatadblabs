@@ -107,9 +107,9 @@ def _cluster_rule(operation: str) -> dict:
 
 
 def _kafka_user_manifest(username: str, cluster: str, namespace: str,
-                         acl_rules: list[dict]) -> dict:
+                         acl_rules: list[dict], acl_supported: bool = True) -> dict:
     body: dict = {
-        "apiVersion": "kafka.strimzi.io/v1beta2",
+        "apiVersion": "kafka.strimzi.io/v1",
         "kind": "KafkaUser",
         "metadata": {
             "name": username,
@@ -123,7 +123,10 @@ def _kafka_user_manifest(username: str, cluster: str, namespace: str,
             "authentication": {"type": "scram-sha-512"},
         },
     }
-    if acl_rules:
+    # Only emit ACL rules when the Kafka cluster has authorization configured.
+    # When acl_supported=False (allow.everyone.if.no.acl.found=true) writing
+    # an authorization block causes Strimzi to reject the KafkaUser CR.
+    if acl_rules and acl_supported:
         body["spec"]["authorization"] = {
             "type": "simple",
             "acls": acl_rules,
@@ -152,35 +155,41 @@ class KafkaAdapter:
         s = get_settings()
         acl_rules = _build_acl_rules(perms)
         manifest = _kafka_user_manifest(
-            username, s.kafka_cluster_name, s.kafka_namespace, acl_rules
+            username, s.kafka_cluster_name, s.kafka_namespace, acl_rules,
+            acl_supported=s.kafka_acl_supported,
         )
 
         api = await self._client()
         try:
-            # Try to get existing resource
-            await api.get_namespaced_custom_object(
+            # Try to get existing resource (need resourceVersion for replace)
+            existing = await api.get_namespaced_custom_object(
                 group="kafka.strimzi.io",
-                version="v1beta2",
+                version="v1",
                 namespace=s.kafka_namespace,
                 plural="kafkausers",
                 name=username,
             )
-            # Exists → patch (server-side apply style)
-            await api.patch_namespaced_custom_object(
+            # Carry over resourceVersion so the replace (PUT) is accepted
+            manifest.setdefault("metadata", {})["resourceVersion"] = (
+                existing.get("metadata", {}).get("resourceVersion", "")
+            )
+            # Exists → replace (PUT) — merge-patch on CRDs requires extra headers;
+            # replace is simpler and always correct for a full desired-state push.
+            await api.replace_namespaced_custom_object(
                 group="kafka.strimzi.io",
-                version="v1beta2",
+                version="v1",
                 namespace=s.kafka_namespace,
                 plural="kafkausers",
                 name=username,
                 body=manifest,
             )
-            log.info("Kafka: patched KafkaUser %s (%d acl rules)", username, len(acl_rules))
+            log.info("Kafka: replaced KafkaUser %s (%d acl rules)", username, len(acl_rules))
         except Exception as exc:
             # 404 → create
             if getattr(exc, "status", None) == 404 or "Not Found" in str(exc):
                 await api.create_namespaced_custom_object(
                     group="kafka.strimzi.io",
-                    version="v1beta2",
+                    version="v1",
                     namespace=s.kafka_namespace,
                     plural="kafkausers",
                     body=manifest,
@@ -195,7 +204,7 @@ class KafkaAdapter:
         try:
             await api.delete_namespaced_custom_object(
                 group="kafka.strimzi.io",
-                version="v1beta2",
+                version="v1",
                 namespace=s.kafka_namespace,
                 plural="kafkausers",
                 name=username,

@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     kafka_bootstrap: str = "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
     kafka_admin_scram_user: str = "kafka-app-user"
     kafka_admin_scram_password: str = ""
+    # Set to False when the Kafka cluster has no authorization plugin configured
+    # (e.g. allow.everyone.if.no.acl.found=true, aclsAdminApiSupported=false).
+    # When False the adapter creates/replaces KafkaUser CRs for SCRAM credentials
+    # only — no authorization.acls block is written, avoiding the Strimzi
+    # "Simple authorization ACL rules are configured but not supported" error.
+    kafka_acl_supported: bool = False
 
     # ── OpenSearch adapter ─────────────────────────────────
     opensearch_host: str = "opensearch-cluster-master.prod.svc.cluster.local"

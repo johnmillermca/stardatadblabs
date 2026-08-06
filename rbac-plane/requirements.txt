@@ -21,7 +21,7 @@ redis[hiredis]==5.2.1
 # Service adapters
 aiomysql==0.2.0              # Doris (MySQL protocol)
 httpx==0.28.1                # OpenSearch REST API
-kubernetes-asyncio==30.3.2   # Kafka KafkaUser CRs + Spark ConfigMap
+kubernetes-asyncio==30.3.1   # Kafka KafkaUser CRs + Spark ConfigMap
 
 # CLI
 typer[all]==0.13.1

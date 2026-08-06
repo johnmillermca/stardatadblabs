@@ -80,16 +80,22 @@ class DorisAdapter:
         try:
             async with conn.cursor() as cur:
                 # Ensure user exists (no password — auth via KDC guard)
-                if not await self._user_exists(cur, username):
+                user_existed = await self._user_exists(cur, username)
+                if not user_existed:
                     await cur.execute(
                         f"CREATE USER IF NOT EXISTS '{username}'@'%';"
                     )
                     log.info("Doris: created user %s", username)
 
-                # Revoke all existing privileges
-                await cur.execute(
-                    f"REVOKE ALL ON *.* FROM '{username}'@'%';"
-                )
+                # Revoke all existing privileges only if user already existed
+                # (REVOKE on a brand-new user with no grants will error in Doris)
+                if user_existed:
+                    try:
+                        await cur.execute(
+                            f"REVOKE ALL ON *.* FROM '{username}'@'%';"
+                        )
+                    except Exception:
+                        pass  # ignore if nothing to revoke
 
                 if not perms:
                     log.info("Doris: user %s → no permissions (revoke-only)", username)
