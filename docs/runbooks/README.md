@@ -20,7 +20,6 @@ This directory contains detailed operational runbooks for every application depl
 | [07](runbook-07-observability.md) | **Observability** | Prometheus (kube-prometheus-stack 60.4), Grafana 8.4, 8× MCP Servers | 30990, 30993, 30300, 30320–30326 |
 | [08](runbook-08-security-access.md) | **Security & Access** | Kerberos KDC, Private Registry | 30500 |
 | [09](runbook-09-incident-postmortem.md) | **Incident Post-Mortem** | Post-reboot degraded platform — root causes & permanent fixes for OpenBao, Strimzi/Kafka, Schema Registry, Debezium, Doris FE/BE, Polaris, ArgoCD | — |
-| [10](runbook-10-ranger-user-management.md) | **Ranger User Management** | ~~Removed~~ — Apache Ranger has been removed from the platform | — |
 | [11](runbook-11-kerberos-integration.md) | **Kerberos Client Auth Integration** | MIT Kerberos KDC — platform toggle, adding users, enabling GSSAPI on Kafka/OpenSearch/Spark, Doris identity alignment | 88 (KDC), 749 (kadmin) |
 | [12](runbook-12-rbac-new-user-testing.md) | **RBAC New User Setup & Verification** | RBAC Control Plane — add users, bind roles, sync to Doris/Kafka/OpenSearch/Spark, verify access, offboard users | 30850 |
 
