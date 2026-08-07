@@ -31,20 +31,25 @@ from ..config import get_settings
 
 log = logging.getLogger(__name__)
 
-# Doris privilege names
+# Doris privilege names — maps logical RBAC permission → Doris SQL privilege token
 _PERM_MAP = {
-    "SELECT": "SELECT_PRIV",
-    "INSERT": "LOAD_PRIV",
-    "UPDATE": "LOAD_PRIV",
-    "DELETE": "LOAD_PRIV",
-    "LOAD":   "LOAD_PRIV",
-    "CREATE": "CREATE_PRIV",
-    "DROP":   "DROP_PRIV",
-    "ALTER":  "ALTER_PRIV",
-    "GRANT":  "GRANT_PRIV",
-    # ADMIN_PRIV uses a 3-part resource identifier (*.*.*) — handled specially below
-    "ADMIN":  "ADMIN_PRIV",
+    "SELECT":    "SELECT_PRIV",
+    "INSERT":    "LOAD_PRIV",    # Doris merges INSERT/UPDATE/DELETE into LOAD_PRIV
+    "UPDATE":    "LOAD_PRIV",
+    "DELETE":    "LOAD_PRIV",
+    "LOAD":      "LOAD_PRIV",
+    "CREATE":    "CREATE_PRIV",
+    "DROP":      "DROP_PRIV",
+    "ALTER":     "ALTER_PRIV",
+    "GRANT":     "GRANT_PRIV",
+    "SHOW_VIEW": "Show_view_priv",
+    # ADMIN_PRIV and NODE_PRIV require the 3-part identifier *.*.* — see _THREE_PART_PERMS
+    "ADMIN":     "ADMIN_PRIV",
+    "NODE":      "NODE_PRIV",
 }
+
+# Permissions that require the 3-part global identifier (*.*.*) in Doris
+_THREE_PART_PERMS = {"ADMIN", "NODE"}
 
 
 class DorisAdapter:
@@ -119,8 +124,8 @@ class DorisAdapter:
                         log.warning("Doris: unknown permission '%s' — skipping", perm_name)
                         continue
 
-                    if perm_name == "ADMIN":
-                        # ADMIN_PRIV and NODE_PRIV require 3-part identifier in Doris
+                    if perm_name in _THREE_PART_PERMS:
+                        # ADMIN_PRIV and NODE_PRIV require the 3-part global identifier
                         # e.g. GRANT ADMIN_PRIV ON *.*.* TO 'user'@'%';
                         resource = "*.*.*"
 
@@ -146,3 +151,4 @@ class DorisAdapter:
             log.info("Doris: dropped user %s", username)
         finally:
             conn.close()
+

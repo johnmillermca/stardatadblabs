@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Prevent Python from writing .pyc bytecode files — avoids stale-cache
+# issues when a layer is rebuilt without bumping the image tag.
+ENV PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
 # ── System deps ────────────────────────────────────────────

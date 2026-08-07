@@ -94,9 +94,13 @@ class SparkAdapter:
             allowlist.pop(username, None)
         else:
             allowlist[username] = {
-                "can_submit":   "SUBMIT_JOB"   in perm_names,
-                "can_kill_any": "KILL_ANY_JOB" in perm_names,
-                "view_ui":      "VIEW_UI"       in perm_names,
+                "can_submit":       "SUBMIT_JOB"    in perm_names,
+                "can_kill_any":     "KILL_ANY_JOB"  in perm_names,
+                "view_ui":          "VIEW_UI"        in perm_names,
+                # Iceberg / Polaris catalog permissions
+                "can_use_catalog":  "USE_CATALOG"   in perm_names,
+                "can_write_iceberg":"WRITE_ICEBERG"  in perm_names,
+                "can_admin_catalog":"ADMIN_CATALOG"  in perm_names,
             }
 
         await self._write_allowlist(api, allowlist)

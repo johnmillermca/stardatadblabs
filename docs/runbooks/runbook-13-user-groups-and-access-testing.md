@@ -40,41 +40,89 @@ curl -s ${RBAC_URL}/health
 
 ### Permission ID reference
 
-Every `POST/DELETE /api/v1/roles/{role_id}/permissions/{permission_id}` call uses these IDs:
+Every `POST/DELETE /api/v1/roles/{role_id}/permissions/{permission_id}` call uses these IDs.
 
-| ID | Service | Permission | What it grants |
+#### Doris (12 permissions)
+
+| ID | Permission | Doris SQL privilege | Scope | Notes |
+|---|---|---|---|---|
+| 1 | SELECT | `SELECT_PRIV` | table / view | Read rows |
+| 2 | INSERT | `LOAD_PRIV` | table | Doris merges INSERT/UPDATE/DELETE/LOAD into LOAD_PRIV |
+| 3 | UPDATE | `LOAD_PRIV` | table | See INSERT |
+| 4 | DELETE | `LOAD_PRIV` | table | See INSERT |
+| 5 | CREATE | `CREATE_PRIV` | catalog / database | Create tables, databases, catalogs |
+| 6 | DROP | `DROP_PRIV` | catalog / database | Drop tables, databases |
+| 7 | ALTER | `ALTER_PRIV` | table | Alter column types, add columns |
+| 8 | LOAD | `LOAD_PRIV` | table | STREAM LOAD / ROUTINE LOAD / INSERT INTO |
+| 9 | GRANT | `GRANT_PRIV` | global | Re-grant privileges to others |
+| 10 | ADMIN | `ADMIN_PRIV ON *.*.*` | global | Full admin — manage users, roles, system vars |
+| 26 | NODE | `NODE_PRIV ON *.*.*` | global | **Critical** — add/decommission cluster nodes |
+| 27 | SHOW_VIEW | `Show_view_priv` | table / view | `SHOW CREATE VIEW`; required by BI tools |
+
+> **Column-level SELECT** — see [section (h)](#h-doris-column-level-privileges) for `GRANT SELECT_PRIV(col1, col2)`.
+
+#### Kafka (11 permissions)
+
+| ID | Permission | Kafka / Strimzi ACL | Notes |
 |---|---|---|---|
-| 1 | doris | SELECT | Read rows |
-| 2 | doris | INSERT | Insert rows (maps to LOAD_PRIV) |
-| 3 | doris | UPDATE | Update rows (maps to LOAD_PRIV) |
-| 4 | doris | DELETE | Delete rows (maps to LOAD_PRIV) |
-| 5 | doris | CREATE | Create tables/databases |
-| 6 | doris | DROP | Drop tables/databases |
-| 7 | doris | ALTER | Alter table schema |
-| 8 | doris | LOAD | Stream/routine load (maps to LOAD_PRIV) |
-| 9 | doris | GRANT | Re-grant privileges to others |
-| 10 | doris | ADMIN | Full Doris admin (ADMIN_PRIV on *.*.*) |
-| 11 | kafka | PRODUCE | Write messages to topics |
-| 12 | kafka | CONSUME | Read messages from topics |
-| 13 | kafka | CREATE_TOPIC | Create Kafka topics |
-| 14 | kafka | DELETE_TOPIC | Delete Kafka topics |
-| 15 | kafka | DESCRIBE | Describe topics / cluster metadata |
-| 16 | kafka | ADMIN | Full Kafka admin |
-| 17 | opensearch | INDEX_READ | Search / get documents |
-| 18 | opensearch | INDEX_WRITE | Index / write documents |
-| 19 | opensearch | INDEX_ADMIN | Create/delete/manage indexes |
-| 20 | opensearch | CLUSTER_READ | Read cluster metadata & health |
-| 21 | opensearch | CLUSTER_ADMIN | Full cluster administration |
-| 22 | spark | SUBMIT_JOB | Submit Spark jobs |
-| 23 | spark | KILL_OWN_JOB | Kill own running jobs |
-| 24 | spark | KILL_ANY_JOB | Kill any running job (operator) |
-| 25 | spark | VIEW_UI | Access Spark Master Web UI |
+| 11 | PRODUCE | topic:\*:Write + Describe | Write messages to topics |
+| 12 | CONSUME | topic:\*:Read + Describe, group:\*:Read | Read messages; join any consumer group |
+| 13 | CREATE_TOPIC | cluster:Create, topic:\*:Create | Create new topics |
+| 14 | DELETE_TOPIC | topic:\*:Delete | Delete topics |
+| 15 | DESCRIBE | topic:\*:Describe | Describe topic metadata |
+| 16 | ADMIN | cluster:All | Full broker-level admin |
+| 28 | SCHEMA_REGISTRY_READ | Application-layer (Schema Registry REST API) | GET `/subjects`, `/schemas` — read registered schemas |
+| 29 | SCHEMA_REGISTRY_WRITE | Application-layer (Schema Registry REST API) | POST `/subjects` — register or evolve schemas |
+| 30 | CDC_CONNECT | Application-layer (Kafka Connect REST API :8083) | Create/update/delete Debezium connector configs |
+| 31 | CONSUMER_GROUP_MANAGE | group:\*:Describe + Delete | Describe lag, reset offsets, delete consumer groups |
+| 32 | TRANSACTIONAL_WRITE | transactionalId:\*:Write + Describe | Use Kafka transactional producers (exactly-once) |
+
+> **Schema Registry & Debezium notes:**
+> Permissions 28–30 are enforced at the **application layer**, not natively by Kafka ACLs.
+> Schema Registry and the Connect REST API have their own auth layers (currently open in
+> this cluster — no username/password required on the internal endpoints). These permissions
+> are recorded in the RBAC plane for governance and future enforcement.
+
+#### OpenSearch (5 permissions)
+
+| ID | Permission | OpenSearch action patterns | Notes |
+|---|---|---|---|
+| 17 | INDEX_READ | `indices:data/read/*`, `indices:admin/mappings/get` | Search, get, scroll |
+| 18 | INDEX_WRITE | `indices:data/write/*` | Index, bulk, update, delete by query |
+| 19 | INDEX_ADMIN | `indices:admin/*` + read + write | Create/delete indexes, aliases, mappings |
+| 20 | CLUSTER_READ | `cluster:monitor/*` | Cluster health, stats, node info |
+| 21 | CLUSTER_ADMIN | `cluster:admin/*` + monitor | Snapshot, reroute, settings, security API |
+
+#### Spark (7 permissions)
+
+| ID | Permission | Allowlist field | Notes |
+|---|---|---|---|
+| 22 | SUBMIT_JOB | `can_submit: true` | Submit jobs to Spark master via krb-spark-guard |
+| 23 | KILL_OWN_JOB | implicit with SUBMIT_JOB | Kill own running applications |
+| 24 | KILL_ANY_JOB | `can_kill_any: true` | Kill any user's running application (operator) |
+| 25 | VIEW_UI | `view_ui: true` | Access Spark Master Web UI (port 30707) |
+| 33 | USE_CATALOG | `can_use_catalog: true` | Read Polaris REST catalog metadata; list namespaces and Iceberg tables |
+| 34 | WRITE_ICEBERG | `can_write_iceberg: true` | Create, INSERT INTO, and modify Iceberg tables via Polaris |
+| 35 | ADMIN_CATALOG | `can_admin_catalog: true` | Full Polaris catalog admin — create/drop namespaces, manage grants |
+
+> **Polaris Iceberg notes:**
+> Permissions 33–35 are recorded in the `spark-rbac-allowlist` ConfigMap.
+> Actual enforcement happens at **Apache Polaris** (`http://polaris-rest.prod.svc.cluster.local:8181`).
+> You must also grant the user the corresponding Polaris catalog role via the Polaris management API —
+> see [section (h)](#h-doris-column-level-privileges) — the allowlist field signals intent; Polaris enforces it.
+>
+> Spark jobs use the Iceberg REST catalog at:
+> ```
+> spark.sql.catalog.polaris=org.apache.iceberg.spark.SparkCatalog
+> spark.sql.catalog.polaris.type=rest
+> spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+> ```
 
 ```bash
-# Fetch live permission IDs at any time
+# Fetch live permission IDs for any service
 curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/services/doris/permissions" | \
-  python3 -c "import sys,json; [print(f'  {p[\"id\"]:3} {p[\"name\"]}') for p in json.load(sys.stdin)]"
+  "${RBAC_URL}/api/v1/services/spark/permissions" | \
+  python3 -c "import sys,json; [print(f'  [{p[\"id\"]:2}] {p[\"name\"]:25} — {p[\"description\"][:65]}') for p in sorted(json.load(sys.stdin),key=lambda x:x['id'])]"
 ```
 
 ---
@@ -483,11 +531,11 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 
 | Role | Permission count | Intended for |
 |---|---|---|
-| `data_admin` | 25 (all) | Generic full admin (legacy seed) |
-| `platform_admin` | 25 (all) | Platform infrastructure admin group |
-| `account_admin` | 25 (all) | Account governance team |
-| `data_engineer` | 14 (SELECT + DML only) | Day-to-day engineering team |
-| `analyst` | 6 (SELECT + read only) | Read-only analysts |
+| `data_admin` | 35 (all) | Generic full admin (legacy seed) |
+| `platform_admin` | 35 (all) | Platform infrastructure admin group |
+| `account_admin` | 35 (all) | Account governance team |
+| `data_engineer` | 20 (SELECT + DML + schema/catalog) | Day-to-day engineering team |
+| `analyst` | 9 (SELECT + read + schema/catalog read) | Read-only analysts |
 
 ---
 
@@ -517,14 +565,14 @@ for r in json.load(sys.stdin):
 
 Output (current roles):
 ```
-  id= 1  name=analyst          ( 6 perms)
-  id= 2  name=etl_writer        ( 7 perms)
+  id= 1  name=analyst          ( 9 perms)
+  id= 2  name=etl_writer        (12 perms)
   id= 3  name=spark_user        ( 3 perms)
-  id= 4  name=data_admin        (25 perms)
-  id= 5  name=kafka_consumer    ( 2 perms)
-  id= 6  name=platform_admin    (25 perms)
-  id= 7  name=data_engineer     (14 perms)
-  id= 8  name=account_admin     (25 perms)
+  id= 4  name=data_admin        (35 perms)
+  id= 5  name=kafka_consumer    ( 3 perms)
+  id= 6  name=platform_admin    (35 perms)
+  id= 7  name=data_engineer     (20 perms)
+  id= 8  name=account_admin     (35 perms)
 ```
 
 ### Adding a privilege to a user group
@@ -1118,7 +1166,7 @@ Expected response:
 
 > Each permission is added with `POST /api/v1/roles/{role_id}/permissions/{permission_id}`.
 > The body must be `{}` (empty JSON object, not empty body).
-> See the [Permission ID reference](#permission-id-reference) table for all 25 IDs.
+> See the [Permission ID reference](#permission-id-reference) table for all 35 IDs.
 
 #### Doris — SELECT only
 
@@ -1479,14 +1527,14 @@ curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
 
 | Role | Doris | Kafka | OpenSearch | Spark | Use case |
 |---|---|---|---|---|---|
-| `analyst` | SELECT | CONSUME, DESCRIBE | INDEX_READ, CLUSTER_READ | VIEW_UI | Read-only analyst |
-| `etl_writer` | SELECT, INSERT, UPDATE, LOAD | PRODUCE, CONSUME, DESCRIBE | — | — | ETL pipeline writer |
+| `analyst` | SELECT, SHOW_VIEW | CONSUME, DESCRIBE, SCHEMA_REGISTRY_READ | INDEX_READ, CLUSTER_READ | VIEW_UI, USE_CATALOG | Read-only analyst |
+| `etl_writer` | SELECT, INSERT, UPDATE, LOAD | PRODUCE, CONSUME, DESCRIBE, SCHEMA_REGISTRY_READ, SCHEMA_REGISTRY_WRITE, TRANSACTIONAL_WRITE | — | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI, USE_CATALOG, WRITE_ICEBERG | ETL pipeline writer |
 | `spark_user` | — | — | — | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI | Spark job submitter |
-| `kafka_consumer` | — | CONSUME, DESCRIBE | — | — | Kafka consumer only |
-| **`data_engineer`** | SELECT, INSERT, UPDATE, DELETE, LOAD | PRODUCE, CONSUME, DESCRIBE | INDEX_READ, INDEX_WRITE, CLUSTER_READ | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI | Data engineering team |
-| **`platform_admin`** | All (incl. ADMIN_PRIV) | All | All | All | Platform infra admin |
-| **`account_admin`** | All (incl. ADMIN_PRIV) | All | All | All | Account governance admin |
-| `data_admin` | All | All | All | All | Generic full admin (legacy seed) |
+| `kafka_consumer` | — | CONSUME, DESCRIBE, SCHEMA_REGISTRY_READ | — | — | Kafka consumer only |
+| **`data_engineer`** | SELECT, INSERT, UPDATE, DELETE, LOAD, SHOW_VIEW | PRODUCE, CONSUME, DESCRIBE, SCHEMA_REGISTRY_READ, CONSUMER_GROUP_MANAGE, TRANSACTIONAL_WRITE | INDEX_READ, INDEX_WRITE, CLUSTER_READ | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI, USE_CATALOG, WRITE_ICEBERG | Data engineering team |
+| **`platform_admin`** | All 12 (incl. ADMIN_PRIV, NODE) | All 11 | All 5 | All 7 | Platform infra admin |
+| **`account_admin`** | All 12 (incl. ADMIN_PRIV, NODE) | All 11 | All 5 | All 7 | Account governance admin |
+| `data_admin` | All 12 | All 11 | All 5 | All 7 | Generic full admin (legacy seed) |
 
 ---
 
