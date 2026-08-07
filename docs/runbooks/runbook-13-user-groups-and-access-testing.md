@@ -15,6 +15,8 @@ This runbook covers the full lifecycle of user groups on the platform:
 | [(e)](#e-adding-and-removing-privileges-for-a-user-group) | Adding and removing privileges for a user group (all services) |
 | [(f)](#f-negative-test---user-in-rbac-group-but-no-kerberos-principal) | Negative test — RBAC binding without a KDC principal |
 | [(g)](#g-creating-a-new-user-group-with-custom-privileges-and-adding-users) | Creating a brand-new user group with custom privileges — Doris, Kafka, OpenSearch, Spark |
+| [(h)](#h-doris-column-level-privileges) | Doris column-level SELECT — syntax, worked example, limitations, revoke |
+| [(i)](#i-polaris-catalog-grants-for-write_iceberg--admin_catalog) | Polaris catalog grants for `WRITE_ICEBERG` / `ADMIN_CATALOG` |
 
 ---
 
@@ -1598,3 +1600,393 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"username":"carol","dry_run":false}' "${RBAC_URL}/api/v1/sync"
 ```
+
+---
+
+## (h) Doris Column-Level Privileges
+
+> Column-level privileges in Doris restrict which columns a user can SELECT from a specific
+> table. They are **not** managed by the RBAC plane sync — they are applied manually with
+> SQL and survive a full `REVOKE ALL` sync cycle.
+>
+> Use column-level grants when a table contains sensitive columns (PII, salary, health data)
+> that should not be visible to all users in a role.
+
+### Syntax
+
+```sql
+-- Grant SELECT on specific columns only
+GRANT SELECT_PRIV(col1, col2, col3) ON internal.<database>.<table> TO '<user>'@'%';
+
+-- The catalog must be specified as the 3-part name: internal.<db>.<table>
+-- Using just <db>.<table> will be rejected by the Doris parser.
+-- SELECT_PRIV is the correct keyword — SELECT without _PRIV is invalid here.
+```
+
+### Worked example — restrict the `salary` and `ssn` columns
+
+> **Scenario:** The `analyst` role has `SELECT_PRIV` on all tables in `internal.*.*`.
+> The `hr.employees` table contains `salary` and `ssn` columns. The analyst `alice`
+> should only be able to read `employee_id`, `name`, and `department`.
+
+#### Step 1 — Verify current table structure
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "DESCRIBE hr.employees;" 2>/dev/null
+# Expected columns: employee_id, name, department, salary, ssn, hire_date
+```
+
+#### Step 2 — Revoke the broad table-level SELECT, grant column-level SELECT
+
+```bash
+# First revoke the broad SELECT on the entire table
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "REVOKE SELECT_PRIV ON internal.hr.employees FROM 'alice'@'%';" 2>/dev/null
+
+# Then grant SELECT only on the safe columns
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "GRANT SELECT_PRIV(employee_id, name, department, hire_date) \
+      ON internal.hr.employees TO 'alice'@'%';" 2>/dev/null
+```
+
+#### Step 3 — Verify the column grants from the admin side
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'alice'@'%';" 2>/dev/null
+
+# Expected output will include a line like:
+# GRANT SELECT_PRIV(employee_id,name,department,hire_date)
+#   ON internal.hr.employees TO 'alice'@'%'
+```
+
+#### Step 4 — Test as the user
+
+```bash
+# This MUST succeed — allowed columns only
+mysql -h 192.168.1.50 -P 30090 -u alice --password="${ALICE_PASS}" \
+  -e "SELECT employee_id, name, department FROM hr.employees LIMIT 5;" 2>/dev/null
+
+# This MUST fail — salary is not in the grant
+mysql -h 192.168.1.50 -P 30090 -u alice --password="${ALICE_PASS}" \
+  -e "SELECT salary FROM hr.employees LIMIT 1;" 2>&1 | grep -i "denied\|error"
+# Expected: Access denied; you need (at least one of) the SELECT privilege(s) for ...
+
+# Selecting all columns (*) also fails when any column is restricted
+mysql -h 192.168.1.50 -P 30090 -u alice --password="${ALICE_PASS}" \
+  -e "SELECT * FROM hr.employees LIMIT 1;" 2>&1 | grep -i "denied\|error"
+# Expected: Access denied
+```
+
+### Adding a column to an existing column grant
+
+Doris column grants are **additive** — you can grant additional columns without revoking
+the existing grant:
+
+```bash
+# Add hire_date to an existing 3-column grant (if not already included)
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "GRANT SELECT_PRIV(hire_date) \
+      ON internal.hr.employees TO 'alice'@'%';" 2>/dev/null
+```
+
+### Revoking column-level privileges
+
+> **Important:** `REVOKE ALL ON *.*` (the broad sync revoke) does **not** clear
+> column-level grants. You must explicitly revoke them per table.
+
+```bash
+# Revoke all column-level SELECT on a specific table
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "REVOKE SELECT_PRIV(employee_id, name, department, hire_date) \
+      ON internal.hr.employees FROM 'alice'@'%';" 2>/dev/null
+
+# Verify — the column grant line should be gone
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'alice'@'%';" 2>/dev/null
+```
+
+### Applying column grants to multiple users
+
+```bash
+# Grant to every user currently bound to the analyst role
+DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+
+ANALYST_USERS=$(curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "http://192.168.1.50:30850/api/v1/users" | \
+  python3 -c "
+import sys, json
+users = json.load(sys.stdin)
+print('\n'.join(u['username'] for u in users))
+" | while read u; do
+    roles=$(curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+      "http://192.168.1.50:30850/api/v1/users/${u}/bindings" | \
+      python3 -c "import sys,json; print(' '.join(b['role_name'] for b in json.load(sys.stdin)))")
+    echo "${roles}" | grep -q "analyst" && echo "${u}"
+  done)
+
+for USER in ${ANALYST_USERS}; do
+  echo "Granting column-level SELECT to ${USER}..."
+  mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+    -e "REVOKE SELECT_PRIV ON internal.hr.employees FROM '${USER}'@'%';" 2>/dev/null
+  mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+    -e "GRANT SELECT_PRIV(employee_id, name, department, hire_date) \
+        ON internal.hr.employees TO '${USER}'@'%';" 2>/dev/null
+done
+```
+
+### Known limitations
+
+| Limitation | Detail |
+|---|---|
+| RBAC plane does not manage column grants | Column-level `SELECT_PRIV` is applied manually. Running a full platform sync will **not** revoke or reapply column grants. |
+| `REVOKE ALL ON *.*` does not clear column grants | Column grants on specific tables survive the sync revoke cycle. They must be explicitly removed. |
+| No `SELECT` shorthand | `GRANT SELECT(col)` is rejected — only `GRANT SELECT_PRIV(col)` is valid. |
+| 3-part name required | `ON hr.employees` is rejected — must be `ON internal.hr.employees` (catalog.db.table). |
+| `SELECT *` blocked | If any column is denied, `SELECT *` returns an access-denied error for that column. |
+| Column grants are per-table | There is no wildcard column grant — you cannot do `GRANT SELECT_PRIV(salary) ON internal.hr.*`. |
+
+---
+
+## (i) Polaris Catalog Grants for `WRITE_ICEBERG` / `ADMIN_CATALOG`
+
+> The RBAC plane records `WRITE_ICEBERG` and `ADMIN_CATALOG` in the `spark-rbac-allowlist`
+> ConfigMap — this signals *intent* and enforces access at the **krb-spark-guard** layer.
+> However, **Apache Polaris enforces catalog privileges independently** via its own
+> principal-role system. You must grant the user the corresponding Polaris catalog role
+> separately, or Iceberg write/admin operations will be rejected at the catalog REST API
+> even if the allowlist entry is present.
+>
+> Polaris REST catalog: `http://polaris-rest.prod.svc.cluster.local:8181/api/catalog`
+> Polaris management API: `http://polaris-rest.prod.svc.cluster.local:8181/api/management/v1`
+
+### Polaris role mapping
+
+| RBAC permission | RBAC allowlist field | Polaris catalog role to grant |
+|---|---|---|
+| `USE_CATALOG` (id=33) | `can_use_catalog: true` | `catalog_viewer` (or any role with `CATALOG_READ`) |
+| `WRITE_ICEBERG` (id=34) | `can_write_iceberg: true` | `catalog_writer` (TABLE_WRITE_DATA + TABLE_CREATE) |
+| `ADMIN_CATALOG` (id=35) | `can_admin_catalog: true` | `catalog_admin` (CATALOG_MANAGE_CONTENT + MANAGE_GRANTS) |
+
+### Prerequisites
+
+```bash
+# Polaris management API is internal — run from inside the cluster or via port-forward
+kubectl port-forward svc/polaris-rest -n prod 8181:8181 &
+POLARIS_URL="http://localhost:8181"
+
+# Get the Polaris root token (set during Polaris bootstrap)
+POLARIS_TOKEN=$(kubectl get secret polaris-credentials -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d 2>/dev/null || \
+  kubectl get secret polaris-credentials -n prod \
+  -o jsonpath='{.data.token}' | base64 -d)
+```
+
+### Step 1 — Create or verify the Polaris principal for the user
+
+Polaris maintains its own principal registry. Each user who needs catalog access must
+have a Polaris principal whose name matches their Kerberos short name.
+
+```bash
+USERNAME="carol"
+
+# List existing principals
+curl -s -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  "${POLARIS_URL}/api/management/v1/principals" | \
+  python3 -c "import sys,json; [print(p['name']) for p in json.load(sys.stdin).get('principals',[])]"
+
+# Create the Polaris principal if it does not exist
+curl -s -X POST \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"${USERNAME}\", \"type\": \"USER\"}" \
+  "${POLARIS_URL}/api/management/v1/principals" | python3 -m json.tool
+```
+
+> **Note:** The Polaris principal name must exactly match the Doris/Kerberos short name
+> (e.g. `carol`, not `carol@STARDATADBLABS.LOCAL`).
+
+### Step 2 — List available catalog roles
+
+```bash
+# List all catalog roles in the default catalog
+CATALOG="polaris"   # the catalog name configured in spark-defaults.conf
+
+curl -s -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  "${POLARIS_URL}/api/management/v1/catalogs/${CATALOG}/catalogRoles" | \
+  python3 -c "
+import sys,json
+for r in json.load(sys.stdin).get('roles',[]):
+    print(f'  {r[\"name\"]:30}  {r.get(\"description\",\"\")}')
+"
+```
+
+### Step 3 — Grant the appropriate catalog role to the principal
+
+#### For `WRITE_ICEBERG` — grant `catalog_writer`
+
+```bash
+USERNAME="carol"
+CATALOG="polaris"
+CATALOG_ROLE="catalog_writer"   # TABLE_WRITE_DATA + TABLE_CREATE
+
+curl -s -X PUT \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${POLARIS_URL}/api/management/v1/principals/${USERNAME}/principal-roles/${CATALOG_ROLE}" | \
+  python3 -m json.tool
+# Expected: 200 OK or {"message":"Principal role assigned"}
+```
+
+#### For `ADMIN_CATALOG` — grant `catalog_admin`
+
+```bash
+USERNAME="bob"
+CATALOG_ROLE="catalog_admin"    # CATALOG_MANAGE_CONTENT + MANAGE_GRANTS
+
+curl -s -X PUT \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${POLARIS_URL}/api/management/v1/principals/${USERNAME}/principal-roles/${CATALOG_ROLE}" | \
+  python3 -m json.tool
+```
+
+#### For `USE_CATALOG` only — grant `catalog_viewer`
+
+```bash
+USERNAME="alice"
+CATALOG_ROLE="catalog_viewer"   # CATALOG_READ only
+
+curl -s -X PUT \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${POLARIS_URL}/api/management/v1/principals/${USERNAME}/principal-roles/${CATALOG_ROLE}" | \
+  python3 -m json.tool
+```
+
+### Step 4 — Verify the assignment
+
+```bash
+# List all catalog roles assigned to the principal
+curl -s -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  "${POLARIS_URL}/api/management/v1/principals/${USERNAME}/principal-roles" | \
+  python3 -c "
+import sys,json
+roles = json.load(sys.stdin).get('principalRoles', [])
+print(f'{USERNAME} catalog roles: {[r[\"name\"] for r in roles]}')
+"
+```
+
+### Step 5 — Test Iceberg access from Spark
+
+```bash
+# Port-forward the Spark master UI (optional — for job submission)
+# Submit a test Spark job as the user (requires a valid keytab)
+
+kubectl exec -n prod deploy/spark-master -- spark-submit \
+  --master spark://spark-master:7077 \
+  --conf "spark.kerberos.principal=${USERNAME}@STARDATADBLABS.LOCAL" \
+  --conf "spark.kerberos.keytab=/etc/security/keytabs/${USERNAME}.keytab" \
+  --conf "spark.sql.catalog.polaris=org.apache.iceberg.spark.SparkCatalog" \
+  --conf "spark.sql.catalog.polaris.type=rest" \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  --class org.apache.spark.examples.SparkPi \
+  local:///opt/spark/examples/jars/spark-examples_2.12-3.5.0.jar 10 2>&1 | tail -5
+
+# Quick Iceberg read test via spark-shell (data_engineer / catalog_writer user)
+kubectl exec -it -n prod deploy/spark-master -- spark-shell \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  << 'EOF'
+spark.sql("SHOW NAMESPACES IN polaris").show()
+spark.sql("SHOW TABLES IN polaris.default").show()
+EOF
+```
+
+#### For `WRITE_ICEBERG` — write test
+
+```bash
+kubectl exec -it -n prod deploy/spark-master -- spark-shell \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  << 'EOF'
+spark.sql("""
+  CREATE TABLE IF NOT EXISTS polaris.default.rbac_write_test (
+    id   BIGINT,
+    name STRING
+  ) USING iceberg
+""")
+spark.sql("INSERT INTO polaris.default.rbac_write_test VALUES (1, 'rbac_test')")
+spark.sql("SELECT * FROM polaris.default.rbac_write_test").show()
+spark.sql("DROP TABLE polaris.default.rbac_write_test")
+EOF
+```
+
+### Revoking a Polaris catalog role
+
+```bash
+USERNAME="carol"
+CATALOG_ROLE="catalog_writer"
+
+curl -s -X DELETE \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  "${POLARIS_URL}/api/management/v1/principals/${USERNAME}/principal-roles/${CATALOG_ROLE}"
+# Expected: 200 OK / empty body
+
+# Verify removal
+curl -s -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  "${POLARIS_URL}/api/management/v1/principals/${USERNAME}/principal-roles" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('principalRoles',[]))"
+```
+
+### Combined workflow — RBAC plane + Polaris (complete sequence)
+
+When granting `WRITE_ICEBERG` or `ADMIN_CATALOG` to a user, complete **both** steps:
+
+```bash
+USERNAME="carol"
+RBAC_URL="http://192.168.1.50:30850"
+RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+
+# ── Step A: RBAC plane — ensure the permission is on the role ──────────────
+# data_engineer already has WRITE_ICEBERG (id=34) after migration 004.
+# If adding to a custom role:
+#   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+#     -H "Content-Type: application/json" -d '{}' \
+#     "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/34"
+
+# ── Step B: RBAC plane — sync to push allowlist entry ─────────────────────
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+# Verify: allowlist shows can_write_iceberg: true
+
+# ── Step C: Polaris — grant the catalog writer role ────────────────────────
+kubectl port-forward svc/polaris-rest -n prod 8181:8181 &
+POLARIS_TOKEN=$(kubectl get secret polaris-credentials -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+
+curl -s -X PUT \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "http://localhost:8181/api/management/v1/principals/${USERNAME}/principal-roles/catalog_writer" | \
+  python3 -m json.tool
+
+kill %1   # stop port-forward
+```
+
+### Summary — Two-layer enforcement
+
+| Layer | What enforces it | How to grant | How to revoke |
+|---|---|---|---|
+| **krb-spark-guard allowlist** | RBAC plane sync → `spark-rbac-allowlist` ConfigMap | Add permission to role + sync | Remove permission from role + sync |
+| **Polaris REST catalog** | Apache Polaris principal-role system | `PUT /principals/{user}/principal-roles/{role}` | `DELETE /principals/{user}/principal-roles/{role}` |
+
+> Both layers must grant access. A user with `can_write_iceberg: true` in the allowlist
+> but **no Polaris catalog role** will pass the guard but receive a 403 from the Polaris
+> catalog API when attempting to write. Conversely, a user with a Polaris catalog role
+> but `can_write_iceberg: false` will be blocked by the guard before reaching Polaris.
