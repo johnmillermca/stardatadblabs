@@ -14,6 +14,7 @@ This runbook covers the full lifecycle of user groups on the platform:
 | [(d)](#d-account_admin-user-group---top-level-governance) | `account_admin` group — account-level governance admin |
 | [(e)](#e-adding-and-removing-privileges-for-a-user-group) | Adding and removing privileges for a user group (all services) |
 | [(f)](#f-negative-test---user-in-rbac-group-but-no-kerberos-principal) | Negative test — RBAC binding without a KDC principal |
+| [(g)](#g-creating-a-new-user-group-with-custom-privileges-and-adding-users) | Creating a brand-new user group with custom privileges — Doris, Kafka, OpenSearch, Spark |
 
 ---
 
@@ -1015,6 +1016,461 @@ kubectl delete kafkauser ghost -n prod --ignore-not-found
 kubectl get kafkauser ghost -n prod 2>&1 | grep -i "not found"
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "SELECT user FROM mysql.user WHERE user='ghost';" 2>/dev/null
+```
+
+---
+
+## (g) Creating a New User Group with Custom Privileges and Adding Users
+
+> This section shows the **complete workflow** for creating a brand-new user group
+> (role) from scratch: defining it, assigning custom privileges for each service, then
+> onboarding a new user into it and verifying access on every service.
+>
+> Use this whenever the built-in roles (`analyst`, `data_engineer`, `platform_admin`, etc.)
+> don't exactly match a team's access requirements.
+
+### Overview of steps
+
+| Step | Action |
+|---|---|
+| 1 | Define the new role (name + description) |
+| 2 | Add the desired permissions per service |
+| 3 | Verify the role definition |
+| 4 | Create the KDC principal for the new user |
+| 5 | Create the Doris SQL user |
+| 6 | Register the user in the RBAC plane and bind the new role |
+| 7 | Sync to all four services |
+| 8 | Verify access on Doris, Kafka, OpenSearch, Spark |
+| 9 | Optional: add more users to the same group |
+
+---
+
+### Worked example — `reporting_analyst` group
+
+> **Scenario:** The reporting team needs read-only access to Doris and OpenSearch,
+> consume-only access to Kafka, and UI-only access to Spark. No write or admin rights.
+>
+> **Privileges chosen:**
+> | Service | Permissions |
+> |---|---|
+> | Doris | SELECT (id=1) |
+> | Kafka | CONSUME (id=12), DESCRIBE (id=15) |
+> | OpenSearch | INDEX_READ (id=17), CLUSTER_READ (id=20) |
+> | Spark | VIEW_UI (id=25) |
+
+```bash
+# Set once for the whole workflow
+export RBAC_URL="http://192.168.1.50:30850"
+export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+export DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+export REALM="STARDATADBLABS.LOCAL"
+
+# Role and user variables
+NEW_ROLE="reporting_analyst"
+NEW_ROLE_DISPLAY="Reporting Analyst"
+NEW_ROLE_DESC="Read-only access to Doris and OpenSearch; consume-only on Kafka; Spark UI only"
+```
+
+---
+
+### Step 1 — Create the new role
+
+> Role names must be lowercase alphanumeric, underscores and hyphens only (`^[a-z0-9_\-]+$`).
+
+```bash
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"name\":         \"${NEW_ROLE}\",
+    \"display_name\": \"${NEW_ROLE_DISPLAY}\",
+    \"description\":  \"${NEW_ROLE_DESC}\"
+  }" \
+  "${RBAC_URL}/api/v1/roles" | python3 -m json.tool
+
+# Save the role ID from the response
+ROLE_ID=$(curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles" | \
+  python3 -c "
+import sys,json
+for r in json.load(sys.stdin):
+    if r['name']=='${NEW_ROLE}': print(r['id'])
+")
+echo "New role id: ${ROLE_ID}"
+```
+
+Expected response:
+```json
+{
+  "id": 9,
+  "name": "reporting_analyst",
+  "display_name": "Reporting Analyst",
+  "description": "Read-only access ...",
+  "created_at": "2026-08-07T00:12:44.994273Z",
+  "permissions": []
+}
+```
+
+---
+
+### Step 2 — Add permissions for each service
+
+> Each permission is added with `POST /api/v1/roles/{role_id}/permissions/{permission_id}`.
+> The body must be `{}` (empty JSON object, not empty body).
+> See the [Permission ID reference](#permission-id-reference) table for all 25 IDs.
+
+#### Doris — SELECT only
+
+```bash
+# doris.SELECT = permission id 1
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" -d '{}' \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/1" | \
+  python3 -c "import sys,json; r=json.load(sys.stdin); print(f'  doris perms: {[p[\"permission_name\"] for p in r[\"permissions\"] if p[\"service_name\"]==\"doris\"]}')"
+```
+
+#### Kafka — CONSUME + DESCRIBE
+
+```bash
+# kafka.CONSUME = 12, kafka.DESCRIBE = 15
+for pid in 12 15; do
+  curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    -H "Content-Type: application/json" -d '{}' \
+    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${pid}" > /dev/null \
+    && echo "  added kafka perm ${pid}"
+done
+```
+
+#### OpenSearch — INDEX_READ + CLUSTER_READ
+
+```bash
+# opensearch.INDEX_READ = 17, opensearch.CLUSTER_READ = 20
+for pid in 17 20; do
+  curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    -H "Content-Type: application/json" -d '{}' \
+    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${pid}" > /dev/null \
+    && echo "  added opensearch perm ${pid}"
+done
+```
+
+#### Spark — VIEW_UI only
+
+```bash
+# spark.VIEW_UI = 25
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" -d '{}' \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/25" > /dev/null \
+  && echo "  added spark perm 25"
+```
+
+---
+
+### Step 3 — Verify the complete role definition
+
+```bash
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+print(f'Role: {r[\"name\"]}  id={r[\"id\"]}  ({len(r[\"permissions\"])} permissions)')
+svc={}
+for p in r['permissions']:
+    svc.setdefault(p['service_name'],[]).append(p['permission_name'])
+for s,perms in sorted(svc.items()):
+    print(f'  {s:12}: {sorted(perms)}')
+"
+```
+
+Expected output:
+```
+Role: reporting_analyst  id=9  (6 permissions)
+  doris       : ['SELECT']
+  kafka       : ['CONSUME', 'DESCRIBE']
+  opensearch  : ['CLUSTER_READ', 'INDEX_READ']
+  spark       : ['VIEW_UI']
+```
+
+---
+
+### Step 4 — Create the KDC principal for the new user
+
+> Each user must have a Kerberos principal **before** connecting to any service.
+> See [section (a)](#a-adding-a-new-user-to-a-group) for the full onboarding checklist.
+
+```bash
+USERNAME="eve"
+PASSWORD="TempPass1!"
+
+# Create principal
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "addprinc -pw ${PASSWORD} ${USERNAME}@${REALM}"
+
+# Verify
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "getprinc ${USERNAME}@${REALM}" 2>/dev/null | grep "Principal:"
+```
+
+Export a keytab for batch / Spark job use:
+```bash
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "ktadd -k /tmp/${USERNAME}.keytab ${USERNAME}@${REALM}"
+
+KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl cp prod/${KDC_POD}:/tmp/${USERNAME}.keytab /tmp/${USERNAME}.keytab
+kubectl create secret generic ${USERNAME}-keytab \
+  --from-file=keytab=/tmp/${USERNAME}.keytab -n prod \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl exec -n prod deploy/kerberos-kdc -- rm /tmp/${USERNAME}.keytab
+rm /tmp/${USERNAME}.keytab
+```
+
+---
+
+### Step 5 — Create the Doris SQL user
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "CREATE USER IF NOT EXISTS '${USERNAME}'@'%' IDENTIFIED BY '${PASSWORD}';"
+
+# Verify
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SELECT user, host FROM mysql.user WHERE user='${USERNAME}';" 2>/dev/null
+```
+
+---
+
+### Step 6 — Register the user in RBAC and bind the new role
+
+```bash
+# Register the user
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"username\":     \"${USERNAME}\",
+    \"display_name\": \"Eve Martinez\",
+    \"email\":        \"${USERNAME}@example.com\"
+  }" \
+  "${RBAC_URL}/api/v1/users" | python3 -m json.tool
+
+# Bind the new role
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"role_name\":\"${NEW_ROLE}\"}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
+```
+
+Expected binding response:
+```json
+{
+  "id": 5,
+  "username": "eve",
+  "role_name": "reporting_analyst",
+  "service_name": null,
+  "granted_by": "master",
+  "granted_at": "2026-08-07T00:...",
+  "expires_at": null
+}
+```
+
+---
+
+### Step 7 — Sync to all four services
+
+```bash
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+Expected output — all four services synced, zero errors:
+```json
+{
+  "results": [
+    {"username": "eve", "service": "doris",      "status": "synced", "detail": "1 permissions applied"},
+    {"username": "eve", "service": "kafka",      "status": "synced", "detail": "2 permissions applied"},
+    {"username": "eve", "service": "opensearch", "status": "synced", "detail": "2 permissions applied"},
+    {"username": "eve", "service": "spark",      "status": "synced", "detail": "1 permissions applied"}
+  ],
+  "errors": 0
+}
+```
+
+---
+
+### Step 8 — Verify access on all four services
+
+#### Doris — SELECT_PRIV only, no write/admin
+
+```bash
+# Admin-side verification
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR '${USERNAME}'@'%';" 2>/dev/null
+
+# Expected: CatalogPrivs contains Select_priv only
+# NOT expected: Load_priv, Create_priv, Drop_priv, Admin_priv, Grant_priv
+
+# User-side test — connect and read (krb-doris-guard checks KDC first)
+mysql -h 192.168.1.50 -P 30090 -u ${USERNAME} --password="${PASSWORD}" \
+  -e "SHOW DATABASES;" 2>/dev/null
+
+# Confirm no write access — this MUST fail
+mysql -h 192.168.1.50 -P 30090 -u ${USERNAME} --password="${PASSWORD}" \
+  -e "CREATE DATABASE rbac_test_forbidden;" 2>&1 | grep -i "denied\|error"
+# Expected: Access denied
+```
+
+#### Kafka — KafkaUser CR with SCRAM credentials
+
+```bash
+kubectl get kafkauser ${USERNAME} -n prod
+
+# Expected:
+# NAME   CLUSTER         AUTHENTICATION   AUTHORIZATION   READY
+# eve    strimzi-kafka   scram-sha-512                    True
+```
+
+> **Note:** This cluster has `allow.everyone.if.no.acl.found=true` — Kafka authorization is
+> not enforced at the broker level. The KafkaUser CR provisions SCRAM-SHA-512 credentials.
+> Kerberos GSSAPI on port 9093 is the authentication gate; all topic access is open once
+> authenticated.
+
+#### OpenSearch — internal user + rbac role mappings
+
+```bash
+# Verify the internal OpenSearch user was created by the sync
+# (requires admin access — typically run from master node or a pod with a valid TGT)
+#
+# From a node with kinit access to admin@STARDATADBLABS.LOCAL:
+#   kinit admin/admin@STARDATADBLABS.LOCAL
+#   curl --negotiate -u : \
+#     "https://192.168.1.50:30920/_plugins/_security/api/internalusers/${USERNAME}"
+#
+# From inside the rbac-plane pod (uses Basic auth with OPENSEARCH_ADMIN_PASSWORD):
+kubectl exec -n prod deploy/rbac-plane -- python3 -c "
+import urllib.request, json, ssl, base64, os
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+host = os.environ['OPENSEARCH_HOST']
+port = os.environ['OPENSEARCH_PORT']
+user = os.environ['OPENSEARCH_ADMIN_USER']
+pw   = os.environ['OPENSEARCH_ADMIN_PASSWORD']
+cred = base64.b64encode(f'{user}:{pw}'.encode()).decode()
+req  = urllib.request.Request(
+  f'https://{host}:{port}/_plugins/_security/api/rolesmapping',
+  headers={'Authorization': f'Basic {cred}'}
+)
+data = json.loads(urllib.request.urlopen(req, context=ctx).read())
+mapped = [r for r,m in data.items() if '${USERNAME}' in m.get('users',[])]
+print('OpenSearch roles for ${USERNAME}:', mapped)
+" 2>&1
+
+# Expected output:
+# OpenSearch roles for eve: ['rbac_index_read_all', 'rbac_cluster_read_all']
+```
+
+> **Note on OpenSearch auth:** This cluster has `kerberos_auth_domain.http_enabled: true`,
+> which means HTTP clients require a Kerberos TGT (SPNEGO). The RBAC plane adapter uses
+> Basic auth with the admin password from `rbac-plane-credentials`; if Kerberos is the
+> only active auth domain this call will return 401. When that happens, verify using the
+> Kerberos-authenticated path shown above (kinit + `--negotiate`).
+
+#### Spark — allowlist ConfigMap
+
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
+
+# Expected for reporting_analyst (VIEW_UI only, no SUBMIT_JOB):
+# {'can_kill_any': False, 'can_submit': False, 'view_ui': True}
+```
+
+---
+
+### Step 9 — Adding more users to the same group
+
+Once the role exists, adding further users is a 4-command operation:
+
+```bash
+# Replace NEWUSER_* with the new user's details
+NEWUSER="frank"
+NEWUSER_PASS="TempPass1!"
+
+# 1. KDC principal
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "addprinc -pw ${NEWUSER_PASS} ${NEWUSER}@${REALM}"
+
+# 2. Doris SQL user
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "CREATE USER IF NOT EXISTS '${NEWUSER}'@'%' IDENTIFIED BY '${NEWUSER_PASS}';"
+
+# 3. RBAC register + bind same role
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${NEWUSER}\",\"display_name\":\"Frank Lin\",\"email\":\"${NEWUSER}@example.com\"}" \
+  "${RBAC_URL}/api/v1/users"
+
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"role_name\":\"${NEW_ROLE}\"}" \
+  "${RBAC_URL}/api/v1/users/${NEWUSER}/bindings"
+
+# 4. Sync
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${NEWUSER}\",\"dry_run\":false}" \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+All users bound to `reporting_analyst` automatically inherit any future permission
+changes made to the role — just re-sync after modifying the role (see [section (e)](#e-adding-and-removing-privileges-for-a-user-group)).
+
+---
+
+### Removing the user group (role)
+
+> Deleting a role **does not** automatically revoke downstream grants. You must:
+> 1. Remove all user bindings to the role, then re-sync each user.
+> 2. Delete the role.
+
+```bash
+# Step 1 — find all users bound to this role
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/users" | \
+  python3 -c "import sys,json; [print(u['username']) for u in json.load(sys.stdin)]" | \
+  while read u; do
+    curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+      "${RBAC_URL}/api/v1/users/${u}/bindings" | \
+      python3 -c "
+import sys,json
+for b in json.load(sys.stdin):
+    if b['role_name']=='${NEW_ROLE}':
+        print(f'${u} binding_id={b[\"id\"]}')
+"
+  done
+
+# Step 2 — for each user: delete binding, then re-sync to revoke downstream grants
+AFFECTED_USER="eve"
+BINDING_ID=5   # from step 1 output above
+
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/${AFFECTED_USER}/bindings/${BINDING_ID}"
+
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${AFFECTED_USER}\",\"dry_run\":false}" \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+# All services should now show "synced" with 0 permissions applied (revoked)
+
+# Step 3 — delete the role
+ROLE_ID=9  # from Step 1 above
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}" | python3 -m json.tool
+# Expected: {"ok": true, "message": "Role 'reporting_analyst' deleted"}
 ```
 
 ---
