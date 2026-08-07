@@ -8,11 +8,11 @@ This runbook covers the full lifecycle of user groups on the platform:
 
 | Section | Topic |
 |---|---|
-| [(a)](#a-adding-a-user-to-kerberos) | Adding a user to Kerberos (KDC) |
-| [(b)](#b-admin-user-group---full-admin-on-all-services) | Admin user group — full admin on Doris, Kafka, OpenSearch, Spark |
+| [(a)](#a-adding-a-new-user-to-a-group) | Adding a new user to each group — Doris, Kafka, OpenSearch, Spark |
+| [(b)](#b-admin-user-group-platform_admin---full-admin-on-all-services) | `platform_admin` group — full admin on all services |
 | [(c)](#c-data_engineer-user-group---select--dml) | `data_engineer` group — SELECT + DML on all services |
 | [(d)](#d-account_admin-user-group---top-level-governance) | `account_admin` group — account-level governance admin |
-| [(e)](#e-adding-a-user-to-a-group-and-testing-access) | Adding a user to a group and verifying access end-to-end |
+| [(e)](#e-adding-and-removing-privileges-for-a-user-group) | Adding and removing privileges for a user group (all services) |
 | [(f)](#f-negative-test---user-in-rbac-group-but-no-kerberos-principal) | Negative test — RBAC binding without a KDC principal |
 
 ---
@@ -26,6 +26,8 @@ export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 export DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
+export OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d 2>/dev/null || echo "admin")
 export REALM="STARDATADBLABS.LOCAL"
 ```
 
@@ -35,85 +37,241 @@ curl -s ${RBAC_URL}/health
 # Expected: {"status":"ok","version":"1.0.0"}
 ```
 
----
+### Permission ID reference
 
-## (a) Adding a User to Kerberos
+Every `POST/DELETE /api/v1/roles/{role_id}/permissions/{permission_id}` call uses these IDs:
 
-> Every user on this platform needs a KDC principal **before** they can authenticate
-> to any Kerberos-protected service (Kafka port 9093, OpenSearch SPNEGO, Spark guard).
-> Kerberos provides **authentication** only — the RBAC plane controls **authorisation**.
-
-### Step 1 — Create the KDC principal
+| ID | Service | Permission | What it grants |
+|---|---|---|---|
+| 1 | doris | SELECT | Read rows |
+| 2 | doris | INSERT | Insert rows (maps to LOAD_PRIV) |
+| 3 | doris | UPDATE | Update rows (maps to LOAD_PRIV) |
+| 4 | doris | DELETE | Delete rows (maps to LOAD_PRIV) |
+| 5 | doris | CREATE | Create tables/databases |
+| 6 | doris | DROP | Drop tables/databases |
+| 7 | doris | ALTER | Alter table schema |
+| 8 | doris | LOAD | Stream/routine load (maps to LOAD_PRIV) |
+| 9 | doris | GRANT | Re-grant privileges to others |
+| 10 | doris | ADMIN | Full Doris admin (ADMIN_PRIV on *.*.*) |
+| 11 | kafka | PRODUCE | Write messages to topics |
+| 12 | kafka | CONSUME | Read messages from topics |
+| 13 | kafka | CREATE_TOPIC | Create Kafka topics |
+| 14 | kafka | DELETE_TOPIC | Delete Kafka topics |
+| 15 | kafka | DESCRIBE | Describe topics / cluster metadata |
+| 16 | kafka | ADMIN | Full Kafka admin |
+| 17 | opensearch | INDEX_READ | Search / get documents |
+| 18 | opensearch | INDEX_WRITE | Index / write documents |
+| 19 | opensearch | INDEX_ADMIN | Create/delete/manage indexes |
+| 20 | opensearch | CLUSTER_READ | Read cluster metadata & health |
+| 21 | opensearch | CLUSTER_ADMIN | Full cluster administration |
+| 22 | spark | SUBMIT_JOB | Submit Spark jobs |
+| 23 | spark | KILL_OWN_JOB | Kill own running jobs |
+| 24 | spark | KILL_ANY_JOB | Kill any running job (operator) |
+| 25 | spark | VIEW_UI | Access Spark Master Web UI |
 
 ```bash
+# Fetch live permission IDs at any time
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/services/doris/permissions" | \
+  python3 -c "import sys,json; [print(f'  {p[\"id\"]:3} {p[\"name\"]}') for p in json.load(sys.stdin)]"
+```
+
+---
+
+## (a) Adding a New User to a Group
+
+> This is the **complete onboarding checklist** for any new user on the platform.
+> All four services require different setup steps. Complete them in the order shown.
+>
+> **Identity convention:** the same short username (e.g. `newuser`) is used across
+> Kerberos, Doris, Kafka, OpenSearch, and Spark. The KDC principal carries the realm:
+> `newuser@STARDATADBLABS.LOCAL`. All services strip the realm and use `newuser`.
+
+```bash
+# Set for the whole section
 USERNAME="newuser"
 PASSWORD="TempPass1!"
+ROLE="data_engineer"    # or: platform_admin, account_admin, analyst, etl_writer …
+DISPLAY_NAME="New User"
+EMAIL="${USERNAME}@example.com"
+```
 
-# Non-interactive — set a temporary password
+### Step 1 — Kerberos: create the KDC principal
+
+> Kerberos is the authentication gate for every service. Without a KDC principal
+> the user cannot connect to anything, regardless of RBAC grants.
+
+```bash
+# Create principal with a temporary password
 kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "addprinc -pw ${PASSWORD} ${USERNAME}@${REALM}"
 
-# Verify principal exists
+# Verify
 kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "getprinc ${USERNAME}@${REALM}" 2>/dev/null | grep "Principal:"
 ```
 
-### Step 2 — Export a keytab (for service accounts and batch jobs)
+#### Export a keytab (for batch/service-account access)
 
 ```bash
-# Export inside the KDC pod
 kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "ktadd -k /tmp/${USERNAME}.keytab ${USERNAME}@${REALM}"
 
-# Copy to master node
 KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl cp prod/${KDC_POD}:/tmp/${USERNAME}.keytab /tmp/${USERNAME}.keytab
-
-# Verify keytab content
 klist -ekt /tmp/${USERNAME}.keytab
 
-# Store as K8s secret
+# Store as K8s secret (so Spark jobs can mount it)
 kubectl create secret generic ${USERNAME}-keytab \
   --from-file=keytab=/tmp/${USERNAME}.keytab \
   -n prod --dry-run=client -o yaml | kubectl apply -f -
 
-# Clean temp files
 kubectl exec -n prod deploy/kerberos-kdc -- rm /tmp/${USERNAME}.keytab
 rm /tmp/${USERNAME}.keytab
 ```
 
-### Step 3 — Create a matching Doris SQL user
+### Step 2 — Doris: create the SQL user
 
-> Doris has no native Kerberos/GSSAPI. The `krb-doris-guard` sidecar enforces KDC
-> principal existence at connection time. Doris uses its own SQL password for the
-> actual query session — the username must match the KDC short name.
+> Doris has no native Kerberos. The `krb-doris-guard` sidecar checks the KDC at
+> connect time and proxies to Doris only if the principal exists. Doris itself uses
+> SQL password auth — the username must match the KDC short name exactly.
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "CREATE USER IF NOT EXISTS '${USERNAME}'@'%' IDENTIFIED BY '${PASSWORD}';"
+
+# Verify
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SELECT user, host FROM mysql.user WHERE user='${USERNAME}';" 2>/dev/null
 ```
 
-### Step 4 — Store credentials in OpenBao
+### Step 3 — RBAC plane: register user and bind role
+
+> The RBAC plane is the single source of truth for *what* a user can do. Binding a role
+> here defines the permission set that is synced to all four downstream services.
+
+```bash
+# Register user
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${USERNAME}\",\"display_name\":\"${DISPLAY_NAME}\",\"email\":\"${EMAIL}\"}" \
+  "${RBAC_URL}/api/v1/users" | python3 -m json.tool
+
+# Bind role
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"role_name\":\"${ROLE}\"}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
+```
+
+### Step 4 — Sync to all four services
+
+```bash
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+
+# Expected: all four services show "synced", errors: 0
+```
+
+### Step 5 — Store credentials in OpenBao
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
 ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
 
-# Kerberos principal metadata
-curl -sf -X POST \
-  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+curl -sf -X POST -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"data\":{\"principal\":\"${USERNAME}@${REALM}\",\"keytab_secret\":\"${USERNAME}-keytab\",\"created_by\":\"admin\"}}" \
   "${BAO_ADDR}/v1/secret/data/kerberos/users/${USERNAME}" && echo "Kerberos entry stored"
 
-# Doris credential
-curl -sf -X POST \
-  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+curl -sf -X POST -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"data\":{\"username\":\"${USERNAME}\",\"password\":\"${PASSWORD}\",\"service\":\"doris\",\"created_by\":\"admin\"}}" \
   "${BAO_ADDR}/v1/secret/data/doris/users/${USERNAME}" && echo "Doris credential stored"
 ```
+
+### Step 6 — Verify access per service
+
+#### Doris
+
+```bash
+# Connect as the new user through the krb-doris-guard
+mysql -h 192.168.1.50 -P 30090 -u ${USERNAME} --password="${PASSWORD}" \
+  -e "SHOW DATABASES;" 2>/dev/null
+
+# Verify grants from admin side
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR '${USERNAME}'@'%';" 2>/dev/null
+```
+
+| Role | Expected Doris grants |
+|---|---|
+| `platform_admin` / `account_admin` | `GlobalPrivs: Admin_priv`, `CatalogPrivs: Grant_priv, Select_priv, Load_priv, Alter_priv, Create_priv, Drop_priv` |
+| `data_engineer` | `CatalogPrivs: Select_priv, Load_priv` (no Admin_priv, no Grant_priv) |
+| `analyst` | `CatalogPrivs: Select_priv` only |
+
+#### Kafka
+
+```bash
+# KafkaUser CR created and Ready
+kubectl get kafkauser ${USERNAME} -n prod
+
+# Expected:
+# NAME        CLUSTER         AUTHENTICATION   READY
+# newuser     strimzi-kafka   scram-sha-512    True
+```
+
+> **Note:** Kafka ACL enforcement is disabled on this cluster
+> (`allow.everyone.if.no.acl.found=true`). The KafkaUser CR provisions SCRAM-SHA-512
+> credentials. The Kerberos GSSAPI listener on port 9093 is the actual authentication
+> gate — no KDC principal means the SASL handshake is rejected before any ACL check.
+
+#### OpenSearch
+
+```bash
+# Internal user was created by the sync
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/internalusers/${USERNAME}" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print('exists:', '${USERNAME}' in d)"
+
+# Role mappings applied by RBAC sync
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
+  python3 -c "
+import sys,json
+for role,m in json.load(sys.stdin).items():
+    if '${USERNAME}' in m.get('users',[]):
+        print(f'  mapped: {role}')
+"
+```
+
+| Role | Expected OpenSearch role mappings |
+|---|---|
+| `platform_admin` / `account_admin` | `rbac_index_read_all`, `rbac_index_write_all`, `rbac_index_admin_all`, `rbac_cluster_read_all`, `rbac_cluster_admin_all` |
+| `data_engineer` | `rbac_index_read_all`, `rbac_index_write_all`, `rbac_cluster_read_all` |
+| `analyst` | `rbac_index_read_all`, `rbac_cluster_read_all` |
+
+#### Spark
+
+```bash
+# User appears in the allowlist ConfigMap
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "
+import sys,json
+entry=json.load(sys.stdin).get('${USERNAME}')
+print('Spark entry:', entry) if entry else print('WARNING: not in allowlist')
+"
+```
+
+| Role | Expected Spark allowlist entry |
+|---|---|
+| `platform_admin` / `account_admin` | `{"can_submit": true, "can_kill_any": true, "view_ui": true}` |
+| `data_engineer` | `{"can_submit": true, "can_kill_any": false, "view_ui": true}` |
+| `analyst` | `{"can_submit": false, "can_kill_any": false, "view_ui": true}` |
 
 ### Quick-check: list all KDC principals
 
@@ -124,10 +282,9 @@ kubectl exec -n prod deploy/kerberos-kdc -- \
 
 ---
 
-## (b) Admin User Group — Full Admin on All Services
+## (b) Admin User Group (`platform_admin`) — Full Admin on All Services
 
 > **Role name:** `platform_admin`
-> **Permissions:** all privileges on Doris, Kafka, OpenSearch, and Spark.
 >
 > | Service | Privileges |
 > |---|---|
@@ -136,53 +293,59 @@ kubectl exec -n prod deploy/kerberos-kdc -- \
 > | OpenSearch | INDEX_READ, INDEX_WRITE, INDEX_ADMIN, CLUSTER_READ, CLUSTER_ADMIN |
 > | Spark | SUBMIT_JOB, KILL_OWN_JOB, KILL_ANY_JOB, VIEW_UI |
 
-This role already exists in the RBAC plane (seeded by migration `003_seed_groups.sql`).
+### Add a new user to the admin group
 
-### View the role definition
-
-```bash
-curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles" | \
-  python3 -c "
-import sys,json
-for r in json.load(sys.stdin):
-    if r['name']=='platform_admin':
-        print('Role:', r['display_name'])
-        for p in r['permissions']:
-            print(f'  {p[\"service_name\"]}.{p[\"permission_name\"]}')
-"
-```
-
-### Add a user to the admin group
+Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="platform_admin"`.
 
 ```bash
-USERNAME="bob"   # must already have a KDC principal + Doris SQL user (see section a)
+# Quick one-liner for an existing KDC+Doris user
+USERNAME="bob"
 
-# 1. Register user in RBAC plane (idempotent)
-curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${USERNAME}\",\"display_name\":\"Bob Jones\",\"email\":\"${USERNAME}@example.com\"}" \
-  "${RBAC_URL}/api/v1/users" | python3 -m json.tool
-
-# 2. Bind the platform_admin role
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"role_name":"platform_admin"}' \
   "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
 
-# 3. Sync to all services
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 ```
 
-### Verify admin grants — Doris
+### Verify admin grants — all four services
 
+#### Doris
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "SHOW GRANTS FOR '${USERNAME}'@'%';" 2>/dev/null
-# Expected: GlobalPrivs includes Admin_priv, CatalogPrivs includes Grant_priv, Select_priv, etc.
+# Expected GlobalPrivs: Admin_priv
+# Expected CatalogPrivs: Grant_priv, Select_priv, Load_priv, Alter_priv, Create_priv, Drop_priv
+```
+
+#### Kafka
+```bash
+kubectl get kafkauser ${USERNAME} -n prod
+# Expected: READY=True, authentication=scram-sha-512
+```
+
+#### OpenSearch
+```bash
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
+  python3 -c "
+import sys,json
+roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
+print('Mapped roles:', roles)
+"
+# Expected: 5 rbac_* roles including rbac_cluster_admin_all and rbac_index_admin_all
+```
+
+#### Spark
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
+# Expected: {"can_kill_any": true, "can_submit": true, "view_ui": true}
 ```
 
 ---
@@ -190,7 +353,6 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 ## (c) `data_engineer` User Group — SELECT + DML
 
 > **Role name:** `data_engineer`
-> **Purpose:** day-to-day data engineering — read and write data, no schema/admin ops.
 >
 > | Service | Privileges |
 > |---|---|
@@ -199,52 +361,60 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 > | OpenSearch | INDEX_READ, INDEX_WRITE, CLUSTER_READ |
 > | Spark | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI |
 
-### View the role definition
+### Add a new user to the data_engineer group
+
+Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="data_engineer"`.
 
 ```bash
-curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles" | \
-  python3 -c "
-import sys,json
-for r in json.load(sys.stdin):
-    if r['name']=='data_engineer':
-        print('Role:', r['display_name'])
-        for p in r['permissions']:
-            print(f'  {p[\"service_name\"]}.{p[\"permission_name\"]}')
-"
-```
+USERNAME="carol"
 
-### Add a user to the data_engineer group
-
-```bash
-USERNAME="carol"   # must have KDC principal + Doris SQL user
-
-# 1. Register
-curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${USERNAME}\",\"display_name\":\"Carol Reyes\",\"email\":\"${USERNAME}@example.com\"}" \
-  "${RBAC_URL}/api/v1/users"
-
-# 2. Bind
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"role_name":"data_engineer"}' \
-  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings"
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
 
-# 3. Sync
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 ```
 
-### Verify DML grants — Doris
+### Verify DML grants — all four services
 
+#### Doris
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "SHOW GRANTS FOR '${USERNAME}'@'%';" 2>/dev/null
-# Expected: CatalogPrivs includes Select_priv, Load_priv (INSERT/UPDATE/DELETE/LOAD all map to LOAD_PRIV)
+# Expected CatalogPrivs: Select_priv, Load_priv
 # NOT expected: Admin_priv, Grant_priv, Create_priv, Drop_priv, Alter_priv
+```
+
+#### Kafka
+```bash
+kubectl get kafkauser ${USERNAME} -n prod
+# Expected: READY=True, authentication=scram-sha-512
+```
+
+#### OpenSearch
+```bash
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
+  python3 -c "
+import sys,json
+roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
+print('Mapped roles:', roles)
+"
+# Expected: rbac_index_read_all, rbac_index_write_all, rbac_cluster_read_all
+# NOT expected: rbac_index_admin_all, rbac_cluster_admin_all
+```
+
+#### Spark
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
+# Expected: {"can_kill_any": false, "can_submit": true, "view_ui": true}
+# NOT expected: can_kill_any=true
 ```
 
 ---
@@ -252,188 +422,471 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 ## (d) `account_admin` User Group — Top-Level Governance
 
 > **Role name:** `account_admin`
-> **Purpose:** account-level administration — user provisioning, policy management, full
-> platform access. Typically reserved for platform/security team leads.
->
-> This role has **identical permissions to `platform_admin`** (all 25 permissions across all
-> 4 services), but is named separately to represent a distinct governance boundary.
+> **Purpose:** account-level governance and user provisioning. Full admin on all services.
+> Same permission set as `platform_admin` — named separately for governance boundary.
 
-### Add a user to the account_admin group
+### Add a new user to the account_admin group
+
+Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="account_admin"`.
 
 ```bash
 USERNAME="dave"
 
-# 1. Register
-curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${USERNAME}\",\"display_name\":\"Dave Kim\",\"email\":\"${USERNAME}@example.com\"}" \
-  "${RBAC_URL}/api/v1/users"
-
-# 2. Bind
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"role_name":"account_admin"}' \
-  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings"
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
 
-# 3. Sync
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 ```
 
-### Difference between `platform_admin`, `data_admin`, and `account_admin`
-
-| Role | Permission set | Intended for |
-|---|---|---|
-| `data_admin` | All 25 permissions | General platform admin (legacy seed) |
-| `platform_admin` | All 25 permissions | Infrastructure admin group |
-| `account_admin` | All 25 permissions | Account governance team |
-| `data_engineer` | 14 permissions (SELECT+DML only) | Day-to-day engineering team |
-
-All three admin roles carry identical privileges. The naming distinction exists to support
-future per-group policy customisation (e.g., `account_admin` may later receive additional
-user management API scopes while `platform_admin` is restricted to service-level ops).
-
----
-
-## (e) Adding a User to a Group and Testing Access
-
-> This section shows the complete end-to-end flow: Kerberos → RBAC → services → access test.
-> Replace `${USERNAME}` and `${ROLE}` with the target user and role.
-
-### Full provisioning script
-
-```bash
-USERNAME="newengineer"
-ROLE="data_engineer"
-PASSWORD="TempPass1!"
-
-# ── Step 1: Kerberos ────────────────────────────────────────
-kubectl exec -n prod deploy/kerberos-kdc -- \
-  kadmin.local -q "addprinc -pw ${PASSWORD} ${USERNAME}@${REALM}"
-
-# ── Step 2: Doris SQL user ──────────────────────────────────
-mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
-  -e "CREATE USER IF NOT EXISTS '${USERNAME}'@'%' IDENTIFIED BY '${PASSWORD}';"
-
-# ── Step 3: RBAC register + bind ───────────────────────────
-curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${USERNAME}\",\"display_name\":\"New Engineer\",\"email\":\"${USERNAME}@example.com\"}" \
-  "${RBAC_URL}/api/v1/users"
-
-curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"role_name\":\"${ROLE}\"}" \
-  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings"
-
-# ── Step 4: Sync to all four services ──────────────────────
-curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
-  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
-```
-
-### Verify access per service
+### Verify admin grants — all four services
 
 #### Doris
-
 ```bash
-# Connect as the new user (guard checks KDC first, then proxies to Doris)
-mysql -h 192.168.1.50 -P 30090 -u ${USERNAME} --password="${PASSWORD}" \
-  -e "SHOW DATABASES;" 2>/dev/null
-
-# Verify grants from admin side
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "SHOW GRANTS FOR '${USERNAME}'@'%';" 2>/dev/null
+# Expected GlobalPrivs: Admin_priv
 ```
 
-Expected for `data_engineer`: `Select_priv, Load_priv` in CatalogPrivs. No `Admin_priv`.
-
-#### Kafka — SCRAM credentials (KafkaUser CR)
-
+#### Kafka
 ```bash
-# KafkaUser CR should exist and be Ready
 kubectl get kafkauser ${USERNAME} -n prod
-
-# Expected:
-# NAME          CLUSTER         AUTHENTICATION   READY
-# newengineer   strimzi-kafka   scram-sha-512    True
+# Expected: READY=True
 ```
 
-> **Note:** Kafka ACL enforcement is disabled on this cluster (`allow.everyone.if.no.acl.found=true`).
-> The KafkaUser CR creates SCRAM credentials only. Kerberos authentication on port 9093 is
-> the actual enforcement gate. The RBAC sync ensures the user has a valid SCRAM credential
-> for the internal SCRAM listener used by operators.
-
-#### OpenSearch — internal user + role mapping
-
+#### OpenSearch
 ```bash
-# Check internal user exists
-curl -sk -u admin:${OPENSEARCH_ADMIN_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/internalusers/${USERNAME}" | \
-  python3 -c "import sys,json; d=json.load(sys.stdin); print('User exists:', '${USERNAME}' in d)"
-
-# Check role mappings
-curl -sk -u admin:${OPENSEARCH_ADMIN_PASS} \
+curl -sk -u admin:${OPENSEARCH_PASS} \
   "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
   python3 -c "
 import sys,json
-d=json.load(sys.stdin)
-for role,mapping in d.items():
-    if '${USERNAME}' in mapping.get('users',[]):
-        print(f'  mapped to role: {role}')
+roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
+print('Mapped roles:', roles)
 "
+# Expected: all 5 rbac_* roles
 ```
 
-#### Spark — allowlist ConfigMap
-
+#### Spark
 ```bash
 kubectl get configmap spark-rbac-allowlist -n prod \
   -o jsonpath='{.data.allowlist\.json}' | \
-  python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-entry=d.get('${USERNAME}')
-if entry:
-    print('Spark allowlist entry:', entry)
-else:
-    print('WARNING: ${USERNAME} not in allowlist')
-"
-# Expected for data_engineer:
-# {"can_kill_any": false, "can_submit": true, "view_ui": true}
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
+# Expected: {"can_kill_any": true, "can_submit": true, "view_ui": true}
 ```
 
-### Check the audit log
+### Role comparison table
+
+| Role | Permission count | Intended for |
+|---|---|---|
+| `data_admin` | 25 (all) | Generic full admin (legacy seed) |
+| `platform_admin` | 25 (all) | Platform infrastructure admin group |
+| `account_admin` | 25 (all) | Account governance team |
+| `data_engineer` | 14 (SELECT + DML only) | Day-to-day engineering team |
+| `analyst` | 6 (SELECT + read only) | Read-only analysts |
+
+---
+
+## (e) Adding and Removing Privileges for a User Group
+
+> Privileges are managed at the **role** level — changes apply to every user bound
+> to that role. After modifying a role, re-sync all affected users to push the new
+> state to the downstream services.
+>
+> **API endpoints:**
+> - Add permission: `POST /api/v1/roles/{role_id}/permissions/{permission_id}`
+> - Remove permission: `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
+> - See the [Permission ID reference](#permission-id-reference) table above for IDs.
+
+### Get role IDs
 
 ```bash
+# List all roles with their IDs
 curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/audit?limit=20" | \
+  "${RBAC_URL}/api/v1/roles" | \
   python3 -c "
 import sys,json
-for e in json.load(sys.stdin)['entries']:
-    if '${USERNAME}' in str(e.get('detail','')):
-        print(e['ts'], e['action'], e['target_type'], e.get('detail'))
+for r in json.load(sys.stdin):
+    print(f'  id={r[\"id\"]:2}  name={r[\"name\"]}  ({len(r[\"permissions\"])} perms)')
 "
+```
+
+Output (current roles):
+```
+  id= 1  name=analyst          ( 6 perms)
+  id= 2  name=etl_writer        ( 7 perms)
+  id= 3  name=spark_user        ( 3 perms)
+  id= 4  name=data_admin        (25 perms)
+  id= 5  name=kafka_consumer    ( 2 perms)
+  id= 6  name=platform_admin    (25 perms)
+  id= 7  name=data_engineer     (14 perms)
+  id= 8  name=account_admin     (25 perms)
+```
+
+### Adding a privilege to a user group
+
+**Pattern:** `POST /api/v1/roles/{role_id}/permissions/{permission_id}`
+
+After adding, sync all users bound to the role so the new privilege is pushed to the
+downstream services.
+
+#### Example A — Give `data_engineer` the ability to CREATE tables in Doris
+
+> Adding permission `CREATE` (id=5) to role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7          # data_engineer
+PERMISSION_ID=5    # doris.CREATE
+
+# 1. Add the permission to the role
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+print(f'Role: {r[\"name\"]} ({len(r[\"permissions\"])} perms)')
+doris=[p['permission_name'] for p in r['permissions'] if p['service_name']=='doris']
+print('Doris perms:', sorted(doris))
+"
+
+# 2. Sync all data_engineer users to push the change to Doris
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"doris","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on Doris:**
+```bash
+# For each data_engineer user (e.g. carol)
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'carol'@'%';" 2>/dev/null
+# Now expected: CatalogPrivs includes Create_priv (was absent before)
+```
+
+---
+
+#### Example B — Give `data_engineer` the ability to CREATE_TOPIC in Kafka
+
+> Adding permission `CREATE_TOPIC` (id=13) to role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=13   # kafka.CREATE_TOPIC
+
+# 1. Add permission
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+kafka=[p['permission_name'] for p in r['permissions'] if p['service_name']=='kafka']
+print('Kafka perms:', sorted(kafka))
+"
+
+# 2. Sync data_engineer users to Kafka only
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"kafka","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on Kafka:**
+```bash
+# Kafka ACL enforcement is disabled on this cluster (allow.everyone.if.no.acl.found=true)
+# The KafkaUser CR is updated — verify the sync recorded the state change
+kubectl get kafkauser carol -n prod -o jsonpath='{.status.conditions[0].type}'
+# Expected: Ready
+```
+
+---
+
+#### Example C — Give `data_engineer` INDEX_ADMIN on OpenSearch
+
+> Adding permission `INDEX_ADMIN` (id=19) to role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=19   # opensearch.INDEX_ADMIN
+
+# 1. Add permission
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+os=[p['permission_name'] for p in r['permissions'] if p['service_name']=='opensearch']
+print('OpenSearch perms:', sorted(os))
+"
+
+# 2. Sync to OpenSearch
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"opensearch","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on OpenSearch:**
+```bash
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
+  python3 -c "
+import sys,json
+for role,m in json.load(sys.stdin).items():
+    if 'carol' in m.get('users',[]):
+        print(f'  mapped: {role}')
+"
+# Now expected: rbac_index_admin_all is in the list (was absent before)
+```
+
+---
+
+#### Example D — Give `data_engineer` KILL_ANY_JOB on Spark
+
+> Adding permission `KILL_ANY_JOB` (id=24) to role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=24   # spark.KILL_ANY_JOB
+
+# 1. Add permission
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+sp=[p['permission_name'] for p in r['permissions'] if p['service_name']=='spark']
+print('Spark perms:', sorted(sp))
+"
+
+# 2. Sync to Spark
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"spark","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on Spark:**
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('carol'))"
+# Now expected: {"can_kill_any": true, "can_submit": true, "view_ui": true}
+# (can_kill_any was false before)
+```
+
+---
+
+### Removing a privilege from a user group
+
+**Pattern:** `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
+
+After removing, sync all affected users to revoke the privilege in the downstream services.
+
+#### Example E — Remove CREATE from `data_engineer` in Doris
+
+> Removing permission `CREATE` (id=5) from role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=5    # doris.CREATE
+
+# 1. Remove the permission from the role
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+doris=[p['permission_name'] for p in r['permissions'] if p['service_name']=='doris']
+print(f'Doris perms after removal: {sorted(doris)}')
+"
+
+# 2. Sync — revokes in Doris by doing REVOKE ALL then re-granting remaining privs
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"doris","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on Doris — CREATE_PRIV is gone:**
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'carol'@'%';" 2>/dev/null
+# CatalogPrivs should no longer contain Create_priv
+```
+
+---
+
+#### Example F — Remove INDEX_ADMIN from `data_engineer` in OpenSearch
+
+> Removing permission `INDEX_ADMIN` (id=19) from role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=19   # opensearch.INDEX_ADMIN
+
+# 1. Remove
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+os=[p['permission_name'] for p in r['permissions'] if p['service_name']=='opensearch']
+print(f'OpenSearch perms after removal: {sorted(os)}')
+"
+
+# 2. Sync to OpenSearch
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"opensearch","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on OpenSearch — INDEX_ADMIN mapping removed:**
+```bash
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
+  python3 -c "
+import sys,json
+for role,m in json.load(sys.stdin).items():
+    if 'carol' in m.get('users',[]):
+        print(f'  mapped: {role}')
+"
+# rbac_index_admin_all should no longer appear
+```
+
+---
+
+#### Example G — Remove KILL_ANY_JOB from `data_engineer` in Spark
+
+> Removing permission `KILL_ANY_JOB` (id=24) from role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=24   # spark.KILL_ANY_JOB
+
+# 1. Remove
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}"
+
+# 2. Sync to Spark
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"spark","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on Spark:**
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('carol'))"
+# Expected: {"can_kill_any": false, ...}  (reverted)
+```
+
+---
+
+#### Example H — Remove CREATE_TOPIC from `data_engineer` in Kafka
+
+> Removing permission `CREATE_TOPIC` (id=13) from role `data_engineer` (id=7).
+
+```bash
+ROLE_ID=7
+PERMISSION_ID=13   # kafka.CREATE_TOPIC
+
+# 1. Remove
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}"
+
+# 2. Sync to Kafka
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"kafka","dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+**Verify on Kafka:**
+```bash
+kubectl get kafkauser carol -n prod
+# KafkaUser should be Ready — the sync cleared and rewrote the SCRAM credential
+```
+
+---
+
+### Verifying the final role state after privilege changes
+
+After any add or remove operation, inspect the role to confirm the full permission set:
+
+```bash
+ROLE_NAME="data_engineer"
+
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/roles" | \
+  python3 -c "
+import sys,json
+for r in json.load(sys.stdin):
+    if r['name']=='${ROLE_NAME}':
+        print(f'Role: {r[\"display_name\"]} (id={r[\"id\"]})')
+        svc={}
+        for p in r['permissions']:
+            svc.setdefault(p['service_name'],[]).append(p['permission_name'])
+        for s,perms in sorted(svc.items()):
+            print(f'  {s}: {sorted(perms)}')
+"
+```
+
+### Dry-run before applying privilege changes
+
+Use `dry_run=true` to preview which users would be affected and what would change
+before committing:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+### Force re-sync all users to all services
+
+If you need to ensure every user's state is in sync (e.g. after bulk role edits):
+
+```bash
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":false}' \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 ```
 
 ---
 
 ## (f) Negative Test — User in RBAC Group But No Kerberos Principal
 
-> **Expected result:** The RBAC sync will succeed (RBAC plane has no KDC awareness),
-> but the user will be **blocked at the Kerberos authentication gate** on every service.
+> **Expected result:** The RBAC sync will succeed — the RBAC plane has no KDC awareness
+> and happily provisions Doris grants, KafkaUser CRs, OpenSearch users, and Spark allowlist
+> entries. However, the user will be **blocked at the Kerberos authentication gate** on
+> every single service.
 >
-> This is an important security property: RBAC grants are necessary but not sufficient.
-> A valid KDC principal is always required first.
+> This is the fundamental security property of the platform: **RBAC grants are necessary
+> but not sufficient. A valid KDC principal is unconditionally required.**
 
 ### Setup: create RBAC-only user (no KDC principal)
 
 ```bash
 USERNAME="ghost"
 
-# 1. Create Doris SQL user (grants exist, but guard will block)
+# 1. Doris SQL user (guard will block, but SQL user must exist for RBAC sync to succeed)
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "CREATE USER IF NOT EXISTS '${USERNAME}'@'%' IDENTIFIED BY 'Ghost1Pass!';"
 
@@ -448,106 +901,120 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -d '{"role_name":"analyst"}' \
   "${RBAC_URL}/api/v1/users/${USERNAME}/bindings"
 
-# 3. Sync — this SUCCEEDS (plane doesn't check KDC)
+# 3. Sync — this SUCCEEDS (plane doesn't consult the KDC)
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+# Expected: all four services show "synced", errors: 0
 ```
 
-**Expected sync output:** all four services show `synced` or `skipped`. Zero errors.
-
-### Confirm: `ghost` exists in downstream services
+### Confirm: `ghost` is provisioned in all downstream services
 
 ```bash
-# Doris: SQL user exists, has grants
+# Doris: SQL user exists and has grants
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "SHOW GRANTS FOR 'ghost'@'%';" 2>/dev/null
 
-# Kafka: KafkaUser CR created
+# Kafka: KafkaUser CR exists and is Ready
 kubectl get kafkauser ghost -n prod
+
+# OpenSearch: internal user created
+curl -sk -u admin:${OPENSEARCH_PASS} \
+  "https://192.168.1.50:30920/_plugins/_security/api/internalusers/ghost" | \
+  python3 -c "import sys,json; print('OS user exists:', 'ghost' in json.load(sys.stdin))"
 
 # Spark: appears in allowlist
 kubectl get configmap spark-rbac-allowlist -n prod \
-  -o jsonpath='{.data.allowlist\.json}' | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); print('ghost in allowlist:', 'ghost' in d)"
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print('in allowlist:', 'ghost' in json.load(sys.stdin))"
 ```
 
-### Test: attempt connection — all services should BLOCK
+All four checks should return positive results. Provisioning succeeded.
 
-#### Doris (via krb-doris-guard)
+### Test: attempt connection — all services must BLOCK
+
+#### Doris
 
 ```bash
-# The guard intercepts MySQL connections on port 30090 (→ internal 19030)
-# It runs: kinit -V -n ghost@STARDATADBLABS.LOCAL < /dev/null
-# Since ghost has no KDC principal, kinit returns exit code 1 → guard rejects
+# The guard (port 19030) intercepts the MySQL handshake, extracts the username,
+# and runs: kinit -V -n ghost@STARDATADBLABS.LOCAL </dev/null
+# Since ghost has no KDC principal, kinit returns exit code 1 → guard sends MySQL ERR
 
 mysql -h 192.168.1.50 -P 30090 -u ghost --password="Ghost1Pass!" \
   -e "SHOW DATABASES;" 2>&1
 
 # Expected error:
-# ERROR 1045 (28000): Access denied for user 'ghost'@...: principal ghost@STARDATADBLABS.LOCAL not found in Kerberos KDC
+# ERROR 1045 (28000): Access denied: principal ghost@STARDATADBLABS.LOCAL not found in KDC
 ```
 
 #### Kafka (GSSAPI listener, port 9093)
 
 ```bash
-# Without a TGT (kinit) the SASL handshake fails immediately
-# kinit itself fails since the principal doesn't exist:
+# Confirm the KDC principal genuinely does not exist
 kubectl exec -n prod deploy/kerberos-kdc -- \
-  kadmin.local -q "getprinc ghost@STARDATADBLABS.LOCAL" 2>&1 | grep -i "does not exist"
+  kadmin.local -q "getprinc ghost@${REALM}" 2>&1 | grep -i "does not exist"
 # Expected: "Principal does not exist"
+
+# Without a TGT (kinit fails) → SASL/GSSAPI handshake on port 9093 is rejected
+# The SCRAM listener (port 9092) is reserved for operators — not accessible externally
 ```
 
 #### OpenSearch (SPNEGO)
 
 ```bash
-# Cannot obtain a Kerberos ticket for ghost → SPNEGO negotiation fails → HTTP 401
-# (The internal OpenSearch user created by the RBAC plane is irrelevant —
-#  SPNEGO auth fails before that user is ever consulted)
+# SPNEGO requires a valid Kerberos TGT for the client.
+# Without a KDC principal the client cannot obtain a TGT → negotiate fails → HTTP 401
 curl -sk --negotiate -u : \
-  "https://192.168.1.50:30920/_cluster/health" 2>&1 | head -3
-# Expected: HTTP 401 Unauthorized
+  "https://192.168.1.50:30920/_cluster/health" -o /dev/null -w "%{http_code}\n"
+# Expected: 401
 ```
 
-#### Spark (krb-spark-guard, auth endpoint)
+#### Spark (krb-spark-guard auth endpoint)
 
 ```bash
-# The guard's POST /auth endpoint calls kinit with the user's keytab
-# Without a KDC principal there is no keytab — the call returns HTTP 401
-curl -s -X POST \
+# The guard's POST /auth API calls kinit against the provided keytab.
+# ghost has no keytab and no KDC principal → kinit fails → HTTP 401
+curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"username":"ghost","keytab_b64":""}' \
   http://192.168.1.50:30778/auth
-# Expected: HTTP 401 or {"error":"kinit failed: ..."}
+# Expected: 401
 ```
 
 ### Summary table
 
-| Service | RBAC grant state | KDC principal | Connection result |
+| Service | RBAC provisioned | KDC principal | Connection |
 |---|---|---|---|
-| Doris | ✅ SELECT_PRIV granted | ❌ no principal | ❌ **BLOCKED** by krb-doris-guard (`kinit` fails) |
-| Kafka | ✅ KafkaUser CR exists | ❌ no principal | ❌ **BLOCKED** — no TGT possible, GSSAPI rejected |
-| OpenSearch | ✅ internal user + role mapping | ❌ no principal | ❌ **BLOCKED** — SPNEGO returns HTTP 401 |
-| Spark | ✅ in allowlist | ❌ no principal | ❌ **BLOCKED** — krb-spark-guard auth call fails |
+| Doris | ✅ SQL user + grants exist | ❌ no principal | ❌ **BLOCKED** by `krb-doris-guard` — `kinit` returns exit 1 |
+| Kafka | ✅ KafkaUser CR Ready | ❌ no principal | ❌ **BLOCKED** — cannot obtain TGT, GSSAPI rejected |
+| OpenSearch | ✅ internal user + role mappings | ❌ no principal | ❌ **BLOCKED** — SPNEGO returns HTTP 401 |
+| Spark | ✅ in allowlist | ❌ no principal | ❌ **BLOCKED** — guard `kinit` call returns 401 |
 
 > **Security conclusion:**
-> Kerberos acts as the **hard authentication gate** in front of every service.
-> The RBAC plane manages *authorisation scope* (what a user can do), but a valid KDC
-> principal is unconditionally required before any service will accept a connection.
-> Removing a user's KDC principal is therefore an immediate, hard revocation — even if
-> their RBAC role bindings remain intact.
+> Kerberos is the **hard authentication gate** before every service. The RBAC plane
+> controls *authorisation scope* (what a verified user can do) but cannot bypass the
+> KDC check. Deleting a user's KDC principal is therefore an **immediate hard revocation**
+> across all services — even if their RBAC role bindings remain intact.
 
-### Cleanup
+### Cleanup: remove ghost from all services
 
 ```bash
-# Remove ghost from all downstream services
+# RBAC plane (also triggers downstream cleanup on next sync or explicit delete)
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
   "${RBAC_URL}/api/v1/users/ghost"
 
+# Doris SQL user
 mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
   -e "DROP USER IF EXISTS 'ghost'@'%';" 2>/dev/null
+
+# Kafka KafkaUser CR
 kubectl delete kafkauser ghost -n prod --ignore-not-found
+
+# Verify removal
+kubectl get kafkauser ghost -n prod 2>&1 | grep -i "not found"
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SELECT user FROM mysql.user WHERE user='ghost';" 2>/dev/null
 ```
 
 ---
@@ -560,9 +1027,9 @@ kubectl delete kafkauser ghost -n prod --ignore-not-found
 | `etl_writer` | SELECT, INSERT, UPDATE, LOAD | PRODUCE, CONSUME, DESCRIBE | — | — | ETL pipeline writer |
 | `spark_user` | — | — | — | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI | Spark job submitter |
 | `kafka_consumer` | — | CONSUME, DESCRIBE | — | — | Kafka consumer only |
-| **`data_engineer`** | SELECT, INSERT, UPDATE, DELETE, LOAD | PRODUCE, CONSUME, DESCRIBE | INDEX_READ, INDEX_WRITE, CLUSTER_READ | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI | **Data engineering team** |
-| **`platform_admin`** | All (incl. ADMIN_PRIV) | All | All | All | **Platform infra admin** |
-| **`account_admin`** | All (incl. ADMIN_PRIV) | All | All | All | **Account governance admin** |
+| **`data_engineer`** | SELECT, INSERT, UPDATE, DELETE, LOAD | PRODUCE, CONSUME, DESCRIBE | INDEX_READ, INDEX_WRITE, CLUSTER_READ | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI | Data engineering team |
+| **`platform_admin`** | All (incl. ADMIN_PRIV) | All | All | All | Platform infra admin |
+| **`account_admin`** | All (incl. ADMIN_PRIV) | All | All | All | Account governance admin |
 | `data_admin` | All | All | All | All | Generic full admin (legacy seed) |
 
 ---
@@ -570,31 +1037,60 @@ kubectl delete kafkauser ghost -n prod --ignore-not-found
 ## Quick-Reference Commands
 
 ```bash
-# List all roles
+# List all roles with permission counts
 curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
   "${RBAC_URL}/api/v1/roles" | python3 -c \
-  "import sys,json; [print(f'{r[\"name\"]:20} ({len(r[\"permissions\"])} perms)') for r in json.load(sys.stdin)]"
+  "import sys,json; [print(f'id={r[\"id\"]:2} {r[\"name\"]:20} ({len(r[\"permissions\"])} perms)') for r in json.load(sys.stdin)]"
 
-# List all users and their roles
+# Inspect a specific role's permissions
+ROLE_NAME="data_engineer"
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/roles" | \
+  python3 -c "
+import sys,json
+for r in json.load(sys.stdin):
+    if r['name']=='${ROLE_NAME}':
+        svc={}
+        for p in r['permissions']:
+            svc.setdefault(p['service_name'],[]).append(p['permission_name'])
+        for s,perms in sorted(svc.items()):
+            print(f'  {s}: {sorted(perms)}')
+"
+
+# List all users and their bound roles
 curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/users" | \
   python3 -c "import sys,json; [print(u['username']) for u in json.load(sys.stdin)]" | \
   while read u; do
-    roles=$(curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/users/${u}/roles" | \
+    roles=$(curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+      "${RBAC_URL}/api/v1/users/${u}/roles" | \
       python3 -c "import sys,json; print(', '.join(r['name'] for r in json.load(sys.stdin)))")
     echo "${u}: ${roles}"
   done
 
-# Full sync of all users to all services
+# Full platform sync — all users to all services
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"dry_run":false}' "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 
-# Dry-run to preview changes
+# Sync a single user to all services
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"dry_run":true}' "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+  -d '{"username":"carol","dry_run":false}' "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+
+# Sync all users to a single service
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"service":"doris","dry_run":false}' "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 
 # List KDC principals
 kubectl exec -n prod deploy/kerberos-kdc -- \
   kadmin.local -q "listprincs" 2>/dev/null | grep -v "^Authenticating"
+
+# Remove a user from a group (delete binding by ID)
+BINDING_ID=3  # get from GET /api/v1/users/{username}/bindings
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/carol/bindings/${BINDING_ID}"
+# Then re-sync to revoke downstream
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"carol","dry_run":false}' "${RBAC_URL}/api/v1/sync"
 ```
