@@ -135,29 +135,24 @@ class OpenSearchAdapter:
         async with self._client() as client:
             await self._upsert_user(client, username)
 
-            desired_roles: list[str] = []
+            # Build deduplicated desired role set; ensure each rbac role exists
+            desired_roles: dict[str, str] = {}   # role_name → perm_name (last wins, fine)
             for p in perms:
                 perm_name = p["permission"]
                 scope     = p.get("resource_scope") or {}
                 index     = scope.get("index", "")
                 rname = _role_name(perm_name, index)
-                await self._ensure_role(client, rname, perm_name, index)
-                desired_roles.append(rname)
+                if rname not in desired_roles:
+                    await self._ensure_role(client, rname, perm_name, index)
+                desired_roles[rname] = perm_name
 
-            if not desired_roles:
-                # Map user to an empty role list (effective revoke)
-                desired_roles = []
-
-            # Retrieve current mapping for each desired role and add user
-            # Strategy: set the users list in the rolesmapping for each rbac role
-            # Revoke: get all rbac_* rolesmappings and remove the user from any
-            # not in the desired set.
+            # Retrieve current rolesmappings snapshot
             all_mappings_resp = await client.get(
                 "/_plugins/_security/api/rolesmapping"
             )
             existing: dict = all_mappings_resp.json() if all_mappings_resp.status_code == 200 else {}
 
-            # Remove user from all rbac roles not in desired set
+            # Remove user from any rbac_* roles not in desired set
             for role_name, mapping in existing.items():
                 if not role_name.startswith("rbac_"):
                     continue
@@ -169,14 +164,17 @@ class OpenSearchAdapter:
                         json={"users": users_in_role},
                     )
 
-            # Add user to desired roles (PUT creates or replaces the mapping)
+            # Add user to each desired role (PUT creates or replaces; each role visited once)
             for rname in desired_roles:
                 mapping = existing.get(rname, {})
                 users_in_role = list(set(mapping.get("users", []) + [username]))
-                await client.put(
+                resp = await client.put(
                     f"/_plugins/_security/api/rolesmapping/{rname}",
                     json={"users": users_in_role},
                 )
+                if resp.status_code not in (200, 201):
+                    log.warning("OpenSearch: rolesmapping PUT %s → %d %s",
+                                rname, resp.status_code, resp.text[:120])
 
             log.info("OpenSearch: synced user %s → %d roles", username, len(desired_roles))
 
