@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import ssl
 from typing import Any
 
 import httpx
@@ -56,6 +57,22 @@ class OpenSearchAdapter:
 
     def _client(self) -> httpx.AsyncClient:
         s = get_settings()
+        # Prefer TLS client-cert auth (required when Kerberos is the active HTTP
+        # auth domain — Basic auth is rejected in that configuration).
+        # Fall back to Basic auth when cert paths are not configured.
+        if s.opensearch_admin_cert and s.opensearch_admin_key:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            if s.opensearch_ca_cert:
+                ctx.load_verify_locations(s.opensearch_ca_cert)
+            else:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            ctx.load_cert_chain(s.opensearch_admin_cert, s.opensearch_admin_key)
+            return httpx.AsyncClient(
+                base_url=f"https://{s.opensearch_host}:{s.opensearch_port}",
+                verify=ctx,
+                timeout=10.0,
+            )
         return httpx.AsyncClient(
             base_url=f"https://{s.opensearch_host}:{s.opensearch_port}",
             auth=(s.opensearch_admin_user, s.opensearch_admin_password),
@@ -147,19 +164,18 @@ class OpenSearchAdapter:
                 users_in_role = mapping.get("users", [])
                 if username in users_in_role and role_name not in desired_roles:
                     users_in_role.remove(username)
-                    await client.patch(
+                    await client.put(
                         f"/_plugins/_security/api/rolesmapping/{role_name}",
-                        json=[{"op": "replace", "path": "/users",
-                               "value": users_in_role}],
+                        json={"users": users_in_role},
                     )
 
-            # Add user to desired roles
+            # Add user to desired roles (PUT creates or replaces the mapping)
             for rname in desired_roles:
                 mapping = existing.get(rname, {})
                 users_in_role = list(set(mapping.get("users", []) + [username]))
-                await client.patch(
+                await client.put(
                     f"/_plugins/_security/api/rolesmapping/{rname}",
-                    json=[{"op": "replace", "path": "/users", "value": users_in_role}],
+                    json={"users": users_in_role},
                 )
 
             log.info("OpenSearch: synced user %s → %d roles", username, len(desired_roles))
