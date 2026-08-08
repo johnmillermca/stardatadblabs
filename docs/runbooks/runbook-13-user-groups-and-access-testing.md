@@ -285,20 +285,34 @@ kubectl get kafkauser ${USERNAME} -n prod
 
 #### OpenSearch
 
+> **Note:** OpenSearch's Security REST API requires the admin TLS client certificate —
+> Basic auth (`-u admin:password`) is rejected when Kerberos is the active HTTP auth domain.
+> All Security API checks below use `kubectl exec` with the admin cert from inside the cluster.
+
 ```bash
 # Internal user was created by the sync
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/internalusers/${USERNAME}" | \
-  python3 -c "import sys,json; d=json.load(sys.stdin); print('exists:', '${USERNAME}' in d)"
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/internalusers/${USERNAME}' | \
+  python3 -c \"import sys,json; d=json.load(sys.stdin); print('exists:', '${USERNAME}' in d)\"
+"
 
 # Role mappings applied by RBAC sync
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
-  python3 -c "
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
 import sys,json
 for role,m in json.load(sys.stdin).items():
     if '${USERNAME}' in m.get('users',[]):
         print(f'  mapped: {role}')
+\"
 "
 ```
 
@@ -384,12 +398,17 @@ kubectl get kafkauser ${USERNAME} -n prod
 
 #### OpenSearch
 ```bash
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
-  python3 -c "
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
 import sys,json
 roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
 print('Mapped roles:', roles)
+\"
 "
 # Expected: 5 rbac_* roles including rbac_cluster_admin_all and rbac_index_admin_all
 ```
@@ -451,12 +470,17 @@ kubectl get kafkauser ${USERNAME} -n prod
 
 #### OpenSearch
 ```bash
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
-  python3 -c "
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
 import sys,json
 roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
 print('Mapped roles:', roles)
+\"
 "
 # Expected: rbac_index_read_all, rbac_index_write_all, rbac_cluster_read_all
 # NOT expected: rbac_index_admin_all, rbac_cluster_admin_all
@@ -514,12 +538,17 @@ kubectl get kafkauser ${USERNAME} -n prod
 
 #### OpenSearch
 ```bash
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
-  python3 -c "
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
 import sys,json
 roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
 print('Mapped roles:', roles)
+\"
 "
 # Expected: all 5 rbac_* roles
 ```
@@ -683,13 +712,18 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
 
 **Verify on OpenSearch:**
 ```bash
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
-  python3 -c "
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
 import sys,json
 for role,m in json.load(sys.stdin).items():
     if 'carol' in m.get('users',[]):
         print(f'  mapped: {role}')
+\"
 "
 # Now expected: rbac_index_admin_all is in the list (was absent before)
 ```
@@ -796,13 +830,18 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
 
 **Verify on OpenSearch — INDEX_ADMIN mapping removed:**
 ```bash
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/rolesmapping" | \
-  python3 -c "
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
 import sys,json
 for role,m in json.load(sys.stdin).items():
     if 'carol' in m.get('users',[]):
         print(f'  mapped: {role}')
+\"
 "
 # rbac_index_admin_all should no longer appear
 ```
@@ -959,9 +998,14 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 kubectl get kafkauser ghost -n prod
 
 # OpenSearch: internal user created
-curl -sk -u admin:${OPENSEARCH_PASS} \
-  "https://192.168.1.50:30920/_plugins/_security/api/internalusers/ghost" | \
-  python3 -c "import sys,json; print('OS user exists:', 'ghost' in json.load(sys.stdin))"
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/internalusers/ghost' | \
+  python3 -c \"import sys,json; print('OS user exists:', 'ghost' in json.load(sys.stdin))\"
+"
 
 # Spark: appears in allowlist
 kubectl get configmap spark-rbac-allowlist -n prod \
@@ -2373,105 +2417,78 @@ kubectl exec -n prod deploy/kafka-admin -- \
 
 #### Create indexes and mappings (admin)
 
+> All admin OpenSearch calls use `kubectl exec` with the TLS admin cert — Basic auth
+> is rejected when Kerberos is the active HTTP auth domain on this cluster.
+
 ```bash
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+CERT='--cert /usr/share/opensearch/config/tls/admin.pem'
+KEY='--key  /usr/share/opensearch/config/tls/admin-key.pem'
+CA='--cacert /usr/share/opensearch/config/tls/root-ca.pem'
+OS='https://localhost:9200'
+
 # ── rbac-test-orders index ─────────────────────────────────
-curl -sk -u admin:${OPENSEARCH_PASS} -X PUT \
-  "https://192.168.1.50:30920/rbac-test-orders" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "settings": {
-      "number_of_shards": 1,
-      "number_of_replicas": 0
-    },
-    "mappings": {
-      "properties": {
-        "order_id":  { "type": "long" },
-        "customer":  { "type": "keyword" },
-        "product":   { "type": "keyword" },
-        "amount":    { "type": "double" },
-        "status":    { "type": "keyword" },
-        "created_at":{ "type": "date", "format": "strict_date_optional_time" }
-      }
-    }
-  }' | python3 -m json.tool
+curl -sk \$CERT \$KEY \$CA -X PUT \"\${OS}/rbac-test-orders\" \
+  -H 'Content-Type: application/json' \
+  -d '{\"settings\":{\"number_of_shards\":1,\"number_of_replicas\":0},
+       \"mappings\":{\"properties\":{
+         \"order_id\":{\"type\":\"long\"},\"customer\":{\"type\":\"keyword\"},
+         \"product\":{\"type\":\"keyword\"},\"amount\":{\"type\":\"double\"},
+         \"status\":{\"type\":\"keyword\"},
+         \"created_at\":{\"type\":\"date\",\"format\":\"strict_date_optional_time\"}}}}' | \
+  python3 -c \"import sys,json; r=json.load(sys.stdin); print('orders index:', r.get('acknowledged'))\"
 
 # ── rbac-test-events index ─────────────────────────────────
-curl -sk -u admin:${OPENSEARCH_PASS} -X PUT \
-  "https://192.168.1.50:30920/rbac-test-events" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
-    "mappings": {
-      "properties": {
-        "event_id":   { "type": "long" },
-        "event_type": { "type": "keyword" },
-        "user_id":    { "type": "keyword" },
-        "payload":    { "type": "object", "enabled": false },
-        "ts":         { "type": "date", "format": "strict_date_optional_time" }
-      }
-    }
-  }' | python3 -m json.tool
+curl -sk \$CERT \$KEY \$CA -X PUT \"\${OS}/rbac-test-events\" \
+  -H 'Content-Type: application/json' \
+  -d '{\"settings\":{\"number_of_shards\":1,\"number_of_replicas\":0},
+       \"mappings\":{\"properties\":{
+         \"event_id\":{\"type\":\"long\"},\"event_type\":{\"type\":\"keyword\"},
+         \"user_id\":{\"type\":\"keyword\"},
+         \"payload\":{\"type\":\"object\",\"enabled\":false},
+         \"ts\":{\"type\":\"date\",\"format\":\"strict_date_optional_time\"}}}}' | \
+  python3 -c \"import sys,json; r=json.load(sys.stdin); print('events index:', r.get('acknowledged'))\"
 
 # ── rbac-test-products index ───────────────────────────────
-curl -sk -u admin:${OPENSEARCH_PASS} -X PUT \
-  "https://192.168.1.50:30920/rbac-test-products" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
-    "mappings": {
-      "properties": {
-        "product_id": { "type": "integer" },
-        "name":       { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
-        "category":   { "type": "keyword" },
-        "price":      { "type": "double" }
-      }
-    }
-  }' | python3 -m json.tool
+curl -sk \$CERT \$KEY \$CA -X PUT \"\${OS}/rbac-test-products\" \
+  -H 'Content-Type: application/json' \
+  -d '{\"settings\":{\"number_of_shards\":1,\"number_of_replicas\":0},
+       \"mappings\":{\"properties\":{
+         \"product_id\":{\"type\":\"integer\"},
+         \"name\":{\"type\":\"text\",\"fields\":{\"keyword\":{\"type\":\"keyword\"}}},
+         \"category\":{\"type\":\"keyword\"},\"price\":{\"type\":\"double\"}}}}' | \
+  python3 -c \"import sys,json; r=json.load(sys.stdin); print('products index:', r.get('acknowledged'))\"
+"
 ```
 
 #### Bulk-index sample documents (admin)
 
 ```bash
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+CERT='--cert /usr/share/opensearch/config/tls/admin.pem'
+KEY='--key  /usr/share/opensearch/config/tls/admin-key.pem'
+CA='--cacert /usr/share/opensearch/config/tls/root-ca.pem'
+OS='https://localhost:9200'
+
 # Index 5 orders
-curl -sk -u admin:${OPENSEARCH_PASS} -X POST \
-  "https://192.168.1.50:30920/rbac-test-orders/_bulk" \
-  -H "Content-Type: application/x-ndjson" \
-  -d '
-{"index":{"_id":"1001"}}
-{"order_id":1001,"customer":"alice","product":"Widget Alpha","amount":19.98,"status":"completed","created_at":"2025-01-10T09:00:00Z"}
-{"index":{"_id":"1002"}}
-{"order_id":1002,"customer":"bob","product":"Gizmo Pro","amount":49.99,"status":"shipped","created_at":"2025-01-11T10:30:00Z"}
-{"index":{"_id":"1003"}}
-{"order_id":1003,"customer":"carol","product":"Widget Beta","amount":14.99,"status":"pending","created_at":"2025-01-12T14:15:00Z"}
-{"index":{"_id":"1004"}}
-{"order_id":1004,"customer":"alice","product":"Gizmo Lite","amount":24.99,"status":"completed","created_at":"2025-01-13T08:45:00Z"}
-{"index":{"_id":"1005"}}
-{"order_id":1005,"customer":"dave","product":"Thingamajig","amount":5.00,"status":"cancelled","created_at":"2025-01-14T16:00:00Z"}
-' | python3 -c "import sys,json; r=json.load(sys.stdin); print(f'indexed: errors={r[\"errors\"]}, items={len(r[\"items\"])}')"
+printf '{\"index\":{\"_id\":\"1001\"}}\n{\"order_id\":1001,\"customer\":\"alice\",\"product\":\"Widget Alpha\",\"amount\":19.98,\"status\":\"completed\",\"created_at\":\"2025-01-10T09:00:00Z\"}\n{\"index\":{\"_id\":\"1002\"}}\n{\"order_id\":1002,\"customer\":\"bob\",\"product\":\"Gizmo Pro\",\"amount\":49.99,\"status\":\"shipped\",\"created_at\":\"2025-01-11T10:30:00Z\"}\n{\"index\":{\"_id\":\"1003\"}}\n{\"order_id\":1003,\"customer\":\"carol\",\"product\":\"Widget Beta\",\"amount\":14.99,\"status\":\"pending\",\"created_at\":\"2025-01-12T14:15:00Z\"}\n{\"index\":{\"_id\":\"1004\"}}\n{\"order_id\":1004,\"customer\":\"alice\",\"product\":\"Gizmo Lite\",\"amount\":24.99,\"status\":\"completed\",\"created_at\":\"2025-01-13T08:45:00Z\"}\n{\"index\":{\"_id\":\"1005\"}}\n{\"order_id\":1005,\"customer\":\"dave\",\"product\":\"Thingamajig\",\"amount\":5.00,\"status\":\"cancelled\",\"created_at\":\"2025-01-14T16:00:00Z\"}\n' | \
+  curl -sk \$CERT \$KEY \$CA -X POST \"\${OS}/rbac-test-orders/_bulk\" \
+    -H 'Content-Type: application/x-ndjson' --data-binary @- | \
+  python3 -c \"import sys,json; r=json.load(sys.stdin); print(f'orders bulk: errors={r[\\\"errors\\\"]}, items={len(r[\\\"items\\\"])}')\"
 
 # Index 5 products
-curl -sk -u admin:${OPENSEARCH_PASS} -X POST \
-  "https://192.168.1.50:30920/rbac-test-products/_bulk" \
-  -H "Content-Type: application/x-ndjson" \
-  -d '
-{"index":{"_id":"1"}}
-{"product_id":1,"name":"Widget Alpha","category":"Widgets","price":9.99}
-{"index":{"_id":"2"}}
-{"product_id":2,"name":"Widget Beta","category":"Widgets","price":14.99}
-{"index":{"_id":"3"}}
-{"product_id":3,"name":"Gizmo Pro","category":"Gizmos","price":49.99}
-{"index":{"_id":"4"}}
-{"product_id":4,"name":"Gizmo Lite","category":"Gizmos","price":24.99}
-{"index":{"_id":"5"}}
-{"product_id":5,"name":"Thingamajig","category":"Other","price":5.00}
-' | python3 -c "import sys,json; r=json.load(sys.stdin); print(f'indexed: errors={r[\"errors\"]}, items={len(r[\"items\"])}')"
+printf '{\"index\":{\"_id\":\"1\"}}\n{\"product_id\":1,\"name\":\"Widget Alpha\",\"category\":\"Widgets\",\"price\":9.99}\n{\"index\":{\"_id\":\"2\"}}\n{\"product_id\":2,\"name\":\"Widget Beta\",\"category\":\"Widgets\",\"price\":14.99}\n{\"index\":{\"_id\":\"3\"}}\n{\"product_id\":3,\"name\":\"Gizmo Pro\",\"category\":\"Gizmos\",\"price\":49.99}\n{\"index\":{\"_id\":\"4\"}}\n{\"product_id\":4,\"name\":\"Gizmo Lite\",\"category\":\"Gizmos\",\"price\":24.99}\n{\"index\":{\"_id\":\"5\"}}\n{\"product_id\":5,\"name\":\"Thingamajig\",\"category\":\"Other\",\"price\":5.00}\n' | \
+  curl -sk \$CERT \$KEY \$CA -X POST \"\${OS}/rbac-test-products/_bulk\" \
+    -H 'Content-Type: application/x-ndjson' --data-binary @- | \
+  python3 -c \"import sys,json; r=json.load(sys.stdin); print(f'products bulk: errors={r[\\\"errors\\\"]}, items={len(r[\\\"items\\\"])}')\"
 
 # Verify document counts
 for idx in rbac-test-orders rbac-test-products rbac-test-events; do
-  count=$(curl -sk -u admin:${OPENSEARCH_PASS} \
-    "https://192.168.1.50:30920/${idx}/_count" | python3 -c "import sys,json; print(json.load(sys.stdin)['count'])")
-  echo "${idx}: ${count} documents"
+  count=\$(curl -sk \$CERT \$KEY \$CA \"\${OS}/\${idx}/_count\" | \
+    python3 -c 'import sys,json; print(json.load(sys.stdin)[\"count\"])')
+  echo \"\${idx}: \${count} documents\"
 done
+"
 ```
 
 Expected:
@@ -2895,11 +2912,16 @@ for TOPIC in rbac-test-orders rbac-test-events rbac-test-products; do
 done
 
 # OpenSearch indexes
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+CERT='--cert /usr/share/opensearch/config/tls/admin.pem'
+KEY='--key  /usr/share/opensearch/config/tls/admin-key.pem'
+CA='--cacert /usr/share/opensearch/config/tls/root-ca.pem'
+OS='https://localhost:9200'
 for IDX in rbac-test-orders rbac-test-events rbac-test-products; do
-  curl -sk -u admin:${OPENSEARCH_PASS} -X DELETE \
-    "https://192.168.1.50:30920/${IDX}" | \
-    python3 -c "import sys,json; r=json.load(sys.stdin); print(f'deleted {\"${IDX}\"}: {r.get(\"acknowledged\")}')"
+  curl -sk \$CERT \$KEY \$CA -X DELETE \"\${OS}/\${IDX}\" | \
+    python3 -c \"import sys,json; r=json.load(sys.stdin); print(f'deleted \${IDX}: {r.get(\\\"acknowledged\\\")}')\"
 done
+"
 
 # Spark / Polaris Iceberg tables
 kubectl exec -n prod deploy/spark-master -- spark-shell \
