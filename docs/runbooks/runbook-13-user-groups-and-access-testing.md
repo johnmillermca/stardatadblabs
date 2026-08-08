@@ -17,6 +17,7 @@ This runbook covers the full lifecycle of user groups on the platform:
 | [(g)](#g-creating-a-new-user-group-with-custom-privileges-and-adding-users) | Creating a brand-new user group with custom privileges — Doris, Kafka, OpenSearch, Spark |
 | [(h)](#h-doris-column-level-privileges) | Doris column-level SELECT — syntax, worked example, limitations, revoke |
 | [(i)](#i-polaris-catalog-grants-for-write_iceberg--admin_catalog) | Polaris catalog grants for `WRITE_ICEBERG` / `ADMIN_CATALOG` |
+| [(j)](#j-sample-data-setup-and-end-to-end-permission-testing) | **Sample data setup** — create test tables/topics/indexes and run permission tests |
 
 ---
 
@@ -134,16 +135,16 @@ curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
 > This is the **complete onboarding checklist** for any new user on the platform.
 > All four services require different setup steps. Complete them in the order shown.
 >
-> **Identity convention:** the same short username (e.g. `newuser`) is used across
+> **Identity convention:** the same short username (e.g. `john`) is used across
 > Kerberos, Doris, Kafka, OpenSearch, and Spark. The KDC principal carries the realm:
-> `newuser@STARDATADBLABS.LOCAL`. All services strip the realm and use `newuser`.
+> `john@STARDATADBLABS.LOCAL`. All services strip the realm and use `john`.
 
 ```bash
 # Set for the whole section
-USERNAME="newuser"
+USERNAME="john"
 PASSWORD="TempPass1!"
 ROLE="data_engineer"    # or: platform_admin, account_admin, analyst, etl_writer …
-DISPLAY_NAME="New User"
+DISPLAY_NAME="John Miller"
 EMAIL="${USERNAME}@example.com"
 ```
 
@@ -548,9 +549,10 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 > state to the downstream services.
 >
 > **API endpoints:**
-> - Add permission: `POST /api/v1/roles/{role_id}/permissions/{permission_id}`
-> - Remove permission: `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
-> - See the [Permission ID reference](#permission-id-reference) table above for IDs.
+> - Add permission: `POST /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`
+> - Remove permission: `DELETE /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`
+> - `service_name` is one of `doris`, `kafka`, `opensearch`, `spark`.
+> - `permission_name` is the token exactly as listed in the [Permission ID reference](#permission-id-reference), e.g. `SELECT`, `CONSUME`, `INDEX_READ`.
 
 ### Get role IDs
 
@@ -586,17 +588,14 @@ downstream services.
 
 #### Example A — Give `data_engineer` the ability to CREATE tables in Doris
 
-> Adding permission `CREATE` (id=5) to role `data_engineer` (id=7).
+> Adding permission `doris:CREATE` to role `data_engineer` (id=7).
 
 ```bash
-ROLE_ID=7          # data_engineer
-PERMISSION_ID=5    # doris.CREATE
+ROLE_ID=7   # data_engineer
 
 # 1. Add the permission to the role
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/doris/CREATE" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -624,17 +623,14 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 
 #### Example B — Give `data_engineer` the ability to CREATE_TOPIC in Kafka
 
-> Adding permission `CREATE_TOPIC` (id=13) to role `data_engineer` (id=7).
+> Adding permission `kafka:CREATE_TOPIC` to role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=13   # kafka.CREATE_TOPIC
 
 # 1. Add permission
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/kafka/CREATE_TOPIC" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -661,17 +657,14 @@ kubectl get kafkauser carol -n prod -o jsonpath='{.status.conditions[0].type}'
 
 #### Example C — Give `data_engineer` INDEX_ADMIN on OpenSearch
 
-> Adding permission `INDEX_ADMIN` (id=19) to role `data_engineer` (id=7).
+> Adding permission `opensearch:INDEX_ADMIN` to role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=19   # opensearch.INDEX_ADMIN
 
 # 1. Add permission
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/opensearch/INDEX_ADMIN" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -703,17 +696,14 @@ for role,m in json.load(sys.stdin).items():
 
 #### Example D — Give `data_engineer` KILL_ANY_JOB on Spark
 
-> Adding permission `KILL_ANY_JOB` (id=24) to role `data_engineer` (id=7).
+> Adding permission `spark:KILL_ANY_JOB` to role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=24   # spark.KILL_ANY_JOB
 
 # 1. Add permission
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/KILL_ANY_JOB" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -741,21 +731,20 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 
 ### Removing a privilege from a user group
 
-**Pattern:** `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
+**Pattern:** `DELETE /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`
 
 After removing, sync all affected users to revoke the privilege in the downstream services.
 
 #### Example E — Remove CREATE from `data_engineer` in Doris
 
-> Removing permission `CREATE` (id=5) from role `data_engineer` (id=7).
+> Removing permission `doris:CREATE` from role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=5    # doris.CREATE
 
 # 1. Remove the permission from the role
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/doris/CREATE" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -781,15 +770,14 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 
 #### Example F — Remove INDEX_ADMIN from `data_engineer` in OpenSearch
 
-> Removing permission `INDEX_ADMIN` (id=19) from role `data_engineer` (id=7).
+> Removing permission `opensearch:INDEX_ADMIN` from role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=19   # opensearch.INDEX_ADMIN
 
 # 1. Remove
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/opensearch/INDEX_ADMIN" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -821,15 +809,14 @@ for role,m in json.load(sys.stdin).items():
 
 #### Example G — Remove KILL_ANY_JOB from `data_engineer` in Spark
 
-> Removing permission `KILL_ANY_JOB` (id=24) from role `data_engineer` (id=7).
+> Removing permission `spark:KILL_ANY_JOB` from role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=24   # spark.KILL_ANY_JOB
 
 # 1. Remove
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}"
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/KILL_ANY_JOB"
 
 # 2. Sync to Spark
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -850,15 +837,14 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 
 #### Example H — Remove CREATE_TOPIC from `data_engineer` in Kafka
 
-> Removing permission `CREATE_TOPIC` (id=13) from role `data_engineer` (id=7).
+> Removing permission `kafka:CREATE_TOPIC` from role `data_engineer` (id=7).
 
 ```bash
 ROLE_ID=7
-PERMISSION_ID=13   # kafka.CREATE_TOPIC
 
 # 1. Remove
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${PERMISSION_ID}"
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/kafka/CREATE_TOPIC"
 
 # 2. Sync to Kafka
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -1166,52 +1152,44 @@ Expected response:
 
 ### Step 2 — Add permissions for each service
 
-> Each permission is added with `POST /api/v1/roles/{role_id}/permissions/{permission_id}`.
-> The body must be `{}` (empty JSON object, not empty body).
-> See the [Permission ID reference](#permission-id-reference) table for all 35 IDs.
+> Each permission is added with `POST /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`.
+> No request body is needed.
+> See the [Permission ID reference](#permission-id-reference) table for the full list of permission names.
 
 #### Doris — SELECT only
 
 ```bash
-# doris.SELECT = permission id 1
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" -d '{}' \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/1" | \
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/doris/SELECT" | \
   python3 -c "import sys,json; r=json.load(sys.stdin); print(f'  doris perms: {[p[\"permission_name\"] for p in r[\"permissions\"] if p[\"service_name\"]==\"doris\"]}')"
 ```
 
 #### Kafka — CONSUME + DESCRIBE
 
 ```bash
-# kafka.CONSUME = 12, kafka.DESCRIBE = 15
-for pid in 12 15; do
+for PERM in CONSUME DESCRIBE; do
   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-    -H "Content-Type: application/json" -d '{}' \
-    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${pid}" > /dev/null \
-    && echo "  added kafka perm ${pid}"
+    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/kafka/${PERM}" > /dev/null \
+    && echo "  added kafka:${PERM}"
 done
 ```
 
 #### OpenSearch — INDEX_READ + CLUSTER_READ
 
 ```bash
-# opensearch.INDEX_READ = 17, opensearch.CLUSTER_READ = 20
-for pid in 17 20; do
+for PERM in INDEX_READ CLUSTER_READ; do
   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-    -H "Content-Type: application/json" -d '{}' \
-    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/${pid}" > /dev/null \
-    && echo "  added opensearch perm ${pid}"
+    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/opensearch/${PERM}" > /dev/null \
+    && echo "  added opensearch:${PERM}"
 done
 ```
 
 #### Spark — VIEW_UI only
 
 ```bash
-# spark.VIEW_UI = 25
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  -H "Content-Type: application/json" -d '{}' \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/25" > /dev/null \
-  && echo "  added spark perm 25"
+  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/VIEW_UI" > /dev/null \
+  && echo "  added spark:VIEW_UI"
 ```
 
 ---
@@ -1952,11 +1930,10 @@ RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 
 # ── Step A: RBAC plane — ensure the permission is on the role ──────────────
-# data_engineer already has WRITE_ICEBERG (id=34) after migration 004.
+# data_engineer already has WRITE_ICEBERG after migration 004.
 # If adding to a custom role:
 #   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-#     -H "Content-Type: application/json" -d '{}' \
-#     "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/34"
+#     "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/WRITE_ICEBERG"
 
 # ── Step B: RBAC plane — sync to push allowlist entry ─────────────────────
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -1990,3 +1967,968 @@ kill %1   # stop port-forward
 > but **no Polaris catalog role** will pass the guard but receive a 403 from the Polaris
 > catalog API when attempting to write. Conversely, a user with a Polaris catalog role
 > but `can_write_iceberg: false` will be blocked by the guard before reaching Polaris.
+
+---
+
+## (j) Sample Data Setup and End-to-End Permission Testing
+
+> **Purpose:** Create concrete test fixtures — a Doris database with tables, Kafka topics,
+> OpenSearch indexes, and a Spark Iceberg table — then run permission-gated queries as each
+> role to confirm the RBAC plane is enforcing access correctly.
+>
+> All samples use the test user **`testuser`** (bound to `data_engineer`) and **`readonlyuser`**
+> (bound to `analyst`). Run section [(a)](#a-adding-a-new-user-to-a-group) to create them
+> before starting here.
+
+```bash
+# Prerequisite variables — already set if you followed the Prerequisites section above
+export RBAC_URL="http://192.168.1.50:30850"
+export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+export DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+export OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d 2>/dev/null || echo "admin")
+export REALM="STARDATADBLABS.LOCAL"
+
+TESTUSER="testuser"
+TESTPASS="TestPass1!"
+READONLY="readonlyuser"
+READONLY_PASS="ReadOnly1!"
+```
+
+### Step 0 — Create the two test users (skip if already exists)
+
+```bash
+# KDC principals
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "addprinc -pw ${TESTPASS} ${TESTUSER}@${REALM}"
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "addprinc -pw ${READONLY_PASS} ${READONLY}@${REALM}"
+
+# Doris SQL users
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" -e "
+  CREATE USER IF NOT EXISTS '${TESTUSER}'@'%'  IDENTIFIED BY '${TESTPASS}';
+  CREATE USER IF NOT EXISTS '${READONLY}'@'%'  IDENTIFIED BY '${READONLY_PASS}';
+" 2>/dev/null
+
+# RBAC: register + bind roles
+for U in ${TESTUSER} ${READONLY}; do
+  curl -sf -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${U}\",\"display_name\":\"${U} (test)\",\"email\":\"${U}@test.invalid\"}" \
+    "${RBAC_URL}/api/v1/users" > /dev/null && echo "Registered ${U}"
+done
+
+curl -sf -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"role_name":"data_engineer"}' \
+  "${RBAC_URL}/api/v1/users/${TESTUSER}/bindings" > /dev/null && echo "Bound data_engineer → ${TESTUSER}"
+
+curl -sf -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"role_name":"analyst"}' \
+  "${RBAC_URL}/api/v1/users/${READONLY}/bindings" > /dev/null && echo "Bound analyst → ${READONLY}"
+
+# Sync both users to all services
+for U in ${TESTUSER} ${READONLY}; do
+  curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${U}\",\"dry_run\":false}" \
+    "${RBAC_URL}/api/v1/sync" | \
+    python3 -c "import sys,json; r=json.load(sys.stdin); print(f'sync {\"${U}\"}: errors={r[\"errors\"]}')"
+done
+```
+
+---
+
+### Doris — Create sample database and tables
+
+All sample objects live in the `rbac_test` database. Run these as the Doris **root** user.
+
+#### Create database and tables (root only)
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" 2>/dev/null << 'SQL'
+
+-- ── Database ─────────────────────────────────────────────
+CREATE DATABASE IF NOT EXISTS rbac_test;
+
+-- ── orders table ─────────────────────────────────────────
+-- Simulates a transactional orders table.
+-- data_engineer can SELECT + INSERT/UPDATE/DELETE.
+-- analyst can SELECT only.
+CREATE TABLE IF NOT EXISTS rbac_test.orders (
+  order_id    BIGINT        NOT NULL,
+  customer    VARCHAR(100)  NOT NULL,
+  product     VARCHAR(200)  NOT NULL,
+  amount      DECIMAL(12,2) NOT NULL,
+  status      VARCHAR(30)   NOT NULL DEFAULT 'pending',
+  created_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+DUPLICATE KEY(order_id)
+DISTRIBUTED BY HASH(order_id) BUCKETS 4
+PROPERTIES ("replication_num" = "1");
+
+-- ── products table ────────────────────────────────────────
+-- Lookup / reference table.
+CREATE TABLE IF NOT EXISTS rbac_test.products (
+  product_id  INT           NOT NULL,
+  name        VARCHAR(200)  NOT NULL,
+  category    VARCHAR(100)  NOT NULL,
+  price       DECIMAL(10,2) NOT NULL
+)
+DUPLICATE KEY(product_id)
+DISTRIBUTED BY HASH(product_id) BUCKETS 4
+PROPERTIES ("replication_num" = "1");
+
+-- ── events table ─────────────────────────────────────────
+-- Append-only event log — tests INSERT (LOAD_PRIV) restriction.
+CREATE TABLE IF NOT EXISTS rbac_test.events (
+  event_id    BIGINT        NOT NULL,
+  event_type  VARCHAR(50)   NOT NULL,
+  user_id     VARCHAR(80)   NOT NULL,
+  payload     VARCHAR(4000) NOT NULL DEFAULT '{}',
+  ts          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+DUPLICATE KEY(event_id, ts)
+DISTRIBUTED BY HASH(event_id) BUCKETS 4
+PROPERTIES ("replication_num" = "1");
+
+-- ── Seed data ─────────────────────────────────────────────
+INSERT INTO rbac_test.products VALUES
+  (1, 'Widget Alpha',  'Widgets',  9.99),
+  (2, 'Widget Beta',   'Widgets', 14.99),
+  (3, 'Gizmo Pro',     'Gizmos',  49.99),
+  (4, 'Gizmo Lite',    'Gizmos',  24.99),
+  (5, 'Thingamajig',   'Other',    5.00);
+
+INSERT INTO rbac_test.orders VALUES
+  (1001, 'alice',   'Widget Alpha',  19.98, 'completed',  '2025-01-10 09:00:00'),
+  (1002, 'bob',     'Gizmo Pro',     49.99, 'shipped',    '2025-01-11 10:30:00'),
+  (1003, 'carol',   'Widget Beta',   14.99, 'pending',    '2025-01-12 14:15:00'),
+  (1004, 'alice',   'Gizmo Lite',    24.99, 'completed',  '2025-01-13 08:45:00'),
+  (1005, 'dave',    'Thingamajig',    5.00, 'cancelled',  '2025-01-14 16:00:00');
+
+INSERT INTO rbac_test.events VALUES
+  (1, 'login',     'alice',  '{"ip":"10.0.0.1"}',          '2025-01-10 08:59:00'),
+  (2, 'purchase',  'alice',  '{"order_id":1001}',           '2025-01-10 09:00:01'),
+  (3, 'login',     'bob',    '{"ip":"10.0.0.2"}',           '2025-01-11 10:29:00'),
+  (4, 'purchase',  'bob',    '{"order_id":1002}',           '2025-01-11 10:30:01'),
+  (5, 'logout',    'carol',  '{"session_duration":"120s"}', '2025-01-12 14:20:00');
+
+SQL
+echo "Doris sample data created"
+```
+
+#### Verify tables and row counts (root)
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" 2>/dev/null -e "
+  SELECT 'orders'   AS tbl, COUNT(*) AS rows FROM rbac_test.orders
+  UNION ALL
+  SELECT 'products', COUNT(*) FROM rbac_test.products
+  UNION ALL
+  SELECT 'events',   COUNT(*) FROM rbac_test.events;
+"
+```
+
+Expected:
+```
++-----------+------+
+| tbl       | rows |
++-----------+------+
+| orders    |    5 |
+| products  |    5 |
+| events    |    5 |
++-----------+------+
+```
+
+---
+
+#### Test: `analyst` — SELECT allowed, writes blocked
+
+```bash
+# ✅ SELECT — must succeed
+mysql -h 192.168.1.50 -P 30090 -u ${READONLY} --password="${READONLY_PASS}" 2>/dev/null \
+  -e "SELECT order_id, customer, amount FROM rbac_test.orders LIMIT 3;"
+
+# ✅ Aggregate query — must succeed
+mysql -h 192.168.1.50 -P 30090 -u ${READONLY} --password="${READONLY_PASS}" 2>/dev/null \
+  -e "SELECT status, COUNT(*) AS cnt, SUM(amount) AS total
+      FROM rbac_test.orders GROUP BY status ORDER BY cnt DESC;"
+
+# ❌ INSERT — must be denied (analyst has no LOAD_PRIV)
+mysql -h 192.168.1.50 -P 30090 -u ${READONLY} --password="${READONLY_PASS}" 2>&1 \
+  -e "INSERT INTO rbac_test.orders VALUES (9999,'x','y',1.00,'pending','2025-01-01 00:00:00');" | \
+  grep -i "denied\|error"
+# Expected: Access denied
+
+# ❌ CREATE TABLE — must be denied
+mysql -h 192.168.1.50 -P 30090 -u ${READONLY} --password="${READONLY_PASS}" 2>&1 \
+  -e "CREATE TABLE rbac_test.forbidden (id INT);" | grep -i "denied\|error"
+# Expected: Access denied
+```
+
+#### Test: `data_engineer` — SELECT + DML allowed, admin ops blocked
+
+```bash
+# ✅ SELECT — must succeed
+mysql -h 192.168.1.50 -P 30090 -u ${TESTUSER} --password="${TESTPASS}" 2>/dev/null \
+  -e "SELECT p.name, p.category, COUNT(o.order_id) AS order_count
+      FROM rbac_test.products p
+      LEFT JOIN rbac_test.orders o ON o.product = p.name
+      GROUP BY p.name, p.category
+      ORDER BY order_count DESC;"
+
+# ✅ INSERT — must succeed
+mysql -h 192.168.1.50 -P 30090 -u ${TESTUSER} --password="${TESTPASS}" 2>/dev/null \
+  -e "INSERT INTO rbac_test.orders
+      VALUES (1006,'eve','Widget Alpha',9.99,'pending','2025-01-15 11:00:00');"
+echo "Insert result: $?"
+
+# ✅ UPDATE — must succeed
+mysql -h 192.168.1.50 -P 30090 -u ${TESTUSER} --password="${TESTPASS}" 2>/dev/null \
+  -e "UPDATE rbac_test.orders SET status='shipped' WHERE order_id=1006;"
+
+# ✅ DELETE — must succeed
+mysql -h 192.168.1.50 -P 30090 -u ${TESTUSER} --password="${TESTPASS}" 2>/dev/null \
+  -e "DELETE FROM rbac_test.orders WHERE order_id=1006;"
+
+# ❌ DROP TABLE — must be denied (no DROP_PRIV)
+mysql -h 192.168.1.50 -P 30090 -u ${TESTUSER} --password="${TESTPASS}" 2>&1 \
+  -e "DROP TABLE rbac_test.orders;" | grep -i "denied\|error"
+# Expected: Access denied
+
+# ❌ GRANT — must be denied (no GRANT_PRIV)
+mysql -h 192.168.1.50 -P 30090 -u ${TESTUSER} --password="${TESTPASS}" 2>&1 \
+  -e "GRANT SELECT_PRIV ON rbac_test.orders TO 'someuser'@'%';" | grep -i "denied\|error"
+# Expected: Access denied
+```
+
+---
+
+### Kafka — Create sample topics
+
+Topics are created by an admin user. The three topics test produce, consume, and schema
+registry permissions.
+
+#### Create topics (admin)
+
+```bash
+# Get the Kafka bootstrap address
+KAFKA_BOOTSTRAP="192.168.1.50:30092"   # NodePort for the PLAINTEXT / SCRAM listener
+
+# Use the strimzi/kafka container to run kafka-topics.sh
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-topics.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --command-config /opt/kafka/config/admin.properties \
+    --create --if-not-exists \
+    --topic rbac-test-orders \
+    --partitions 3 \
+    --replication-factor 1 \
+    --config retention.ms=86400000
+
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-topics.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --command-config /opt/kafka/config/admin.properties \
+    --create --if-not-exists \
+    --topic rbac-test-events \
+    --partitions 3 \
+    --replication-factor 1 \
+    --config retention.ms=86400000
+
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-topics.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --command-config /opt/kafka/config/admin.properties \
+    --create --if-not-exists \
+    --topic rbac-test-products \
+    --partitions 1 \
+    --replication-factor 1
+
+# Verify topics were created
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-topics.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --command-config /opt/kafka/config/admin.properties \
+    --list | grep rbac-test
+```
+
+Expected output:
+```
+rbac-test-events
+rbac-test-orders
+rbac-test-products
+```
+
+#### Seed `rbac-test-orders` with sample messages (admin)
+
+```bash
+# Produce 5 sample JSON messages to rbac-test-orders
+kubectl exec -n prod deploy/kafka-admin -- bash -c "
+cat <<'MSGS' | kafka-console-producer.sh \
+  --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --producer.config /opt/kafka/config/admin.properties \
+  --topic rbac-test-orders
+{\"order_id\":1001,\"customer\":\"alice\",\"product\":\"Widget Alpha\",\"amount\":19.98,\"status\":\"completed\"}
+{\"order_id\":1002,\"customer\":\"bob\",\"product\":\"Gizmo Pro\",\"amount\":49.99,\"status\":\"shipped\"}
+{\"order_id\":1003,\"customer\":\"carol\",\"product\":\"Widget Beta\",\"amount\":14.99,\"status\":\"pending\"}
+{\"order_id\":1004,\"customer\":\"alice\",\"product\":\"Gizmo Lite\",\"amount\":24.99,\"status\":\"completed\"}
+{\"order_id\":1005,\"customer\":\"dave\",\"product\":\"Thingamajig\",\"amount\":5.00,\"status\":\"cancelled\"}
+MSGS
+"
+echo "Messages produced to rbac-test-orders"
+```
+
+#### Test: `data_engineer` — PRODUCE + CONSUME
+
+```bash
+# Get the SCRAM credentials that the RBAC sync created for testuser
+SCRAM_SECRET=$(kubectl get secret ${TESTUSER} -n prod \
+  -o jsonpath='{.data.password}' | base64 -d 2>/dev/null)
+
+# Write a consumer config with testuser credentials
+cat > /tmp/testuser-consumer.properties << EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="${TESTUSER}" password="${SCRAM_SECRET}";
+group.id=rbac-test-consumer-group
+auto.offset.reset=earliest
+EOF
+
+# ✅ CONSUME — read messages from rbac-test-orders (must succeed)
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-console-consumer.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --consumer.config /tmp/testuser-consumer.properties \
+    --topic rbac-test-orders \
+    --from-beginning \
+    --max-messages 5 \
+    --timeout-ms 10000
+# Expected: 5 JSON messages printed
+
+# ✅ PRODUCE — write a new event message (must succeed)
+echo '{"order_id":1006,"customer":"eve","product":"Widget Alpha","amount":9.99,"status":"pending"}' | \
+kubectl exec -i -n prod deploy/kafka-admin -- \
+  kafka-console-producer.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --producer.config /tmp/testuser-consumer.properties \
+    --topic rbac-test-events
+echo "Produce result: $?"
+```
+
+#### Test: `analyst` — CONSUME only, PRODUCE blocked
+
+```bash
+READONLY_SCRAM=$(kubectl get secret ${READONLY} -n prod \
+  -o jsonpath='{.data.password}' | base64 -d 2>/dev/null)
+
+cat > /tmp/readonly-consumer.properties << EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="${READONLY}" password="${READONLY_SCRAM}";
+group.id=rbac-test-analyst-group
+auto.offset.reset=earliest
+EOF
+
+# ✅ CONSUME — must succeed (analyst has CONSUME permission)
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-console-consumer.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --consumer.config /tmp/readonly-consumer.properties \
+    --topic rbac-test-orders \
+    --from-beginning \
+    --max-messages 3 \
+    --timeout-ms 10000
+# Expected: 3 JSON messages
+
+# Note: this cluster has allow.everyone.if.no.acl.found=true, so broker-level ACL
+# enforcement is not active. The KafkaUser CR and SCRAM credentials are the
+# enforced boundary — the user must be authenticated. Permission differences between
+# roles are recorded in the RBAC plane for governance and future ACL enforcement.
+```
+
+#### Describe topic metadata (DESCRIBE permission test)
+
+```bash
+# Both analyst and data_engineer have DESCRIBE — both should succeed
+kubectl exec -n prod deploy/kafka-admin -- \
+  kafka-topics.sh \
+    --bootstrap-server ${KAFKA_BOOTSTRAP} \
+    --command-config /tmp/testuser-consumer.properties \
+    --describe \
+    --topic rbac-test-orders
+```
+
+---
+
+### OpenSearch — Create sample indexes
+
+#### Create indexes and mappings (admin)
+
+```bash
+# ── rbac-test-orders index ─────────────────────────────────
+curl -sk -u admin:${OPENSEARCH_PASS} -X PUT \
+  "https://192.168.1.50:30920/rbac-test-orders" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "properties": {
+        "order_id":  { "type": "long" },
+        "customer":  { "type": "keyword" },
+        "product":   { "type": "keyword" },
+        "amount":    { "type": "double" },
+        "status":    { "type": "keyword" },
+        "created_at":{ "type": "date", "format": "strict_date_optional_time" }
+      }
+    }
+  }' | python3 -m json.tool
+
+# ── rbac-test-events index ─────────────────────────────────
+curl -sk -u admin:${OPENSEARCH_PASS} -X PUT \
+  "https://192.168.1.50:30920/rbac-test-events" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+    "mappings": {
+      "properties": {
+        "event_id":   { "type": "long" },
+        "event_type": { "type": "keyword" },
+        "user_id":    { "type": "keyword" },
+        "payload":    { "type": "object", "enabled": false },
+        "ts":         { "type": "date", "format": "strict_date_optional_time" }
+      }
+    }
+  }' | python3 -m json.tool
+
+# ── rbac-test-products index ───────────────────────────────
+curl -sk -u admin:${OPENSEARCH_PASS} -X PUT \
+  "https://192.168.1.50:30920/rbac-test-products" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+    "mappings": {
+      "properties": {
+        "product_id": { "type": "integer" },
+        "name":       { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+        "category":   { "type": "keyword" },
+        "price":      { "type": "double" }
+      }
+    }
+  }' | python3 -m json.tool
+```
+
+#### Bulk-index sample documents (admin)
+
+```bash
+# Index 5 orders
+curl -sk -u admin:${OPENSEARCH_PASS} -X POST \
+  "https://192.168.1.50:30920/rbac-test-orders/_bulk" \
+  -H "Content-Type: application/x-ndjson" \
+  -d '
+{"index":{"_id":"1001"}}
+{"order_id":1001,"customer":"alice","product":"Widget Alpha","amount":19.98,"status":"completed","created_at":"2025-01-10T09:00:00Z"}
+{"index":{"_id":"1002"}}
+{"order_id":1002,"customer":"bob","product":"Gizmo Pro","amount":49.99,"status":"shipped","created_at":"2025-01-11T10:30:00Z"}
+{"index":{"_id":"1003"}}
+{"order_id":1003,"customer":"carol","product":"Widget Beta","amount":14.99,"status":"pending","created_at":"2025-01-12T14:15:00Z"}
+{"index":{"_id":"1004"}}
+{"order_id":1004,"customer":"alice","product":"Gizmo Lite","amount":24.99,"status":"completed","created_at":"2025-01-13T08:45:00Z"}
+{"index":{"_id":"1005"}}
+{"order_id":1005,"customer":"dave","product":"Thingamajig","amount":5.00,"status":"cancelled","created_at":"2025-01-14T16:00:00Z"}
+' | python3 -c "import sys,json; r=json.load(sys.stdin); print(f'indexed: errors={r[\"errors\"]}, items={len(r[\"items\"])}')"
+
+# Index 5 products
+curl -sk -u admin:${OPENSEARCH_PASS} -X POST \
+  "https://192.168.1.50:30920/rbac-test-products/_bulk" \
+  -H "Content-Type: application/x-ndjson" \
+  -d '
+{"index":{"_id":"1"}}
+{"product_id":1,"name":"Widget Alpha","category":"Widgets","price":9.99}
+{"index":{"_id":"2"}}
+{"product_id":2,"name":"Widget Beta","category":"Widgets","price":14.99}
+{"index":{"_id":"3"}}
+{"product_id":3,"name":"Gizmo Pro","category":"Gizmos","price":49.99}
+{"index":{"_id":"4"}}
+{"product_id":4,"name":"Gizmo Lite","category":"Gizmos","price":24.99}
+{"index":{"_id":"5"}}
+{"product_id":5,"name":"Thingamajig","category":"Other","price":5.00}
+' | python3 -c "import sys,json; r=json.load(sys.stdin); print(f'indexed: errors={r[\"errors\"]}, items={len(r[\"items\"])}')"
+
+# Verify document counts
+for idx in rbac-test-orders rbac-test-products rbac-test-events; do
+  count=$(curl -sk -u admin:${OPENSEARCH_PASS} \
+    "https://192.168.1.50:30920/${idx}/_count" | python3 -c "import sys,json; print(json.load(sys.stdin)['count'])")
+  echo "${idx}: ${count} documents"
+done
+```
+
+Expected:
+```
+rbac-test-orders: 5 documents
+rbac-test-products: 5 documents
+rbac-test-events: 0 documents
+```
+
+#### Test: `analyst` — INDEX_READ allowed, INDEX_WRITE blocked
+
+The RBAC sync maps OpenSearch internal users to `rbac_*` roles. For these tests the
+user connects through the RBAC-managed OpenSearch internal user credentials (password
+set by the sync adapter), not via Kerberos SPNEGO.
+
+```bash
+# Get the password the sync adapter wrote for readonlyuser
+# (stored in OpenSearch's internal users store — retrieve via admin API)
+OS_READONLY_PASS=$(kubectl exec -n prod deploy/rbac-plane -- python3 -c "
+import os; print(os.environ.get('OPENSEARCH_USER_DEFAULT_PASSWORD','ChangeMe1!'))
+" 2>/dev/null)
+
+# ✅ SEARCH — must succeed (INDEX_READ → rbac_index_read_all)
+curl -sk -u ${READONLY}:${OS_READONLY_PASS} \
+  "https://192.168.1.50:30920/rbac-test-orders/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"match_all":{}},"size":3}' | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+print(f'hits: {r[\"hits\"][\"total\"][\"value\"]}')
+for h in r['hits']['hits'][:3]:
+    print(f'  {h[\"_source\"][\"customer\"]:10} — {h[\"_source\"][\"product\"]} — {h[\"_source\"][\"status\"]}')
+"
+
+# ✅ Term query by status — must succeed
+curl -sk -u ${READONLY}:${OS_READONLY_PASS} \
+  "https://192.168.1.50:30920/rbac-test-orders/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"term":{"status":"completed"}},"_source":["order_id","customer","amount"]}' | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+for h in r['hits']['hits']:
+    print(h['_source'])
+"
+
+# ❌ INDEX a new document — must be denied (analyst has no INDEX_WRITE)
+curl -sk -u ${READONLY}:${OS_READONLY_PASS} -X POST \
+  "https://192.168.1.50:30920/rbac-test-orders/_doc/9999" \
+  -H "Content-Type: application/json" \
+  -d '{"order_id":9999,"customer":"hacker","product":"none","amount":0,"status":"test"}' | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+print('status:', r.get('status'), '| error:', r.get('error',{}).get('type',''))
+"
+# Expected: status 403, security_exception
+
+# ❌ DELETE index — must be denied (analyst has no INDEX_ADMIN)
+curl -sk -o /dev/null -w "%{http_code}" \
+  -u ${READONLY}:${OS_READONLY_PASS} \
+  -X DELETE "https://192.168.1.50:30920/rbac-test-orders"
+# Expected: 403
+```
+
+#### Test: `data_engineer` — INDEX_READ + INDEX_WRITE allowed, INDEX_ADMIN blocked
+
+```bash
+OS_TESTUSER_PASS=$(kubectl exec -n prod deploy/rbac-plane -- python3 -c "
+import os; print(os.environ.get('OPENSEARCH_USER_DEFAULT_PASSWORD','ChangeMe1!'))
+" 2>/dev/null)
+
+# ✅ INDEX a new event document — must succeed
+curl -sk -u ${TESTUSER}:${OS_TESTUSER_PASS} -X POST \
+  "https://192.168.1.50:30920/rbac-test-events/_doc/1" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"event_id\":1,
+    \"event_type\":\"login\",
+    \"user_id\":\"${TESTUSER}\",
+    \"payload\":{\"ip\":\"10.0.0.9\"},
+    \"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+  }" | python3 -c "import sys,json; r=json.load(sys.stdin); print('result:', r.get('result'))"
+# Expected: result: created
+
+# ✅ BULK index — must succeed
+curl -sk -u ${TESTUSER}:${OS_TESTUSER_PASS} -X POST \
+  "https://192.168.1.50:30920/rbac-test-events/_bulk" \
+  -H "Content-Type: application/x-ndjson" \
+  -d "
+{\"index\":{\"_id\":\"2\"}}
+{\"event_id\":2,\"event_type\":\"purchase\",\"user_id\":\"alice\",\"payload\":{\"order_id\":1001},\"ts\":\"2025-01-10T09:00:01Z\"}
+{\"index\":{\"_id\":\"3\"}}
+{\"event_id\":3,\"event_type\":\"logout\",\"user_id\":\"bob\",\"payload\":{\"session\":\"300s\"},\"ts\":\"2025-01-11T11:00:00Z\"}
+" | python3 -c "import sys,json; r=json.load(sys.stdin); print(f'bulk: errors={r[\"errors\"]}, items={len(r[\"items\"])}')"
+
+# ✅ Search across indexes — must succeed
+curl -sk -u ${TESTUSER}:${OS_TESTUSER_PASS} \
+  "https://192.168.1.50:30920/rbac-test-orders,rbac-test-events/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"match_all":{}},"size":2}' | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+print(f'total hits: {r[\"hits\"][\"total\"][\"value\"]}')
+"
+
+# ❌ CREATE a new index — must be denied (data_engineer has no INDEX_ADMIN)
+curl -sk -o /dev/null -w "%{http_code}" \
+  -u ${TESTUSER}:${OS_TESTUSER_PASS} \
+  -X PUT "https://192.168.1.50:30920/rbac-test-forbidden-index"
+# Expected: 403
+```
+
+#### Aggregation query — test numeric analytics (analyst)
+
+```bash
+# ✅ Aggregation by status with sum of amount — must succeed for analyst
+curl -sk -u ${READONLY}:${OS_READONLY_PASS} \
+  "https://192.168.1.50:30920/rbac-test-orders/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "size": 0,
+    "aggs": {
+      "by_status": {
+        "terms": { "field": "status" },
+        "aggs": {
+          "total_amount": { "sum": { "field": "amount" } }
+        }
+      }
+    }
+  }' | python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+for b in r['aggregations']['by_status']['buckets']:
+    print(f'  {b[\"key\"]:12} count={b[\"doc_count\"]}  total=\${b[\"total_amount\"][\"value\"]:.2f}')
+"
+```
+
+Expected:
+```
+  completed    count=2  total=$44.97
+  cancelled    count=1  total=$5.00
+  pending      count=1  total=$14.99
+  shipped      count=1  total=$49.99
+```
+
+---
+
+### Spark — Create sample Iceberg table via Polaris
+
+> **Prerequisites:** The Polaris catalog must be accessible and the user must have a Polaris
+> principal with `catalog_writer` assigned (see [section (i)](#i-polaris-catalog-grants-for-write_iceberg--admin_catalog)).
+
+#### Create the test Iceberg table (admin / catalog_admin)
+
+```bash
+# Port-forward Polaris if needed (run in a separate terminal)
+kubectl port-forward svc/polaris-rest -n prod 8181:8181 &
+POLARIS_TOKEN=$(kubectl get secret polaris-credentials -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+
+# Create the rbac_test namespace in the polaris catalog if it doesn't exist
+curl -s -X POST \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "http://localhost:8181/api/catalog/v1/polaris/namespaces" \
+  -d '{"namespace":["rbac_test"],"properties":{"owner":"admin"}}' | \
+  python3 -m json.tool
+```
+
+Now create the Iceberg table and seed data using `spark-shell`:
+
+```bash
+kubectl exec -it -n prod deploy/spark-master -- spark-shell \
+  --conf "spark.sql.catalog.polaris=org.apache.iceberg.spark.SparkCatalog" \
+  --conf "spark.sql.catalog.polaris.type=rest" \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  --conf "spark.sql.catalog.polaris.warehouse=polaris" \
+  --conf "spark.sql.catalog.polaris.credential=root:${POLARIS_TOKEN}" \
+  << 'EOF'
+
+// ── Create sample Iceberg tables ──────────────────────────
+
+// orders table — mirrors the Doris sample data
+spark.sql("""
+  CREATE TABLE IF NOT EXISTS polaris.rbac_test.orders (
+    order_id   BIGINT,
+    customer   STRING,
+    product    STRING,
+    amount     DOUBLE,
+    status     STRING,
+    created_at TIMESTAMP
+  ) USING iceberg
+  PARTITIONED BY (status)
+  TBLPROPERTIES ('write.format.default' = 'parquet')
+""")
+
+// events table — append-only event log
+spark.sql("""
+  CREATE TABLE IF NOT EXISTS polaris.rbac_test.events (
+    event_id   BIGINT,
+    event_type STRING,
+    user_id    STRING,
+    payload    STRING,
+    ts         TIMESTAMP
+  ) USING iceberg
+  PARTITIONED BY (days(ts))
+""")
+
+// products lookup table
+spark.sql("""
+  CREATE TABLE IF NOT EXISTS polaris.rbac_test.products (
+    product_id INT,
+    name       STRING,
+    category   STRING,
+    price      DOUBLE
+  ) USING iceberg
+""")
+
+// ── Seed sample data ──────────────────────────────────────
+
+spark.sql("""
+  INSERT INTO polaris.rbac_test.products VALUES
+    (1, 'Widget Alpha', 'Widgets',  9.99),
+    (2, 'Widget Beta',  'Widgets', 14.99),
+    (3, 'Gizmo Pro',    'Gizmos',  49.99),
+    (4, 'Gizmo Lite',   'Gizmos',  24.99),
+    (5, 'Thingamajig',  'Other',    5.00)
+""")
+
+spark.sql("""
+  INSERT INTO polaris.rbac_test.orders VALUES
+    (1001, 'alice', 'Widget Alpha',  19.98, 'completed', TIMESTAMP '2025-01-10 09:00:00'),
+    (1002, 'bob',   'Gizmo Pro',     49.99, 'shipped',   TIMESTAMP '2025-01-11 10:30:00'),
+    (1003, 'carol', 'Widget Beta',   14.99, 'pending',   TIMESTAMP '2025-01-12 14:15:00'),
+    (1004, 'alice', 'Gizmo Lite',    24.99, 'completed', TIMESTAMP '2025-01-13 08:45:00'),
+    (1005, 'dave',  'Thingamajig',    5.00, 'cancelled', TIMESTAMP '2025-01-14 16:00:00')
+""")
+
+spark.sql("""
+  INSERT INTO polaris.rbac_test.events VALUES
+    (1, 'login',    'alice', '{"ip":"10.0.0.1"}',           TIMESTAMP '2025-01-10 08:59:00'),
+    (2, 'purchase', 'alice', '{"order_id":1001}',            TIMESTAMP '2025-01-10 09:00:01'),
+    (3, 'login',    'bob',   '{"ip":"10.0.0.2"}',            TIMESTAMP '2025-01-11 10:29:00'),
+    (4, 'purchase', 'bob',   '{"order_id":1002}',            TIMESTAMP '2025-01-11 10:30:01'),
+    (5, 'logout',   'carol', '{"session_duration":"120s"}',  TIMESTAMP '2025-01-12 14:20:00')
+""")
+
+// Verify
+println("=== orders ===")
+spark.sql("SELECT * FROM polaris.rbac_test.orders ORDER BY order_id").show()
+
+println("=== products ===")
+spark.sql("SELECT * FROM polaris.rbac_test.products ORDER BY product_id").show()
+
+println("=== events ===")
+spark.sql("SELECT * FROM polaris.rbac_test.events ORDER BY event_id").show()
+
+EOF
+```
+
+#### Grant Polaris catalog roles to test users
+
+```bash
+# testuser (data_engineer) → catalog_writer (WRITE_ICEBERG)
+curl -s -X PUT \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "http://localhost:8181/api/management/v1/principals/${TESTUSER}/principal-roles/catalog_writer" | \
+  python3 -m json.tool
+
+# readonlyuser (analyst) → catalog_viewer (USE_CATALOG read only)
+curl -s -X PUT \
+  -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "http://localhost:8181/api/management/v1/principals/${READONLY}/principal-roles/catalog_viewer" | \
+  python3 -m json.tool
+```
+
+#### Test: `analyst` (USE_CATALOG) — read-only Iceberg access
+
+```bash
+kubectl exec -it -n prod deploy/spark-master -- spark-shell \
+  --conf "spark.sql.catalog.polaris=org.apache.iceberg.spark.SparkCatalog" \
+  --conf "spark.sql.catalog.polaris.type=rest" \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  --conf "spark.sql.catalog.polaris.warehouse=polaris" \
+  --conf "spark.kerberos.principal=${READONLY}@STARDATADBLABS.LOCAL" \
+  --conf "spark.kerberos.keytab=/etc/security/keytabs/${READONLY}.keytab" \
+  << 'EOF'
+
+// ✅ List namespaces — must succeed (catalog_viewer has CATALOG_READ)
+spark.sql("SHOW NAMESPACES IN polaris").show()
+
+// ✅ List tables — must succeed
+spark.sql("SHOW TABLES IN polaris.rbac_test").show()
+
+// ✅ SELECT from orders — must succeed
+spark.sql("""
+  SELECT status, COUNT(*) AS cnt, ROUND(SUM(amount),2) AS total
+  FROM polaris.rbac_test.orders
+  GROUP BY status
+  ORDER BY total DESC
+""").show()
+
+// ✅ JOIN query — must succeed
+spark.sql("""
+  SELECT o.customer, p.category, SUM(o.amount) AS spend
+  FROM polaris.rbac_test.orders o
+  JOIN polaris.rbac_test.products p ON o.product = p.name
+  GROUP BY o.customer, p.category
+  ORDER BY spend DESC
+""").show()
+
+// ❌ INSERT — must fail (catalog_viewer has no TABLE_WRITE_DATA)
+try {
+  spark.sql("INSERT INTO polaris.rbac_test.orders VALUES (9999,'x','y',1.0,'test',current_timestamp())")
+  println("ERROR: INSERT should have been denied")
+} catch {
+  case e: Exception => println(s"✅ INSERT correctly blocked: ${e.getMessage.take(120)}")
+}
+
+// ❌ DROP TABLE — must fail
+try {
+  spark.sql("DROP TABLE polaris.rbac_test.orders")
+  println("ERROR: DROP should have been denied")
+} catch {
+  case e: Exception => println(s"✅ DROP correctly blocked: ${e.getMessage.take(120)}")
+}
+
+EOF
+```
+
+#### Test: `data_engineer` (WRITE_ICEBERG) — read + write Iceberg access
+
+```bash
+kubectl exec -it -n prod deploy/spark-master -- spark-shell \
+  --conf "spark.sql.catalog.polaris=org.apache.iceberg.spark.SparkCatalog" \
+  --conf "spark.sql.catalog.polaris.type=rest" \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  --conf "spark.sql.catalog.polaris.warehouse=polaris" \
+  --conf "spark.kerberos.principal=${TESTUSER}@STARDATADBLABS.LOCAL" \
+  --conf "spark.kerberos.keytab=/etc/security/keytabs/${TESTUSER}.keytab" \
+  << 'EOF'
+
+// ✅ INSERT a new order — must succeed (catalog_writer has TABLE_WRITE_DATA)
+spark.sql("""
+  INSERT INTO polaris.rbac_test.orders
+  VALUES (1006, 'eve', 'Widget Alpha', 9.99, 'pending', TIMESTAMP '2025-01-15 11:00:00')
+""")
+println("✅ INSERT succeeded")
+
+// ✅ Read back — confirm new row appears
+spark.sql("SELECT * FROM polaris.rbac_test.orders WHERE order_id = 1006").show()
+
+// ✅ CREATE a temporary test table — must succeed
+spark.sql("""
+  CREATE TABLE IF NOT EXISTS polaris.rbac_test.rbac_write_test (
+    id   BIGINT,
+    msg  STRING
+  ) USING iceberg
+""")
+spark.sql("INSERT INTO polaris.rbac_test.rbac_write_test VALUES (1, 'hello rbac')")
+spark.sql("SELECT * FROM polaris.rbac_test.rbac_write_test").show()
+
+// ✅ Clean up the test table
+spark.sql("DROP TABLE polaris.rbac_test.rbac_write_test")
+println("✅ Cleanup complete")
+
+// ❌ DROP core sample table — must fail (catalog_writer cannot drop namespace tables
+//    without CATALOG_MANAGE_CONTENT — only catalog_admin can do this)
+try {
+  spark.sql("DROP TABLE polaris.rbac_test.orders")
+  println("ERROR: DROP should have been denied for catalog_writer")
+} catch {
+  case e: Exception => println(s"✅ DROP of core table correctly blocked: ${e.getMessage.take(120)}")
+}
+
+EOF
+```
+
+---
+
+### Summary — Expected permission outcomes per role
+
+| Test | `analyst` (`readonlyuser`) | `data_engineer` (`testuser`) |
+|---|---|---|
+| **Doris** SELECT `rbac_test.orders` | ✅ allowed | ✅ allowed |
+| **Doris** INSERT into `rbac_test.orders` | ❌ blocked (no LOAD_PRIV) | ✅ allowed |
+| **Doris** DROP TABLE | ❌ blocked | ❌ blocked |
+| **Kafka** CONSUME `rbac-test-orders` | ✅ allowed (SCRAM auth) | ✅ allowed |
+| **Kafka** PRODUCE to `rbac-test-events` | SCRAM auth only* | ✅ allowed |
+| **OpenSearch** SEARCH `rbac-test-orders` | ✅ allowed (INDEX_READ) | ✅ allowed |
+| **OpenSearch** INDEX to `rbac-test-events` | ❌ blocked (403) | ✅ allowed (INDEX_WRITE) |
+| **OpenSearch** CREATE index | ❌ blocked | ❌ blocked |
+| **Spark / Iceberg** SELECT `polaris.rbac_test.orders` | ✅ allowed (USE_CATALOG) | ✅ allowed |
+| **Spark / Iceberg** INSERT into orders | ❌ blocked (no TABLE_WRITE_DATA) | ✅ allowed (WRITE_ICEBERG) |
+| **Spark / Iceberg** DROP core table | ❌ blocked | ❌ blocked |
+
+> \* Kafka broker-level ACL enforcement is disabled (`allow.everyone.if.no.acl.found=true`).
+> SCRAM-SHA-512 authentication via the KafkaUser CR is the enforced boundary.
+> PRODUCE/CONSUME distinctions are tracked in the RBAC plane for future ACL activation.
+
+### Cleanup — Remove sample test data
+
+```bash
+# Doris
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" 2>/dev/null \
+  -e "DROP DATABASE IF EXISTS rbac_test;"
+
+# Kafka topics
+for TOPIC in rbac-test-orders rbac-test-events rbac-test-products; do
+  kubectl exec -n prod deploy/kafka-admin -- \
+    kafka-topics.sh \
+      --bootstrap-server ${KAFKA_BOOTSTRAP} \
+      --command-config /opt/kafka/config/admin.properties \
+      --delete --topic ${TOPIC} \
+    && echo "Deleted topic: ${TOPIC}"
+done
+
+# OpenSearch indexes
+for IDX in rbac-test-orders rbac-test-events rbac-test-products; do
+  curl -sk -u admin:${OPENSEARCH_PASS} -X DELETE \
+    "https://192.168.1.50:30920/${IDX}" | \
+    python3 -c "import sys,json; r=json.load(sys.stdin); print(f'deleted {\"${IDX}\"}: {r.get(\"acknowledged\")}')"
+done
+
+# Spark / Polaris Iceberg tables
+kubectl exec -n prod deploy/spark-master -- spark-shell \
+  --conf "spark.sql.catalog.polaris.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog" \
+  << 'EOF'
+spark.sql("DROP TABLE IF EXISTS polaris.rbac_test.orders")
+spark.sql("DROP TABLE IF EXISTS polaris.rbac_test.events")
+spark.sql("DROP TABLE IF EXISTS polaris.rbac_test.products")
+spark.sql("DROP NAMESPACE IF EXISTS polaris.rbac_test")
+println("Iceberg tables cleaned up")
+EOF
+
+# Revoke Polaris roles
+for USER in ${TESTUSER} ${READONLY}; do
+  for ROLE in catalog_writer catalog_viewer; do
+    curl -s -X DELETE \
+      -H "Authorization: Bearer ${POLARIS_TOKEN}" \
+      "http://localhost:8181/api/management/v1/principals/${USER}/principal-roles/${ROLE}" > /dev/null
+  done
+done
+echo "Polaris roles revoked"
+
+# Optionally remove test RBAC users
+for U in ${TESTUSER} ${READONLY}; do
+  curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    "${RBAC_URL}/api/v1/users/${U}" > /dev/null && echo "Removed RBAC user: ${U}"
+  mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" 2>/dev/null \
+    -e "DROP USER IF EXISTS '${U}'@'%';"
+  kubectl delete kafkauser ${U} -n prod --ignore-not-found
+  kubectl exec -n prod deploy/kerberos-kdc -- \
+    kadmin.local -q "delprinc -force ${U}@${REALM}" 2>/dev/null
+done
+echo "Test users removed"
+```
