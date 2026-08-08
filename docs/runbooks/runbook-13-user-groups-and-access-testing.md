@@ -31,7 +31,7 @@ export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
 export DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
 export OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
-  -o jsonpath='{.data.admin-password}' | base64 -d 2>/dev/null || echo "admin")
+  -o jsonpath='{.data.opensearch-password}' | base64 -d 2>/dev/null || echo "admin")
 export REALM="STARDATADBLABS.LOCAL"
 ```
 
@@ -1990,7 +1990,7 @@ export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
 export DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
 export OPENSEARCH_PASS=$(kubectl get secret opensearch-credentials -n prod \
-  -o jsonpath='{.data.admin-password}' | base64 -d 2>/dev/null || echo "admin")
+  -o jsonpath='{.data.opensearch-password}' | base64 -d 2>/dev/null || echo "admin")
 export REALM="STARDATADBLABS.LOCAL"
 
 TESTUSER="testuser"
