@@ -249,6 +249,9 @@ curl -sf -X POST -H "X-Vault-Token: ${ROOT_TOKEN}" \
 
 ### Step 6 — Verify access per service
 
+> **Reminder:** `USERNAME` must be set in your shell before running these commands.
+> If you started a new session: `USERNAME="john"` (or whatever username you onboarded).
+
 #### Doris
 
 ```bash
@@ -290,6 +293,9 @@ kubectl get kafkauser ${USERNAME} -n prod
 > All Security API checks below use `kubectl exec` with the admin cert from inside the cluster.
 
 ```bash
+# Set USERNAME before running (should already be set from the top of this section)
+# USERNAME="carol"   # ← uncomment and set if running this step standalone
+
 # Internal user was created by the sync
 kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
   curl -sk \
