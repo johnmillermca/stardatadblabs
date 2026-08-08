@@ -232,7 +232,9 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
 
 ```bash
 BAO_ADDR="http://192.168.1.50:30820"
-ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('/root/openbao-init-keys.json'))['root_token'])")
+KEYS_FILE="${HOME}/openbao-init-keys.json"
+[ -f "${KEYS_FILE}" ] || KEYS_FILE="/root/openbao-init-keys.json"
+ROOT_TOKEN=$(python3 -c "import json; print(json.load(open('${KEYS_FILE}'))['root_token'])")
 
 curl -sf -X POST -H "X-Vault-Token: ${ROOT_TOKEN}" \
   -H "Content-Type: application/json" \
