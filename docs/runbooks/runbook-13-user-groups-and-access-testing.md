@@ -46,7 +46,7 @@ curl -s ${RBAC_URL}/health
 
 ### Permission ID reference
 
-Every `POST/DELETE /api/v1/roles/{role_id}/permissions/{permission_id}` call uses these IDs.
+Every `POST/DELETE /api/v1/roles/{role_name}/permissions/{service_name}/{permission_name}` call uses these names. The IDs shown below are for reference only — commands no longer require them.
 
 #### Doris (12 permissions)
 
@@ -648,53 +648,48 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 > state to the downstream services.
 >
 > **API endpoints:**
-> - Add permission: `POST /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`
-> - Remove permission: `DELETE /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`
+> - Add permission: `POST /api/v1/roles/{role_name}/permissions/{service_name}/{permission_name}`
+> - Remove permission: `DELETE /api/v1/roles/{role_name}/permissions/{service_name}/{permission_name}`
 > - `service_name` is one of `doris`, `kafka`, `opensearch`, `spark`.
 > - `permission_name` is the token exactly as listed in the [Permission ID reference](#permission-id-reference), e.g. `SELECT`, `CONSUME`, `INDEX_READ`.
 
-### Get role IDs
+### List roles
 
 ```bash
-# List all roles with their IDs
-curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles" | \
-  python3 -c "
-import sys,json
-for r in json.load(sys.stdin):
-    print(f'  id={r[\"id\"]:2}  name={r[\"name\"]}  ({len(r[\"permissions\"])} perms)')
-"
+# List all roles with their names and permission counts
+rbacctl role list
 ```
 
 Output (current roles):
 ```
-  id= 1  name=analyst          ( 9 perms)
-  id= 2  name=etl_writer        (12 perms)
-  id= 3  name=spark_user        ( 3 perms)
-  id= 4  name=data_admin        (35 perms)
-  id= 5  name=kafka_consumer    ( 3 perms)
-  id= 6  name=platform_admin    (35 perms)
-  id= 7  name=data_engineer     (20 perms)
-  id= 8  name=account_admin     (35 perms)
+  name=analyst          ( 9 perms)
+  name=etl_writer        (12 perms)
+  name=spark_user        ( 3 perms)
+  name=data_admin        (35 perms)
+  name=kafka_consumer    ( 3 perms)
+  name=platform_admin    (35 perms)
+  name=data_engineer     (20 perms)
+  name=account_admin     (35 perms)
 ```
 
 ### Adding a privilege to a user group
 
-**Pattern:** `POST /api/v1/roles/{role_id}/permissions/{permission_id}`
+**Pattern:** `POST /api/v1/roles/{role_name}/permissions/{service_name}/{permission_name}`
 
 After adding, sync all users bound to the role so the new privilege is pushed to the
 downstream services.
 
 #### Example A — Give `data_engineer` the ability to CREATE tables in Doris
 
-> Adding permission `doris:CREATE` to role `data_engineer` (id=7).
+> Adding permission `doris:CREATE` to role `data_engineer`.
 
 ```bash
-ROLE_ID=7   # data_engineer
+# CLI
+rbacctl role add-perm data_engineer doris:CREATE
 
-# 1. Add the permission to the role
+# API
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/doris/CREATE" | \
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/doris/CREATE" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -722,14 +717,15 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 
 #### Example B — Give `data_engineer` the ability to CREATE_TOPIC in Kafka
 
-> Adding permission `kafka:CREATE_TOPIC` to role `data_engineer` (id=7).
+> Adding permission `kafka:CREATE_TOPIC` to role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role add-perm data_engineer kafka:CREATE_TOPIC
 
-# 1. Add permission
+# API
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/kafka/CREATE_TOPIC" | \
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/kafka/CREATE_TOPIC" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -756,14 +752,15 @@ kubectl get kafkauser carol -n prod -o jsonpath='{.status.conditions[0].type}'
 
 #### Example C — Give `data_engineer` INDEX_ADMIN on OpenSearch
 
-> Adding permission `opensearch:INDEX_ADMIN` to role `data_engineer` (id=7).
+> Adding permission `opensearch:INDEX_ADMIN` to role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role add-perm data_engineer opensearch:INDEX_ADMIN
 
-# 1. Add permission
+# API
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/opensearch/INDEX_ADMIN" | \
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/opensearch/INDEX_ADMIN" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -800,14 +797,15 @@ for role,m in json.load(sys.stdin).items():
 
 #### Example D — Give `data_engineer` KILL_ANY_JOB on Spark
 
-> Adding permission `spark:KILL_ANY_JOB` to role `data_engineer` (id=7).
+> Adding permission `spark:KILL_ANY_JOB` to role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role add-perm data_engineer spark:KILL_ANY_JOB
 
-# 1. Add permission
+# API
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/KILL_ANY_JOB" | \
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/spark/KILL_ANY_JOB" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -835,20 +833,21 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 
 ### Removing a privilege from a user group
 
-**Pattern:** `DELETE /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`
+**Pattern:** `DELETE /api/v1/roles/{role_name}/permissions/{service_name}/{permission_name}`
 
 After removing, sync all affected users to revoke the privilege in the downstream services.
 
 #### Example E — Remove CREATE from `data_engineer` in Doris
 
-> Removing permission `doris:CREATE` from role `data_engineer` (id=7).
+> Removing permission `doris:CREATE` from role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role remove-perm data_engineer doris:CREATE --yes
 
-# 1. Remove the permission from the role
+# API
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/doris/CREATE" | \
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/doris/CREATE" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -874,14 +873,15 @@ mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
 
 #### Example F — Remove INDEX_ADMIN from `data_engineer` in OpenSearch
 
-> Removing permission `opensearch:INDEX_ADMIN` from role `data_engineer` (id=7).
+> Removing permission `opensearch:INDEX_ADMIN` from role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role remove-perm data_engineer opensearch:INDEX_ADMIN --yes
 
-# 1. Remove
+# API
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/opensearch/INDEX_ADMIN" | \
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/opensearch/INDEX_ADMIN" | \
   python3 -c "
 import sys,json
 r=json.load(sys.stdin)
@@ -918,14 +918,15 @@ for role,m in json.load(sys.stdin).items():
 
 #### Example G — Remove KILL_ANY_JOB from `data_engineer` in Spark
 
-> Removing permission `spark:KILL_ANY_JOB` from role `data_engineer` (id=7).
+> Removing permission `spark:KILL_ANY_JOB` from role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role remove-perm data_engineer spark:KILL_ANY_JOB --yes
 
-# 1. Remove
+# API
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/KILL_ANY_JOB"
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/spark/KILL_ANY_JOB"
 
 # 2. Sync to Spark
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -946,14 +947,15 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 
 #### Example H — Remove CREATE_TOPIC from `data_engineer` in Kafka
 
-> Removing permission `kafka:CREATE_TOPIC` from role `data_engineer` (id=7).
+> Removing permission `kafka:CREATE_TOPIC` from role `data_engineer`.
 
 ```bash
-ROLE_ID=7
+# CLI
+rbacctl role remove-perm data_engineer kafka:CREATE_TOPIC --yes
 
-# 1. Remove
+# API
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/kafka/CREATE_TOPIC"
+  "${RBAC_URL}/api/v1/roles/data_engineer/permissions/kafka/CREATE_TOPIC"
 
 # 2. Sync to Kafka
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -1239,15 +1241,8 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   }" \
   "${RBAC_URL}/api/v1/roles" | python3 -m json.tool
 
-# Save the role ID from the response
-ROLE_ID=$(curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles" | \
-  python3 -c "
-import sys,json
-for r in json.load(sys.stdin):
-    if r['name']=='${NEW_ROLE}': print(r['id'])
-")
-echo "New role id: ${ROLE_ID}"
+# Confirm the role was created
+rbacctl role get ${NEW_ROLE}
 ```
 
 Expected response:
@@ -1266,24 +1261,33 @@ Expected response:
 
 ### Step 2 — Add permissions for each service
 
-> Each permission is added with `POST /api/v1/roles/{role_id}/permissions/{service_name}/{permission_name}`.
+> Each permission is added with `POST /api/v1/roles/{role_name}/permissions/{service_name}/{permission_name}`.
 > No request body is needed.
 > See the [Permission ID reference](#permission-id-reference) table for the full list of permission names.
 
 #### Doris — SELECT only
 
 ```bash
+# CLI
+rbacctl role add-perm ${NEW_ROLE} doris:SELECT
+
+# API
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/doris/SELECT" | \
+  "${RBAC_URL}/api/v1/roles/${NEW_ROLE}/permissions/doris/SELECT" | \
   python3 -c "import sys,json; r=json.load(sys.stdin); print(f'  doris perms: {[p[\"permission_name\"] for p in r[\"permissions\"] if p[\"service_name\"]==\"doris\"]}')"
 ```
 
 #### Kafka — CONSUME + DESCRIBE
 
 ```bash
+# CLI
+rbacctl role add-perm ${NEW_ROLE} kafka:CONSUME
+rbacctl role add-perm ${NEW_ROLE} kafka:DESCRIBE
+
+# API
 for PERM in CONSUME DESCRIBE; do
   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/kafka/${PERM}" > /dev/null \
+    "${RBAC_URL}/api/v1/roles/${NEW_ROLE}/permissions/kafka/${PERM}" > /dev/null \
     && echo "  added kafka:${PERM}"
 done
 ```
@@ -1291,9 +1295,14 @@ done
 #### OpenSearch — INDEX_READ + CLUSTER_READ
 
 ```bash
+# CLI
+rbacctl role add-perm ${NEW_ROLE} opensearch:INDEX_READ
+rbacctl role add-perm ${NEW_ROLE} opensearch:CLUSTER_READ
+
+# API
 for PERM in INDEX_READ CLUSTER_READ; do
   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-    "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/opensearch/${PERM}" > /dev/null \
+    "${RBAC_URL}/api/v1/roles/${NEW_ROLE}/permissions/opensearch/${PERM}" > /dev/null \
     && echo "  added opensearch:${PERM}"
 done
 ```
@@ -1301,8 +1310,12 @@ done
 #### Spark — VIEW_UI only
 
 ```bash
+# CLI
+rbacctl role add-perm ${NEW_ROLE} spark:VIEW_UI
+
+# API
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/VIEW_UI" > /dev/null \
+  "${RBAC_URL}/api/v1/roles/${NEW_ROLE}/permissions/spark/VIEW_UI" > /dev/null \
   && echo "  added spark:VIEW_UI"
 ```
 
@@ -1311,17 +1324,22 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
 ### Step 3 — Verify the complete role definition
 
 ```bash
+# CLI
+rbacctl role get ${NEW_ROLE}
+
+# API
 curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}" | \
+  "${RBAC_URL}/api/v1/roles" | \
   python3 -c "
 import sys,json
-r=json.load(sys.stdin)
-print(f'Role: {r[\"name\"]}  id={r[\"id\"]}  ({len(r[\"permissions\"])} permissions)')
-svc={}
-for p in r['permissions']:
-    svc.setdefault(p['service_name'],[]).append(p['permission_name'])
-for s,perms in sorted(svc.items()):
-    print(f'  {s:12}: {sorted(perms)}')
+for r in json.load(sys.stdin):
+    if r['name']=='${NEW_ROLE}':
+        print(f'Role: {r[\"name\"]}  id={r[\"id\"]}  ({len(r[\"permissions\"])} permissions)')
+        svc={}
+        for p in r['permissions']:
+            svc.setdefault(p['service_name'],[]).append(p['permission_name'])
+        for s,perms in sorted(svc.items()):
+            print(f'  {s:12}: {sorted(perms)}')
 "
 ```
 
@@ -1620,10 +1638,11 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
 # All services should now show "synced" with 0 permissions applied (revoked)
 
-# Step 3 — delete the role
-ROLE_ID=9  # from Step 1 above
+# Step 3 — delete the role (by name)
+rbacctl role delete ${NEW_ROLE} --yes
+# or via API:
 curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
-  "${RBAC_URL}/api/v1/roles/${ROLE_ID}" | python3 -m json.tool
+  "${RBAC_URL}/api/v1/roles/${NEW_ROLE}" | python3 -m json.tool
 # Expected: {"ok": true, "message": "Role 'reporting_analyst' deleted"}
 ```
 
@@ -2057,9 +2076,11 @@ RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
 
 # ── Step A: RBAC plane — ensure the permission is on the role ──────────────
 # data_engineer already has WRITE_ICEBERG after migration 004.
-# If adding to a custom role:
+# If adding to a custom role (substitute your role name):
+#   rbacctl role add-perm <role_name> spark:WRITE_ICEBERG
+# or via API:
 #   curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
-#     "${RBAC_URL}/api/v1/roles/${ROLE_ID}/permissions/spark/WRITE_ICEBERG"
+#     "${RBAC_URL}/api/v1/roles/<role_name>/permissions/spark/WRITE_ICEBERG"
 
 # ── Step B: RBAC plane — sync to push allowlist entry ─────────────────────
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -4003,10 +4024,9 @@ permission set already filtered by service — it is the definitive answer to
 > Confirm exactly which permissions a role grants before binding users to it.
 
 ```bash
-# CLI — list permissions for a role by name
+# CLI — inspect a role's permissions by name
 rbacctl role list
-# Note the id of the role you want, then:
-rbacctl role get <role_id>
+rbacctl role get <role_name>
 ```
 
 ```bash
@@ -4050,6 +4070,6 @@ Role: data_engineer  (id=7, 20 permissions)
 | What roles/scope does user X have? | `rbacctl user bindings <user>` | `GET /api/v1/users/<user>/bindings` |
 | What can user X actually do? | `rbacctl user roles <user>` | `GET /api/v1/users/<user>/roles` |
 | Who is in role Y? | loop over users, filter by `role_name` | loop over `GET /api/v1/users` |
-| What permissions does role Y grant? | `rbacctl role get <role_id>` | `GET /api/v1/roles/<role_id>` |
+| What permissions does role Y grant? | `rbacctl role get <role_name>` | `GET /api/v1/roles` (filter by name) |
 | List all available permissions for a service | `rbacctl role perms --service spark` | `GET /api/v1/services/spark/permissions` |
 | See all roles with permission counts | `rbacctl role list` | `GET /api/v1/roles` |

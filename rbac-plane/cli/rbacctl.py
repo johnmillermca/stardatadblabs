@@ -10,8 +10,8 @@ Usage:
   rbacctl sync --dry-run
   rbacctl role list
   rbacctl role create myrole --display-name "My Role" --perm doris:SELECT --perm kafka:CONSUME
-  rbacctl role add-perm <role_id> doris:SELECT
-  rbacctl role remove-perm <role_id> doris:SELECT
+  rbacctl role add-perm <role_name> doris:SELECT
+  rbacctl role remove-perm <role_name> doris:SELECT
   rbacctl role add-members data_engineer alice bob carol
   rbacctl role add-members platform_admin bob --service spark --expires-days 30
   rbacctl audit --limit 20
@@ -74,6 +74,16 @@ def _client() -> httpx.Client:
         headers={"Authorization": f"Bearer {_token()}"},
         timeout=30.0,
     )
+
+
+def _resolve_role_id(client: httpx.Client, role_name: str) -> int:
+    """Look up a role by name and return its numeric ID."""
+    resp = _check(client.get("/api/v1/roles", params={"q": role_name}))
+    matches = [r for r in resp if r["name"] == role_name]
+    if not matches:
+        rprint(f"[red]Error:[/red] Role '{role_name}' not found")
+        raise SystemExit(1)
+    return matches[0]["id"]
 
 
 def _check(resp: httpx.Response, ok=(200, 201)) -> dict:
@@ -233,9 +243,10 @@ def role_list(q: str = typer.Option("", "--filter", "-f")):
 
 
 @role_app.command("get")
-def role_get(role_id: int):
+def role_get(role_name: str):
     """Show full detail for a role including its permissions."""
     with _client() as c:
+        role_id = _resolve_role_id(c, role_name)
         resp = _check(c.get(f"/api/v1/roles/{role_id}"))
     rprint(f"\n[bold]{resp['name']}[/bold] (id={resp['id']}): {resp.get('description','')}")
     _print_table(
@@ -276,7 +287,7 @@ def role_create(
 
 @role_app.command("add-perm")
 def role_add_perm(
-    role_id: int,
+    role_name: str,
     permission: str = typer.Argument(
         ..., help="Permission in 'service:NAME' format, e.g. doris:SELECT"
     ),
@@ -288,16 +299,17 @@ def role_add_perm(
         raise SystemExit(1)
     service_name, perm_name = parts
     with _client() as c:
+        role_id = _resolve_role_id(c, role_name)
         resp = _check(
             c.post(f"/api/v1/roles/{role_id}/permissions/{service_name}/{perm_name}"),
             ok=(200, 201),
         )
-    rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] added to role {role_id}")
+    rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] added to role [bold]{role_name}[/bold]")
 
 
 @role_app.command("remove-perm")
 def role_remove_perm(
-    role_id: int,
+    role_name: str,
     permission: str = typer.Argument(
         ..., help="Permission in 'service:NAME' format, e.g. doris:SELECT"
     ),
@@ -305,18 +317,19 @@ def role_remove_perm(
 ):
     """Revoke a permission from a role by name (e.g. doris:SELECT)."""
     if not yes:
-        typer.confirm(f"Remove permission '{permission}' from role {role_id}?", abort=True)
+        typer.confirm(f"Remove permission '{permission}' from role '{role_name}'?", abort=True)
     parts = permission.split(":", 1)
     if len(parts) != 2:
         rprint(f"[red]Error:[/red] Use 'service:NAME' format, e.g. doris:SELECT")
         raise SystemExit(1)
     service_name, perm_name = parts
     with _client() as c:
+        role_id = _resolve_role_id(c, role_name)
         resp = _check(
             c.delete(f"/api/v1/roles/{role_id}/permissions/{service_name}/{perm_name}"),
             ok=(200,),
         )
-    rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] removed from role {role_id}")
+    rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] removed from role [bold]{role_name}[/bold]")
 
 
 @role_app.command("add-members")
@@ -367,13 +380,14 @@ def role_add_members(
 
 
 @role_app.command("delete")
-def role_delete(role_id: int, yes: bool = typer.Option(False, "--yes", "-y")):
+def role_delete(role_name: str, yes: bool = typer.Option(False, "--yes", "-y")):
     """Delete a role (also removes all bindings to it)."""
     if not yes:
-        typer.confirm(f"Delete role {role_id}?", abort=True)
+        typer.confirm(f"Delete role '{role_name}'?", abort=True)
     with _client() as c:
+        role_id = _resolve_role_id(c, role_name)
         _check(c.delete(f"/api/v1/roles/{role_id}"))
-    rprint(f"[green]✓[/green] Role {role_id} deleted")
+    rprint(f"[green]✓[/green] Role [bold]{role_name}[/bold] deleted")
 
 
 @role_app.command("perms")
