@@ -20,6 +20,7 @@ This runbook covers the full lifecycle of user groups on the platform:
 | [(j)](#j-sample-data-setup-and-end-to-end-permission-testing) | **Sample data setup** — create test tables/topics/indexes and run permission tests |
 | [(k)](#k-bulk-binding---adding-multiple-users-to-a-role-in-one-call) | **Bulk binding** — add multiple users to a role in one API/CLI call |
 | [(l)](#l-removing-a-user-from-a-role-or-from-the-platform) | **Removing a user** — unbind from one role, one service, or full offboard |
+| [(m)](#m-inspecting-users-roles-and-service-scope) | **Inspecting users** — who is in which role, which services they can reach |
 
 ---
 
@@ -3747,3 +3748,308 @@ curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
 > **Disable vs Delete:** `rbacctl user disable` keeps all bindings and the user record intact but
 > invalidates the cache so the guards treat the user as unauthorised immediately. Use this for
 > temporary suspension or maternity/parental leave. Use `delete` only for permanent offboarding.
+
+---
+
+## (m) Inspecting Users, Roles, and Service Scope
+
+> Use this section to answer three operational questions:
+>
+> | Question | Section |
+> |---|---|
+> | What roles and service scope does a specific user have? | [Test 1](#test-1--inspect-one-user) |
+> | What exact permissions does a user have on each service? | [Test 2](#test-2--effective-permissions-for-one-user) |
+> | Who is in a given role, and what service are they scoped to? | [Test 3](#test-3--list-all-members-of-a-role) |
+> | What does the service_name column mean? | [Reading the output](#reading-the-service_name-column) |
+>
+> **No changes are made by any command in this section** — all reads are safe to run at any time.
+
+```bash
+# Prerequisites — set once for this section
+export RBAC_URL="http://192.168.1.50:30850"
+export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+```
+
+---
+
+### Test 1 — Inspect one user
+
+> **What roles does the user have, and are those roles scoped to all services or just one?**
+
+#### CLI
+
+```bash
+rbacctl user bindings bob
+```
+
+Expected output — `bob` has a single all-services binding:
+```
+        Bindings for bob
+ id │ role_name      │ service_name │ granted_by │ granted_at          │ expires_at
+────┼────────────────┼──────────────┼────────────┼─────────────────────┼───────────
+ 7  │ platform_admin │              │ master     │ 2026-01-10T09:00:00 │
+```
+
+The `service_name` column is **blank** — the role applies to all four services.
+
+Compare with a user who has per-service bindings (e.g. after a Spark-only removal per section (l) Scenario B):
+```
+ id │ role_name      │ service_name │ granted_by │ granted_at          │ expires_at
+────┼────────────────┼──────────────┼────────────┼─────────────────────┼───────────
+ 8  │ platform_admin │ doris        │ master     │ 2026-01-10T09:00:00 │
+ 9  │ platform_admin │ kafka        │ master     │ 2026-01-10T09:00:00 │
+ 10 │ platform_admin │ opensearch   │ master     │ 2026-01-10T09:00:00 │
+```
+
+Here `bob` has **three separate scoped bindings** — Spark was deliberately removed.
+
+#### API equivalent
+
+```bash
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/bob/bindings" | \
+  python3 -c "
+import sys, json
+for b in json.load(sys.stdin):
+    svc = b['service_name'] or 'ALL SERVICES'
+    exp = b['expires_at'] or 'never'
+    print(f'  id={b[\"id\"]}  role={b[\"role_name\"]:20} scope={svc:15} expires={exp}')
+"
+```
+
+---
+
+### Test 2 — Effective permissions for one user
+
+> **What exact permissions does the user have, broken down by service?**
+> This resolves all bindings (including scoped ones and expiry) into a flat list.
+
+#### CLI
+
+```bash
+rbacctl user roles bob
+```
+
+Expected output for `bob` (`platform_admin`, all services):
+```
+bob
+  Roles: platform_admin
+
+     Effective Permissions
+ service     │ permission        │ resource_scope
+─────────────┼───────────────────┼───────────────
+ doris        │ SELECT            │ {}
+ doris        │ INSERT            │ {}
+ doris        │ ADMIN             │ {}
+ ...
+ kafka        │ PRODUCE           │ {}
+ kafka        │ ADMIN             │ {}
+ ...
+ opensearch   │ INDEX_READ        │ {}
+ opensearch   │ CLUSTER_ADMIN     │ {}
+ ...
+ spark        │ SUBMIT_JOB        │ {}
+ spark        │ KILL_ANY_JOB      │ {}
+ spark        │ ADMIN_CATALOG     │ {}
+ ...
+```
+
+If a user is **scoped to Spark only**, only `spark` rows will appear:
+```
+carol  (cached)
+  Roles: analyst
+
+     Effective Permissions
+ service │ permission  │ resource_scope
+─────────┼─────────────┼───────────────
+ spark    │ VIEW_UI     │ {}
+```
+
+> The `(cached)` label means the result was served from the in-process/Redis cache.
+> This is the same response the Spark/Doris/Kafka guards receive on the hot path.
+
+#### API equivalent
+
+```bash
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/bob/roles" | \
+  python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('Roles:', ', '.join(data['roles']))
+print('Cached:', data['cached'])
+svc = {}
+for p in data['permissions']:
+    svc.setdefault(p['service'], []).append(p['permission'])
+for s in sorted(svc):
+    print(f'  {s}: {sorted(svc[s])}')
+"
+```
+
+Expected:
+```
+Roles: platform_admin
+Cached: False
+  doris: ['ADMIN', 'ALTER', 'CREATE', 'DELETE', 'DROP', 'GRANT', 'INSERT', 'LOAD', 'NODE', 'SELECT', 'SHOW_VIEW', 'UPDATE']
+  kafka: ['ADMIN', 'CDC_CONNECT', 'CONSUME', 'CONSUMER_GROUP_MANAGE', 'CREATE_TOPIC', 'DELETE_TOPIC', 'DESCRIBE', 'PRODUCE', 'SCHEMA_REGISTRY_READ', 'SCHEMA_REGISTRY_WRITE', 'TRANSACTIONAL_WRITE']
+  opensearch: ['CLUSTER_ADMIN', 'CLUSTER_READ', 'INDEX_ADMIN', 'INDEX_READ', 'INDEX_WRITE']
+  spark: ['ADMIN_CATALOG', 'KILL_ANY_JOB', 'KILL_OWN_JOB', 'SUBMIT_JOB', 'USE_CATALOG', 'VIEW_UI', 'WRITE_ICEBERG']
+```
+
+#### Check a specific service only
+
+```bash
+# Only show spark permissions for bob
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/bob/roles" | \
+  python3 -c "
+import sys, json
+perms = [p for p in json.load(sys.stdin)['permissions'] if p['service'] == 'spark']
+print('Spark permissions:', sorted(p['permission'] for p in perms))
+"
+# Expected: ['ADMIN_CATALOG', 'KILL_ANY_JOB', 'KILL_OWN_JOB', 'SUBMIT_JOB', 'USE_CATALOG', 'VIEW_UI', 'WRITE_ICEBERG']
+```
+
+---
+
+### Test 3 — List all members of a role
+
+> **Who is in the `data_engineer` role, and what service scope does each binding have?**
+
+#### CLI + API (loop over all users)
+
+```bash
+ROLE="data_engineer"
+
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/users" | \
+  python3 -c "import sys,json; [print(u['username']) for u in json.load(sys.stdin)]" | \
+  while read u; do
+    curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+      "${RBAC_URL}/api/v1/users/${u}/bindings" | \
+    python3 -c "
+import sys, json
+for b in json.load(sys.stdin):
+    if b['role_name'] == '${ROLE}':
+        svc = b['service_name'] or 'all services'
+        exp = b['expires_at'] or 'never'
+        print(f'  {b[\"username\"]:14} scope={svc:15} expires={exp}')
+" 2>/dev/null
+  done
+```
+
+Expected output when `alice` and `carol` are in `data_engineer` (all services):
+```
+  alice          scope=all services   expires=never
+  carol          scope=all services   expires=never
+```
+
+#### Snapshot of all users and all their roles at once
+
+```bash
+# Full platform view — every user with every role and service scope
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/users" | \
+  python3 -c "import sys,json; [print(u['username']) for u in json.load(sys.stdin)]" | \
+  while read u; do
+    curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+      "${RBAC_URL}/api/v1/users/${u}/bindings" | \
+    python3 -c "
+import sys, json
+rows = json.load(sys.stdin)
+if not rows:
+    print(f'  ${u}: no bindings')
+for b in rows:
+    svc = b['service_name'] or 'ALL SERVICES'
+    exp = b['expires_at'] or 'never'
+    print(f'  ${u:14} role={b[\"role_name\"]:20} scope={svc:15} expires={exp}')
+" 2>/dev/null
+  done
+```
+
+Example output for a platform with four users:
+```
+  alice          role=data_engineer     scope=ALL SERVICES   expires=never
+  bob            role=platform_admin    scope=ALL SERVICES   expires=never
+  carol          role=data_engineer     scope=ALL SERVICES   expires=never
+  dave           role=platform_admin    scope=doris          expires=never
+  dave           role=platform_admin    scope=kafka          expires=never
+  dave           role=platform_admin    scope=opensearch     expires=never
+```
+
+> `dave` has three rows — he was given per-service bindings after Spark access was removed
+> (see [section (l) Scenario B](#scenario-b--remove-a-user-from-one-service-only)).
+
+---
+
+### Reading the `service_name` column
+
+| `service_name` value | What it means |
+|---|---|
+| *(blank / null)* | Role applies to **all four services** — Doris, Kafka, OpenSearch, Spark |
+| `doris` | Role permissions are enforced on **Doris only** |
+| `kafka` | Role permissions are enforced on **Kafka only** |
+| `opensearch` | Role permissions are enforced on **OpenSearch only** |
+| `spark` | Role permissions are enforced on **Spark only** |
+
+A user with **multiple rows** in `bindings` has multiple bindings active at the same time.
+`rbacctl user roles` resolves all of them and shows the combined, de-duplicated
+permission set already filtered by service — it is the definitive answer to
+"what can this user actually do right now".
+
+---
+
+### Test 4 — Verify role contents (what permissions a role grants)
+
+> Confirm exactly which permissions a role grants before binding users to it.
+
+```bash
+# CLI — list permissions for a role by name
+rbacctl role list
+# Note the id of the role you want, then:
+rbacctl role get <role_id>
+```
+
+```bash
+# CLI — list all available permissions filtered by service
+rbacctl role perms --service spark
+rbacctl role perms --service doris
+```
+
+```bash
+# API — inspect one role's permissions grouped by service
+ROLE_NAME="data_engineer"
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" "${RBAC_URL}/api/v1/roles" | \
+  python3 -c "
+import sys, json
+for r in json.load(sys.stdin):
+    if r['name'] == '${ROLE_NAME}':
+        svc = {}
+        for p in r['permissions']:
+            svc.setdefault(p['service_name'], []).append(p['permission_name'])
+        print(f'Role: {r[\"name\"]}  (id={r[\"id\"]}, {len(r[\"permissions\"])} permissions)')
+        for s in sorted(svc):
+            print(f'  {s}: {sorted(svc[s])}')
+"
+```
+
+Expected output for `data_engineer`:
+```
+Role: data_engineer  (id=7, 20 permissions)
+  doris: ['DELETE', 'INSERT', 'LOAD', 'SELECT', 'SHOW_VIEW', 'UPDATE']
+  kafka: ['CONSUME', 'CONSUMER_GROUP_MANAGE', 'DESCRIBE', 'PRODUCE', 'SCHEMA_REGISTRY_READ', 'TRANSACTIONAL_WRITE']
+  opensearch: ['CLUSTER_READ', 'INDEX_READ', 'INDEX_WRITE']
+  spark: ['KILL_OWN_JOB', 'SUBMIT_JOB', 'USE_CATALOG', 'VIEW_UI', 'WRITE_ICEBERG']
+```
+
+---
+
+### Quick-reference — inspection commands
+
+| Question | CLI | API |
+|---|---|---|
+| What roles/scope does user X have? | `rbacctl user bindings <user>` | `GET /api/v1/users/<user>/bindings` |
+| What can user X actually do? | `rbacctl user roles <user>` | `GET /api/v1/users/<user>/roles` |
+| Who is in role Y? | loop over users, filter by `role_name` | loop over `GET /api/v1/users` |
+| What permissions does role Y grant? | `rbacctl role get <role_id>` | `GET /api/v1/roles/<role_id>` |
+| List all available permissions for a service | `rbacctl role perms --service spark` | `GET /api/v1/services/spark/permissions` |
+| See all roles with permission counts | `rbacctl role list` | `GET /api/v1/roles` |
