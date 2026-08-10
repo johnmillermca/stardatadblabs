@@ -1,15 +1,21 @@
 # =============================================================================
 # OpenBao Auto-Unseal CronJob
 # Namespace : prod
-# Schedule  : every 2 minutes
+# Schedule  : every 1 minute
 # Runs on   : master.local (control-plane)
 #
-# Calls /v1/sys/seal-status directly instead of /v1/sys/health.
-# /v1/sys/health returns HTTP 503 when sealed, which causes `curl -sf`
-# to fail and return an empty body — the old grep-based sealed check
-# always fell through to "already unsealed", leaving Bao sealed forever.
-# /v1/sys/seal-status always returns HTTP 200 with a JSON body regardless
-# of seal state, so the grep is reliable.
+# Image: busybox:1.36 (already in private registry at 192.168.1.50:30500).
+# Previously used strimzi/operator:1.1.0 purely as a shell container — if
+# that image tag is ever replaced the CronJob would silently stop working,
+# leaving OpenBao sealed indefinitely after a reboot. busybox is a stable,
+# purpose-appropriate image for this job.
+#
+# Uses wget (BusyBox applet) instead of curl.
+# /v1/sys/seal-status always returns HTTP 200 regardless of seal state,
+# unlike /v1/sys/health which returns 503 when sealed — so the grep is reliable.
+#
+# Schedule is */1 (every minute) to reduce the post-reboot sealed window from
+# up to 2 minutes down to at most 1 minute.
 # =============================================================================
 apiVersion: batch/v1
 kind: CronJob
@@ -17,7 +23,7 @@ metadata:
   name: openbao-auto-unseal
   namespace: prod
 spec:
-  schedule: "*/2 * * * *"
+  schedule: "*/1 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 1
@@ -35,23 +41,22 @@ spec:
               effect: NoSchedule
           containers:
             - name: unseal
-              image: 192.168.1.50:30500/strimzi/operator:1.1.0
+              image: 192.168.1.50:30500/busybox:1.36
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/sh
                 - -c
                 - |
-                  # Use /v1/sys/seal-status — always returns HTTP 200 regardless of seal state,
-                  # unlike /v1/sys/health which returns 503 when sealed (causing curl -sf to
-                  # silently fail and produce an empty body, making the sealed check unreliable).
-                  SEALED=$(curl -sf http://openbao.prod.svc.cluster.local:8200/v1/sys/seal-status \
+                  # /v1/sys/seal-status always returns HTTP 200 regardless of seal state.
+                  # wget -qO- writes response body to stdout; exit code 0 on HTTP 200.
+                  SEALED=$(wget -qO- http://openbao.prod.svc.cluster.local:8200/v1/sys/seal-status \
                     | grep -o '"sealed":[a-z]*' | cut -d: -f2)
                   echo "Sealed status: '${SEALED}'"
                   if [ "${SEALED}" = "true" ]; then
                     echo "OpenBao is sealed — unsealing..."
-                    curl -sf -X PUT \
-                      http://openbao.prod.svc.cluster.local:8200/v1/sys/unseal \
-                      -d "{\"key\":\"${UNSEAL_KEY}\"}"
+                    wget -qO- --post-data="{\"key\":\"${UNSEAL_KEY}\"}" \
+                      --header="Content-Type: application/json" \
+                      http://openbao.prod.svc.cluster.local:8200/v1/sys/unseal
                     echo "Unseal attempted"
                   else
                     echo "OpenBao is already unsealed — nothing to do"

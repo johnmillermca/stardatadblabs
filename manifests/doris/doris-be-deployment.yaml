@@ -1,12 +1,26 @@
 # =============================================================================
-# Apache Doris BE (Backend) — ConfigMap + PVC + Deployment
+# Apache Doris BE (Backend) — ConfigMap + PVC + StatefulSet
 # Namespace : prod
 # Node      : worker1.local
 # Connects  : to FE via stable FQDN doris-fe-0.doris-fe-headless.prod.svc.cluster.local
-# PVC       : 400Gi on /home (worker1.local)
+# PVC       : 400Gi on /home (worker1.local) — pre-existing PVC doris-be-storage
 # Replicas  : 1
 # FE_SERVERS: static FQDN — no init-container IP resolution needed now that FE
 #             runs as a StatefulSet with enable_fqdn_mode = true.
+#
+# NOTE: Previously a Deployment. Converted to StatefulSet so that:
+#   1. Pod gets a stable identity (doris-be-0) — BE registers itself in the FE
+#      catalog under its hostname; a Deployment can produce a random suffix on
+#      restart, which would create a ghost entry in the FE backend table.
+#   2. A StatefulSet guarantees at-most-one-pod-at-a-time (same as Recreate
+#      strategy on a Deployment, but enforced by the controller even if replicas
+#      is accidentally changed).
+#   3. Safe to scale in future — each replica would get its own PVC via
+#      volumeClaimTemplates.
+#
+# MIGRATION: The existing PVC 'doris-be-storage' is referenced directly via
+# volumes (not volumeClaimTemplates) so no data migration is needed. The PVC
+# pre-dates this StatefulSet and must not be owned by the StatefulSet controller.
 # =============================================================================
 ---
 apiVersion: v1
@@ -24,20 +38,26 @@ data:
     storage_root_path = /opt/apache-doris/be/storage
     JAVA_OPTS = "-Xmx1024m -DlogPath=$DORIS_HOME/log/jni.log"
 ---
+# Headless service required by StatefulSet for stable DNS (doris-be-0.doris-be-headless)
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Service
 metadata:
-  name: doris-be-storage
+  name: doris-be-headless
   namespace: prod
+  labels:
+    app: doris-be
+    component: be
 spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 400Gi
+  clusterIP: None
+  selector:
+    app: doris-be
+    component: be
+  ports:
+    - name: heartbeat
+      port: 9050
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: doris-be
   namespace: prod
@@ -46,8 +66,7 @@ metadata:
     component: be
 spec:
   replicas: 1
-  strategy:
-    type: Recreate
+  serviceName: doris-be-headless
   selector:
     matchLabels:
       app: doris-be
@@ -133,6 +152,8 @@ spec:
             name: doris-be-config
         - name: be-config-rw
           emptyDir: {}
+        # The PVC is referenced by name (not via volumeClaimTemplates) so it is
+        # not owned or deleted by the StatefulSet controller.
         - name: be-storage
           persistentVolumeClaim:
             claimName: doris-be-storage

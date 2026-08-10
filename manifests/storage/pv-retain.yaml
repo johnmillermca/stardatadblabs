@@ -3,6 +3,25 @@
 # Generated from live cluster — all PVs use spec.hostPath (rancher.io/local-path
 # provisioner creates hostPath, not spec.local volumes).
 # Retain policy: data survives PVC deletion and node reboots.
+#
+# ── Node-local storage trade-off ─────────────────────────────────────────────
+# All PVs are pinned to a specific node via nodeAffinity (hostPath-backed).
+# This means:
+#   ✅ Data survives pod restarts and full node/cluster reboots.
+#   ✅ No distributed storage dependency — simple and fast.
+#   ❌ If a node suffers permanent hardware failure, data on that node is
+#      inaccessible until the node is recovered. There is no automatic failover.
+#
+# Data locations by node:
+#   master.local  — OpenBao, Kerberos, PostgreSQL, MongoDB, Oracle, Registry
+#   worker1.local — Doris FE, Doris BE
+#   worker2.local — Kestra, SQLMesh, Debezium, Alertmanager
+#   worker3.local — OpenSearch
+#   worker4.local — Kafka, Grafana, JupyterHub, Prometheus
+#
+# Accepted trade-off: this is a single-site lab/dev cluster. For production
+# HA, migrate to a distributed storage backend (e.g. Ceph/Rook, NFS, Longhorn)
+# so PVs can be rebound to a replacement node after hardware failure.
 # =============================================================================
 ---
 # PVC 'alertmanager-prometheus-alertmanager-db-alertmanager-prometheus-alertmanager-0' (monitoring) on worker2.local
