@@ -24,7 +24,8 @@ httpx==0.28.1                # OpenSearch REST API
 kubernetes-asyncio==30.3.1   # Kafka KafkaUser CRs + Spark ConfigMap
 
 # CLI
-typer[all]==0.13.1
+typer==0.15.3
+click==8.1.8
 rich==13.9.4
 
 # Dev / testing

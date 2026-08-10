@@ -393,7 +393,7 @@ def role_perms(service: Optional[str] = typer.Option(None, "--service", "-s")):
 
 # ── sync commands ──────────────────────────────────────────
 
-@sync_app.command("run", name="run")
+@sync_app.command("run")
 def sync_run(
     username: Optional[str] = typer.Option(None, "--user", "-u"),
     service:  Optional[str] = typer.Option(None, "--service", "-s"),
