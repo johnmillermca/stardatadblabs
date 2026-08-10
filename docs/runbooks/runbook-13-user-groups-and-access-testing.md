@@ -18,6 +18,8 @@ This runbook covers the full lifecycle of user groups on the platform:
 | [(h)](#h-doris-column-level-privileges) | Doris column-level SELECT — syntax, worked example, limitations, revoke |
 | [(i)](#i-polaris-catalog-grants-for-write_iceberg--admin_catalog) | Polaris catalog grants for `WRITE_ICEBERG` / `ADMIN_CATALOG` |
 | [(j)](#j-sample-data-setup-and-end-to-end-permission-testing) | **Sample data setup** — create test tables/topics/indexes and run permission tests |
+| [(k)](#k-bulk-binding---adding-multiple-users-to-a-role-in-one-call) | **Bulk binding** — add multiple users to a role in one API/CLI call |
+| [(l)](#l-removing-a-user-from-a-role-or-from-the-platform) | **Removing a user** — unbind from one role, one service, or full offboard |
 
 ---
 
@@ -343,9 +345,9 @@ print('Spark entry:', entry) if entry else print('WARNING: not in allowlist')
 
 | Role | Expected Spark allowlist entry |
 |---|---|
-| `platform_admin` / `account_admin` | `{"can_submit": true, "can_kill_any": true, "view_ui": true}` |
-| `data_engineer` | `{"can_submit": true, "can_kill_any": false, "view_ui": true}` |
-| `analyst` | `{"can_submit": false, "can_kill_any": false, "view_ui": true}` |
+| `platform_admin` / `account_admin` | `{"can_admin_catalog": true, "can_kill_any": true, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}` |
+| `data_engineer` | `{"can_admin_catalog": false, "can_kill_any": false, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}` |
+| `analyst` | `{"can_admin_catalog": false, "can_kill_any": false, "can_submit": false, "can_use_catalog": true, "can_write_iceberg": false, "view_ui": true}` |
 
 ### Quick-check: list all KDC principals
 
@@ -367,12 +369,13 @@ kubectl exec -n prod deploy/kerberos-kdc -- \
 > | OpenSearch | INDEX_READ, INDEX_WRITE, INDEX_ADMIN, CLUSTER_READ, CLUSTER_ADMIN |
 > | Spark | SUBMIT_JOB, KILL_OWN_JOB, KILL_ANY_JOB, VIEW_UI |
 
-### Add a new user to the admin group
+### Add users to the admin group
 
-Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="platform_admin"`.
+Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="platform_admin"` to fully onboard a new user (KDC principal, Doris SQL user, RBAC register + bind, sync).
+
+#### Single user (quick one-liner for an existing KDC+Doris user)
 
 ```bash
-# Quick one-liner for an existing KDC+Doris user
 USERNAME="bob"
 
 curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
@@ -384,6 +387,24 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+#### Multiple users at once (bulk bind)
+
+> All users must already be registered in the RBAC plane. See [section (k)](#k-bulk-binding---adding-multiple-users-to-a-role-in-one-call) for the full bulk-bind workflow.
+
+```bash
+# API — bind bob, alice, and charlie to platform_admin in one call
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"usernames":["bob","alice","charlie"]}' \
+  "${RBAC_URL}/api/v1/users/roles/platform_admin/members" | python3 -m json.tool
+
+# CLI equivalent
+rbacctl role add-members platform_admin bob alice charlie
+
+# Then sync all three to all services
+rbacctl sync run
 ```
 
 ### Verify admin grants — all four services
@@ -424,7 +445,7 @@ print('Mapped roles:', roles)
 kubectl get configmap spark-rbac-allowlist -n prod \
   -o jsonpath='{.data.allowlist\.json}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
-# Expected: {"can_kill_any": true, "can_submit": true, "view_ui": true}
+# Expected: {"can_admin_catalog": true, "can_kill_any": true, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}
 ```
 
 ---
@@ -440,9 +461,11 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 > | OpenSearch | INDEX_READ, INDEX_WRITE, CLUSTER_READ |
 > | Spark | SUBMIT_JOB, KILL_OWN_JOB, VIEW_UI |
 
-### Add a new user to the data_engineer group
+### Add users to the data_engineer group
 
-Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="data_engineer"`.
+Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="data_engineer"` to fully onboard a new user.
+
+#### Single user
 
 ```bash
 USERNAME="carol"
@@ -456,6 +479,24 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+#### Multiple users at once (bulk bind)
+
+> See [section (k)](#k-bulk-binding---adding-multiple-users-to-a-role-in-one-call) for the full bulk-bind workflow.
+
+```bash
+# API
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"usernames":["carol","dave","frank"]}' \
+  "${RBAC_URL}/api/v1/users/roles/data_engineer/members" | python3 -m json.tool
+
+# CLI
+rbacctl role add-members data_engineer carol dave frank
+
+# Sync
+rbacctl sync run
 ```
 
 ### Verify DML grants — all four services
@@ -497,8 +538,8 @@ print('Mapped roles:', roles)
 kubectl get configmap spark-rbac-allowlist -n prod \
   -o jsonpath='{.data.allowlist\.json}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
-# Expected: {"can_kill_any": false, "can_submit": true, "view_ui": true}
-# NOT expected: can_kill_any=true
+# Expected: {"can_admin_catalog": false, "can_kill_any": false, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}
+# NOT expected: can_kill_any=true or can_admin_catalog=true
 ```
 
 ---
@@ -509,9 +550,11 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 > **Purpose:** account-level governance and user provisioning. Full admin on all services.
 > Same permission set as `platform_admin` — named separately for governance boundary.
 
-### Add a new user to the account_admin group
+### Add users to the account_admin group
 
-Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="account_admin"`.
+Follow [section (a)](#a-adding-a-new-user-to-a-group) with `ROLE="account_admin"` to fully onboard a new user.
+
+#### Single user
 
 ```bash
 USERNAME="dave"
@@ -525,6 +568,24 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+#### Multiple users at once (bulk bind)
+
+> See [section (k)](#k-bulk-binding---adding-multiple-users-to-a-role-in-one-call) for the full bulk-bind workflow.
+
+```bash
+# API
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"usernames":["dave","grace"]}' \
+  "${RBAC_URL}/api/v1/users/roles/account_admin/members" | python3 -m json.tool
+
+# CLI
+rbacctl role add-members account_admin dave grace
+
+# Sync
+rbacctl sync run
 ```
 
 ### Verify admin grants — all four services
@@ -564,7 +625,7 @@ print('Mapped roles:', roles)
 kubectl get configmap spark-rbac-allowlist -n prod \
   -o jsonpath='{.data.allowlist\.json}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('${USERNAME}'))"
-# Expected: {"can_kill_any": true, "can_submit": true, "view_ui": true}
+# Expected: {"can_admin_catalog": true, "can_kill_any": true, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}
 ```
 
 ### Role comparison table
@@ -765,7 +826,7 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
 kubectl get configmap spark-rbac-allowlist -n prod \
   -o jsonpath='{.data.allowlist\.json}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('carol'))"
-# Now expected: {"can_kill_any": true, "can_submit": true, "view_ui": true}
+# Now expected: {"can_admin_catalog": false, "can_kill_any": true, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}
 # (can_kill_any was false before)
 ```
 
@@ -877,7 +938,7 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
 kubectl get configmap spark-rbac-allowlist -n prod \
   -o jsonpath='{.data.allowlist\.json}' | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('carol'))"
-# Expected: {"can_kill_any": false, ...}  (reverted)
+# Expected: {"can_admin_catalog": false, "can_kill_any": false, "can_submit": true, "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}  (reverted)
 ```
 
 ---
@@ -1474,10 +1535,9 @@ kubectl get configmap spark-rbac-allowlist -n prod \
 
 ### Step 9 — Adding more users to the same group
 
-Once the role exists, adding further users is a 4-command operation:
+#### Single additional user (4-command operation)
 
 ```bash
-# Replace NEWUSER_* with the new user's details
 NEWUSER="frank"
 NEWUSER_PASS="TempPass1!"
 
@@ -1505,6 +1565,19 @@ curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${NEWUSER}\",\"dry_run\":false}" \
   "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+#### Multiple users at once (bulk bind)
+
+> Use this when you have several already-registered users to add to the same role.
+> See [section (k)](#k-bulk-binding---adding-multiple-users-to-a-role-in-one-call) for the full workflow.
+
+```bash
+# Bind frank, grace, and henry to reporting_analyst in one call
+rbacctl role add-members ${NEW_ROLE} frank grace henry
+
+# Sync all three to all services
+rbacctl sync run
 ```
 
 All users bound to `reporting_analyst` automatically inherit any future permission
@@ -2962,3 +3035,715 @@ for U in ${TESTUSER} ${READONLY}; do
 done
 echo "Test users removed"
 ```
+
+---
+
+## (k) Bulk Binding — Adding Multiple Users to a Role in One Call
+
+> **API endpoint:** `POST /api/v1/users/roles/{role_name}/members`
+> **CLI command:** `rbacctl role add-members <role_name> <user1> <user2> ...`
+>
+> Use bulk binding when you need to assign several already-registered users to the
+> same role in a single operation. Each user in the list is processed independently —
+> unknown usernames and duplicate bindings are reported individually rather than
+> aborting the whole batch.
+>
+> **Prerequisites:** Every username in the list must already be registered in the RBAC
+> plane (`POST /api/v1/users`). KDC principals and Doris SQL users must also exist
+> before syncing — see [section (a)](#a-adding-a-new-user-to-a-group).
+
+---
+
+### API reference
+
+```
+POST /api/v1/users/roles/{role_name}/members
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "usernames":    ["alice", "bob", "carol"],   // required — list of usernames
+  "service_name": "spark",                     // optional — restrict to one service
+  "expires_at":   "2026-12-31T00:00:00Z"       // optional — auto-expire all new bindings
+}
+```
+
+**Response:**
+```json
+{
+  "results": [
+    {"username": "alice", "status": "bound",          "binding_id": 42},
+    {"username": "bob",   "status": "already_exists", "binding_id": null},
+    {"username": "carol", "status": "user_not_found", "binding_id": null}
+  ],
+  "bound":   1,
+  "skipped": 1,
+  "errors":  1
+}
+```
+
+| `status` | Meaning |
+|---|---|
+| `bound` | New binding created successfully. `binding_id` is the new binding's ID. |
+| `already_exists` | The user already had this role binding — skipped, not an error. |
+| `user_not_found` | Username not registered in the RBAC plane. Fix: register the user first. |
+
+---
+
+### CLI reference
+
+```bash
+# Syntax
+rbacctl role add-members <role_name> <user1> [user2 ...] [--service <svc>] [--expires-days <n>]
+
+# Options
+#   --service,      -s   Restrict all new bindings to one service
+#   --expires-days, -d   Auto-expire all new bindings after N days
+```
+
+---
+
+### Test scenario — bind three users to `data_engineer` at once
+
+> **Setup:** `alice`, `bob`, and `carol` are already registered in the RBAC plane
+> and have KDC principals + Doris SQL users. `dave` is not registered.
+
+#### Step 1 — Prerequisites check
+
+```bash
+export RBAC_URL="http://192.168.1.50:30850"
+export RBAC_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+
+# Confirm the users exist in the RBAC plane
+for U in alice bob carol; do
+  curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    "${RBAC_URL}/api/v1/users/${U}" | \
+    python3 -c "import sys,json; u=json.load(sys.stdin); print(f'{u[\"username\"]:10} enabled={u[\"enabled\"]}')" \
+    2>/dev/null || echo "${U}: NOT FOUND"
+done
+```
+
+Expected:
+```
+alice      enabled=True
+bob        enabled=True
+carol      enabled=True
+```
+
+#### Step 2 — Bulk bind via API
+
+```bash
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"usernames":["alice","bob","carol","dave"]}' \
+  "${RBAC_URL}/api/v1/users/roles/data_engineer/members" | python3 -m json.tool
+```
+
+Expected response (`dave` is not registered, so it surfaces as `user_not_found`):
+```json
+{
+  "results": [
+    {"username": "alice", "status": "bound",          "binding_id": 10},
+    {"username": "bob",   "status": "bound",          "binding_id": 11},
+    {"username": "carol", "status": "already_exists", "binding_id": null},
+    {"username": "dave",  "status": "user_not_found", "binding_id": null}
+  ],
+  "bound":   2,
+  "skipped": 1,
+  "errors":  1
+}
+```
+
+> `carol` already had `data_engineer` — the duplicate is skipped, not an error.
+> `dave` must be registered first; re-run after fixing.
+
+#### Step 2 (alternative) — Bulk bind via CLI
+
+```bash
+rbacctl role add-members data_engineer alice bob carol dave
+```
+
+Expected CLI output:
+```
+     Bulk bind → data_engineer
+ username │ status        │ binding_id
+──────────┼───────────────┼───────────
+ alice    │ bound         │ 10
+ bob      │ bound         │ 11
+ carol    │ already_exists│ —
+ dave     │ user_not_found│ —
+
+bound 2  skipped 1  errors 1
+```
+
+> The CLI exits with code `1` when any username is `user_not_found`, so CI scripts
+> can detect incomplete binds.
+
+#### Step 3 — Verify bindings
+
+```bash
+# Check that alice and bob now have the data_engineer role
+for U in alice bob; do
+  echo "=== ${U} ==="
+  rbacctl user bindings ${U}
+done
+```
+
+#### Step 4 — Sync the newly bound users to all services
+
+```bash
+# Sync alice and bob individually (targeted)
+rbacctl sync run --user alice
+rbacctl sync run --user bob
+
+# Or sync the whole role's permission set to all services at once
+rbacctl sync run
+```
+
+#### Step 5 — Verify sync results per service
+
+**Doris:**
+```bash
+for U in alice bob; do
+  mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+    -e "SHOW GRANTS FOR '${U}'@'%';" 2>/dev/null | grep "CatalogPrivs"
+done
+# Expected: CatalogPrivs: Select_priv, Load_priv  (for each user)
+```
+
+**Kafka:**
+```bash
+for U in alice bob; do
+  kubectl get kafkauser ${U} -n prod
+done
+# Expected: READY=True for each user
+```
+
+**OpenSearch:**
+```bash
+for U in alice bob; do
+  kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+    curl -sk \
+      --cert /usr/share/opensearch/config/tls/admin.pem \
+      --key  /usr/share/opensearch/config/tls/admin-key.pem \
+      --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+      'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+    python3 -c \"
+import sys,json
+roles=[r for r,m in json.load(sys.stdin).items() if '${U}' in m.get('users',[])]
+print('${U} roles:', roles)
+\"
+  "
+done
+# Expected: rbac_index_read_all, rbac_index_write_all, rbac_cluster_read_all
+```
+
+**Spark:**
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "
+import sys,json
+al=json.load(sys.stdin)
+for u in ['alice','bob']:
+    print(f'{u}: {al.get(u, \"NOT FOUND\")}')
+"
+# Expected for each user:
+# {"can_admin_catalog": false, "can_kill_any": false, "can_submit": true,
+#  "can_use_catalog": true, "can_write_iceberg": true, "view_ui": true}
+```
+
+---
+
+### Bulk bind with service scope (Spark only)
+
+> Use `--service` / `service_name` to restrict new bindings to a single service.
+> Useful for granting a temporary Spark permission without affecting Doris, Kafka, or OpenSearch.
+
+```bash
+# API — grant VIEW_UI on Spark only, expiring in 30 days
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"usernames\":    [\"alice\",\"bob\"],
+    \"service_name\": \"spark\",
+    \"expires_at\":   \"$(date -u -d '+30 days' '+%Y-%m-%dT%H:%M:%SZ')\"
+  }" \
+  "${RBAC_URL}/api/v1/users/roles/analyst/members" | python3 -m json.tool
+
+# CLI equivalent
+rbacctl role add-members analyst alice bob --service spark --expires-days 30
+
+# Sync Spark only
+rbacctl sync run --service spark
+```
+
+---
+
+### Negative test — `user_not_found`
+
+> **Expected:** a username that is not registered returns `user_not_found` in the
+> results. The rest of the batch is unaffected.
+
+```bash
+# ghost is not registered in the RBAC plane
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"usernames":["alice","ghost"]}' \
+  "${RBAC_URL}/api/v1/users/roles/data_engineer/members" | \
+  python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+for res in r['results']:
+    print(f'{res[\"username\"]:10} → {res[\"status\"]}')
+print(f'bound={r[\"bound\"]} skipped={r[\"skipped\"]} errors={r[\"errors\"]}')
+"
+```
+
+Expected:
+```
+alice      → already_exists
+ghost      → user_not_found
+bound=0 skipped=1 errors=1
+```
+
+> `alice` was already bound — `already_exists` is not counted as an error in the
+> `errors` counter. Only `user_not_found` increments `errors`.
+
+---
+
+## (l) Removing a User from a Role or from the Platform
+
+> This section covers three distinct removal scenarios — pick the one that matches your situation:
+>
+> | Scenario | What it does | When to use |
+> |---|---|---|
+> | [A — Remove from one role](#scenario-a--remove-a-user-from-one-role-all-services) | Deletes the role binding; sync revokes access on all services | User moves to a different team / role |
+> | [B — Remove from one service only](#scenario-b--remove-a-user-from-one-service-only) | Deletes the service-scoped binding; sync revokes access on that service alone | Withdraw Spark access while keeping Doris/Kafka/OpenSearch |
+> | [C — Full offboard](#scenario-c--full-offboard-remove-user-from-the-platform-entirely) | Removes all bindings, syncs revoke, deletes user, removes KDC principal and Doris SQL user | Leaver / account decommission |
+>
+> **Key principle:** deleting a binding from the RBAC plane does **not** immediately revoke
+> downstream access. You must always follow with a sync (`rbacctl sync run --user <username>`)
+> to push the removal to the services.
+
+---
+
+### Scenario A — Remove a user from one role (all services)
+
+> **Example:** `carol` is leaving the `data_engineer` group and moving to `analyst`.
+> This removes the `data_engineer` binding so the sync will revoke those grants on
+> every service, then a new `analyst` binding is added.
+
+#### Step 1 — Find the binding ID to remove
+
+```bash
+USERNAME="carol"
+
+# CLI
+rbacctl user bindings ${USERNAME}
+```
+
+Expected output:
+```
+         Bindings for carol
+ id │ role_name     │ service_name │ granted_by │ granted_at          │ expires_at
+────┼───────────────┼──────────────┼────────────┼─────────────────────┼───────────
+ 3  │ data_engineer │              │ master     │ 2026-01-10T09:00:00 │
+```
+
+```bash
+# API equivalent
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
+```
+
+#### Step 2 — Delete the binding
+
+```bash
+BINDING_ID=3   # from step 1
+
+# CLI
+rbacctl user unbind ${USERNAME} ${BINDING_ID}
+
+# API equivalent
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings/${BINDING_ID}" | python3 -m json.tool
+# Expected: {"ok": true, "message": "Binding 3 removed"}
+```
+
+#### Step 3 — Sync to revoke access on all services
+
+```bash
+# CLI
+rbacctl sync run --user ${USERNAME}
+
+# API equivalent
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${USERNAME}\",\"dry_run\":false}" \
+  "${RBAC_URL}/api/v1/sync" | python3 -m json.tool
+```
+
+Expected sync output — `carol` has no remaining bindings, so all four services
+revoke to zero permissions:
+```json
+{
+  "results": [
+    {"username": "carol", "service": "doris",      "status": "synced", "detail": "0 permissions applied"},
+    {"username": "carol", "service": "kafka",      "status": "synced", "detail": "0 permissions applied"},
+    {"username": "carol", "service": "opensearch", "status": "synced", "detail": "0 permissions applied"},
+    {"username": "carol", "service": "spark",      "status": "synced", "detail": "0 permissions applied"}
+  ],
+  "errors": 0
+}
+```
+
+#### Step 4 — Verify revocation per service
+
+**Doris — grants should be empty:**
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'carol'@'%';" 2>/dev/null
+# Expected: no CatalogPrivs rows (or only empty GlobalPrivs)
+```
+
+**Kafka — KafkaUser CR deleted:**
+```bash
+kubectl get kafkauser carol -n prod
+# Expected: Error from server (NotFound): kafkausers.kafka.strimzi.io "carol" not found
+```
+
+**OpenSearch — removed from all role mappings:**
+```bash
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
+import sys,json
+roles=[r for r,m in json.load(sys.stdin).items() if 'carol' in m.get('users',[])]
+print('carol roles:', roles)
+\"
+"
+# Expected: carol roles: []
+```
+
+**Spark — removed from allowlist:**
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print('carol' in json.load(sys.stdin))"
+# Expected: False
+```
+
+#### Step 5 (optional) — Bind the new role
+
+```bash
+# CLI
+rbacctl user bind ${USERNAME} analyst
+
+# API equivalent
+curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"role_name":"analyst"}' \
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | python3 -m json.tool
+
+# Sync the new role to all services
+rbacctl sync run --user ${USERNAME}
+```
+
+---
+
+### Scenario B — Remove a user from one service only
+
+> **Example:** `bob` (`platform_admin`) should lose Spark access temporarily while
+> keeping full access on Doris, Kafka, and OpenSearch.
+>
+> The mechanism is a **service-scoped binding**. If `bob` already has an
+> all-services binding, you cannot partially revoke it — instead, you:
+> 1. Delete the all-services binding.
+> 2. Re-add three service-specific bindings (doris, kafka, opensearch).
+> 3. Sync.
+>
+> If `bob` was originally onboarded with per-service bindings you can simply delete
+> the Spark-scoped one.
+
+#### Identify the current binding structure
+
+```bash
+USERNAME="bob"
+
+rbacctl user bindings ${USERNAME}
+```
+
+**Case 1 — bob has a single all-services binding (most common)**
+
+```
+ id │ role_name      │ service_name │ ...
+────┼────────────────┼──────────────┼────
+ 7  │ platform_admin │              │ ...
+```
+
+```bash
+# 1. Remove the all-services binding
+rbacctl user unbind ${USERNAME} 7
+
+# 2. Re-add one binding per service — omitting spark
+for SVC in doris kafka opensearch; do
+  curl -s -X POST -H "Authorization: Bearer ${RBAC_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"role_name\":\"platform_admin\",\"service_name\":\"${SVC}\"}" \
+    "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | \
+    python3 -c "import sys,json; b=json.load(sys.stdin); print(f'bound {b[\"role_name\"]} → {b[\"service_name\"]} (id={b[\"id\"]})')"
+done
+
+# 3. Sync — Spark will now receive 0 permissions and remove the allowlist entry;
+#    doris/kafka/opensearch remain fully intact (hash unchanged → skipped)
+rbacctl sync run --user ${USERNAME}
+```
+
+Expected sync result:
+```json
+{
+  "results": [
+    {"username": "bob", "service": "doris",      "status": "skipped",  "detail": "no change"},
+    {"username": "bob", "service": "kafka",      "status": "skipped",  "detail": "no change"},
+    {"username": "bob", "service": "opensearch", "status": "skipped",  "detail": "no change"},
+    {"username": "bob", "service": "spark",      "status": "synced",   "detail": "0 permissions applied"}
+  ],
+  "errors": 0
+}
+```
+
+**Case 2 — bob has a Spark-scoped binding**
+
+```
+ id │ role_name      │ service_name │ ...
+────┼────────────────┼──────────────┼────
+ 7  │ platform_admin │              │ ...   ← all-services
+ 12 │ analyst        │ spark        │ ...   ← spark-only (the extra one to remove)
+```
+
+```bash
+# Simply delete the spark-scoped binding and sync
+rbacctl user unbind ${USERNAME} 12
+rbacctl sync run --user ${USERNAME} --service spark
+```
+
+#### Verify Spark access is revoked
+
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print('bob' in json.load(sys.stdin))"
+# Expected: False
+
+# Doris should still be intact
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'bob'@'%';" 2>/dev/null | grep "Admin_priv"
+# Expected: GlobalPrivs: Admin_priv  (unchanged)
+
+# Kafka should still be intact
+kubectl get kafkauser bob -n prod
+# Expected: READY=True  (unchanged)
+```
+
+#### Restore Spark access later
+
+```bash
+# Re-add spark to the all-services binding (simplest: delete the 3 scoped bindings, re-add one all-services binding)
+# OR add a Spark-scoped binding directly:
+rbacctl user bind ${USERNAME} platform_admin --service spark
+rbacctl sync run --user ${USERNAME} --service spark
+```
+
+---
+
+### Scenario C — Full offboard (remove user from the platform entirely)
+
+> **Example:** `carol` is leaving the organisation.
+> This removes her from every service and cleans up all related infrastructure.
+
+> ⚠️ **Order matters.** Always sync (revoke downstream) *before* deleting the RBAC
+> user record. Deleting the user first leaves orphaned grants on Doris, OpenSearch,
+> and Spark.
+
+```bash
+USERNAME="carol"
+REALM="STARDATADBLABS.LOCAL"
+export DORIS_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
+```
+
+#### Step 1 — Preview what will be revoked (dry run)
+
+```bash
+rbacctl sync run --user ${USERNAME} --dry-run
+```
+
+Expected — shows every service that currently has grants for `carol`:
+```json
+{
+  "results": [
+    {"username": "carol", "service": "doris",      "status": "dry_run", "detail": "would apply 0 permissions"},
+    {"username": "carol", "service": "kafka",      "status": "dry_run", "detail": "would apply 0 permissions"},
+    {"username": "carol", "service": "opensearch", "status": "dry_run", "detail": "would apply 0 permissions"},
+    {"username": "carol", "service": "spark",      "status": "dry_run", "detail": "would apply 0 permissions"}
+  ],
+  "errors": 0
+}
+```
+
+#### Step 2 — Remove all RBAC bindings
+
+```bash
+# List all bindings
+rbacctl user bindings ${USERNAME}
+
+# Remove each binding by ID (repeat for every row)
+rbacctl user unbind ${USERNAME} <binding_id>
+
+# API: list + delete in one shot
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}/bindings" | \
+  python3 -c "import sys,json; [print(b['id']) for b in json.load(sys.stdin)]" | \
+  while read bid; do
+    curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+      "${RBAC_URL}/api/v1/users/${USERNAME}/bindings/${bid}" > /dev/null
+    echo "Removed binding ${bid}"
+  done
+```
+
+#### Step 3 — Sync to push zero-permission state to all services
+
+```bash
+rbacctl sync run --user ${USERNAME}
+```
+
+Expected — all four services show `synced` with `0 permissions applied`:
+```json
+{
+  "results": [
+    {"username": "carol", "service": "doris",      "status": "synced", "detail": "0 permissions applied"},
+    {"username": "carol", "service": "kafka",      "status": "synced", "detail": "0 permissions applied"},
+    {"username": "carol", "service": "opensearch", "status": "synced", "detail": "0 permissions applied"},
+    {"username": "carol", "service": "spark",      "status": "synced", "detail": "0 permissions applied"}
+  ],
+  "errors": 0
+}
+```
+
+#### Step 4 — Verify revocation on each service
+
+**Doris:**
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SHOW GRANTS FOR 'carol'@'%';" 2>/dev/null
+# Expected: empty — no CatalogPrivs rows
+```
+
+**Kafka:**
+```bash
+kubectl get kafkauser ${USERNAME} -n prod
+# Expected: NotFound
+```
+
+**OpenSearch:**
+```bash
+kubectl exec -n prod opensearch-cluster-master-0 -- bash -c "
+  curl -sk \
+    --cert /usr/share/opensearch/config/tls/admin.pem \
+    --key  /usr/share/opensearch/config/tls/admin-key.pem \
+    --cacert /usr/share/opensearch/config/tls/root-ca.pem \
+    'https://localhost:9200/_plugins/_security/api/rolesmapping' | \
+  python3 -c \"
+import sys,json
+roles=[r for r,m in json.load(sys.stdin).items() if '${USERNAME}' in m.get('users',[])]
+print('${USERNAME} roles:', roles)
+\"
+"
+# Expected: carol roles: []
+```
+
+**Spark:**
+```bash
+kubectl get configmap spark-rbac-allowlist -n prod \
+  -o jsonpath='{.data.allowlist\.json}' | \
+  python3 -c "import sys,json; print('${USERNAME}' in json.load(sys.stdin))"
+# Expected: False
+```
+
+#### Step 5 — Delete the RBAC user record
+
+```bash
+# CLI
+rbacctl user delete ${USERNAME} --yes
+
+# API equivalent
+curl -s -X DELETE -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}" | python3 -m json.tool
+# Expected: {"ok": true, "message": "User 'carol' deleted"}
+```
+
+#### Step 6 — Remove the Doris SQL user
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "DROP USER IF EXISTS '${USERNAME}'@'%';"
+
+# Verify
+mysql -h 192.168.1.50 -P 30090 -u root --password="${DORIS_PASS}" \
+  -e "SELECT user FROM mysql.user WHERE user='${USERNAME}';" 2>/dev/null
+# Expected: Empty set
+```
+
+#### Step 7 — Delete the Kerberos principal
+
+```bash
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "delprinc -force ${USERNAME}@${REALM}"
+
+# Verify
+kubectl exec -n prod deploy/kerberos-kdc -- \
+  kadmin.local -q "getprinc ${USERNAME}@${REALM}" 2>/dev/null | grep "Principal:"
+# Expected: no output (principal does not exist)
+```
+
+#### Step 8 — Remove the keytab secret (if one was created)
+
+```bash
+kubectl delete secret ${USERNAME}-keytab -n prod --ignore-not-found
+# Expected: secret "carol-keytab" deleted  (or: not found — both are fine)
+```
+
+#### Step 9 — Confirm the user is gone from the RBAC plane
+
+```bash
+rbacctl user list | grep ${USERNAME}
+# Expected: no output
+
+# API
+curl -s -H "Authorization: Bearer ${RBAC_TOKEN}" \
+  "${RBAC_URL}/api/v1/users/${USERNAME}"
+# Expected: {"detail": "User 'carol' not found"}  (HTTP 404)
+```
+
+---
+
+### Quick-reference — removal commands
+
+| Goal | CLI | API |
+|---|---|---|
+| List a user's bindings | `rbacctl user bindings <user>` | `GET /api/v1/users/<user>/bindings` |
+| Remove one binding | `rbacctl user unbind <user> <binding_id>` | `DELETE /api/v1/users/<user>/bindings/<id>` |
+| Sync revoke to all services | `rbacctl sync run --user <user>` | `POST /api/v1/sync` `{"username":"<user>"}` |
+| Sync revoke to one service | `rbacctl sync run --user <user> --service <svc>` | `POST /api/v1/sync` `{"username":"<user>","service":"<svc>"}` |
+| Disable user (keep bindings) | `rbacctl user disable <user>` | `PATCH /api/v1/users/<user>` `{"enabled":false}` |
+| Delete user (full removal) | `rbacctl user delete <user> --yes` | `DELETE /api/v1/users/<user>` |
+
+> **Disable vs Delete:** `rbacctl user disable` keeps all bindings and the user record intact but
+> invalidates the cache so the guards treat the user as unauthorised immediately. Use this for
+> temporary suspension or maternity/parental leave. Use `delete` only for permanent offboarding.

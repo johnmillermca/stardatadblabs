@@ -9,7 +9,11 @@ Usage:
   rbacctl sync --user alice
   rbacctl sync --dry-run
   rbacctl role list
-  rbacctl role create myrole --perm doris:SELECT --perm kafka:CONSUME
+  rbacctl role create myrole --display-name "My Role" --perm doris:SELECT --perm kafka:CONSUME
+  rbacctl role add-perm <role_id> doris:SELECT
+  rbacctl role remove-perm <role_id> doris:SELECT
+  rbacctl role add-members data_engineer alice bob carol
+  rbacctl role add-members platform_admin bob --service spark --expires-days 30
   rbacctl audit --limit 20
 
 Authentication:
@@ -246,13 +250,120 @@ def role_create(
     name: str,
     display_name: str = typer.Option(..., "--display-name", "-n"),
     description: Optional[str] = typer.Option(None, "--description", "-d"),
+    perms: Optional[list[str]] = typer.Option(
+        None, "--perm", "-p",
+        help=(
+            "Permission to grant in 'service:NAME' format. "
+            "Repeat for multiple permissions. "
+            "Example: --perm doris:SELECT --perm kafka:CONSUME"
+        ),
+    ),
 ):
-    """Create a new empty role."""
-    payload = {"name": name, "display_name": display_name,
-               "description": description, "permissions": []}
+    """Create a new role with optional initial permissions."""
+    permissions = [{"permission_name": p} for p in (perms or [])]
+    payload = {
+        "name": name,
+        "display_name": display_name,
+        "description": description,
+        "permissions": permissions,
+    }
     with _client() as c:
         resp = _check(c.post("/api/v1/roles", json=payload), ok=(201,))
     rprint(f"[green]✓[/green] Role [bold]{name}[/bold] created (id={resp['id']})")
+    if perms:
+        rprint(f"  Permissions granted: [cyan]{', '.join(perms)}[/cyan]")
+
+
+@role_app.command("add-perm")
+def role_add_perm(
+    role_id: int,
+    permission: str = typer.Argument(
+        ..., help="Permission in 'service:NAME' format, e.g. doris:SELECT"
+    ),
+):
+    """Grant a permission to a role by name (e.g. doris:SELECT)."""
+    parts = permission.split(":", 1)
+    if len(parts) != 2:
+        rprint(f"[red]Error:[/red] Use 'service:NAME' format, e.g. doris:SELECT")
+        raise SystemExit(1)
+    service_name, perm_name = parts
+    with _client() as c:
+        resp = _check(
+            c.post(f"/api/v1/roles/{role_id}/permissions/{service_name}/{perm_name}"),
+            ok=(200, 201),
+        )
+    rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] added to role {role_id}")
+
+
+@role_app.command("remove-perm")
+def role_remove_perm(
+    role_id: int,
+    permission: str = typer.Argument(
+        ..., help="Permission in 'service:NAME' format, e.g. doris:SELECT"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+):
+    """Revoke a permission from a role by name (e.g. doris:SELECT)."""
+    if not yes:
+        typer.confirm(f"Remove permission '{permission}' from role {role_id}?", abort=True)
+    parts = permission.split(":", 1)
+    if len(parts) != 2:
+        rprint(f"[red]Error:[/red] Use 'service:NAME' format, e.g. doris:SELECT")
+        raise SystemExit(1)
+    service_name, perm_name = parts
+    with _client() as c:
+        resp = _check(
+            c.delete(f"/api/v1/roles/{role_id}/permissions/{service_name}/{perm_name}"),
+            ok=(200,),
+        )
+    rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] removed from role {role_id}")
+
+
+@role_app.command("add-members")
+def role_add_members(
+    role_name: str,
+    usernames: list[str] = typer.Argument(..., help="One or more usernames to bind to the role"),
+    service: Optional[str] = typer.Option(
+        None, "--service", "-s",
+        help="Restrict binding to one service (doris/kafka/opensearch/spark)",
+    ),
+    expires_days: Optional[int] = typer.Option(
+        None, "--expires-days", "-d",
+        help="Auto-expire all new bindings after N days",
+    ),
+):
+    """Bind multiple users to a role in a single call."""
+    from datetime import datetime, timedelta, timezone
+    payload: dict = {"usernames": usernames}
+    if service:
+        payload["service_name"] = service
+    if expires_days:
+        payload["expires_at"] = (
+            datetime.now(timezone.utc) + timedelta(days=expires_days)
+        ).isoformat()
+    with _client() as c:
+        resp = _check(c.post(f"/api/v1/users/roles/{role_name}/members", json=payload))
+
+    table = Table(title=f"Bulk bind → {role_name}", show_header=True, header_style="bold cyan")
+    table.add_column("username")
+    table.add_column("status")
+    table.add_column("binding_id")
+    colour_map = {"bound": "green", "already_exists": "yellow", "user_not_found": "red"}
+    for r in resp["results"]:
+        colour = colour_map.get(r["status"], "white")
+        table.add_row(
+            r["username"],
+            f"[{colour}]{r['status']}[/{colour}]",
+            str(r["binding_id"]) if r.get("binding_id") else "—",
+        )
+    console.print(table)
+    rprint(
+        f"[green]bound {resp['bound']}[/green]  "
+        f"[yellow]skipped {resp['skipped']}[/yellow]  "
+        f"[red]errors {resp['errors']}[/red]"
+    )
+    if resp["errors"]:
+        raise SystemExit(1)
 
 
 @role_app.command("delete")

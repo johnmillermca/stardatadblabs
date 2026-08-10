@@ -16,8 +16,8 @@ from ..middleware.auth import require_read, require_write, require_admin
 from ..middleware.audit import audit
 from ..models import Permission, Role, RoleBinding, RolePermission, Service, User
 from ..schemas import (
-    BindingCreate, BindingOut, OkResponse,
-    UserCreate, UserOut, UserRolesOut, UserUpdate,
+    BindingCreate, BindingOut, BulkBindRequest, BulkBindResponse, BulkBindResult,
+    OkResponse, UserCreate, UserOut, UserRolesOut, UserUpdate,
 )
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -203,6 +203,83 @@ async def bind_role(
             granted_at=binding.granted_at,
             expires_at=binding.expires_at,
         )
+
+
+# ── Bulk role binding ──────────────────────────────────────
+
+@router.post("/roles/{role_name}/members", response_model=BulkBindResponse,
+             status_code=200,
+             summary="Bind multiple users to a role in one request",
+             description=(
+                 "Bind a list of usernames to `role_name` in a single call. "
+                 "Each user is processed independently — unknown users and "
+                 "duplicate bindings are reported in the results rather than "
+                 "aborting the whole batch."
+             ))
+async def bulk_bind_role(
+    role_name: str,
+    body: BulkBindRequest,
+    request: Request,
+    principal: dict = Depends(require_write),
+):
+    async with db_session() as session:
+        role_result = await session.execute(
+            select(Role).where(Role.name == role_name)
+        )
+        role = role_result.scalar_one_or_none()
+        if not role:
+            raise HTTPException(404, f"Role '{role_name}' not found")
+
+        service = None
+        if body.service_name:
+            svc_result = await session.execute(
+                select(Service).where(Service.name == body.service_name)
+            )
+            service = svc_result.scalar_one_or_none()
+            if not service:
+                raise HTTPException(404, f"Service '{body.service_name}' not found")
+
+        results: list[BulkBindResult] = []
+        for username in body.usernames:
+            user_result = await session.execute(
+                select(User).where(User.username == username)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                results.append(BulkBindResult(username=username, status="user_not_found"))
+                continue
+
+            dup_stmt = select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.role_id == role.id,
+                RoleBinding.service_id == (service.id if service else None),
+            )
+            if (await session.execute(dup_stmt)).scalar_one_or_none():
+                results.append(BulkBindResult(username=username, status="already_exists"))
+                continue
+
+            binding = RoleBinding(
+                user_id=user.id,
+                role_id=role.id,
+                service_id=service.id if service else None,
+                granted_by=principal["sub"],
+                expires_at=body.expires_at,
+            )
+            session.add(binding)
+            await session.flush()
+            await audit(
+                principal["sub"], "BIND_ROLE", "binding", f"{username}:{role_name}",
+                detail={"service": body.service_name, "bulk": True},
+                ip_address=request.client.host if request.client else None,
+            )
+            await cache_invalidate_user(username)
+            results.append(BulkBindResult(username=username, status="bound",
+                                          binding_id=binding.id))
+
+    bound   = sum(1 for r in results if r.status == "bound")
+    skipped = sum(1 for r in results if r.status == "already_exists")
+    errors  = sum(1 for r in results if r.status == "user_not_found")
+    return BulkBindResponse(results=results, bound=bound, skipped=skipped, errors=errors)
 
 
 @router.delete("/{username}/bindings/{binding_id}", response_model=OkResponse,

@@ -44,7 +44,14 @@ class PermissionOut(BaseModel):
 # ── Roles ──────────────────────────────────────────────────
 
 class RolePermissionIn(BaseModel):
-    permission_id: int
+    permission_name: str = Field(
+        ...,
+        description=(
+            "Permission to grant, in 'service:NAME' format. "
+            "Example: 'doris:SELECT', 'kafka:CONSUME', 'opensearch:INDEX_READ'."
+        ),
+        pattern=r"^[a-z0-9_\-]+:[A-Z0-9_]+$",
+    )
     resource_scope: dict = Field(default_factory=dict)
 
 
@@ -114,6 +121,32 @@ class BindingCreate(BaseModel):
         description="Restrict binding to one service. Omit for all services.",
     )
     expires_at: Optional[datetime] = None
+
+
+class BulkBindRequest(BaseModel):
+    usernames: list[str] = Field(
+        ...,
+        min_length=1,
+        description="List of usernames to bind to the role.",
+    )
+    service_name: Optional[str] = Field(
+        None,
+        description="Restrict binding to one service. Omit for all services.",
+    )
+    expires_at: Optional[datetime] = None
+
+
+class BulkBindResult(BaseModel):
+    username: str
+    status: str          # "bound" | "already_exists" | "user_not_found"
+    binding_id: Optional[int] = None
+
+
+class BulkBindResponse(BaseModel):
+    results: list[BulkBindResult]
+    bound: int
+    skipped: int
+    errors: int
 
 
 class BindingOut(BaseModel):
