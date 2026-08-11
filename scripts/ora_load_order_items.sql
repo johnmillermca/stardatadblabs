@@ -1,0 +1,21 @@
+SET FEEDBACK OFF SERVEROUTPUT ON SIZE UNLIMITED
+DECLARE
+  v_id    NUMBER;
+BEGIN
+  FOR b IN 0..699 LOOP
+    FOR i IN 1..10000 LOOP
+      v_id := b*10000+i;
+      INSERT INTO order_items(item_id,order_id,product_id,quantity,unit_price,discount_pct)
+      VALUES(v_id,
+        TRUNC(DBMS_RANDOM.VALUE(1,3000001)),
+        TRUNC(DBMS_RANDOM.VALUE(1,500001)),
+        TRUNC(DBMS_RANDOM.VALUE(1,10)),
+        ROUND(DBMS_RANDOM.VALUE(0.99,9999.99),2),
+        ROUND(DBMS_RANDOM.VALUE(0,30),2));
+    END LOOP;
+    COMMIT;
+  END LOOP;
+  DBMS_OUTPUT.PUT_LINE('ORDER_ITEMS loaded: 7000000');
+END;
+/
+EXIT;
