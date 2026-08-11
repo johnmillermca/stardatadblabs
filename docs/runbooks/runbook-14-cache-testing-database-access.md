@@ -2,27 +2,28 @@
 
 > **Related runbooks:** [12 — New User Setup](runbook-12-rbac-new-user-testing.md) · [13 — User Groups and Access Testing](runbook-13-user-groups-and-access-testing.md)
 
-This runbook covers how to connect to, inspect, and query the **cache testing** dataset loaded into Oracle XE and MongoDB. The dataset models an e-commerce order management system and is purpose-built to stress database caching layers (buffer pool, page cache, LRU eviction) with realistic data volumes.
+This runbook covers how to connect to, inspect, and query the **cache testing** dataset loaded into Oracle XE, MongoDB, and PostgreSQL. The dataset models an e-commerce order management system and is purpose-built to stress database caching layers (buffer pool, page cache, LRU eviction) with realistic data volumes.
 
 ---
 
 ## Dataset overview
 
-| Database  | Schema / DB    | Tables / Collections | Approximate Size |
-|-----------|----------------|----------------------|-----------------|
-| Oracle XE | `CACHE_TESTING` | 6 tables             | ~9.6 GB         |
-| MongoDB   | `cache_testing` | 6 collections        | ~10.4 GB data   |
+| Database    | Schema / DB     | Tables / Collections | Approximate Size |
+|-------------|-----------------|----------------------|-----------------|
+| Oracle XE   | `CACHE_TESTING` | 6 tables             | ~9.6 GB         |
+| MongoDB     | `cache_testing` | 6 collections        | ~10.4 GB data   |
+| PostgreSQL  | `cache_testing` | 6 tables             | ~9.1 GB         |
 
 ### Table / Collection structure
 
-| Name                | Oracle rows | MongoDB docs | Description                              |
-|---------------------|-------------|--------------|------------------------------------------|
-| `customers`         | 2,000,000   | 2,000,000    | Customer profiles with tier + geo        |
-| `products`          | 500,000     | 400,000      | Product catalogue with category/price    |
-| `orders`            | 3,000,000   | 2,500,000    | Orders linking customers to line items   |
-| `order_items`       | 7,000,000   | 3,000,000    | Line items linking orders to products    |
-| `product_reviews`   | 4,000,000   | 7,500,000    | Reviews with large text (main size driver)|
-| `inventory_events`  | 3,000,000   | 2,000,000    | Stock movement events per warehouse      |
+| Name                | Oracle rows | MongoDB docs | PostgreSQL rows | Description                               |
+|---------------------|-------------|--------------|-----------------|-------------------------------------------|
+| `customers`         | 2,000,000   | 2,000,000    | ~2,000,000      | Customer profiles with tier + geo         |
+| `products`          | 500,000     | 400,000      | ~500,000        | Product catalogue with category/price     |
+| `orders`            | 3,000,000   | 2,500,000    | ~10,000,000     | Orders linking customers to line items    |
+| `order_items`       | 7,000,000   | 3,000,000    | ~39,000,000     | Line items linking orders to products     |
+| `product_reviews`   | 4,000,000   | 7,500,000    | ~5,000,000      | Reviews with large text (main size driver)|
+| `inventory_events`  | 3,000,000   | 2,000,000    | ~10,000,000     | Stock movement events per warehouse       |
 
 ### Oracle primary keys and indexes
 
@@ -35,6 +36,19 @@ This runbook covers how to connect to, inspect, and query the **cache testing** 
 | `product_reviews`   | `review_id`       | `product_id`, `customer_id`, `product_id+rating`          |
 | `inventory_events`  | `event_id`        | `product_id`, `event_at`, `warehouse_id+event_at`         |
 
+### PostgreSQL primary keys and indexes
+
+> **Note:** PostgreSQL uses `id` (bigserial) as the PK column name on every table — unlike Oracle, which uses entity-specific names such as `customer_id`, `order_id`, etc.
+
+| Table               | Primary Key | Supporting indexes                                              |
+|---------------------|-------------|-----------------------------------------------------------------|
+| `customers`         | `id`        | `email` (unique), `tier`, `created_at`                         |
+| `products`          | `id`        | `sku` (unique), `category`, `price`                            |
+| `orders`            | `id`        | `customer_id` (FK), `status`, `created_at`                     |
+| `order_items`       | `id`        | `order_id` (FK), `product_id` (FK)                             |
+| `product_reviews`   | `id`        | `product_id` (FK), `customer_id` (FK), `rating`, `created_at` |
+| `inventory_events`  | `id`        | `product_id` (FK), `event_type`, `warehouse_id`, `event_at`   |
+
 ---
 
 ## Prerequisites
@@ -45,12 +59,15 @@ ORA_PASS=$(kubectl get secret oracle-credentials -n prod \
   -o jsonpath='{.data.oracle-password}' | base64 -d)
 MONGO_PASS=$(kubectl get secret mongodb-credentials -n prod \
   -o jsonpath='{.data.mongodb-root-password}' | base64 -d)
+PG_PASS=$(kubectl get secret postgresql-credentials -n prod \
+  -o jsonpath='{.data.postgres-password}' | base64 -d)
 
-echo "Oracle  : ${ORA_PASS}"
-echo "MongoDB : ${MONGO_PASS}"
+echo "Oracle     : ${ORA_PASS}"
+echo "MongoDB    : ${MONGO_PASS}"
+echo "PostgreSQL : ${PG_PASS}"
 
-# Pod names (verify these match your cluster)
-kubectl get pods -n prod | grep -E "oracle|mongo"
+# Pod / StatefulSet names (verify these match your cluster)
+kubectl get pods -n prod | grep -E "oracle|mongo|postgresql"
 ```
 
 ---
@@ -541,6 +558,323 @@ db.orders.stats()
 
 ---
 
+## PostgreSQL — `cache_testing` database
+
+### Connection options
+
+#### Option A — kubectl exec (no local client required)
+
+```bash
+PG_PASS=$(kubectl get secret postgresql-credentials -n prod \
+  -o jsonpath='{.data.postgres-password}' | base64 -d)
+
+# Interactive psql shell
+kubectl exec -it -n prod statefulset/postgresql -- \
+  psql -U postgres -d cache_testing
+
+# One-shot query
+kubectl exec -n prod statefulset/postgresql -- \
+  psql -U postgres -d cache_testing -c "SELECT COUNT(*) FROM customers;"
+```
+
+#### Option B — Direct NodePort (requires psql installed locally)
+
+```bash
+PG_PASS=$(kubectl get secret postgresql-credentials -n prod \
+  -o jsonpath='{.data.postgres-password}' | base64 -d)
+
+psql -h 192.168.1.50 -p 30432 -U postgres -d cache_testing
+# Enter password when prompted, or:
+PGPASSWORD="${PG_PASS}" psql -h 192.168.1.50 -p 30432 -U postgres -d cache_testing
+```
+
+---
+
+### List tables and sizes
+
+```sql
+-- Table sizes including all indexes
+SELECT
+    relname                                          AS table_name,
+    pg_size_pretty(pg_total_relation_size(oid))      AS total_size,
+    pg_size_pretty(pg_relation_size(oid))            AS table_size,
+    pg_size_pretty(pg_total_relation_size(oid)
+                   - pg_relation_size(oid))          AS index_size,
+    to_char(reltuples::bigint, 'FM999,999,999')      AS est_rows
+FROM pg_class
+WHERE relkind = 'r'
+  AND relnamespace = 'public'::regnamespace
+ORDER BY pg_total_relation_size(oid) DESC;
+```
+
+Expected output:
+
+```
+    table_name     | total_size | table_size | index_size |   est_rows
+-------------------+------------+------------+------------+------------
+ order_items       | 4597 MB    | 3102 MB    | 1495 MB    | 39,000,628
+ orders            | 1501 MB    | 1023 MB    |  478 MB    | 10,000,017
+ inventory_events  | 1274 MB    |  834 MB    |  440 MB    | 10,000,371
+ product_reviews   | 1159 MB    |  858 MB    |  301 MB    |  5,000,009
+ customers         |  457 MB    |  244 MB    |  213 MB    |  1,999,995
+ products          |  100 MB    |   56 MB    |   44 MB    |    500,000
+```
+
+---
+
+### Describe table structure
+
+```sql
+-- All columns across all six tables
+SELECT
+    c.table_name,
+    c.column_name,
+    c.data_type,
+    c.character_maximum_length  AS max_len,
+    c.is_nullable,
+    c.column_default
+FROM information_schema.columns c
+WHERE c.table_schema = 'public'
+  AND c.table_name IN (
+    'customers','products','orders',
+    'order_items','product_reviews','inventory_events'
+  )
+ORDER BY c.table_name, c.ordinal_position;
+```
+
+Quick per-table reference (from live cluster):
+
+**customers**
+| Column | Type |
+|--------|------|
+| `id` | `bigint` PK (serial) |
+| `name` | `varchar(120)` |
+| `email` | `varchar(180)` unique |
+| `phone` | `varchar(30)` |
+| `address` | `text` |
+| `tier` | `varchar(20)` default `'standard'` |
+| `created_at` | `timestamptz` |
+| `updated_at` | `timestamptz` |
+
+**products**
+| Column | Type |
+|--------|------|
+| `id` | `bigint` PK (serial) |
+| `sku` | `varchar(60)` unique |
+| `name` | `varchar(200)` |
+| `category` | `varchar(80)` |
+| `price` | `numeric(12,2)` |
+| `stock_qty` | `integer` default `0` |
+| `weight_kg` | `numeric(8,3)` |
+| `created_at` | `timestamptz` |
+
+**orders**
+| Column | Type |
+|--------|------|
+| `id` | `bigint` PK (serial) |
+| `customer_id` | `bigint` FK → `customers.id` |
+| `status` | `varchar(30)` default `'pending'` |
+| `total_amount` | `numeric(14,2)` |
+| `shipping_address` | `text` |
+| `created_at` | `timestamptz` |
+| `updated_at` | `timestamptz` |
+
+**order_items**
+| Column | Type |
+|--------|------|
+| `id` | `bigint` PK (serial) |
+| `order_id` | `bigint` FK → `orders.id` |
+| `product_id` | `bigint` FK → `products.id` |
+| `qty` | `integer` default `1` |
+| `unit_price` | `numeric(12,2)` |
+| `discount_pct` | `numeric(5,2)` default `0` |
+
+**product_reviews**
+| Column | Type |
+|--------|------|
+| `id` | `bigint` PK (serial) |
+| `product_id` | `bigint` FK → `products.id` |
+| `customer_id` | `bigint` FK → `customers.id` |
+| `rating` | `smallint` check (1–5) |
+| `review_text` | `text` |
+| `created_at` | `timestamptz` |
+
+**inventory_events**
+| Column | Type |
+|--------|------|
+| `id` | `bigint` PK (serial) |
+| `product_id` | `bigint` FK → `products.id` |
+| `event_type` | `varchar(40)` |
+| `delta_qty` | `integer` |
+| `warehouse_id` | `integer` |
+| `event_at` | `timestamptz` |
+
+---
+
+### Example queries
+
+#### 1 — Single customer lookup (PK point query — cache hot key test)
+
+```sql
+-- Direct PK hit — confirm index-only scan after warm-up
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, name, email, tier, created_at
+FROM customers
+WHERE id = 500000;
+```
+
+#### 2 — Customer order history with totals (join + aggregation)
+
+```sql
+SELECT
+    c.id          AS customer_id,
+    c.name,
+    c.tier,
+    COUNT(o.id)               AS order_count,
+    SUM(o.total_amount)       AS lifetime_value,
+    MAX(o.created_at)         AS last_order_at
+FROM customers c
+JOIN orders o ON o.customer_id = c.id
+WHERE c.id = 500000
+GROUP BY c.id, c.name, c.tier;
+```
+
+#### 3 — Orders by status in the last 30 days (range scan on indexed column)
+
+```sql
+SELECT
+    status,
+    COUNT(*)                              AS order_count,
+    ROUND(AVG(total_amount)::numeric, 2)  AS avg_amount,
+    SUM(total_amount)                     AS total_revenue
+FROM orders
+WHERE created_at >= NOW() - INTERVAL '30 days'
+GROUP BY status
+ORDER BY order_count DESC;
+```
+
+#### 4 — Order line items with product detail (3-table join)
+
+```sql
+SELECT
+    o.id          AS order_id,
+    o.status,
+    p.name        AS product_name,
+    p.category,
+    oi.qty,
+    oi.unit_price,
+    oi.discount_pct,
+    ROUND((oi.unit_price * oi.qty * (1 - oi.discount_pct / 100))::numeric, 2)
+                  AS line_total
+FROM orders o
+JOIN order_items oi ON oi.order_id = o.id
+JOIN products    p  ON p.id        = oi.product_id
+WHERE o.id = 1000000
+ORDER BY oi.id;
+```
+
+#### 5 — Top 10 products by revenue (aggregation + sort)
+
+```sql
+SELECT
+    p.id,
+    p.name,
+    p.category,
+    SUM(oi.qty)                                               AS units_sold,
+    ROUND(SUM(oi.unit_price * oi.qty
+              * (1 - oi.discount_pct / 100))::numeric, 2)    AS revenue
+FROM order_items oi
+JOIN products p ON p.id = oi.product_id
+GROUP BY p.id, p.name, p.category
+ORDER BY revenue DESC
+LIMIT 10;
+```
+
+#### 6 — Product reviews with average rating (index scan on product_id)
+
+```sql
+SELECT
+    p.name                                    AS product_name,
+    p.category,
+    COUNT(r.id)                               AS review_count,
+    ROUND(AVG(r.rating)::numeric, 2)          AS avg_rating,
+    COUNT(r.id) FILTER (WHERE r.rating = 5)   AS five_star
+FROM product_reviews r
+JOIN products p ON p.id = r.product_id
+WHERE r.product_id = 250000
+GROUP BY p.id, p.name, p.category;
+```
+
+#### 7 — Current inventory per product (event sourcing — sum of deltas)
+
+```sql
+SELECT
+    p.id,
+    p.name,
+    p.sku,
+    SUM(ie.delta_qty)   AS current_stock,
+    COUNT(ie.id)        AS event_count
+FROM inventory_events ie
+JOIN products p ON p.id = ie.product_id
+WHERE ie.product_id = 250000
+GROUP BY p.id, p.name, p.sku;
+```
+
+#### 8 — Warehouse activity summary for the past 7 days (range scan on event_at)
+
+```sql
+SELECT
+    warehouse_id,
+    event_type,
+    COUNT(*)          AS event_count,
+    SUM(delta_qty)    AS net_qty_change
+FROM inventory_events
+WHERE event_at >= NOW() - INTERVAL '7 days'
+GROUP BY warehouse_id, event_type
+ORDER BY warehouse_id, event_type;
+```
+
+#### 9 — High-value customers with no orders in 90 days (left join + filter)
+
+```sql
+SELECT
+    c.id,
+    c.name,
+    c.email,
+    c.tier,
+    MAX(o.created_at)  AS last_order_at
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE c.tier IN ('gold', 'platinum')
+GROUP BY c.id, c.name, c.email, c.tier
+HAVING MAX(o.created_at) < NOW() - INTERVAL '90 days'
+    OR MAX(o.created_at) IS NULL
+ORDER BY last_order_at ASC NULLS FIRST
+LIMIT 50;
+```
+
+#### 10 — Execution plan inspection (for cache and shared-buffer tuning)
+
+```sql
+-- EXPLAIN ANALYZE shows actual rows, loops, and buffer hits vs misses
+-- Run twice: first cold (cache miss), second warm (shared buffer hit)
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT
+    c.tier,
+    COUNT(DISTINCT c.id)              AS customers,
+    COUNT(o.id)                       AS orders,
+    ROUND(AVG(o.total_amount)::numeric, 2) AS avg_order_value
+FROM customers c
+JOIN orders o ON o.customer_id = c.id
+GROUP BY c.tier
+ORDER BY avg_order_value DESC;
+
+-- Look for "Buffers: shared hit=N read=M" in the output.
+-- After the first run, re-running should show read=0 (all hits from shared_buffers).
+```
+
+---
+
 ## Cache testing patterns
 
 These queries are specifically designed to exercise different caching scenarios:
@@ -558,6 +892,14 @@ SELECT * FROM customers WHERE customer_id = 100000;
 ```javascript
 // MongoDB: use explain to see docsExamined drop after warm-up
 db.customers.find({ customer_id: 100000 }).explain("executionStats")
+```
+
+```sql
+-- PostgreSQL: use EXPLAIN (ANALYZE, BUFFERS) and watch shared hit vs read
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM customers WHERE id = 100000;
+-- First run: "Buffers: shared read=N"  → disk I/O
+-- Repeat:    "Buffers: shared hit=N"   → served from shared_buffers (cache)
 ```
 
 ### Range scan — simulates time-series dashboard queries
@@ -578,6 +920,13 @@ db.orders.aggregate([
 ])
 ```
 
+```sql
+-- PostgreSQL
+SELECT COUNT(*), ROUND(AVG(total_amount)::numeric, 2) AS avg_amount
+FROM orders
+WHERE created_at >= NOW() - INTERVAL '7 days';
+```
+
 ### Cold-start test — flush buffer pool then query
 
 ```sql
@@ -589,6 +938,14 @@ SELECT * FROM product_reviews WHERE product_id = 250000;
 ```javascript
 // MongoDB: check storageSize vs dataSize ratio to infer compression/cache efficiency
 db.product_reviews.stats(1024*1024)
+```
+
+```sql
+-- PostgreSQL: discard shared_buffers content (requires superuser + restart)
+-- In production use pg_prewarm extension to warm selectively instead.
+-- To simulate cold start: restart PostgreSQL pod
+kubectl rollout restart statefulset/postgresql -n prod
+-- Then immediately run your query and observe "shared read=" in EXPLAIN BUFFERS output
 ```
 
 ### Full aggregation scan — exercises sequential read path
@@ -608,11 +965,26 @@ db.product_reviews.aggregate([
 ])
 ```
 
+```sql
+-- PostgreSQL: sequential scan of the largest table (order_items, ~4.6 GB)
+-- Disable index scans temporarily to force seqscan and measure effective_cache_size impact
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT rating, COUNT(*), ROUND(AVG(rating)::numeric, 2) AS avg_rating
+FROM product_reviews
+GROUP BY rating
+ORDER BY rating;
+-- Reset
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+```
+
 ---
 
 ## Connection summary
 
-| Database | Internal URL | NodePort | User | Password source |
-|---|---|---|---|---|
-| Oracle XE | `oracle-xe.prod.svc.cluster.local:1521/XEPDB1` | `192.168.1.50:30521` | `cache_testing` | `CacheTesting#2025` (fixed) |
-| MongoDB | `mongodb.prod.svc.cluster.local:27017` | `192.168.1.50:30017` | `root` | `mongodb-credentials` secret |
+| Database   | Internal URL                                    | NodePort               | User            | Password source                    |
+|------------|-------------------------------------------------|------------------------|-----------------|------------------------------------|
+| Oracle XE  | `oracle-xe.prod.svc.cluster.local:1521/XEPDB1`  | `192.168.1.50:30521`   | `cache_testing` | `CacheTesting#2025` (fixed)        |
+| MongoDB    | `mongodb.prod.svc.cluster.local:27017`          | `192.168.1.50:30017`   | `root`          | `mongodb-credentials` secret       |
+| PostgreSQL | `postgresql.prod.svc.cluster.local:5432`        | `192.168.1.50:30432`   | `postgres`      | `postgresql-credentials` secret    |
