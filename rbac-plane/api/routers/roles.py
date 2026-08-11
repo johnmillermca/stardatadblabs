@@ -59,6 +59,22 @@ async def _load_role(session, role_id: int) -> Role:
     return role
 
 
+async def _load_role_by_name(session, role_name: str) -> Role:
+    result = await session.execute(
+        select(Role)
+        .options(
+            selectinload(Role.role_perms)
+            .selectinload(RolePermission.permission)
+            .selectinload(Permission.service)
+        )
+        .where(Role.name == role_name)
+    )
+    role = result.scalar_one_or_none()
+    if not role:
+        raise HTTPException(404, f"Role '{role_name}' not found")
+    return role
+
+
 def _serialize(role: Role) -> RoleOut:
     perms = [
         RolePermissionOut(
@@ -104,6 +120,12 @@ async def list_roles(
 async def get_role(role_id: int, principal: dict = Depends(require_read)):
     async with db_session() as session:
         return _serialize(await _load_role(session, role_id))
+
+
+@router.get("/name/{role_name}", response_model=RoleOut, summary="Get a role by name")
+async def get_role_by_name(role_name: str, principal: dict = Depends(require_read)):
+    async with db_session() as session:
+        return _serialize(await _load_role_by_name(session, role_name))
 
 
 @router.post("", response_model=RoleOut, status_code=201, summary="Create a role")
@@ -155,6 +177,24 @@ async def update_role(
         return _serialize(role)
 
 
+@router.patch("/name/{role_name}", response_model=RoleOut, summary="Update role metadata by name")
+async def update_role_by_name(
+    role_name: str,
+    body: RoleUpdate,
+    request: Request,
+    principal: dict = Depends(require_write),
+):
+    async with db_session() as session:
+        role = await _load_role_by_name(session, role_name)
+        if body.display_name is not None:
+            role.display_name = body.display_name
+        if body.description is not None:
+            role.description = body.description
+        await audit(principal["sub"], "UPDATE_ROLE", "role", role.name,
+                    ip_address=request.client.host if request.client else None)
+        return _serialize(role)
+
+
 @router.delete("/{role_id}", response_model=OkResponse, summary="Delete a role")
 async def delete_role(
     role_id: int,
@@ -163,6 +203,22 @@ async def delete_role(
 ):
     async with db_session() as session:
         role = await _load_role(session, role_id)
+        name = role.name
+        await session.delete(role)
+        await audit(principal["sub"], "DELETE_ROLE", "role", name,
+                    ip_address=request.client.host if request.client else None)
+    await cache_invalidate_role(name)
+    return OkResponse(message=f"Role '{name}' deleted")
+
+
+@router.delete("/name/{role_name}", response_model=OkResponse, summary="Delete a role by name")
+async def delete_role_by_name(
+    role_name: str,
+    request: Request,
+    principal: dict = Depends(require_admin),
+):
+    async with db_session() as session:
+        role = await _load_role_by_name(session, role_name)
         name = role.name
         await session.delete(role)
         await audit(principal["sub"], "DELETE_ROLE", "role", name,
@@ -210,6 +266,45 @@ async def add_permission_to_role(
         return _serialize(await _load_role(session, role_id))
 
 
+@router.post("/name/{role_name}/permissions/{service_name}/{permission_name}",
+             response_model=RoleOut,
+             summary="Add a permission to a role by name",
+             description=(
+                 "Grant a permission to a role addressed by its slug name. "
+                 "`service_name` is one of `doris`, `kafka`, `opensearch`, `spark`. "
+                 "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`, `INDEX_READ`."
+             ))
+async def add_permission_to_role_by_name(
+    role_name: str,
+    service_name: str,
+    permission_name: str,
+    resource_scope: dict = {},
+    request: Request = None,
+    principal: dict = Depends(require_write),
+):
+    async with db_session() as session:
+        role = await _load_role_by_name(session, role_name)
+        perm = await _resolve_permission(session, f"{service_name}:{permission_name}")
+        exists = await session.execute(
+            select(RolePermission).where(
+                RolePermission.role_id == role.id,
+                RolePermission.permission_id == perm.id,
+            )
+        )
+        if exists.scalar_one_or_none():
+            raise HTTPException(409, "Permission already in role")
+        session.add(RolePermission(
+            role_id=role.id, permission_id=perm.id,
+            resource_scope=resource_scope,
+        ))
+        await audit(principal["sub"], "ADD_ROLE_PERM", "role", role.name,
+                    detail={"permission": f"{service_name}:{permission_name}"},
+                    ip_address=request.client.host if request.client else None)
+        await session.flush()
+        await cache_invalidate_role(role.name)
+        return _serialize(await _load_role(session, role.id))
+
+
 @router.delete("/{role_id}/permissions/{service_name}/{permission_name}", response_model=RoleOut,
                summary="Remove a permission from a role",
                description=(
@@ -242,3 +337,38 @@ async def remove_permission_from_role(
                     ip_address=request.client.host if request.client else None)
         await cache_invalidate_role(role.name)
         return _serialize(await _load_role(session, role_id))
+
+
+@router.delete("/name/{role_name}/permissions/{service_name}/{permission_name}",
+               response_model=RoleOut,
+               summary="Remove a permission from a role by name",
+               description=(
+                   "Revoke a permission from a role addressed by its slug name. "
+                   "`service_name` is one of `doris`, `kafka`, `opensearch`, `spark`. "
+                   "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`, `INDEX_READ`."
+               ))
+async def remove_permission_from_role_by_name(
+    role_name: str,
+    service_name: str,
+    permission_name: str,
+    request: Request,
+    principal: dict = Depends(require_admin),
+):
+    async with db_session() as session:
+        role = await _load_role_by_name(session, role_name)
+        perm = await _resolve_permission(session, f"{service_name}:{permission_name}")
+        result = await session.execute(
+            select(RolePermission).where(
+                RolePermission.role_id == role.id,
+                RolePermission.permission_id == perm.id,
+            )
+        )
+        rp = result.scalar_one_or_none()
+        if not rp:
+            raise HTTPException(404, "Permission not in role")
+        await session.delete(rp)
+        await audit(principal["sub"], "REMOVE_ROLE_PERM", "role", role.name,
+                    detail={"permission": f"{service_name}:{permission_name}"},
+                    ip_address=request.client.host if request.client else None)
+        await cache_invalidate_role(role.name)
+        return _serialize(await _load_role(session, role.id))

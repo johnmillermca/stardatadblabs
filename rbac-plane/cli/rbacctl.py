@@ -76,16 +76,6 @@ def _client() -> httpx.Client:
     )
 
 
-def _resolve_role_id(client: httpx.Client, role_name: str) -> int:
-    """Look up a role by name and return its numeric ID."""
-    resp = _check(client.get("/api/v1/roles", params={"q": role_name}))
-    matches = [r for r in resp if r["name"] == role_name]
-    if not matches:
-        rprint(f"[red]Error:[/red] Role '{role_name}' not found")
-        raise SystemExit(1)
-    return matches[0]["id"]
-
-
 def _check(resp: httpx.Response, ok=(200, 201)) -> dict:
     if resp.status_code not in ok:
         try:
@@ -246,8 +236,7 @@ def role_list(q: str = typer.Option("", "--filter", "-f")):
 def role_get(role_name: str):
     """Show full detail for a role including its permissions."""
     with _client() as c:
-        role_id = _resolve_role_id(c, role_name)
-        resp = _check(c.get(f"/api/v1/roles/{role_id}"))
+        resp = _check(c.get(f"/api/v1/roles/name/{role_name}"))
     rprint(f"\n[bold]{resp['name']}[/bold] (id={resp['id']}): {resp.get('description','')}")
     _print_table(
         "Permissions",
@@ -299,9 +288,8 @@ def role_add_perm(
         raise SystemExit(1)
     service_name, perm_name = parts
     with _client() as c:
-        role_id = _resolve_role_id(c, role_name)
         resp = _check(
-            c.post(f"/api/v1/roles/{role_id}/permissions/{service_name}/{perm_name}"),
+            c.post(f"/api/v1/roles/name/{role_name}/permissions/{service_name}/{perm_name}"),
             ok=(200, 201),
         )
     rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] added to role [bold]{role_name}[/bold]")
@@ -324,9 +312,8 @@ def role_remove_perm(
         raise SystemExit(1)
     service_name, perm_name = parts
     with _client() as c:
-        role_id = _resolve_role_id(c, role_name)
         resp = _check(
-            c.delete(f"/api/v1/roles/{role_id}/permissions/{service_name}/{perm_name}"),
+            c.delete(f"/api/v1/roles/name/{role_name}/permissions/{service_name}/{perm_name}"),
             ok=(200,),
         )
     rprint(f"[green]✓[/green] Permission [cyan]{permission}[/cyan] removed from role [bold]{role_name}[/bold]")
@@ -385,8 +372,7 @@ def role_delete(role_name: str, yes: bool = typer.Option(False, "--yes", "-y")):
     if not yes:
         typer.confirm(f"Delete role '{role_name}'?", abort=True)
     with _client() as c:
-        role_id = _resolve_role_id(c, role_name)
-        _check(c.delete(f"/api/v1/roles/{role_id}"))
+        _check(c.delete(f"/api/v1/roles/name/{role_name}"))
     rprint(f"[green]✓[/green] Role [bold]{role_name}[/bold] deleted")
 
 
