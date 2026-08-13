@@ -27,7 +27,7 @@
 #   TOKEN=$(curl -sf \
 #     -X POST http://192.168.1.50:30181/api/catalog/v1/oauth/tokens \
 #     -H "Content-Type: application/x-www-form-urlencoded" \
-#     -u "3212a1b3cc1e9583:fbd445b8a1e57c5a6c46d6f9cd650dfb" \
+#     -u "<doris_reader_id>:<doris_reader_secret> # from OpenBao secret/platform/polaris" \
 #     -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" \
 #     | sed 's/.*"access_token":"\([^"]*\)".*/\1/')
 #
@@ -45,7 +45,7 @@
 #   kubectl rollout status  deployment/polaris-auth-proxy -n prod
 #
 #   # Verify: the next Doris query should succeed
-#   mysql -h 192.168.1.50 -P 30090 -uroot -pslV2i5uhdMrM3xR2wkE8s8Gd \
+#   mysql -h 192.168.1.50 -P 30090 -uroot -p<doris_admin_password> # from OpenBao secret/platform/doris \
 #     -e "SELECT COUNT(*) FROM iceberg_polaris.lakehouse.events;"
 #
 # ─────────────────────────────────────────────────────────────
