@@ -1,0 +1,195 @@
+# ============================================================
+# 07_polaris_token_refresh_cronjob.yaml
+# ============================================================
+# Refreshes the polaris-auth-proxy Bearer token every 55 minutes.
+#
+# Why this is needed
+# ------------------
+# Polaris 1.6.0 issues access tokens with expires_in=3600 (1 h).
+# Doris 4.0.7's Iceberg REST client cannot perform OAuth2 token
+# refresh on its own, so a dedicated nginx auth-proxy injects a
+# static Bearer token into every /api/catalog request.
+# Without periodic refresh the token expires and Doris returns
+# NotAuthorizedException (401).
+#
+# This CronJob fetches a new token every 55 min (5 min before
+# expiry), patches the polaris-auth-proxy-conf ConfigMap, and
+# triggers a rolling restart of the polaris-auth-proxy Deployment.
+#
+# Image: alpine/curl — has curl, wget, and sh; tiny (< 15 MB).
+# K8s API calls use curl + the in-cluster service-account token.
+#
+# ─────────────────────────────────────────────────────────────
+# MANUAL REFRESH (run from any host with cluster access)
+# ─────────────────────────────────────────────────────────────
+#
+#   # 1. Fetch a fresh token from Polaris
+#   TOKEN=$(curl -sf \
+#     -X POST http://192.168.1.50:30181/api/catalog/v1/oauth/tokens \
+#     -H "Content-Type: application/x-www-form-urlencoded" \
+#     -u "3212a1b3cc1e9583:fbd445b8a1e57c5a6c46d6f9cd650dfb" \
+#     -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" \
+#     | sed 's/.*"access_token":"\([^"]*\)".*/\1/')
+#
+#   # 2. Patch the ConfigMap (in-place token replacement)
+#   CURR=$(kubectl get configmap polaris-auth-proxy-conf -n prod \
+#            -o jsonpath='{.data.nginx\.conf}')
+#   NEW=$(printf '%s' "$CURR" | \
+#     sed "s|Bearer [A-Za-z0-9._-]*|Bearer $TOKEN|g")
+#   kubectl create configmap polaris-auth-proxy-conf -n prod \
+#     --from-literal="nginx.conf=$NEW" \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+#   # 3. Rolling restart so nginx loads the new config
+#   kubectl rollout restart deployment/polaris-auth-proxy -n prod
+#   kubectl rollout status  deployment/polaris-auth-proxy -n prod
+#
+#   # Verify: the next Doris query should succeed
+#   mysql -h 192.168.1.50 -P 30090 -uroot -pslV2i5uhdMrM3xR2wkE8s8Gd \
+#     -e "SELECT COUNT(*) FROM iceberg_polaris.lakehouse.events;"
+#
+# ─────────────────────────────────────────────────────────────
+
+---
+# ServiceAccount for the CronJob to call the K8s API in-cluster
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: polaris-token-refresher
+  namespace: prod
+
+---
+# RBAC: get + patch the auth-proxy ConfigMap; patch the Deployment
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: polaris-token-refresher
+  namespace: prod
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["polaris-auth-proxy-conf"]
+  verbs: ["get", "patch", "update"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["polaris-auth-proxy"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: polaris-token-refresher
+  namespace: prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: polaris-token-refresher
+subjects:
+- kind: ServiceAccount
+  name: polaris-token-refresher
+  namespace: prod
+
+---
+# CronJob: refresh every 55 minutes (5 min before the 1-hour token expiry)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: polaris-token-refresh
+  namespace: prod
+  labels:
+    app: polaris-token-refresh
+spec:
+  schedule: "*/55 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          serviceAccountName: polaris-token-refresher
+          restartPolicy: OnFailure
+          containers:
+          - name: token-refresher
+            # bitnami/kubectl: has both kubectl (for clean ConfigMap patching) and curl
+            # (for the Polaris OAuth2 and OpenBao token requests). No python3 needed.
+            image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: BAO_ADDR
+              value: "http://openbao.prod.svc.cluster.local:8200"
+            - name: POLARIS_URL
+              value: "http://polaris-rest.prod.svc.cluster.local:8181"
+            - name: NAMESPACE
+              value: "prod"
+            - name: CM_NAME
+              value: "polaris-auth-proxy-conf"
+            - name: DEPLOY_NAME
+              value: "polaris-auth-proxy"
+            command:
+            - sh
+            - -c
+            - |
+              set -e
+              SA_JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+
+              # ── Step 1: Authenticate to OpenBao via Kubernetes auth ──────────
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Authenticating to OpenBao..."
+              BAO_RESP=$(curl -sf --connect-timeout 10 --max-time 20 \
+                -X POST "${BAO_ADDR}/v1/auth/kubernetes/login" \
+                -H "Content-Type: application/json" \
+                -d "{\"role\":\"polaris-token-refresher\",\"jwt\":\"${SA_JWT}\"}")
+              BAO_TOKEN=$(echo "$BAO_RESP" | sed 's/.*"client_token":"\([^"]*\)".*/\1/')
+              if [ -z "$BAO_TOKEN" ] || [ "$BAO_TOKEN" = "$BAO_RESP" ]; then
+                echo "ERROR: OpenBao login failed: $BAO_RESP" >&2; exit 1
+              fi
+              echo "OpenBao token OK"
+
+              # ── Step 2: Read Polaris credentials from OpenBao ────────────────
+              POLARIS_SECRET=$(curl -sf --connect-timeout 10 --max-time 20 \
+                -H "X-Vault-Token: ${BAO_TOKEN}" \
+                "${BAO_ADDR}/v1/secret/data/platform/polaris")
+              READER_ID=$(echo "$POLARIS_SECRET"     | sed 's/.*"doris_reader_id":"\([^"]*\)".*/\1/')
+              READER_SECRET=$(echo "$POLARIS_SECRET" | sed 's/.*"doris_reader_secret":"\([^"]*\)".*/\1/')
+              WRITER_ID=$(echo "$POLARIS_SECRET"     | sed 's/.*"doris_writer_id":"\([^"]*\)".*/\1/')
+              WRITER_SECRET=$(echo "$POLARIS_SECRET" | sed 's/.*"doris_writer_secret":"\([^"]*\)".*/\1/')
+              echo "Credentials read from OpenBao"
+
+              # ── Step 3: Fetch fresh Polaris tokens for reader + writer ────────
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Fetching Polaris tokens..."
+              READER_TOKEN=$(curl -sf --connect-timeout 10 --max-time 20 \
+                -X POST "${POLARIS_URL}/api/catalog/v1/oauth/tokens" \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                -u "${READER_ID}:${READER_SECRET}" \
+                -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" | \
+                sed 's/.*"access_token":"\([^"]*\)".*/\1/')
+              WRITER_TOKEN=$(curl -sf --connect-timeout 10 --max-time 20 \
+                -X POST "${POLARIS_URL}/api/catalog/v1/oauth/tokens" \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                -u "${WRITER_ID}:${WRITER_SECRET}" \
+                -d "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL" | \
+                sed 's/.*"access_token":"\([^"]*\)".*/\1/')
+              echo "Reader token OK ($(echo -n "$READER_TOKEN" | wc -c) chars)"
+              echo "Writer token OK ($(echo -n "$WRITER_TOKEN" | wc -c) chars)"
+
+              # ── Step 4: Patch the ConfigMap with both fresh tokens ────────────
+              CURR=$(kubectl get configmap "${CM_NAME}" -n "${NAMESPACE}" \
+                       -o jsonpath='{.data.nginx\.conf}')
+              # Replace first Bearer occurrence (reader, port 8282) then second (writer, port 8283)
+              # sed replaces only the first match per substitution; two sequential passes handle both.
+              AFTER_READER=$(printf '%s' "$CURR" | \
+                sed "0,/Bearer [A-Za-z0-9._-]*/s|Bearer [A-Za-z0-9._-]*|Bearer ${READER_TOKEN}|")
+              NEW=$(printf '%s' "$AFTER_READER" | \
+                sed "0,/Bearer [A-Za-z0-9._-]*/s|Bearer [A-Za-z0-9._-]*|Bearer ${WRITER_TOKEN}|")
+              kubectl create configmap "${CM_NAME}" -n "${NAMESPACE}" \
+                --from-literal="nginx.conf=${NEW}" \
+                --dry-run=client -o yaml | kubectl apply -f -
+              echo "ConfigMap '${CM_NAME}' updated (reader + writer tokens)."
+
+              # ── Step 5: Rolling restart so nginx picks up new tokens ──────────
+              kubectl rollout restart deployment/"${DEPLOY_NAME}" -n "${NAMESPACE}"
+              kubectl rollout status  deployment/"${DEPLOY_NAME}" -n "${NAMESPACE}" \
+                --timeout=60s
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Done."
