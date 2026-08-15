@@ -1,0 +1,109 @@
+# spark-defaults-configmap.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Delivers spark-defaults.conf to spark-master and spark-worker pods via a
+# ConfigMap volume mount.
+#
+# Apply:
+#   kubectl apply -f spark-defaults-configmap.yaml -n prod
+#   kubectl rollout restart deployment spark-master spark-worker -n prod
+#
+# The Snowflake connector JAR is downloaded at Spark submit time via --packages.
+# Credentials are injected at runtime by bao_spark_init.py — NOT stored here.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-defaults-conf
+  namespace: prod
+  labels:
+    app.kubernetes.io/component: spark
+    app.kubernetes.io/managed-by: platform-team
+data:
+  spark-defaults.conf: |
+    # ── Spark master ───────────────────────────────────────────────────────────
+    spark.master                                    spark://spark-master-svc.prod.svc.cluster.local:7077
+
+    # ── Iceberg extension ──────────────────────────────────────────────────────
+    spark.sql.extensions                            org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+
+    # ── Polaris REST catalog (catalog name: polaris) ───────────────────────────
+    spark.sql.catalog.polaris                       org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.polaris.type                  rest
+    spark.sql.catalog.polaris.uri                   http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+    spark.sql.catalog.polaris.warehouse             IcebergCatalog
+    spark.sql.catalog.polaris.scope                 PRINCIPAL_ROLE:ALL
+    # credential injected at runtime by bao_spark_init.py
+
+    # ── Snowflake sample data internal catalog (catalog name: snowflake_sample) ─
+    # Used by snowflake_to_iceberg.py to validate that the source catalog exists.
+    spark.sql.catalog.snowflake_sample              org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.snowflake_sample.type         hadoop
+    spark.sql.catalog.snowflake_sample.warehouse    SNOWFLAKE_SAMPLE_DATA
+
+    # ── S3A defaults (keys injected at runtime) ────────────────────────────────
+    spark.hadoop.fs.s3a.impl                        org.apache.hadoop.fs.s3a.S3AFileSystem
+    spark.hadoop.fs.s3a.endpoint                    https://s3.us-east-2.amazonaws.com
+    spark.hadoop.fs.s3a.endpoint.region             us-east-2
+    spark.hadoop.fs.s3a.path.style.access           true
+    spark.hadoop.fs.s3a.connection.ssl.enabled      true
+
+    # ── Parquet / write defaults ───────────────────────────────────────────────
+    spark.sql.parquet.compression.codec             snappy
+    spark.sql.iceberg.write.format.default          parquet
+
+    # ── JARs bundled with the platform ────────────────────────────────────────
+    spark.jars                                      /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar
+
+    # ── Driver / executor sizing (adjust per workload) ────────────────────────
+    spark.driver.memory                             2g
+    spark.executor.memory                           4g
+    spark.executor.cores                            2
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Patch deployments to mount spark-defaults-conf at /opt/spark/conf/
+#
+# Apply AFTER the ConfigMap above:
+#   kubectl patch deployment spark-master -n prod --patch-file spark-defaults-patch.yaml
+#   kubectl patch deployment spark-worker -n prod --patch-file spark-defaults-patch.yaml
+# (or use the combined patch below with kubectl patch deployment ... --type=json)
+# ─────────────────────────────────────────────────────────────────────────────
+# spark-master patch
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: prod
+spec:
+  template:
+    spec:
+      volumes:
+        - name: spark-defaults-conf
+          configMap:
+            name: spark-defaults-conf
+      containers:
+        - name: spark-master
+          volumeMounts:
+            - name: spark-defaults-conf
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
+---
+# spark-worker patch
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+  namespace: prod
+spec:
+  template:
+    spec:
+      volumes:
+        - name: spark-defaults-conf
+          configMap:
+            name: spark-defaults-conf
+      containers:
+        - name: spark-worker
+          volumeMounts:
+            - name: spark-defaults-conf
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
