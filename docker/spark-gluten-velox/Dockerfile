@@ -1,79 +1,120 @@
 # =============================================================================
-# Spark 3.5.1 + Gluten 1.2.0 + Velox backend
-# Build: docker/spark-gluten-velox/build-and-push.sh
-# Push:  192.168.1.50:30500/spark-gluten-velox:3.5.1
+# Spark 3.5.1 + Gluten 1.2.0 (Velox backend, CentOS/RHEL build)
 #
-# Iceberg runtime: 1.9.2 (latest LTS stable; fully compatible with Spark 3.5
-#                  and Gluten 1.2.0 / Velox — versions 1.10+ require Spark 3.5.4+)
-# SHA-256: c40ae0a8e2673bb5c01951b7d15aae2224a534f8331f4274ce2082776116a044
+# Bundles:
+#   gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar  (Gluten+Velox native)
+#   iceberg-spark-runtime-3.5_2.12-1.9.2.jar                     (Iceberg)
+#   spark-snowflake_2.12-3.2.1-spark_3.5.jar                     (Snowflake connector)
+#   snowflake-jdbc-3.16.1.jar                                     (Snowflake JDBC)
+#   hadoop-aws-3.3.4.jar                                          (S3A filesystem)
+#   aws-java-sdk-bundle-1.12.262.jar                              (AWS SDK)
+#
+# Python packages:
+#   pyspark==3.5.1, snowflake-connector-python, confluent-kafka,
+#   pyarrow, pandas, boto3, pyiceberg
+#
+# Place all JARs in jars/ next to this Dockerfile before building.
+# Build:
+#   bash docker/spark-gluten-velox/build-and-push.sh
 # =============================================================================
 FROM apache/spark:3.5.1-scala2.12-java17-python3-ubuntu
 
 USER root
 
-# ── System deps required by Velox native libraries ────────────────────────────
+# ── System libs required by Velox native engine ───────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgflags-dev \
-    libgoogle-glog-dev \
-    libunwind-dev \
-    libre2-dev \
-    libfmt-dev \
-    libboost-all-dev \
-    curl \
+        libgflags-dev \
+        libgoogle-glog-dev \
+        libunwind-dev \
+        libre2-dev \
+        libfmt-dev \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Gluten 1.2.0 — pre-built Velox bundle for Spark 3.5 on Ubuntu 22.04 ──────
-# This jar includes Velox native .so libs + Gluten JNI bridge
-ENV GLUTEN_VERSION=1.2.0
-ENV GLUTEN_JAR=gluten-velox-bundle-spark3.5_2.12-ubuntu_22.04-${GLUTEN_VERSION}.jar
-ENV GLUTEN_URL=https://github.com/apache/incubator-gluten/releases/download/v${GLUTEN_VERSION}/${GLUTEN_JAR}
+# ── Copy all JARs from build context ─────────────────────────────────────────
+COPY jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
+     /opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar
 
-RUN curl -fsSL "${GLUTEN_URL}" -o "/opt/spark/jars/${GLUTEN_JAR}" || \
-    echo "WARNING: Gluten jar download failed. Place ${GLUTEN_JAR} in docker/spark-gluten-velox/jars/ and rebuild with --air-gap flag."
+COPY jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar \
+     /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar
 
-# ── Apache Iceberg runtime 1.9.2 (Spark 3.5 + Scala 2.12) ───────────────────
-# Latest LTS stable compatible with Gluten 1.2.0 / Velox
-# SHA-256: c40ae0a8e2673bb5c01951b7d15aae2224a534f8331f4274ce2082776116a044
-RUN curl -fsSL \
-    "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.9.2/iceberg-spark-runtime-3.5_2.12-1.9.2.jar" \
-    -o /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar
+COPY jars/spark-snowflake_2.12-3.2.1-spark_3.5.jar \
+     /opt/spark/jars/spark-snowflake_2.12-3.2.1-spark_3.5.jar
 
-# ── Delta Lake runtime (Spark 3.5) ───────────────────────────────────────────
-RUN curl -fsSL \
-    "https://repo1.maven.org/maven2/io/delta/delta-spark_2.12/3.2.0/delta-spark_2.12-3.2.0.jar" \
-    -o /opt/spark/jars/delta-spark_2.12-3.2.0.jar && \
-    curl -fsSL \
-    "https://repo1.maven.org/maven2/io/delta/delta-storage/3.2.0/delta-storage-3.2.0.jar" \
-    -o /opt/spark/jars/delta-storage-3.2.0.jar
+COPY jars/snowflake-jdbc-3.16.1.jar \
+     /opt/spark/jars/snowflake-jdbc-3.16.1.jar
 
-# ── Python packages ───────────────────────────────────────────────────────────
+COPY jars/hadoop-aws-3.3.4.jar \
+     /opt/spark/jars/hadoop-aws-3.3.4.jar
+
+COPY jars/aws-java-sdk-bundle-1.12.262.jar \
+     /opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar
+
+# ── Python packages — split into layers to avoid pip botocore conflict ────────
+# Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
 RUN pip3 install --no-cache-dir \
-    pyspark==3.5.1 \
-    delta-spark==3.2.0 \
-    "pyiceberg[s3fs,glue]" \
-    pyarrow \
-    pandas \
-    boto3
+        "boto3" \
+        "s3fs" \
+        "fsspec"
 
-# ── Spark defaults ────────────────────────────────────────────────────────────
-RUN cat >> "${SPARK_HOME}/conf/spark-defaults.conf" << 'EOF'
-# Gluten + Velox
+# Layer 2: remaining packages — all pinned, no botocore conflict
+RUN pip3 install --no-cache-dir \
+        "pyspark==3.5.1" \
+        "snowflake-connector-python==3.12.3" \
+        "confluent-kafka==2.6.1" \
+        "pyarrow==17.0.0" \
+        "pandas==2.2.3" \
+        "pyiceberg==0.7.1"
+
+# ── spark-defaults.conf ───────────────────────────────────────────────────────
+# Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
+# Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —
+# they are injected at runtime by bao_spark_init.py from OpenBao.
+RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.conf" << 'EOF'
+# ── Gluten + Velox native execution ──────────────────────────────────────────
 spark.plugins                                        io.glutenproject.GlutenPlugin
 spark.gluten.sql.columnar.backend.lib                velox
 spark.gluten.loadLibFromJar                          true
+spark.memory.offHeap.enabled                         true
+spark.memory.offHeap.size                            2g
 
-# Iceberg
+# ── SQL extensions (Iceberg only — Delta added per-session if needed) ─────────
 spark.sql.extensions                                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+
+# ── Polaris REST catalog (credentials injected at runtime by bao_spark_init) ──
 spark.sql.catalog.polaris                            org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.polaris.type                       rest
-spark.sql.catalog.polaris.uri                        http://polaris-rest.catalog.svc.cluster.local:8181/api/catalog
+spark.sql.catalog.polaris.uri                        http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+spark.sql.catalog.polaris.warehouse                  IcebergCatalog
+spark.sql.catalog.polaris.scope                      PRINCIPAL_ROLE:ALL
 
-# Delta Lake
-spark.sql.extensions                                 io.delta.sql.DeltaSparkSessionExtension,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
-spark.sql.catalog.spark_catalog                      org.apache.spark.sql.delta.catalog.DeltaCatalog
+# ── Snowflake source catalog (namespace = tpcds_sf10tcl) ─────────────────────
+spark.sql.catalog.snowflake_sample                   org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.snowflake_sample.type              hadoop
+spark.sql.catalog.snowflake_sample.warehouse         SNOWFLAKE_SAMPLE_DATA
+spark.sql.catalog.snowflake_sample.default-namespace tpcds_sf10tcl
 
-# Serializer
+# ── Global Iceberg write defaults (256 MB file size) ─────────────────────────
+spark.sql.iceberg.write.format.default               parquet
+spark.sql.iceberg.target-file-size-bytes             268435456
+
+# ── S3A defaults (credentials injected at runtime) ───────────────────────────
+spark.hadoop.fs.s3a.impl                             org.apache.hadoop.fs.s3a.S3AFileSystem
+spark.hadoop.fs.s3a.endpoint                         https://s3.us-east-2.amazonaws.com
+spark.hadoop.fs.s3a.endpoint.region                  us-east-2
+spark.hadoop.fs.s3a.path.style.access                true
+spark.hadoop.fs.s3a.connection.ssl.enabled           true
+
+# ── Parquet / compression ─────────────────────────────────────────────────────
+spark.sql.parquet.compression.codec                  snappy
+
+# ── Serializer ───────────────────────────────────────────────────────────────
 spark.serializer                                     org.apache.spark.serializer.KryoSerializer
+
+# ── Driver / executor sizing ──────────────────────────────────────────────────
+spark.driver.memory                                  2g
+spark.executor.memory                                4g
+spark.executor.cores                                 2
 EOF
 
 USER spark

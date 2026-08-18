@@ -157,7 +157,7 @@ spec:
         # Listens on 17077 — NOT exposed by the Service directly.
         # Only the krb-spark-guard sidecar (127.0.0.1:7077) forwards to it.
         - name: spark-master
-          image: 192.168.1.50:30500/apache/spark:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
           command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
           env:
             - name: SPARK_MASTER_HOST
@@ -245,7 +245,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/apache/spark:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
           command:
             - /opt/spark/bin/spark-class
             - org.apache.spark.deploy.worker.Worker
