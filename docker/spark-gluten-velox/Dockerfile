@@ -41,8 +41,9 @@ COPY jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar \
 COPY jars/spark-snowflake_2.12-3.2.1-spark_3.5.jar \
      /opt/spark/jars/spark-snowflake_2.12-3.2.1-spark_3.5.jar
 
-COPY jars/snowflake-jdbc-3.16.1.jar \
-     /opt/spark/jars/snowflake-jdbc-3.16.1.jar
+# spark-snowflake 3.2.1 requires JDBC 4.x (internal API package restructure in 4.0+)
+COPY jars/snowflake-jdbc-4.0.2.jar \
+     /opt/spark/jars/snowflake-jdbc-4.0.2.jar
 
 COPY jars/hadoop-aws-3.3.4.jar \
      /opt/spark/jars/hadoop-aws-3.3.4.jar

@@ -54,6 +54,8 @@ _ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
 _ICEBERG_JAR_PATH    = f"/opt/spark/jars/{_ICEBERG_JAR_NAME}"
 _SNOWFLAKE_JAR_NAME  = "spark-snowflake_2.12-3.2.1-spark_3.5.jar"
 _SNOWFLAKE_JAR_PATH  = f"/opt/spark/jars/{_SNOWFLAKE_JAR_NAME}"
+# spark-snowflake 3.2.1 requires JDBC 4.x (internal API package restructure)
+_SNOWFLAKE_JDBC_JAR  = "/opt/spark/jars/snowflake-jdbc-4.0.2.jar"
 
 _POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
 # In-cluster drivers connect directly on port 17077 (bypasses krb-spark-guard sidecar).
@@ -176,6 +178,21 @@ class BaoSparkInit:
         conf.setAppName(app_name)
         conf.setMaster(_SPARK_MASTER)
 
+        # ── Java 17 module opens for Snowflake JDBC 4.x ───────────────────────
+        # JDBC 4.x uses reflection-based serialization internally (Unsafe, ObjectInputStream
+        # on internal JDK classes) which Java 17 blocks by default. Required for
+        # SnowflakeResultSetSerializableV1 static initializer and query execution.
+        _opens = " ".join([
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            "--add-opens=java.base/java.nio=ALL-UNNAMED",
+            "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+            "--add-opens=java.base/java.io=ALL-UNNAMED",
+            "--add-opens=java.base/java.util=ALL-UNNAMED",
+            "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        ])
+        conf.set("spark.driver.extraJavaOptions",   _opens)
+        conf.set("spark.executor.extraJavaOptions", _opens)
+
         # ── Gluten opt-in: clear spark.plugins so GlutenPlugin is NOT loaded ──
         # spark-defaults.conf in the image no longer sets spark.plugins, but an
         # older image or a mounted ConfigMap might still set it.  Force empty so
@@ -226,7 +243,7 @@ class BaoSparkInit:
         conf.set("spark.jars", ",".join([
             _ICEBERG_JAR_PATH,
             _SNOWFLAKE_JAR_PATH,
-            "/opt/spark/jars/snowflake-jdbc-3.16.1.jar",
+            _SNOWFLAKE_JDBC_JAR,
             "/opt/spark/jars/hadoop-aws-3.3.4.jar",
             "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
         ]))
