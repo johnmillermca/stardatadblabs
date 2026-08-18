@@ -72,6 +72,27 @@ spec:
     - name: rpc
       port: 7077
 ---
+# ── Internal service — direct access to Spark master (no guard) ──────────────
+# Workers and in-cluster drivers connect here (port 17077) to bypass the
+# krb-spark-guard sidecar.  Not exposed via NodePort — cluster-internal only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-internal
+  namespace: prod
+  labels:
+    app: spark
+    component: master
+spec:
+  type: ClusterIP
+  selector:
+    app: spark
+    component: master
+  ports:
+    - name: rpc-internal
+      port: 17077
+      targetPort: 17077
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -249,7 +270,7 @@ spec:
           command:
             - /opt/spark/bin/spark-class
             - org.apache.spark.deploy.worker.Worker
-            - spark://spark-master-svc.prod.svc.cluster.local:7077
+            - spark://spark-master-internal.prod.svc.cluster.local:17077
           env:
             - name: SPARK_WORKER_MEMORY
               value: "4g"

@@ -56,7 +56,9 @@ _SNOWFLAKE_JAR_NAME  = "spark-snowflake_2.12-3.2.1-spark_3.5.jar"
 _SNOWFLAKE_JAR_PATH  = f"/opt/spark/jars/{_SNOWFLAKE_JAR_NAME}"
 
 _POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
-_SPARK_MASTER = "spark://spark-master-svc.prod.svc.cluster.local:7077"
+# In-cluster drivers connect directly on port 17077 (bypasses krb-spark-guard sidecar).
+# External spark-submit should use spark-master-svc:7077 (guard-proxied NodePort).
+_SPARK_MASTER = "spark://spark-master-internal.prod.svc.cluster.local:17077"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
