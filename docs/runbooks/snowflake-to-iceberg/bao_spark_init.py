@@ -41,15 +41,19 @@ _BAO_IN_CLUSTER  = "http://openbao.prod.svc.cluster.local:8200"
 _BAO_NODEPORT    = "http://192.168.1.50:30820"
 _K8S_SA_JWT_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
-# ── Secret paths ──────────────────────────────────────────────────────────────
-_PATH_S3        = "secret/platform/s3"
-_PATH_SNOWFLAKE = "secret/platform/snowflake"
-_PATH_POLARIS   = "secret/platform/polaris"
-_PATH_DORIS     = "secret/platform/doris"
+# ── Secret paths (OpenBao KV v2 — read via secret/data/<path>) ───────────────
+_PATH_S3        = "secret/data/platform/s3"
+_PATH_SNOWFLAKE = "secret/data/platform/snowflake"
+_PATH_POLARIS   = "secret/data/platform/polaris"
+_PATH_DORIS     = "secret/data/platform/doris"
+_PATH_ORACLE    = "secret/data/platform/oracle"
+_PATH_KAFKA     = "secret/data/platform/kafka"
 
-# Iceberg JAR shipped with the repo (mounted via ConfigMap or baked into image)
-_ICEBERG_JAR_NAME = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
-_ICEBERG_JAR_PATH = f"/opt/spark/jars/{_ICEBERG_JAR_NAME}"
+# JARs baked into the spark-gluten-velox:3.5.1 image
+_ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
+_ICEBERG_JAR_PATH    = f"/opt/spark/jars/{_ICEBERG_JAR_NAME}"
+_SNOWFLAKE_JAR_NAME  = "spark-snowflake_2.12-3.2.1-spark_3.5.jar"
+_SNOWFLAKE_JAR_PATH  = f"/opt/spark/jars/{_SNOWFLAKE_JAR_NAME}"
 
 _POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
 _SPARK_MASTER = "spark://spark-master-svc.prod.svc.cluster.local:7077"
@@ -118,7 +122,9 @@ class BaoSparkInit:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-        secret_data: dict[str, str] = data.get("data", {})
+        # KV v2: response is { data: { data: { key: val }, metadata: {...} } }
+        outer = data.get("data", {})
+        secret_data: dict[str, str] = outer.get("data", outer)
         self._cache[path] = secret_data
         return secret_data
 
@@ -138,6 +144,14 @@ class BaoSparkInit:
     def doris_creds(self) -> dict[str, str]:
         """Return {'admin_password', ...}."""
         return self._read_secret(_PATH_DORIS)
+
+    def oracle_creds(self) -> dict[str, str]:
+        """Return {'user', 'password', 'host', 'port', 'sid', 'jdbc_url'}."""
+        return self._read_secret(_PATH_ORACLE)
+
+    def kafka_creds(self) -> dict[str, str]:
+        """Return {'debezium_user', 'debezium_password', 'bootstrap', 'schema_registry'}."""
+        return self._read_secret(_PATH_KAFKA)
 
     # ── SparkConf builder ──────────────────────────────────────────────────────
     def spark_conf(
@@ -159,6 +173,14 @@ class BaoSparkInit:
         conf = SparkConf()
         conf.setAppName(app_name)
         conf.setMaster(_SPARK_MASTER)
+
+        # ── Gluten opt-in: clear spark.plugins so GlutenPlugin is NOT loaded ──
+        # spark-defaults.conf in the image no longer sets spark.plugins, but an
+        # older image or a mounted ConfigMap might still set it.  Force empty so
+        # SparkContext never tries to load the Velox native library by default.
+        # To enable Gluten for a session, call:
+        #   spark.conf.set("spark.plugins", "io.glutenproject.GlutenPlugin")
+        conf.set("spark.plugins", "")
 
         # ── Iceberg extension ──────────────────────────────────────────────────
         conf.set(
@@ -198,8 +220,14 @@ class BaoSparkInit:
         # ── Parquet defaults ───────────────────────────────────────────────────
         conf.set("spark.sql.parquet.compression.codec", "snappy")
 
-        # ── JARs ──────────────────────────────────────────────────────────────
-        conf.set("spark.jars", _ICEBERG_JAR_PATH)
+        # ── JARs (baked into image — list for explicitness) ───────────────────
+        conf.set("spark.jars", ",".join([
+            _ICEBERG_JAR_PATH,
+            _SNOWFLAKE_JAR_PATH,
+            "/opt/spark/jars/snowflake-jdbc-3.16.1.jar",
+            "/opt/spark/jars/hadoop-aws-3.3.4.jar",
+            "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
+        ]))
 
         if extra_conf:
             for k, v in extra_conf.items():

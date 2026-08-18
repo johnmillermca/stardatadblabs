@@ -71,8 +71,12 @@ RUN pip3 install --no-cache-dir \
 # Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —
 # they are injected at runtime by bao_spark_init.py from OpenBao.
 RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.conf" << 'EOF'
-# ── Gluten + Velox native execution ──────────────────────────────────────────
-spark.plugins                                        io.glutenproject.GlutenPlugin
+# ── Gluten + Velox native execution (OPT-IN — not enabled globally) ──────────
+# To enable Gluten in a specific session:
+#   spark.conf.set("spark.plugins", "io.glutenproject.GlutenPlugin")
+#   spark.conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
+# Do NOT set spark.plugins here — it causes ClassNotFoundException at SparkContext
+# init when the Velox native lib fails to load on non-matching kernel/glibc.
 spark.gluten.sql.columnar.backend.lib                velox
 spark.gluten.loadLibFromJar                          true
 spark.memory.offHeap.enabled                         true
