@@ -178,6 +178,19 @@ class BaoSparkInit:
         conf.setAppName(app_name)
         conf.setMaster(_SPARK_MASTER)
 
+        # ── Driver host: use pod IP so executors on other nodes can reach it ──
+        # Default Spark behaviour advertises the pod hostname
+        # (e.g. spark-master-6ddc5d8578-8qxbd) which is not resolvable by
+        # other pods via DNS.  Binding to the pod IP fixes
+        # "UnknownHostException: spark-master-XXXXXXXX" in executor logs.
+        import socket as _socket
+        _pod_ip = os.environ.get(
+            "SPARK_LOCAL_IP",
+            _socket.gethostbyname(_socket.gethostname()),
+        )
+        conf.set("spark.driver.host",      _pod_ip)
+        conf.set("spark.driver.bindAddress", _pod_ip)
+
         # ── Java 17 module opens for Snowflake JDBC 4.x ───────────────────────
         # JDBC 4.x uses reflection-based serialization internally (Unsafe, ObjectInputStream
         # on internal JDK classes) which Java 17 blocks by default. Required for
@@ -235,6 +248,17 @@ class BaoSparkInit:
                  "org.apache.hadoop.fs.s3a.S3AFileSystem")
         conf.set("spark.hadoop.fs.s3a.path.style.access", "true")
         conf.set("spark.hadoop.fs.s3a.connection.ssl.enabled", "true")
+        # Alias bare s3:// to the s3a implementation.
+        # Polaris validates table LOCATION as s3:// (not s3a://), but Hadoop
+        # needs an explicit FileSystem binding for that scheme.
+        conf.set("spark.hadoop.fs.s3.impl",
+                 "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        conf.set("spark.hadoop.fs.s3.access.key",  s3["access_key"])
+        conf.set("spark.hadoop.fs.s3.secret.key",  s3["secret_key"])
+        conf.set("spark.hadoop.fs.s3.endpoint",    s3["endpoint"])
+        conf.set("spark.hadoop.fs.s3.endpoint.region", s3["region"])
+        conf.set("spark.hadoop.fs.s3.path.style.access", "true")
+        conf.set("spark.hadoop.fs.s3.connection.ssl.enabled", "true")
 
         # ── Parquet defaults ───────────────────────────────────────────────────
         conf.set("spark.sql.parquet.compression.codec", "snappy")

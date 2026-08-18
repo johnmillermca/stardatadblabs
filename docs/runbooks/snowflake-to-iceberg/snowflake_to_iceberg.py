@@ -478,7 +478,10 @@ def _copy_table(
 
         partition_spec = _auto_partition_spec(iceberg_schema)
 
-        s3_location = f"s3a://{s3_bucket}/iceberg/{ICEBERG_NAMESPACE}/{table}"
+        # Location must be under the Polaris catalog's allowedLocations.
+        # IcebergCatalog is configured with s3://xdatatoiceberg1/tpcds — use
+        # s3:// (not s3a://) and the correct prefix so Polaris accepts the path.
+        s3_location = f"s3://{s3_bucket}/tpcds/{ICEBERG_NAMESPACE}/{table}"
 
         fqn = builder.create_table(
             catalog        = ICEBERG_CATALOG,
