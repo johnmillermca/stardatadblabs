@@ -116,9 +116,12 @@ import queue
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
+import psycopg2
+import psycopg2.extras
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import current_timestamp, lit
 from pyspark.sql.types import (
@@ -212,6 +215,218 @@ def _sf_to_spark(sf_type: str) -> Any:
         s = int(parts[1].strip()) if len(parts) > 1 else 0
         return DecimalType(p, s)
     return _SF_TYPE_MAP.get(base, StringType())
+
+
+# ── Pipeline PostgreSQL helpers ────────────────────────────────────────────────
+
+def _pg_connect(pg: dict) -> "psycopg2.connection":
+    """Open a connection to the dedicated `pipeline` PostgreSQL database."""
+    return psycopg2.connect(
+        host=pg["host"],
+        port=int(pg.get("port", 5432)),
+        dbname=pg["database"],
+        user=pg["user"],
+        password=pg["password"],
+        connect_timeout=10,
+    )
+
+
+def pg_upsert_watermark(
+    pg:               dict,
+    source_db:        str,
+    source_schema:    str,
+    table_name:       str,
+    sf_extraction_ts: str,
+    rows_copied:      int,
+    iceberg_namespace: str,
+) -> None:
+    """
+    Upsert a watermark row into pipeline_watermarks in the `pipeline` Postgres DB.
+
+    This is the authoritative sync-point store that the Debezium bootstrap
+    script reads (via plain psql) to resolve oracle_start_scn WITHOUT needing
+    a Spark session.
+    """
+    sql = """
+        INSERT INTO pipeline_watermarks
+            (source_db, source_schema, table_name,
+             sf_extraction_ts, rows_copied, pipeline_run_ts, iceberg_namespace)
+        VALUES (%s, %s, %s, %s, %s, NOW(), %s)
+        ON CONFLICT (source_db, source_schema, table_name)
+        DO UPDATE SET
+            sf_extraction_ts  = EXCLUDED.sf_extraction_ts,
+            rows_copied       = EXCLUDED.rows_copied,
+            pipeline_run_ts   = EXCLUDED.pipeline_run_ts,
+            iceberg_namespace = EXCLUDED.iceberg_namespace,
+            oracle_start_scn  = NULL,   -- reset; Debezium bootstrap must re-resolve
+            updated_at        = NOW()
+    """
+    with _pg_connect(pg) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (
+                source_db, source_schema, table_name,
+                sf_extraction_ts, rows_copied, iceberg_namespace,
+            ))
+        conn.commit()
+    logger.info(
+        "[pg-watermark] upserted %s.%s.%s sf_extraction_ts=%s rows=%d",
+        source_db, source_schema, table_name, sf_extraction_ts, rows_copied,
+    )
+
+
+def pg_log_run_start(pg: dict, run_id: str, source_db: str, source_schema: str) -> None:
+    """Insert a pipeline_run_log row with status='running'."""
+    sql = """
+        INSERT INTO pipeline_run_log (run_id, source_db, source_schema, started_at, status)
+        VALUES (%s, %s, %s, NOW(), 'running')
+        ON CONFLICT (run_id) DO NOTHING
+    """
+    with _pg_connect(pg) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (run_id, source_db, source_schema))
+        conn.commit()
+
+
+def pg_log_run_finish(
+    pg:             dict,
+    run_id:         str,
+    tables_ok:      int,
+    tables_failed:  int,
+    tables_skipped: int,
+    total_rows:     int,
+    status:         str,
+    error_detail:   str | None = None,
+) -> None:
+    """Update pipeline_run_log row to final status."""
+    sql = """
+        UPDATE pipeline_run_log
+        SET finished_at    = NOW(),
+            tables_ok      = %s,
+            tables_failed  = %s,
+            tables_skipped = %s,
+            total_rows     = %s,
+            status         = %s,
+            error_detail   = %s
+        WHERE run_id = %s
+    """
+    with _pg_connect(pg) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (
+                tables_ok, tables_failed, tables_skipped,
+                total_rows, status, error_detail, run_id,
+            ))
+        conn.commit()
+
+
+# ── Snowflake extraction watermark ────────────────────────────────────────────
+
+def capture_sf_extraction_ts(spark: SparkSession, sf_opts: dict) -> str:
+    """
+    Run SELECT CURRENT_TIMESTAMP() inside the Snowflake session and return
+    the result as an ISO-8601 string (UTC, microsecond precision).
+
+    This is the exact Snowflake server-side time at which the subsequent
+    SELECT on the table will be executed — it is the CDC sync point.
+
+    Using CURRENT_TIMESTAMP() from Snowflake (not the driver clock) ensures
+    the watermark reflects Snowflake's transaction timeline, not network
+    latency or driver time-zone differences.
+    """
+    row = (
+        spark.read.format("net.snowflake.spark.snowflake")
+        .options(**sf_opts)
+        .option("query", "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::VARCHAR AS ts")
+        .load()
+        .collect()[0]
+    )
+    ts_str: str = row[0]  # e.g. "2026-08-18 04:01:39.123456"
+    # Normalise to ISO-8601 with Z suffix
+    ts_str = ts_str.replace(" ", "T")
+    if "." not in ts_str:
+        ts_str += ".000000"
+    if not ts_str.endswith("Z"):
+        ts_str += "Z"
+    return ts_str   # e.g. "2026-08-18T04:01:39.123456Z"
+
+
+def write_watermark_iceberg(
+    spark:            SparkSession,
+    catalog:          str,
+    namespace:        str,
+    source_db:        str,
+    source_schema:    str,
+    table_name:       str,
+    sf_extraction_ts: str,
+    rows_copied:      int,
+) -> None:
+    """
+    Upsert one row into the Iceberg control table
+    <catalog>.<namespace>._pipeline_watermarks.
+
+    This is the Spark-native copy of the watermark — queryable from any Spark
+    job via SQL without a Postgres connection.  The canonical CDC sync-point
+    store is the `pipeline` Postgres DB (see pg_upsert_watermark).
+    """
+    from pyspark.sql.types import (
+        StructType, StructField,
+        StringType as ST, LongType as LT, TimestampType as TT,
+    )
+    wm_fqn = f"`{catalog}`.`{namespace}`.`_pipeline_watermarks`"
+
+    wm_schema = StructType([
+        StructField("source_db",         ST(), True),
+        StructField("source_schema",      ST(), True),
+        StructField("table_name",         ST(), True),
+        StructField("sf_extraction_ts",   ST(), True),
+        StructField("rows_copied",        LT(), True),
+        StructField("pipeline_run_ts",    TT(), True),
+        StructField("iceberg_namespace",  ST(), True),
+    ])
+
+    # Ensure control table exists (idempotent)
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {wm_fqn} (
+          source_db          STRING,
+          source_schema      STRING,
+          table_name         STRING,
+          sf_extraction_ts   STRING,
+          rows_copied        BIGINT,
+          pipeline_run_ts    TIMESTAMP,
+          iceberg_namespace  STRING
+        )
+        USING iceberg
+        PARTITIONED BY (source_db, source_schema)
+        TBLPROPERTIES (
+          'format-version'               = '2',
+          'write.format.default'         = 'parquet',
+          'write.target-file-size-bytes' = '268435456',
+          'platform.purpose'             = 'cdc-sync-watermark'
+        )
+    """)
+
+    # Iceberg v2 MERGE (upsert)
+    spark.sql(f"""
+        MERGE INTO {wm_fqn} t
+        USING (SELECT
+                 '{source_db}'        AS source_db,
+                 '{source_schema}'    AS source_schema,
+                 '{table_name}'       AS table_name,
+                 '{sf_extraction_ts}' AS sf_extraction_ts,
+                 {rows_copied}        AS rows_copied,
+                 current_timestamp()  AS pipeline_run_ts,
+                 '{namespace}'        AS iceberg_namespace
+              ) s
+        ON  t.source_db     = s.source_db
+        AND t.source_schema = s.source_schema
+        AND t.table_name    = s.table_name
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+    """)
+
+    logger.info(
+        "[iceberg-watermark] %s.%s.%s → sf_extraction_ts=%s rows=%d",
+        source_db, source_schema, table_name, sf_extraction_ts, rows_copied,
+    )
 
 
 # ── Schema discovery ───────────────────────────────────────────────────────────
@@ -457,14 +672,28 @@ def _copy_table(
     size_gb:   float,
     results:   dict,
     lock:      threading.Lock,
+    pg_creds:  dict,
 ) -> None:
     """
     Copy one table from Snowflake → Iceberg (called inside a thread).
-    Writes result to the shared *results* dict.
+
+    Watermark flow
+    --------------
+    1. Capture Snowflake server-side CURRENT_TIMESTAMP() immediately before
+       the first batch SELECT — this is the CDC sync point (sf_extraction_ts).
+    2. After a successful copy: dual-write the watermark to
+       a. Iceberg _pipeline_watermarks control table  (Spark-queryable)
+       b. PostgreSQL pipeline.pipeline_watermarks      (shell-queryable by
+          the Debezium bootstrap script without a Spark session)
+    3. Stamp 'pipeline.sf_extraction_ts' as an Iceberg table property so
+       the watermark appears in any DESCRIBE EXTENDED output.
+
+    Writes final status to the shared *results* dict.
     """
-    status     = "pending"
-    rows_total = 0
-    err        = None
+    status           = "pending"
+    rows_total       = 0
+    err              = None
+    sf_extraction_ts = None
 
     try:
         logger.info("[%s] START: %.1f GB | discovering schema …", table, size_gb)
@@ -497,6 +726,13 @@ def _copy_table(
             logger.info("[%s] DRY_RUN — skipping data copy.", table)
             status = "dry_run"
         else:
+            # ── Capture CDC sync-point BEFORE the first batch query ────────
+            # Must use Snowflake server-side CURRENT_TIMESTAMP() so the
+            # watermark reflects Snowflake's transaction timeline and maps
+            # precisely to an Oracle SCN via TIMESTAMP_TO_SCN().
+            sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
+            logger.info("[%s] sf_extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
+
             # ── Batched sequential copy ────────────────────────────────────
             iceberg_cols = [f.name for f in iceberg_schema.fields]
             offset = 0
@@ -547,6 +783,36 @@ def _copy_table(
                     break   # last batch
 
             logger.info("[%s] DONE — %d rows written.", table, rows_total)
+
+            # ── Stamp sf_extraction_ts onto the Iceberg table property ─────
+            spark.sql(
+                f"ALTER TABLE {fqn} SET TBLPROPERTIES "
+                f"('pipeline.sf_extraction_ts' = '{sf_extraction_ts}')"
+            )
+
+            # ── Dual-write watermark: Iceberg control table ────────────────
+            write_watermark_iceberg(
+                spark             = spark,
+                catalog           = ICEBERG_CATALOG,
+                namespace         = ICEBERG_NAMESPACE,
+                source_db         = SF_DATABASE,
+                source_schema     = SF_SCHEMA,
+                table_name        = table,
+                sf_extraction_ts  = sf_extraction_ts,
+                rows_copied       = rows_total,
+            )
+
+            # ── Dual-write watermark: pipeline PostgreSQL DB ───────────────
+            pg_upsert_watermark(
+                pg                = pg_creds,
+                source_db         = SF_DATABASE,
+                source_schema     = SF_SCHEMA,
+                table_name        = table,
+                sf_extraction_ts  = sf_extraction_ts,
+                rows_copied       = rows_total,
+                iceberg_namespace = ICEBERG_NAMESPACE,
+            )
+
             status = "success"
 
     except Exception as exc:  # noqa: BLE001
@@ -556,10 +822,11 @@ def _copy_table(
 
     with lock:
         results[table] = {
-            "status":       status,
-            "rows_written": rows_total,
-            "size_gb":      size_gb,
-            "error":        err,
+            "status":           status,
+            "rows_written":     rows_total,
+            "size_gb":          size_gb,
+            "sf_extraction_ts": sf_extraction_ts,
+            "error":            err,
         }
 
 
@@ -568,9 +835,11 @@ def _copy_table(
 def main() -> None:
     os.environ["SPARK_USER"] = SPARK_USER   # ensure env is set for submodules
 
+    run_id = str(uuid.uuid4())
+
     logger.info(
-        "=== Snowflake → Iceberg copy | user=%s db=%s schema=%s catalog=%s ===",
-        SPARK_USER, SF_DATABASE, SF_SCHEMA, ICEBERG_CATALOG,
+        "=== Snowflake → Iceberg copy | run_id=%s user=%s db=%s schema=%s catalog=%s ===",
+        run_id, SPARK_USER, SF_DATABASE, SF_SCHEMA, ICEBERG_CATALOG,
     )
     logger.info(
         "=== Filters: include=%s  exclude=%s  max_size=%.1f GB ===",
@@ -583,32 +852,43 @@ def main() -> None:
     bao  = BaoSparkInit()
     s3   = bao.s3_creds()
     s3_bucket = S3_BUCKET_OVERRIDE or s3["bucket"]
+    pg   = bao.pipeline_db_creds()
 
     conf    = bao.spark_conf(app_name="sf-to-iceberg")
-    sf_opts = bao.snowflake_options(schema=SF_SCHEMA)
+    sf_opts = bao.snowflake_options(schema=SF_SCHEMA, database=SF_DATABASE)
 
     # ── 2. Spark session ──────────────────────────────────────────────────────
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
+    # ── 3. Log run start in pipeline DB ──────────────────────────────────────
+    try:
+        pg_log_run_start(pg, run_id, SF_DATABASE, SF_SCHEMA)
+        logger.info("[run-log] run_id=%s recorded in pipeline DB.", run_id)
+    except Exception as pg_err:
+        logger.warning("[run-log] Could not write run start to pipeline DB: %s", pg_err)
+
+    run_status    = "failed"
+    run_err_detail = None
+
     try:
         builder = IcebergTableBuilder(spark, running_user=SPARK_USER)
         builder.ensure_namespace(ICEBERG_CATALOG, ICEBERG_NAMESPACE)
 
-        # ── 3. Table discovery ────────────────────────────────────────────────
+        # ── 4. Table discovery ────────────────────────────────────────────────
         all_tables = discover_sf_tables(spark, sf_opts)
         if not all_tables:
             logger.error("No tables found in %s.%s — aborting.", SF_DATABASE, SF_SCHEMA)
             sys.exit(1)
 
-        # ── 4. Size discovery ─────────────────────────────────────────────────
+        # ── 5. Size discovery ─────────────────────────────────────────────────
         sizes: dict[str, float] = {}
         if _SIZE_FILTER_ENABLED:
             sizes = discover_table_sizes(spark, sf_opts)
         else:
             logger.info("Size discovery skipped (MAX_TABLE_SIZE_GB=0).")
 
-        # ── 5. Apply filters ──────────────────────────────────────────────────
+        # ── 6. Apply filters ──────────────────────────────────────────────────
         tables = apply_table_filters(all_tables, sizes)
 
         # Log the full size report (shows every table + COPY/SKIP verdict)
@@ -627,7 +907,7 @@ def main() -> None:
             " [DRY RUN]" if DRY_RUN else "",
         )
 
-        # ── 6. 8-thread copy using a work queue ───────────────────────────────
+        # ── 7. 8-thread copy using a work queue ───────────────────────────────
         # Each thread pulls the next table from the queue so they naturally
         # pick up new work as soon as they finish.
         work_q: queue.Queue[tuple[str, float]] = queue.Queue()
@@ -646,6 +926,7 @@ def main() -> None:
                 _copy_table(
                     spark, builder, sf_opts, s3_bucket,
                     tbl, size_gb, results, lock,
+                    pg_creds=pg,
                 )
                 work_q.task_done()
 
@@ -661,7 +942,7 @@ def main() -> None:
 
         elapsed = time.time() - t0
 
-        # ── 7. Summary ────────────────────────────────────────────────────────
+        # ── 8. Summary ────────────────────────────────────────────────────────
         ok     = [r for r in results.values() if r["status"] in ("success", "dry_run")]
         failed = {t: r for t, r in results.items() if r["status"] == "error"}
         skipped_count = len(all_tables) - len(tables)
@@ -676,16 +957,50 @@ def main() -> None:
         )
         for tbl, r in results.items():
             mark = "✓" if r["status"] in ("success", "dry_run") else "✗"
+            wm   = r.get("sf_extraction_ts") or "-"
             logger.info(
-                "  %s %-30s  rows=%-8d  size=%.1f GB  status=%s%s",
-                mark, tbl, r["rows_written"], r["size_gb"], r["status"],
+                "  %s %-30s  rows=%-8d  size=%.1f GB  sf_ts=%-30s  status=%s%s",
+                mark, tbl, r["rows_written"], r["size_gb"], wm, r["status"],
                 f"  ERR={r['error'][:80]}" if r["error"] else "",
             )
         logger.info("─" * 70)
 
+        run_status = "partial" if failed else "success"
+        if failed:
+            run_err_detail = f"Failed tables: {list(failed.keys())}"
+
+        # ── 9. Finalise pipeline_run_log in pipeline DB ───────────────────────
+        try:
+            pg_log_run_finish(
+                pg             = pg,
+                run_id         = run_id,
+                tables_ok      = len(ok),
+                tables_failed  = len(failed),
+                tables_skipped = skipped_count,
+                total_rows     = total_rows,
+                status         = run_status,
+                error_detail   = run_err_detail,
+            )
+            logger.info("[run-log] run_id=%s finalised status=%s.", run_id, run_status)
+        except Exception as pg_err:
+            logger.warning("[run-log] Could not finalise run log in pipeline DB: %s", pg_err)
+
         if failed:
             sys.exit(1)
 
+    except SystemExit:
+        raise
+    except Exception as top_err:
+        run_err_detail = str(top_err)
+        try:
+            pg_log_run_finish(
+                pg=pg, run_id=run_id, tables_ok=0, tables_failed=0,
+                tables_skipped=0, total_rows=0, status="failed",
+                error_detail=run_err_detail,
+            )
+        except Exception:
+            pass
+        raise
     finally:
         spark.stop()
 

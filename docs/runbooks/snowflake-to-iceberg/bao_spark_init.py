@@ -46,8 +46,9 @@ _PATH_S3        = "secret/data/platform/s3"
 _PATH_SNOWFLAKE = "secret/data/platform/snowflake"
 _PATH_POLARIS   = "secret/data/platform/polaris"
 _PATH_DORIS     = "secret/data/platform/doris"
-_PATH_ORACLE    = "secret/data/platform/oracle"
-_PATH_KAFKA     = "secret/data/platform/kafka"
+_PATH_ORACLE       = "secret/data/platform/oracle"
+_PATH_KAFKA        = "secret/data/platform/kafka"
+_PATH_PIPELINE_DB  = "secret/data/platform/pipeline_db"
 
 # JARs baked into the spark-gluten-velox:3.5.1 image
 _ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
@@ -156,6 +157,15 @@ class BaoSparkInit:
     def kafka_creds(self) -> dict[str, str]:
         """Return {'debezium_user', 'debezium_password', 'bootstrap', 'schema_registry'}."""
         return self._read_secret(_PATH_KAFKA)
+
+    def pipeline_db_creds(self) -> dict[str, str]:
+        """
+        Return credentials for the dedicated `pipeline` PostgreSQL database.
+        Keys: host, port, database, user, password, jdbc_url.
+        This DB stores pipeline_watermarks and pipeline_run_log — the
+        authoritative CDC sync-point tables that Debezium reads without Spark.
+        """
+        return self._read_secret(_PATH_PIPELINE_DB)
 
     # ── SparkConf builder ──────────────────────────────────────────────────────
     def spark_conf(
@@ -279,17 +289,25 @@ class BaoSparkInit:
         return conf
 
     # ── Snowflake JDBC / connector options ─────────────────────────────────────
-    def snowflake_options(self, schema: str = "TPCDS_SF10TCL") -> dict[str, str]:
+    def snowflake_options(
+        self,
+        schema:   str = "TPCDS_SF10TCL",
+        database: str = "SNOWFLAKE_SAMPLE_DATA",
+    ) -> dict[str, str]:
         """
         Return a dict of options for spark.read.format("snowflake").
         Requires net.snowflake:spark-snowflake_2.12:2.15.0-spark_3.5 on classpath.
+
+        Args:
+            schema:   Snowflake schema name (e.g. TPCDS_SF10TCL)
+            database: Snowflake database name (default: SNOWFLAKE_SAMPLE_DATA)
         """
         sf = self.snowflake_creds()
         return {
             "sfURL":       f"{sf['account']}.snowflakecomputing.com",
             "sfUser":      sf["user"],
             "sfPassword":  sf["password"],
-            "sfDatabase":  "SNOWFLAKE_SAMPLE_DATA",
+            "sfDatabase":  database,
             "sfSchema":    schema,
             "sfWarehouse": sf.get("warehouse", "COMPUTE_WH"),
         }
