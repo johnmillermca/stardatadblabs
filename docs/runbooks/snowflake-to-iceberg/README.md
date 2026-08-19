@@ -232,16 +232,50 @@ MAX_TABLE_SIZE_GB=25 INCLUDE_TABLES=store_sales ...
 
 ## Resuming After Partial Run
 
-The pipeline writes in 100k-row batches, each committed as a separate Iceberg snapshot. If a run fails mid-way:
+The pipeline writes in 100k-row batches, each committed as a separate Iceberg snapshot.
+On restart it automatically detects how far a previous run got and picks up from that point —
+**no duplicate rows, no CDC sync-point drift**.
 
-1. The Iceberg table already exists — re-running will **not** truncate it.  
-   `IcebergTableBuilder.create_table()` uses `CREATE TABLE IF NOT EXISTS`.
-2. Rows already written are preserved — new batches are **appended**.
-3. To start a table fresh, drop it first:
-   ```sql
-   DROP TABLE IF EXISTS polaris.tpcds_sf10tcl.income_band;
-   ```
-4. Then re-run with `INCLUDE_TABLES=income_band`.
+### How resume works
+
+1. **Row count as offset** — at the start of each table copy the job counts rows already in
+   the Iceberg table (`spark.table(fqn).count()`).  The batch `OFFSET` starts from that number,
+   so already-written batches are skipped entirely.
+2. **Watermark recovery** — `sf_extraction_ts` (the CDC sync-point timestamp) is written to
+   the `pipeline` PostgreSQL DB **before the first batch** on a fresh run.  On resume the job
+   reads it back from Postgres and reuses it, so the Debezium SCN derived from that timestamp
+   remains valid regardless of how many restart attempts occurred.
+3. **Idempotent table creation** — `IcebergTableBuilder.create_table()` uses
+   `CREATE TABLE IF NOT EXISTS`, so the table schema is never dropped or recreated.
+
+### Failure scenarios
+
+| Scenario | Resume behaviour |
+|---|---|
+| Crash before any batch written | `already_written = 0` → fresh run, new `sf_extraction_ts` |
+| Crash mid-copy (e.g. batch 7 of 100) | `already_written = 600 000` → offset skips those rows, reuses original `sf_extraction_ts` from Postgres |
+| Crash after all batches but before watermark write | All rows in Iceberg, watermark in Postgres already set → `already_written = N` (full count), nothing to copy, watermarks refreshed |
+| Postgres watermark missing + rows in Iceberg | Logs a warning, captures a fresh `sf_extraction_ts` (safe only if CDC has not started yet) |
+
+### Starting a table completely fresh
+
+If you need to discard partial data and restart from zero:
+
+```sql
+-- 1. Drop the Iceberg table
+DROP TABLE IF EXISTS polaris.tpcds_sf10tcl.income_band;
+
+-- 2. Clear the pipeline watermark
+DELETE FROM pipeline_watermarks
+WHERE source_db='SNOWFLAKE_SAMPLE_DATA'
+  AND source_schema='TPCDS_SF10TCL'
+  AND table_name='income_band';
+```
+
+Then re-run:
+```bash
+INCLUDE_TABLES=income_band python3 snowflake_to_iceberg.py
+```
 
 ---
 

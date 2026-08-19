@@ -726,16 +726,84 @@ def _copy_table(
             logger.info("[%s] DRY_RUN — skipping data copy.", table)
             status = "dry_run"
         else:
-            # ── Capture CDC sync-point BEFORE the first batch query ────────
-            # Must use Snowflake server-side CURRENT_TIMESTAMP() so the
-            # watermark reflects Snowflake's transaction timeline and maps
-            # precisely to an Oracle SCN via TIMESTAMP_TO_SCN().
-            sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
-            logger.info("[%s] sf_extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
+            # ── Resume detection ───────────────────────────────────────────
+            # Count rows already committed to Iceberg from a previous partial
+            # run so the batch loop can skip them (use as initial OFFSET).
+            try:
+                already_written = spark.table(fqn).count()
+            except Exception:
+                already_written = 0
+
+            # Reuse the original sf_extraction_ts if it was stamped onto the
+            # table property in a prior run.  The property is only written on
+            # full success, so its presence means the table was fully copied
+            # before and this is a fresh re-run — capture a new timestamp.
+            # If the property is ABSENT and already_written > 0, the table is
+            # partially copied: reuse the watermark from the Postgres pipeline
+            # DB so the CDC sync-point stays consistent.
+            if already_written > 0:
+                # Try to recover the original timestamp from the pipeline DB
+                # (written at the very start of the first run, before any batches).
+                try:
+                    with _pg_connect(pg_creds) as _conn:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                "SELECT sf_extraction_ts FROM pipeline_watermarks "
+                                "WHERE source_db=%s AND source_schema=%s AND table_name=%s",
+                                (SF_DATABASE, SF_SCHEMA, table),
+                            )
+                            _row = _cur.fetchone()
+                    sf_extraction_ts = _row[0] if _row and _row[0] else None
+                except Exception:
+                    sf_extraction_ts = None
+
+                if sf_extraction_ts:
+                    logger.info(
+                        "[%s] RESUME: %d rows already in Iceberg — reusing "
+                        "sf_extraction_ts=%s from pipeline DB, starting at offset=%d.",
+                        table, already_written, sf_extraction_ts, already_written,
+                    )
+                else:
+                    # Fallback: no watermark in pipeline DB yet (first run wrote
+                    # nothing before crashing).  Capture a fresh timestamp.
+                    sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
+                    logger.info(
+                        "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
+                        "fresh sf_extraction_ts=%s, starting at offset=%d.",
+                        table, already_written, sf_extraction_ts, already_written,
+                    )
+            else:
+                # ── Fresh run: capture CDC sync-point BEFORE the first batch ──
+                # Must use Snowflake server-side CURRENT_TIMESTAMP() so the
+                # watermark reflects Snowflake's transaction timeline and maps
+                # precisely to an Oracle SCN via TIMESTAMP_TO_SCN().
+                sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
+                logger.info("[%s] sf_extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
+
+                # Eagerly write the watermark to Postgres NOW — before the first
+                # batch — so a crash mid-copy still leaves a recoverable timestamp
+                # for the next resume attempt.
+                try:
+                    pg_upsert_watermark(
+                        pg                = pg_creds,
+                        source_db         = SF_DATABASE,
+                        source_schema     = SF_SCHEMA,
+                        table_name        = table,
+                        sf_extraction_ts  = sf_extraction_ts,
+                        rows_copied       = 0,
+                        iceberg_namespace = ICEBERG_NAMESPACE,
+                    )
+                    logger.info("[%s] Early watermark written to pipeline DB.", table)
+                except Exception as _pg_err:
+                    logger.warning(
+                        "[%s] Could not write early watermark to pipeline DB: %s",
+                        table, _pg_err,
+                    )
 
             # ── Batched sequential copy ────────────────────────────────────
             iceberg_cols = [f.name for f in iceberg_schema.fields]
-            offset = 0
+            offset = already_written
+            rows_total = already_written
 
             while True:
                 query = (
@@ -782,7 +850,7 @@ def _copy_table(
                 if n < BATCH_SIZE:
                     break   # last batch
 
-            logger.info("[%s] DONE — %d rows written.", table, rows_total)
+            logger.info("[%s] DONE — %d rows written (total incl. prior runs).", table, rows_total)
 
             # ── Stamp sf_extraction_ts onto the Iceberg table property ─────
             spark.sql(
@@ -802,7 +870,8 @@ def _copy_table(
                 rows_copied       = rows_total,
             )
 
-            # ── Dual-write watermark: pipeline PostgreSQL DB ───────────────
+            # ── Final watermark update: pipeline PostgreSQL DB ────────────
+            # Refresh rows_copied to the final count now that copy is complete.
             pg_upsert_watermark(
                 pg                = pg_creds,
                 source_db         = SF_DATABASE,
