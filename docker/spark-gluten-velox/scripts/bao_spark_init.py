@@ -243,7 +243,7 @@ class BaoSparkInit:
         # and "missing OAuth2 server URI" fallback warning from Iceberg REST client.
         conf.set("spark.sql.catalog.polaris.rest.auth.type", "oauth2")
         conf.set("spark.sql.catalog.polaris.oauth2-server-uri",
-                 f"{_POLARIS_URI}/oauth/tokens")
+                 f"{_POLARIS_URI}/v1/oauth/tokens")
 
         # ── Snowflake internal catalog (for reading source tables) ─────────────
         conf.set("spark.sql.catalog.snowflake_sample",
