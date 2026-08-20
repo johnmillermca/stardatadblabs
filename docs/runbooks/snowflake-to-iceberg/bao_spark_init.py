@@ -239,6 +239,11 @@ class BaoSparkInit:
                  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         conf.set("spark.sql.catalog.polaris.scope", "PRINCIPAL_ROLE:ALL")
         conf.set("spark.sql.catalog.polaris.warehouse", "IcebergCatalog")
+        # Explicit OAuth2 config — suppresses "inferring rest.auth.type" warning
+        # and "missing OAuth2 server URI" fallback warning from Iceberg REST client.
+        conf.set("spark.sql.catalog.polaris.rest.auth.type", "oauth2")
+        conf.set("spark.sql.catalog.polaris.oauth2-server-uri",
+                 f"{_POLARIS_URI}/oauth/tokens")
 
         # ── Snowflake internal catalog (for reading source tables) ─────────────
         conf.set("spark.sql.catalog.snowflake_sample",
@@ -270,12 +275,30 @@ class BaoSparkInit:
         conf.set("spark.hadoop.fs.s3.path.style.access", "true")
         conf.set("spark.hadoop.fs.s3.connection.ssl.enabled", "true")
 
+        # ── Iceberg AWS SDK v2 credentials (S3FileIO used by iceberg-aws-bundle)
+        # spark.hadoop.fs.s3a.* feeds Hadoop S3A only — the Iceberg writer uses
+        # its own AWS SDK v2 DefaultCredentialsProvider chain on each executor.
+        # These catalog-scoped properties inject the credentials directly into
+        # the Iceberg S3FileIO so no cloud IMDS / profile lookup is attempted.
+        conf.set("spark.sql.catalog.polaris.s3.access-key-id",     s3["access_key"])
+        conf.set("spark.sql.catalog.polaris.s3.secret-access-key", s3["secret_key"])
+        conf.set("spark.sql.catalog.polaris.s3.endpoint",          s3["endpoint"])
+        conf.set("spark.sql.catalog.polaris.s3.path-style-access", "true")
+        conf.set("spark.sql.catalog.polaris.client.region",        s3["region"])
+
         # ── Parquet defaults ───────────────────────────────────────────────────
         conf.set("spark.sql.parquet.compression.codec", "snappy")
+
+        # ── Serializer (Kryo avoids NotSerializableException: StorageStatus bug)
+        # Spark 3.5 JavaSerializer incorrectly tries to serialize StorageStatus
+        # in RPC responses, causing ERROR Inbox warnings. Kryo suppresses this.
+        conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+        conf.set("spark.kryo.registrationRequired", "false")
 
         # ── JARs (baked into image — list for explicitness) ───────────────────
         conf.set("spark.jars", ",".join([
             _ICEBERG_JAR_PATH,
+            "/opt/spark/jars/iceberg-aws-bundle-1.9.2.jar",
             _SNOWFLAKE_JAR_PATH,
             _SNOWFLAKE_JDBC_JAR,
             "/opt/spark/jars/hadoop-aws-3.3.4.jar",

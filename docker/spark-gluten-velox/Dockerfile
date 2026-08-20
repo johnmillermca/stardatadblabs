@@ -4,10 +4,11 @@
 # Bundles:
 #   gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar  (Gluten+Velox native)
 #   iceberg-spark-runtime-3.5_2.12-1.9.2.jar                     (Iceberg)
+#   iceberg-aws-bundle-1.9.2.jar                                  (Iceberg S3FileIO — AWS SDK v2)
 #   spark-snowflake_2.12-3.2.1-spark_3.5.jar                     (Snowflake connector)
-#   snowflake-jdbc-3.16.1.jar                                     (Snowflake JDBC)
+#   snowflake-jdbc-4.0.2.jar                                      (Snowflake JDBC)
 #   hadoop-aws-3.3.4.jar                                          (S3A filesystem)
-#   aws-java-sdk-bundle-1.12.262.jar                              (AWS SDK)
+#   aws-java-sdk-bundle-1.12.262.jar                              (AWS SDK v1 — S3A)
 #
 # Python packages:
 #   pyspark==3.5.1, snowflake-connector-python, confluent-kafka,
@@ -51,6 +52,11 @@ COPY jars/hadoop-aws-3.3.4.jar \
 COPY jars/aws-java-sdk-bundle-1.12.262.jar \
      /opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar
 
+# iceberg-aws-bundle provides AWS SDK v2 classes (S3FileIO, S3Exception, etc.)
+# required by iceberg-spark-runtime 1.9.2 — absent from aws-java-sdk-bundle (v1).
+COPY jars/iceberg-aws-bundle-1.9.2.jar \
+     /opt/spark/jars/iceberg-aws-bundle-1.9.2.jar
+
 # ── Python packages — split into layers to avoid pip botocore conflict ────────
 # Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
 RUN pip3 install --no-cache-dir \
@@ -77,6 +83,13 @@ COPY scripts/bao_spark_init.py        /opt/spark/work-dir/bao_spark_init.py
 COPY scripts/spark_iceberg_utils.py   /opt/spark/work-dir/spark_iceberg_utils.py
 COPY scripts/snowflake_to_iceberg.py  /opt/spark/work-dir/snowflake_to_iceberg.py
 RUN chmod 644 /opt/spark/work-dir/*.py
+
+# ── Set HOME for Snowflake JDBC credential cache ──────────────────────────────
+# Snowflake JDBC 4.x needs a writable $HOME to enable the local credential
+# cache (SF_TEMPORARY_CREDENTIAL_CACHE_DIR). Without it, every query logs
+# "WARN NoOpFileCacheManager: Cache is not available".
+ENV HOME=/home/spark
+RUN mkdir -p /home/spark && chown spark:spark /home/spark
 
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
