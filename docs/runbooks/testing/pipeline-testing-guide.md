@@ -9,27 +9,26 @@
 
 ## Before You Start — Common Setup
 
-> **Image requirement:** The Spark image must include `psycopg2-binary`.
-> If you are running an image built before this was added, the script will fail immediately with `ModuleNotFoundError: No module named 'psycopg2'`.
-> Rebuild and push the image first:
+> **After any image rebuild or pod rollout**, re-run the "Common Setup" block below to refresh `$MASTER` — the pod name changes after every restart and the old variable points to a pod that no longer exists. The scripts (`bao_spark_init.py`, `spark_iceberg_utils.py`, `snowflake_to_iceberg.py`) are baked into the image at `/opt/spark/work-dir/` and do **not** need to be copied manually.
+>
+> To rebuild and roll the pods:
 > ```bash
 > bash docker/spark-gluten-velox/build-and-push.sh
-> ```
-> Then restart the Spark pods so they pull the new image and wait for the rollout to complete:
-> ```bash
 > kubectl rollout restart deployment -n prod -l app=spark
 > kubectl rollout status  deployment/spark-master -n prod
 > kubectl rollout status  deployment/spark-worker -n prod
 > ```
-> After the rollout finishes the master pod name changes. **Re-run the entire "Common Setup" block below** (both the `MASTER=…` line and the `kubectl cp` loop) before executing any test commands — the new pod has an empty `/opt/spark/work-dir/` and your old `$MASTER` shell variable points to a pod that no longer exists.
 
 Run these once in your terminal before any test. All tests below assume these variables are set.
 
 ```bash
-# Spark master pod
+# Spark master pod — wait until all containers are Ready before proceeding
 MASTER=$(kubectl get pod -n prod -l app=spark,component=master \
   -o jsonpath='{.items[0].metadata.name}')
 echo "Spark master pod: $MASTER"
+
+kubectl wait pod -n prod "$MASTER" --for=condition=Ready --timeout=120s
+echo "Pod is Ready."
 
 # OpenBao root token
 BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
@@ -44,12 +43,6 @@ PG_PASS=$(kubectl exec -n prod $MASTER -c spark-master -- \
   curl -sf -H "X-Vault-Token: $BAO_TOKEN" \
   http://openbao.prod.svc.cluster.local:8200/v1/secret/data/platform/pipeline_db \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['data']['password'])")
-
-# Copy scripts onto pod (idempotent — safe to re-run)
-for f in bao_spark_init.py spark_iceberg_utils.py snowflake_to_iceberg.py; do
-  kubectl cp docs/runbooks/snowflake-to-iceberg/$f \
-    prod/$MASTER:/opt/spark/work-dir/$f -c spark-master
-done
 
 echo "Setup complete."
 ```

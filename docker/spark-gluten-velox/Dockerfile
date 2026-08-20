@@ -68,6 +68,16 @@ RUN pip3 install --no-cache-dir \
         "pyiceberg==0.7.1" \
         "psycopg2-binary==2.9.10"
 
+# ── Pipeline scripts — baked in so work-dir is always populated ──────────────
+# Scripts are maintained in docs/runbooks/snowflake-to-iceberg/ and mirrored
+# into docker/spark-gluten-velox/scripts/ so they are part of the build context.
+# Update scripts/ whenever the source files change, then rebuild the image.
+RUN mkdir -p /opt/spark/work-dir
+COPY scripts/bao_spark_init.py        /opt/spark/work-dir/bao_spark_init.py
+COPY scripts/spark_iceberg_utils.py   /opt/spark/work-dir/spark_iceberg_utils.py
+COPY scripts/snowflake_to_iceberg.py  /opt/spark/work-dir/snowflake_to_iceberg.py
+RUN chmod 644 /opt/spark/work-dir/*.py
+
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
 # Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —

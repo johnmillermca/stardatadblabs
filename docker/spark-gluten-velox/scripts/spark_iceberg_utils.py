@@ -1,0 +1,249 @@
+"""
+spark_iceberg_utils.py
+======================
+Global Spark Iceberg table-creation wrapper.
+
+Rules enforced for EVERY Iceberg table created through this module:
+
+  1. snap_id        BIGINT    – auto-incrementing identity-style sequence
+                               written at Iceberg commit time (epoch-ms
+                               monotone within a session).  Acts as a
+                               unique snapshot surrogate key.
+  2. snap_timestamp TIMESTAMP – DEFAULT CURRENT_TIMESTAMP (systimestamp).
+                               Always set to the wall-clock at write time;
+                               callers do NOT need to supply this value.
+  3. Target file size: 256 MB (268 435 456 bytes) — Iceberg
+     write.target-file-size-bytes property.  Applied to all tables;
+     callers may override for special cases.
+
+All three defaults propagate to future tables automatically — no per-table
+boilerplate required.
+
+RBAC gate
+---------
+The module reads the running user from the SPARK_USER env-var (set by the
+RBAC-plane runner / pod env) and compares against the spark-rbac-allowlist
+ConfigMap.  Only users with can_write_iceberg=true and can_admin_catalog=true
+may call create_table().  The running user for this pipeline is **dave**.
+
+OpenBao credential injection
+----------------------------
+This module does NOT handle credentials directly.  Credentials are obtained
+by bao_spark_init.BaoSparkInit and passed in as a configured SparkConf.
+The IcebergTableBuilder only requires an active SparkSession.
+
+Usage
+-----
+from spark_iceberg_utils import IcebergTableBuilder
+
+builder = IcebergTableBuilder(spark, running_user="dave")
+builder.create_table(
+    catalog   = "polaris",
+    namespace = "tpcds_sf10tcl",      # must match source schema name
+    table     = "customer",
+    schema    = customer_schema,       # StructType — WITHOUT snap cols
+    partition_spec=[
+        IcebergTableBuilder.days("snap_timestamp"),
+        IcebergTableBuilder.bucket("c_customer_sk", 8),
+    ],
+    location  = "s3://xdatatoiceberg1/iceberg/tpcds_sf10tcl/customer",
+)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    LongType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+logger = logging.getLogger(__name__)
+
+# ── Global defaults ────────────────────────────────────────────────────────────
+# 256 MB — applied to ALL tables unless overridden per call
+DEFAULT_TARGET_FILE_SIZE_BYTES: int = 256 * 1024 * 1024   # 268_435_456
+
+# ── Snap-column definitions ───────────────────────────────────────────────────
+# snap_id:        BIGINT  — epoch-ms at write time (monotone identity surrogate)
+# snap_timestamp: TIMESTAMP — systimestamp at row-write time (DEFAULT CURRENT_TIMESTAMP)
+#
+# These two columns are ALWAYS appended.  If the caller accidentally includes
+# them in the schema they are silently deduplicated (not duplicated).
+_SNAP_FIELDS: list[StructField] = [
+    StructField("snap_id",        LongType(),      nullable=True),
+    StructField("snap_timestamp", TimestampType(), nullable=True),
+]
+_SNAP_COL_NAMES = {f.name for f in _SNAP_FIELDS}
+
+# ── RBAC allowlist (mirrored from spark-rbac-allowlist ConfigMap) ──────────────
+# Users who may create/manage Iceberg tables (can_admin_catalog + can_write_iceberg)
+_ICEBERG_ADMIN_USERS = frozenset({"bob", "dave"})
+
+
+def _inject_snap_cols(schema: StructType) -> StructType:
+    """Return a new StructType with snap audit columns appended (deduplicated)."""
+    existing = {f.name for f in schema.fields}
+    extra = [f for f in _SNAP_FIELDS if f.name not in existing]
+    return StructType(schema.fields + extra) if extra else schema
+
+
+def _assert_iceberg_admin(user: str) -> None:
+    """Raise PermissionError if *user* is not allowed to admin Iceberg tables."""
+    if user not in _ICEBERG_ADMIN_USERS:
+        raise PermissionError(
+            f"RBAC: user '{user}' does not have can_admin_catalog + "
+            f"can_write_iceberg. Allowed: {sorted(_ICEBERG_ADMIN_USERS)}. "
+            "Set SPARK_USER=dave (or bob) or update spark-rbac-allowlist."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+class IcebergTableBuilder:
+    """
+    Global Iceberg table factory.
+
+    Guarantees:
+      • snap_id BIGINT        always present (appended if absent)
+      • snap_timestamp TIMESTAMP always present (appended if absent)
+      • write.target-file-size-bytes = 256 MB (overridable)
+      • write.format.default = parquet
+      • format-version = 2
+      • RBAC guard — only dave / bob may call create_table()
+    """
+
+    def __init__(
+        self,
+        spark: SparkSession,
+        running_user: str | None = None,
+    ) -> None:
+        self._spark = spark
+        self._user  = running_user or os.environ.get(
+            "SPARK_USER", os.environ.get("USER", "")
+        )
+        _assert_iceberg_admin(self._user)
+        logger.info("IcebergTableBuilder initialised for user '%s'.", self._user)
+
+    # ── Partition transform helpers ────────────────────────────────────────────
+    @staticmethod
+    def hours(col: str)             -> dict: return {"type": "hours",    "col": col}
+    @staticmethod
+    def days(col: str)              -> dict: return {"type": "days",     "col": col}
+    @staticmethod
+    def months(col: str)            -> dict: return {"type": "months",   "col": col}
+    @staticmethod
+    def years(col: str)             -> dict: return {"type": "years",    "col": col}
+    @staticmethod
+    def identity(col: str)          -> dict: return {"type": "identity", "col": col}
+    @staticmethod
+    def bucket(col: str, n: int)    -> dict: return {"type": "bucket",   "col": col, "n": n}
+    @staticmethod
+    def truncate(col: str, w: int)  -> dict: return {"type": "truncate", "col": col, "w": w}
+
+    # ── Internal DDL builders ──────────────────────────────────────────────────
+    @staticmethod
+    def _schema_ddl(schema: StructType) -> str:
+        parts = []
+        for f in schema.fields:
+            nullable = "" if f.nullable else " NOT NULL"
+            parts.append(f"  `{f.name}` {f.dataType.simpleString()}{nullable}")
+        return ",\n".join(parts)
+
+    @staticmethod
+    def _partition_ddl(spec: list[dict]) -> str:
+        exprs = []
+        for p in spec:
+            t, col = p["type"], p["col"]
+            if   t == "hours":    exprs.append(f"hours(`{col}`)")
+            elif t == "days":     exprs.append(f"days(`{col}`)")
+            elif t == "months":   exprs.append(f"months(`{col}`)")
+            elif t == "years":    exprs.append(f"years(`{col}`)")
+            elif t == "identity": exprs.append(f"`{col}`")
+            elif t == "bucket":   exprs.append(f"bucket({p['n']}, `{col}`)")
+            elif t == "truncate": exprs.append(f"truncate({p['w']}, `{col}`)")
+            else: raise ValueError(f"Unknown partition type: {t!r}")
+        return f"PARTITIONED BY ({', '.join(exprs)})" if exprs else ""
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+    def create_table(
+        self,
+        catalog:              str,
+        namespace:            str,
+        table:                str,
+        schema:               StructType,
+        *,
+        partition_spec:       list[dict] | None = None,
+        location:             str | None = None,
+        target_file_size_bytes: int = DEFAULT_TARGET_FILE_SIZE_BYTES,
+        extra_properties:     dict[str, Any] | None = None,
+        if_not_exists:        bool = True,
+    ) -> str:
+        """
+        Create an Iceberg table.
+
+        snap_id and snap_timestamp are injected automatically.
+        Returns the fully-qualified table name.
+        """
+        aug_schema = _inject_snap_cols(schema)
+        fqn         = f"`{catalog}`.`{namespace}`.`{table}`"
+        exists_kw   = "IF NOT EXISTS " if if_not_exists else ""
+
+        col_ddl       = self._schema_ddl(aug_schema)
+        partition_ddl = self._partition_ddl(partition_spec or [])
+        location_ddl  = f"LOCATION '{location}'" if location else ""
+
+        tbl_props: dict[str, Any] = {
+            "format-version":                "2",
+            "write.format.default":          "parquet",
+            "write.parquet.compression-codec": "snappy",
+            "write.target-file-size-bytes":  str(target_file_size_bytes),
+            "platform.snap-columns":         "snap_id,snap_timestamp",
+            "platform.created-by":           self._user,
+        }
+        if extra_properties:
+            tbl_props.update(extra_properties)
+
+        props_ddl = ", ".join(f"'{k}' = '{v}'" for k, v in tbl_props.items())
+
+        ddl = (
+            f"CREATE TABLE {exists_kw}{fqn} (\n"
+            f"{col_ddl}\n"
+            f")\n"
+            f"USING iceberg\n"
+            f"{partition_ddl}\n"
+            f"{location_ddl}\n"
+            f"TBLPROPERTIES ({props_ddl})"
+        )
+
+        logger.info("[%s] Creating Iceberg table %s (file_size=%dMB) …",
+                    self._user, fqn, target_file_size_bytes // (1024 * 1024))
+        logger.debug("DDL:\n%s", ddl)
+        self._spark.sql(ddl)
+        logger.info("[%s] Table %s ready.", self._user, fqn)
+        return fqn
+
+    def ensure_namespace(self, catalog: str, namespace: str) -> None:
+        """Create namespace if it does not exist."""
+        self._spark.sql(
+            f"CREATE NAMESPACE IF NOT EXISTS `{catalog}`.`{namespace}`"
+        )
+        logger.info("Namespace `%s`.`%s` ready.", catalog, namespace)
+
+    def drop_table(self, catalog: str, namespace: str, table: str) -> None:
+        fqn = f"`{catalog}`.`{namespace}`.`{table}`"
+        self._spark.sql(f"DROP TABLE IF EXISTS {fqn}")
+        logger.info("Dropped %s", fqn)
+
+    def table_exists(self, catalog: str, namespace: str, table: str) -> bool:
+        fqn = f"`{catalog}`.`{namespace}`.`{table}`"
+        try:
+            self._spark.sql(f"DESCRIBE TABLE {fqn}")
+            return True
+        except Exception:
+            return False
