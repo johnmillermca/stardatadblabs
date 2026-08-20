@@ -123,7 +123,7 @@ from typing import Any, Optional
 import psycopg2
 import psycopg2.extras
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import current_timestamp, lit
+from pyspark.sql.functions import current_timestamp, lit, monotonically_increasing_id
 from pyspark.sql.types import (
     BooleanType,
     ByteType,
@@ -640,24 +640,16 @@ def apply_table_filters(
 
 def _auto_partition_spec(schema: StructType) -> list[dict]:
     """
-    Build a sensible partition spec from the column schema:
-      days(<first timestamp or date col>)  — daily range partition
-      bucket(8, <first integer _sk/_id/_key col>) — 8 hash buckets
-    Falls back to snap_timestamp / snap_id when no suitable column is found.
+    Global partition spec applied to EVERY Iceberg table:
+      hours(snap_timestamp)   — hourly range partition
+      bucket(4, snap_id)      — 4 hash buckets within each hour
+
+    snap_timestamp and snap_id are always present (injected by IcebergTableBuilder),
+    so no schema inspection is needed and no fallback is required.
     """
-    ts_col:  str | None = None
-    int_col: str | None = None
-    for f in schema.fields:
-        n = f.name.lower()
-        if ts_col is None and isinstance(f.dataType, (TimestampType, DateType)):
-            ts_col = f.name
-        if int_col is None and isinstance(
-            f.dataType, (IntegerType, LongType, ShortType)
-        ) and (n.endswith("_sk") or n.endswith("_id") or n.endswith("_key")):
-            int_col = f.name
     return [
-        IcebergTableBuilder.days(ts_col or "snap_timestamp"),
-        IcebergTableBuilder.bucket(int_col or "snap_id", 8),
+        IcebergTableBuilder.hours("snap_timestamp"),
+        IcebergTableBuilder.bucket("snap_id", 4),
     ]
 
 
@@ -832,11 +824,16 @@ def _copy_table(
                 )
 
                 # Inject snap audit values
-                snap_id_val = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+                # snap_id: unique BIGINT per row using Spark's monotonically_increasing_id().
+                # This produces a 64-bit integer that is unique and monotonically
+                # increasing across all rows and partitions within the batch — not
+                # a scalar constant (which would give every row the same value).
+                # snap_timestamp: wall-clock at write time, same for all rows in
+                # the batch (correct — it marks when the batch was written).
                 final = (
                     aligned
-                    .withColumn("snap_id",       lit(snap_id_val).cast(LongType()))
-                    .withColumn("snap_timestamp", current_timestamp())
+                    .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+                    .withColumn("snap_timestamp",  current_timestamp())
                 )
 
                 final.writeTo(fqn).option("mergeSchema", "true").append()
