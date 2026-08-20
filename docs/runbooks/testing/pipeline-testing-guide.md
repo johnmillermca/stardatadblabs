@@ -14,16 +14,21 @@
 > To rebuild and roll the pods:
 > ```bash
 > bash docker/spark-gluten-velox/build-and-push.sh
-> kubectl rollout restart deployment -n prod -l app=spark
+> kubectl rollout restart deployment/spark-master deployment/spark-worker -n prod
 > kubectl rollout status  deployment/spark-master -n prod
 > kubectl rollout status  deployment/spark-worker -n prod
 > ```
+
+> **`-i` flag for heredoc commands:** Any `kubectl exec` command that pipes a Python
+> script via `<<'EOF'` requires the `-i` flag so kubectl wires up stdin to the remote
+> process. Without `-i` the heredoc is silently discarded and you get no output.
 
 Run these once in your terminal before any test. All tests below assume these variables are set.
 
 ```bash
 # Spark master pod — wait until all containers are Ready before proceeding
-MASTER=$(kubectl get pod -n prod -l app=spark,component=master \
+# The pod label is component=master (not app=spark-master).
+MASTER=$(kubectl get pod -n prod -l component=master \
   -o jsonpath='{.items[0].metadata.name}')
 echo "Spark master pod: $MASTER"
 
@@ -83,10 +88,11 @@ Completed in X.Xs — 1/24 copied | 23 skipped (filtered) | 0 failed | 1000 rows
 **Verify in Iceberg:**
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao = BaoSparkInit()
@@ -233,10 +239,11 @@ You will see the job die mid-run in Terminal 1.
 
 ```bash
 # How many rows are in Iceberg
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao  = BaoSparkInit()
@@ -288,10 +295,11 @@ Key things to confirm:
 ### B.5 Confirm no duplicate rows
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao  = BaoSparkInit()
@@ -471,10 +479,11 @@ kubectl exec -n prod $KAFKA_POD -- \
 Wait ~35 seconds for the Iceberg Sink's 30-second commit interval to flush.
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao  = BaoSparkInit()
@@ -540,10 +549,11 @@ grep -m1 "Subscribed to topic" /tmp/schema_handler.log
 ### E.2 Describe the Iceberg table before DDL (baseline)
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao  = BaoSparkInit()
@@ -591,10 +601,11 @@ tail -f /tmp/schema_handler.log
 ### E.5 Verify the new column appears in Iceberg — no manual intervention
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao  = BaoSparkInit()
@@ -625,10 +636,11 @@ EXIT;
 Wait ~35 seconds for the Iceberg Sink commit, then:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
+kubectl exec -n prod -i $MASTER -c spark-master -- \
   env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
       BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
   python3 - <<'EOF'
+import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
 from bao_spark_init import BaoSparkInit
 bao  = BaoSparkInit()
@@ -690,12 +702,27 @@ master can route callbacks back to the notebook pod.
 Paste this into **Cell 1** and run it (`Shift+Enter`):
 
 ```python
+import urllib.request, json
 from pyspark.sql import SparkSession
+
+# ── Fetch credentials from OpenBao ────────────────────────────────────────────
+BAO_TOKEN = "<paste-token-here>"   # kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
+
+def _bao_get(path):
+    req = urllib.request.Request(
+        f"http://openbao.prod.svc.cluster.local:8200/v1/{path}",
+        headers={"X-Vault-Token": BAO_TOKEN}
+    )
+    return json.loads(urllib.request.urlopen(req).read())["data"]["data"]
+
+pol = _bao_get("secret/data/platform/polaris")
+s3  = _bao_get("secret/data/platform/s3")
 
 # ── Spark connection ──────────────────────────────────────────────────────────
 # Use the NodePort address (30777) — Jupyter pods are in the 'analytics'
-# namespace and the internal service is spark-master-svc.analytics.svc.cluster.local:7077.
-# Either works from inside the cluster; NodePort is more portable.
+# namespace; NodePort is reachable from any namespace.
+POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+
 spark = SparkSession.builder \
     .master("spark://192.168.1.50:30777") \
     .appName("jupyter-iceberg-inspection") \
@@ -703,15 +730,25 @@ spark = SparkSession.builder \
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
     .config("spark.sql.catalog.polaris",
             "org.apache.iceberg.spark.SparkCatalog") \
-    .config("spark.sql.catalog.polaris.type", "rest") \
-    .config("spark.sql.catalog.polaris.uri",
-            "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog") \
+    .config("spark.sql.catalog.polaris.type",       "rest") \
+    .config("spark.sql.catalog.polaris.uri",         POLARIS_URI) \
     .config("spark.sql.catalog.polaris.credential",
-            "<spark_svc_id>:<spark_svc_secret>")   # replace with Polaris credentials
-    .config("spark.sql.catalog.polaris.scope",     "PRINCIPAL_ROLE:ALL") \
-    .config("spark.sql.catalog.polaris.warehouse",  "IcebergCatalog") \
-    .config("spark.jars",
-            "/opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar") \
+            f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}") \
+    .config("spark.sql.catalog.polaris.scope",       "PRINCIPAL_ROLE:ALL") \
+    .config("spark.sql.catalog.polaris.warehouse",   "IcebergCatalog") \
+    .config("spark.sql.catalog.polaris.rest.auth.type",    "oauth2") \
+    .config("spark.sql.catalog.polaris.oauth2-server-uri", f"{POLARIS_URI}/v1/oauth/tokens") \
+    .config("spark.sql.catalog.polaris.s3.access-key-id",     s3["access_key"]) \
+    .config("spark.sql.catalog.polaris.s3.secret-access-key", s3["secret_key"]) \
+    .config("spark.sql.catalog.polaris.s3.endpoint",           s3["endpoint"]) \
+    .config("spark.sql.catalog.polaris.s3.path-style-access",  "true") \
+    .config("spark.sql.catalog.polaris.client.region",         s3["region"]) \
+    .config("spark.jars", ",".join([
+        "/opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
+        "/opt/spark/jars/iceberg-aws-bundle-1.9.2.jar",
+        "/opt/spark/jars/hadoop-aws-3.3.4.jar",
+        "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
+    ])) \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -720,17 +757,20 @@ print("Spark master  :", spark.sparkContext.master)
 print("App name      :", spark.sparkContext.appName)
 ```
 
-> **Tip — get the Polaris credential from OpenBao without leaving the notebook:**
+> **Tip — get all credentials from OpenBao in one call:**
 > ```python
-> import urllib.request, json, os
-> BAO_TOKEN = "<paste-token-here>"   # from: kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
-> req = urllib.request.Request(
->     "http://openbao.prod.svc.cluster.local:8200/v1/secret/data/platform/polaris",
->     headers={"X-Vault-Token": BAO_TOKEN}
-> )
-> creds = json.loads(urllib.request.urlopen(req).read())["data"]["data"]
-> print("ID    :", creds["spark_svc_id"])
-> print("Secret:", creds["spark_svc_secret"])
+> import urllib.request, json
+> BAO_TOKEN = "<paste-token-here>"   # kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
+> def _bao_get(path):
+>     req = urllib.request.Request(
+>         f"http://openbao.prod.svc.cluster.local:8200/v1/{path}",
+>         headers={"X-Vault-Token": BAO_TOKEN}
+>     )
+>     return json.loads(urllib.request.urlopen(req).read())["data"]["data"]
+> pol = _bao_get("secret/data/platform/polaris")
+> s3  = _bao_get("secret/data/platform/s3")
+> print("Polaris ID    :", pol["spark_svc_id"])
+> print("S3 endpoint   :", s3["endpoint"])
 > ```
 
 ---
@@ -770,7 +810,15 @@ spark.sql.catalog.polaris.type                       rest
 spark.sql.catalog.polaris.uri                        http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
 spark.sql.catalog.polaris.warehouse                  IcebergCatalog
 spark.sql.catalog.polaris.scope                      PRINCIPAL_ROLE:ALL
+spark.sql.catalog.polaris.rest.auth.type             oauth2
+spark.sql.catalog.polaris.oauth2-server-uri          http://polaris-rest.prod.svc.cluster.local:8181/api/catalog/v1/oauth/tokens
+spark.sql.catalog.polaris.s3.access-key-id           ***
+spark.sql.catalog.polaris.s3.secret-access-key       ***
+spark.sql.catalog.polaris.s3.endpoint                https://s3.us-east-2.amazonaws.com
+spark.sql.catalog.polaris.s3.path-style-access       true
+spark.sql.catalog.polaris.client.region              us-east-2
 spark.sql.extensions                                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+spark.serializer                                     org.apache.spark.serializer.KryoSerializer
 ```
 
 ---
@@ -1093,6 +1141,7 @@ print("SparkSession stopped.")
 | Early watermark written | `Early watermark written to pipeline DB` |
 | Batch progress | `batch offset=N rows=M total=T` |
 | Thread assignment | `[copy-worker-N] [<table>] START` |
+| Job completed successfully | `status=success` in final summary line |
 | Connector running | `"state": "RUNNING"` in connector status JSON |
 | CDC event published to Kafka | offset increases on `oracle-tpcds.TPCDS.<TABLE>` |
 | Iceberg sink committed | new snapshot in `polaris.tpcds.<table>.snapshots` |
@@ -1103,3 +1152,17 @@ print("SparkSession stopped.")
 | Gluten disabled (fallback) | standard `HashAggregate` / `Exchange` in plan |
 | Iceberg table property visible | `pipeline.sf_extraction_ts` row in DESCRIBE EXTENDED |
 | CDC watermark readable | rows in `polaris.tpcds_sf10tcl._pipeline_watermarks` |
+
+## Known Harmless Noise in Logs
+
+These messages appear on every run and can be safely ignored — they do not indicate a
+failure and have no effect on job output.
+
+| Message | Cause | Safe to ignore? |
+|---|---|---|
+| `WARN NativeCodeLoader: Unable to load native-hadoop library` | Hadoop native libs not compiled for this platform; Java fallback used | ✓ Yes |
+| `WARN OAuth2Manager: Iceberg REST client is missing the OAuth2 server URI` | Fires from `spark-defaults.conf` catalog init before runtime conf overrides take effect; uses the correct default URL and succeeds | ✓ Yes |
+| `ERROR Inbox: Ignoring error … NotSerializableException: StorageStatus` | Spark 3.5 bug — Web UI polls storage status via RPC; `JavaSerializer` (used for RPC, not configurable) fails on `StorageStatus`. Spark catches and drops it immediately. No effect on job | ✓ Yes |
+| `ERROR RestRequest: UnknownHostException: metadata.google.internal` | Snowflake JDBC probing GCP cloud identity endpoint on startup; fails immediately and falls back to password auth | ✓ Yes |
+| `ERROR RestRequest: SocketTimeoutException … 169.254.169.254` | Snowflake JDBC probing AWS/Azure IMDS on startup; times out (~3s total) and falls back to password auth | ✓ Yes |
+| `WARN S3InputStream: Unclosed input stream` | Iceberg `pushAggregation` opens S3 manifest files during `count()` query planning without explicit close; GC cleans up. Not configurable, not a data risk | ✓ Yes |
