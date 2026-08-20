@@ -9,6 +9,20 @@
 
 ## Before You Start — Common Setup
 
+> **Image requirement:** The Spark image must include `psycopg2-binary`.
+> If you are running an image built before this was added, the script will fail immediately with `ModuleNotFoundError: No module named 'psycopg2'`.
+> Rebuild and push the image first:
+> ```bash
+> bash docker/spark-gluten-velox/build-and-push.sh
+> ```
+> Then restart the Spark pods so they pull the new image and wait for the rollout to complete:
+> ```bash
+> kubectl rollout restart deployment -n prod -l app=spark
+> kubectl rollout status  deployment/spark-master -n prod
+> kubectl rollout status  deployment/spark-worker -n prod
+> ```
+> After the rollout finishes the master pod name changes. **Re-run the entire "Common Setup" block below** (both the `MASTER=…` line and the `kubectl cp` loop) before executing any test commands — the new pod has an empty `/opt/spark/work-dir/` and your old `$MASTER` shell variable points to a pod that no longer exists.
+
 Run these once in your terminal before any test. All tests below assume these variables are set.
 
 ```bash

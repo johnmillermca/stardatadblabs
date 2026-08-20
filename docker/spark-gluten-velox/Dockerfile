@@ -11,7 +11,7 @@
 #
 # Python packages:
 #   pyspark==3.5.1, snowflake-connector-python, confluent-kafka,
-#   pyarrow, pandas, boto3, pyiceberg
+#   pyarrow, pandas, boto3, pyiceberg, psycopg2-binary
 #
 # Place all JARs in jars/ next to this Dockerfile before building.
 # Build:
@@ -65,7 +65,8 @@ RUN pip3 install --no-cache-dir \
         "confluent-kafka==2.6.1" \
         "pyarrow==17.0.0" \
         "pandas==2.2.3" \
-        "pyiceberg==0.7.1"
+        "pyiceberg==0.7.1" \
+        "psycopg2-binary==2.9.10"
 
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
