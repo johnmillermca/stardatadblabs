@@ -18,7 +18,7 @@ master:
   webPort: 8080
   clusterPort: 7077
   configOptions:
-    SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-ubuntu_22.04-1.2.0.jar"
+    SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
   service:
     type: NodePort
     nodePorts:
@@ -46,7 +46,7 @@ worker:
   configOptions:
     SPARK_WORKER_MEMORY: "4G"
     SPARK_WORKER_CORES: "4"
-    SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-ubuntu_22.04-1.2.0.jar"
+    SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
   resources:
     requests:
       memory: 1Gi

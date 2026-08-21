@@ -74,6 +74,26 @@ RUN pip3 install --no-cache-dir \
         "pyiceberg==0.7.1" \
         "psycopg2-binary==2.9.10"
 
+# ── Set HOME for Snowflake JDBC credential cache + log directory ──────────────
+# Done early (before COPY conf/) so /home/spark exists and is owned by spark
+# when the RollingFile appender creates spark-warnings.log at first write.
+# Snowflake JDBC 4.x also needs a writable $HOME for its credential cache
+# (SF_TEMPORARY_CREDENTIAL_CACHE_DIR); without it every query prints
+# "WARN NoOpFileCacheManager: Cache is not available".
+ENV HOME=/home/spark
+RUN mkdir -p /home/spark/logs \
+    && chown -R spark:spark /home/spark
+
+# ── Logging — suppress harmless transport / OAuth2 / NativeLoader noise ──────
+# log4j2.properties:
+#   Console  : WARN+ only (StacklessClosedChannelException etc. never printed)
+#   Log file : /home/spark/logs/spark-warnings.log — all levels, 500 MB cap,
+#              single-file overwrite on rollover (disk never exceeds 500 MB).
+# Tell Spark explicitly where to find this config (avoids relying on classpath
+# discovery order which differs between standalone and client-mode launches).
+RUN mkdir -p "${SPARK_HOME}/conf"
+COPY conf/log4j2.properties ${SPARK_HOME}/conf/log4j2.properties
+
 # ── Pipeline scripts — baked in so work-dir is always populated ──────────────
 # Scripts are maintained in docs/runbooks/snowflake-to-iceberg/ and mirrored
 # into docker/spark-gluten-velox/scripts/ so they are part of the build context.
@@ -83,13 +103,6 @@ COPY scripts/bao_spark_init.py        /opt/spark/work-dir/bao_spark_init.py
 COPY scripts/spark_iceberg_utils.py   /opt/spark/work-dir/spark_iceberg_utils.py
 COPY scripts/snowflake_to_iceberg.py  /opt/spark/work-dir/snowflake_to_iceberg.py
 RUN chmod 644 /opt/spark/work-dir/*.py
-
-# ── Set HOME for Snowflake JDBC credential cache ──────────────────────────────
-# Snowflake JDBC 4.x needs a writable $HOME to enable the local credential
-# cache (SF_TEMPORARY_CREDENTIAL_CACHE_DIR). Without it, every query logs
-# "WARN NoOpFileCacheManager: Cache is not available".
-ENV HOME=/home/spark
-RUN mkdir -p /home/spark && chown spark:spark /home/spark
 
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
@@ -144,6 +157,14 @@ spark.serializer                                     org.apache.spark.serializer
 spark.driver.memory                                  2g
 spark.executor.memory                                4g
 spark.executor.cores                                 2
+
+# ── Logging config — point Spark at the baked-in log4j2.properties ───────────
+# Uses the resolved path /opt/spark (not ${SPARK_HOME}) because this heredoc
+# uses a quoted delimiter ('EOF') which suppresses shell variable expansion.
+# bao_spark_init.py APPENDS this flag to its --add-opens string; it must not
+# set extraJavaOptions independently or it will overwrite this value.
+spark.driver.extraJavaOptions   -Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+spark.executor.extraJavaOptions -Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
 EOF
 
 USER spark

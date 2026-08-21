@@ -205,7 +205,16 @@ class BaoSparkInit:
         # JDBC 4.x uses reflection-based serialization internally (Unsafe, ObjectInputStream
         # on internal JDK classes) which Java 17 blocks by default. Required for
         # SnowflakeResultSetSerializableV1 static initializer and query execution.
+        #
+        # The -Dlog4j.configurationFile flag is included here so that this single
+        # string is the authoritative value of extraJavaOptions for both driver and
+        # executor.  spark-defaults.conf sets the same property as a baseline, but
+        # SparkConf.set() called here takes precedence — omitting the log4j flag
+        # here would silently drop it and revert to the default log4j2 config on
+        # the classpath, losing the console-filter and rolling-file appender.
+        _log4j_flag = "-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties"
         _opens = " ".join([
+            _log4j_flag,
             "--add-opens=java.base/java.lang=ALL-UNNAMED",
             "--add-opens=java.base/java.nio=ALL-UNNAMED",
             "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",

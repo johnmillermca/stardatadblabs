@@ -40,6 +40,21 @@ kubectl run spark-submit --rm -it --restart=Never \
     /opt/spark/examples/jars/spark-examples_2.12-3.5.1.jar 100
 ```
 
+## Logging
+Known-harmless messages (`TransportRequestHandler` JAR-stream closes,
+`OAuth2Manager` fallback warning, `NativeCodeLoader` unavailability) are
+suppressed from the console. They are still written to a rolling log file:
+
+```
+/home/spark/logs/spark-warnings.log
+```
+
+The file is capped at **500 MB** and overwritten on rollover (a single file,
+no rotation history). To inspect it from inside the master pod:
+```bash
+kubectl exec -n prod -it $MASTER -c spark-master -- tail -f /home/spark/logs/spark-warnings.log
+```
+
 ## Gluten / Velox Usage
 Gluten/Velox is enabled per-query with:
 ```python
