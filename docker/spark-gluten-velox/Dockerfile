@@ -89,10 +89,19 @@ RUN mkdir -p /home/spark/logs \
 #   Console  : WARN+ only (StacklessClosedChannelException etc. never printed)
 #   Log file : /home/spark/logs/spark-warnings.log — all levels, 500 MB cap,
 #              single-file overwrite on rollover (disk never exceeds 500 MB).
-# Tell Spark explicitly where to find this config (avoids relying on classpath
-# discovery order which differs between standalone and client-mode launches).
+#
+# Why spark-env.sh is required:
+#   spark.driver.extraJavaOptions in spark-defaults.conf is processed by the
+#   Spark launcher *after* the launcher mini-JVM has already initialised log4j
+#   with its default config — so early messages (NativeCodeLoader, OAuth2Manager,
+#   TransportRequestHandler) print before the filter ever takes effect.
+#   SPARK_JAVA_OPTS in spark-env.sh is sourced by load-spark-env.sh inside
+#   spark-class *before* any JVM is launched, so the -Dlog4j flag applies to
+#   the launcher JVM, the driver JVM, and all executor JVMs from the first line.
 RUN mkdir -p "${SPARK_HOME}/conf"
 COPY conf/log4j2.properties ${SPARK_HOME}/conf/log4j2.properties
+RUN echo 'export SPARK_JAVA_OPTS="-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties"' \
+    > "${SPARK_HOME}/conf/spark-env.sh"
 
 # ── Pipeline scripts — baked in so work-dir is always populated ──────────────
 # Scripts are maintained in docs/runbooks/snowflake-to-iceberg/ and mirrored
