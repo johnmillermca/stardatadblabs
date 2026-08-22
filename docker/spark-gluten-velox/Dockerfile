@@ -113,6 +113,14 @@ COPY scripts/spark_iceberg_utils.py   /opt/spark/work-dir/spark_iceberg_utils.py
 COPY scripts/snowflake_to_iceberg.py  /opt/spark/work-dir/snowflake_to_iceberg.py
 RUN chmod 644 /opt/spark/work-dir/*.py
 
+# ── CLI entry-point — allows calling without explicit python3 path ────────────
+# Writes a thin wrapper to /usr/local/bin/snowflake-to-iceberg so the pipeline
+# can be invoked as just:
+#   kubectl exec ... -- env SF_SCHEMA=X snowflake-to-iceberg
+RUN printf '#!/bin/sh\nexec python3 /opt/spark/work-dir/snowflake_to_iceberg.py "$@"\n' \
+    > /usr/local/bin/snowflake-to-iceberg \
+    && chmod 755 /usr/local/bin/snowflake-to-iceberg
+
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
 # Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —
