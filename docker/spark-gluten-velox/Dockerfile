@@ -113,13 +113,17 @@ COPY scripts/spark_iceberg_utils.py   /opt/spark/work-dir/spark_iceberg_utils.py
 COPY scripts/snowflake_to_iceberg.py  /opt/spark/work-dir/snowflake_to_iceberg.py
 RUN chmod 644 /opt/spark/work-dir/*.py
 
-# ── CLI entry-point — allows calling without explicit python3 path ────────────
-# Writes a thin wrapper to /usr/local/bin/snowflake-to-iceberg so the pipeline
-# can be invoked as just:
+# ── CLI entry-points ──────────────────────────────────────────────────────────
+# snowflake-to-iceberg: thin wrapper so pipeline runs without explicit path.
 #   kubectl exec ... -- env SF_SCHEMA=X snowflake-to-iceberg
 RUN printf '#!/bin/sh\nexec python3 /opt/spark/work-dir/snowflake_to_iceberg.py "$@"\n' \
     > /usr/local/bin/snowflake-to-iceberg \
     && chmod 755 /usr/local/bin/snowflake-to-iceberg
+
+# spark-app-cleanup: kills stale/orphaned apps via the Spark master REST API.
+#   kubectl exec -n prod $MASTER -c spark-master -- spark-app-cleanup
+COPY scripts/spark-app-cleanup.sh /usr/local/bin/spark-app-cleanup
+RUN chmod 755 /usr/local/bin/spark-app-cleanup
 
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
@@ -182,6 +186,21 @@ spark.executor.cores                                 2
 # set extraJavaOptions independently or it will overwrite this value.
 spark.driver.extraJavaOptions   -Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
 spark.executor.extraJavaOptions -Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+
+# ── Orphan / stalled-app protection ──────────────────────────────────────────
+# worker.timeout: seconds before the master marks a silent worker DEAD and
+#   removes its apps.  OOM-killed drivers disconnect immediately; this catches
+#   hung or network-partitioned workers within 60 s.
+spark.worker.timeout                                 60
+# dead.worker.persistence: UI history entries for dead workers (0 = no history).
+spark.dead.worker.persistence                        0
+# network.timeout: global RPC + heartbeat deadline — 60 s (1 minute).
+#   A driver/executor that stops responding is evicted after this window.
+spark.network.timeout                                60s
+# Worker-side app working-directory cleanup (removes shuffle/tmp files).
+spark.worker.cleanup.enabled                         true
+spark.worker.cleanup.interval                        60
+spark.worker.cleanup.appDataTtl                      60
 EOF
 
 USER spark

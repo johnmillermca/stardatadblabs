@@ -1,0 +1,85 @@
+---
+# =============================================================================
+# Spark Orphan App Cleanup — CronJob
+#
+# Runs spark-app-cleanup every 5 minutes inside the spark-master container.
+# Kills any RUNNING or WAITING app that has been alive longer than
+# MAX_AGE_SECONDS (default: 60 s) — catches OOM-killed / hung drivers that
+# the Spark master has not yet evicted via its own heartbeat timeout.
+#
+# The job uses kubectl exec via a ServiceAccount that has exec permission on
+# the spark-master pod — no sidecar, no extra image required.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-cleanup
+  namespace: prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-cleanup
+  namespace: prod
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-cleanup
+  namespace: prod
+subjects:
+  - kind: ServiceAccount
+    name: spark-cleanup
+    namespace: prod
+roleRef:
+  kind: Role
+  name: spark-cleanup
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spark-app-cleanup
+  namespace: prod
+spec:
+  # Run every 5 minutes
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid          # never run two cleanup jobs simultaneously
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Job times out after 2 minutes — if kubectl exec hangs, kill the job
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          serviceAccountName: spark-cleanup
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  MASTER=$(kubectl get pod -n prod -l component=master \
+                    -o jsonpath='{.items[0].metadata.name}')
+                  echo "Spark master pod: $MASTER"
+                  kubectl exec -n prod "$MASTER" -c spark-master -- \
+                    env MAX_AGE_SECONDS=60 \
+                    spark-app-cleanup
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
