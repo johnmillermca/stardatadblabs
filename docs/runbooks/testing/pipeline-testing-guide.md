@@ -1,8 +1,8 @@
 # Pipeline Testing Guide
 
-**Audience:** Platform engineers manually validating the Snowflake → Iceberg copy pipeline and Oracle CDC → Iceberg replication.  
-**Cluster:** `192.168.1.50` (Spark master UI: `http://192.168.1.50:30707`)  
-**Debezium Connect:** `http://192.168.1.54:30083`  
+**Audience:** Platform engineers manually validating the Snowflake → Iceberg copy pipeline and Oracle CDC → Iceberg replication.
+**Cluster:** `192.168.1.50` (Spark master UI: `http://192.168.1.52:30707`)
+**Debezium Connect:** `http://192.168.1.54:30083`
 **OpenBao:** `http://192.168.1.50:30820`
 
 ---
@@ -10,6 +10,11 @@
 ## Before You Start — Common Setup
 
 > **After any image rebuild or pod rollout**, re-run the "Common Setup" block below to refresh `$MASTER` — the pod name changes after every restart and the old variable points to a pod that no longer exists. The scripts (`bao_spark_init.py`, `spark_iceberg_utils.py`, `snowflake_to_iceberg.py`) are baked into the image at `/opt/spark/work-dir/` and do **not** need to be copied manually.
+>
+> The pipeline is also available as a CLI command directly on `PATH`:
+> ```bash
+> snowflake-to-iceberg   # equivalent to: python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+> ```
 >
 > To rebuild and roll the pods:
 > ```bash
@@ -70,7 +75,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       SF_SCHEMA=TPCDS_SF10TCL \
       INCLUDE_TABLES=promotion \
       MAX_TABLE_SIZE_GB=0 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+  snowflake-to-iceberg
 ```
 
 **What to look for in the logs:**
@@ -118,7 +123,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       SF_SCHEMA=TPCDS_SF10TCL \
       INCLUDE_TABLES=reason,warehouse,ship_mode \
       MAX_TABLE_SIZE_GB=0 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+  snowflake-to-iceberg
 ```
 
 **Expected size-report:**
@@ -145,7 +150,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       SF_SCHEMA=TPCDS_SF10TCL \
       EXCLUDE_TABLES=catalog_returns,store_returns \
       MAX_TABLE_SIZE_GB=1.0 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+  snowflake-to-iceberg
 ```
 
 **Expected size-report (excerpt):**
@@ -171,7 +176,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       SF_DATABASE=SNOWFLAKE_SAMPLE_DATA \
       SF_SCHEMA=TPCDS_SF10TCL \
       MAX_TABLE_SIZE_GB=1.0 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+  snowflake-to-iceberg
 ```
 
 Tables such as `store_sales` (~22 GB), `catalog_sales` (~18 GB), `web_sales` (~9 GB),
@@ -209,7 +214,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       INCLUDE_TABLES=customer \
       MAX_TABLE_SIZE_GB=0 \
       BATCH_SIZE=50000 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py 2>&1 | tee /tmp/copy_run1.log
+  snowflake-to-iceberg 2>&1 | tee /tmp/copy_run1.log
 ```
 
 Watch for the first few batch lines:
@@ -273,7 +278,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       INCLUDE_TABLES=customer \
       MAX_TABLE_SIZE_GB=0 \
       BATCH_SIZE=50000 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py 2>&1 | tee /tmp/copy_run2.log
+  snowflake-to-iceberg 2>&1 | tee /tmp/copy_run2.log
 ```
 
 **What to look for — proof of resume:**
@@ -331,7 +336,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion \
       MAX_TABLE_SIZE_GB=0 \
       MAX_THREADS=8 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py 2>&1 | tee /tmp/copy_threads.log
+  snowflake-to-iceberg 2>&1 | tee /tmp/copy_threads.log
 ```
 
 ### C.2 Confirm 8 threads in the logs
@@ -382,7 +387,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
       INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion,catalog_page \
       MAX_TABLE_SIZE_GB=0 \
       MAX_THREADS=4 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py 2>&1 | grep START
+  snowflake-to-iceberg 2>&1 | grep START
 ```
 
 You will see 4 threads start first; as each finishes it picks up the 5th, 6th, … table.
@@ -1153,16 +1158,33 @@ print("SparkSession stopped.")
 | Iceberg table property visible | `pipeline.sf_extraction_ts` row in DESCRIBE EXTENDED |
 | CDC watermark readable | rows in `polaris.tpcds_sf10tcl._pipeline_watermarks` |
 
-## Known Harmless Noise in Logs
+## Logging
 
-These messages appear on every run and can be safely ignored — they do not indicate a
-failure and have no effect on job output.
+All Spark/Hadoop/Iceberg/Snowflake/Netty internal messages are routed to the rolling log file only — they never appear on the console.
 
-| Message | Cause | Safe to ignore? |
+**Log file location (inside the master pod):**
+```
+/home/spark/logs/spark-warnings.log
+```
+Capped at **500 MB**, overwritten on rollover (single file, no rotation history).
+
+**Tail the log live:**
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  tail -f /home/spark/logs/spark-warnings.log
+```
+
+**What appears on console:** Only Python `logging` output from `sf2iceberg`, `bao_spark_init`, and `spark_iceberg_utils` — the `[INFO]`, `[WARN]`, `[ERROR]` lines with the `%(asctime)s [%(threadName)s]` prefix.
+
+**What goes to file only (suppressed from console):**
+
+| Message | Logger package | Reason suppressed |
 |---|---|---|
-| `WARN NativeCodeLoader: Unable to load native-hadoop library` | Hadoop native libs not compiled for this platform; Java fallback used | ✓ Yes |
-| `WARN OAuth2Manager: Iceberg REST client is missing the OAuth2 server URI` | Fires from `spark-defaults.conf` catalog init before runtime conf overrides take effect; uses the correct default URL and succeeds | ✓ Yes |
-| `ERROR Inbox: Ignoring error … NotSerializableException: StorageStatus` | Spark 3.5 bug — Web UI polls storage status via RPC; `JavaSerializer` (used for RPC, not configurable) fails on `StorageStatus`. Spark catches and drops it immediately. No effect on job | ✓ Yes |
-| `ERROR RestRequest: UnknownHostException: metadata.google.internal` | Snowflake JDBC probing GCP cloud identity endpoint on startup; fails immediately and falls back to password auth | ✓ Yes |
-| `ERROR RestRequest: SocketTimeoutException … 169.254.169.254` | Snowflake JDBC probing AWS/Azure IMDS on startup; times out (~3s total) and falls back to password auth | ✓ Yes |
-| `WARN S3InputStream: Unclosed input stream` | Iceberg `pushAggregation` opens S3 manifest files during `count()` query planning without explicit close; GC cleans up. Not configurable, not a data risk | ✓ Yes |
+| `WARN NativeCodeLoader: Unable to load native-hadoop library` | `org.apache.hadoop` | Hadoop native libs not compiled for this platform; Java fallback is used automatically |
+| `WARN OAuth2Manager: Iceberg REST client is missing the OAuth2 server URI` | `org.apache.iceberg` | Fires from catalog init before runtime SparkConf applies; uses correct default URL and succeeds |
+| `ERROR TransportRequestHandler: StacklessClosedChannelException` | `org.apache.spark` | Executor drops a JAR-fetch stream it no longer needs; harmless Netty connection close |
+| `ERROR Inbox: Ignoring error … NotSerializableException: StorageStatus` | `org.apache.spark` | Spark 3.5 bug — Web UI RPC serialisation failure; caught and dropped internally, no effect on job |
+| `ERROR RestRequest: UnknownHostException: metadata.google.internal` | `com.snowflake` | Snowflake JDBC probing GCP cloud identity on startup; fails immediately, falls back to password auth |
+| `ERROR RestRequest: SocketTimeoutException … 169.254.169.254` | `com.snowflake` | Snowflake JDBC probing AWS/Azure IMDS on startup; times out (~3 s total), falls back to password auth |
+| `WARN SparkConnectorContext$: Finish cancelling all queries` | `net.snowflake` | Normal Snowflake connector shutdown on `spark.stop()` |
+| `INFO py4j … Closing down clientserver connection` | `py4j` | Normal py4j gateway teardown on `spark.stop()` |
