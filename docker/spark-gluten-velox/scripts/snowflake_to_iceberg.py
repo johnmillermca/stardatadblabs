@@ -856,16 +856,23 @@ def _copy_table(
             )
 
             # ── Dual-write watermark: Iceberg control table ────────────────
-            write_watermark_iceberg(
-                spark             = spark,
-                catalog           = ICEBERG_CATALOG,
-                namespace         = ICEBERG_NAMESPACE,
-                source_db         = SF_DATABASE,
-                source_schema     = SF_SCHEMA,
-                table_name        = table,
-                sf_extraction_ts  = sf_extraction_ts,
-                rows_copied       = rows_total,
-            )
+            # Must hold the shared lock: _pipeline_watermarks is a single
+            # Iceberg table written by all 8 threads.  Concurrent MERGE INTO
+            # operations on the same table via the same SparkSession cause:
+            #   ValidationException  — conflicting files under serializable isolation
+            #   IllegalStateException — snapshot modified between scan and commit
+            # Serialising through the lock makes each MERGE atomic w.r.t. peers.
+            with lock:
+                write_watermark_iceberg(
+                    spark             = spark,
+                    catalog           = ICEBERG_CATALOG,
+                    namespace         = ICEBERG_NAMESPACE,
+                    source_db         = SF_DATABASE,
+                    source_schema     = SF_SCHEMA,
+                    table_name        = table,
+                    sf_extraction_ts  = sf_extraction_ts,
+                    rows_copied       = rows_total,
+                )
 
             # ── Final watermark update: pipeline PostgreSQL DB ────────────
             # Refresh rows_copied to the final count now that copy is complete.
