@@ -54,6 +54,12 @@ PG_PASS=$(kubectl exec -n prod $MASTER -c spark-master -- \
   http://openbao.prod.svc.cluster.local:8200/v1/secret/data/platform/pipeline_db \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['data']['password'])")
 
+# PostgreSQL pod — psql is not installed on the host; run all psql commands
+# through kubectl exec on the postgresql-0 pod instead.
+PGPOD=$(kubectl get pod -n prod -l app=postgresql \
+  -o jsonpath='{.items[0].metadata.name}')
+echo "PostgreSQL pod: $PGPOD"
+
 echo "Setup complete."
 ```
 
@@ -186,7 +192,9 @@ Tables such as `store_sales` (~22 GB), `catalog_sales` (~18 GB), `web_sales` (~9
 **Verify the pipeline DB watermarks for only the copied tables:**
 
 ```bash
-PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -U pipeline -d pipeline \
+kubectl exec -n prod $PGPOD -- \
+  env PGPASSWORD="$PG_PASS" \
+  psql -h "$PG_HOST" -U pipeline -d pipeline \
   -c "SELECT table_name, rows_copied, sf_extraction_ts
       FROM pipeline_watermarks
       WHERE source_db='SNOWFLAKE_SAMPLE_DATA' AND source_schema='TPCDS_SF10TCL'
@@ -259,7 +267,9 @@ print(f"Rows in Iceberg before resume: {n}")
 EOF
 
 # What watermark was written in the pipeline DB
-PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -U pipeline -d pipeline \
+kubectl exec -n prod $PGPOD -- \
+  env PGPASSWORD="$PG_PASS" \
+  psql -h "$PG_HOST" -U pipeline -d pipeline \
   -c "SELECT table_name, sf_extraction_ts, rows_copied, oracle_start_scn
       FROM pipeline_watermarks
       WHERE table_name='customer';"
