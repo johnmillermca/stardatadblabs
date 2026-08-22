@@ -130,16 +130,14 @@ RUN chmod 755 /usr/local/bin/spark-app-cleanup
 # Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —
 # they are injected at runtime by bao_spark_init.py from OpenBao.
 RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.conf" << 'EOF'
-# ── Gluten + Velox native execution (OPT-IN — not enabled globally) ──────────
-# To enable Gluten in a specific session:
-#   spark.conf.set("spark.plugins", "io.glutenproject.GlutenPlugin")
-#   spark.conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
-# Do NOT set spark.plugins here — it causes ClassNotFoundException at SparkContext
-# init when the Velox native lib fails to load on non-matching kernel/glibc.
+# ── Gluten + Velox native execution (OPT-IN) ─────────────────────────────────
+# Gluten is disabled by default. To enable it for a job set:
+#   ENABLE_GLUTEN=1 snowflake-to-iceberg
+# or pass spark.plugins at session creation.
+# The off-heap reservation below is ONLY meaningful when Gluten is active —
+# bao_spark_init.py enables it conditionally based on ENABLE_GLUTEN.
 spark.gluten.sql.columnar.backend.lib                velox
 spark.gluten.loadLibFromJar                          true
-spark.memory.offHeap.enabled                         true
-spark.memory.offHeap.size                            2g
 
 # ── SQL extensions (Iceberg only — Delta added per-session if needed) ─────────
 spark.sql.extensions                                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
@@ -175,8 +173,11 @@ spark.sql.parquet.compression.codec                  snappy
 spark.serializer                                     org.apache.spark.serializer.KryoSerializer
 
 # ── Driver / executor sizing ──────────────────────────────────────────────────
-spark.driver.memory                                  2g
-spark.executor.memory                                4g
+# Worker pods: 8 GB RAM limit, SPARK_WORKER_MEMORY=7g.
+# 3g executor + 300 MB overhead = 3.3 GB → 2 executors per worker (safe).
+# 2 executors × 2 cores = 4 tasks/worker; 3 workers = 12 total parallel tasks.
+spark.driver.memory                                  4g
+spark.executor.memory                                3g
 spark.executor.cores                                 2
 
 # ── Logging config — point Spark at the baked-in log4j2.properties ───────────

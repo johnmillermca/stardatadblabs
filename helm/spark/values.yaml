@@ -1,11 +1,20 @@
 # =============================================================================
 # Apache Spark (Gluten-Velox) — bitnami/spark 10.0.3
 # Namespace   : prod
-# Node        : worker2.local (master + workers pinned; overflow to worker3)
+# Node        : worker2.local (master + workers pinned; overflow to worker3/4)
 # Image       : 192.168.1.50:30500/spark-gluten-velox:3.5.1 (private registry)
 # Access      : http://192.168.1.52:30707 (Master UI)
 #               spark://192.168.1.52:30777 (RPC)
-# Workers     : 3 replicas pinned to worker2/worker3
+# Workers     : 3 replicas pinned to worker2/worker3/worker4
+#
+# Memory sizing rationale (worker nodes: 12 vCPU / ~9.3 GB each)
+# ──────────────────────────────────────────────────────────────────
+# Worker pod limit : 8 CPU / 8 GB  (leaves ~1.3 GB for OS + other pods)
+# SPARK_WORKER_MEMORY: 7g          (leaves 1 GB for JVM overhead)
+# spark.executor.memory: 3g        (+ 300 MB overhead = 3.3 GB/executor)
+# spark.executor.cores: 2          (3 executors × 2 cores = 6 tasks/worker)
+# Executors per worker: floor(7168 / 3379) = 2  (safe; total 6 across 3 workers)
+# Gluten off-heap (when enabled): 2g per executor — needs 8 GB workers
 # =============================================================================
 
 image:
@@ -26,11 +35,11 @@ master:
       http: "30707"
   resources:
     requests:
-      memory: 512Mi
+      memory: 1Gi
       cpu: 500m
     limits:
-      memory: 4Gi
-      cpu: "2"
+      memory: 6Gi
+      cpu: "4"
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -44,16 +53,18 @@ master:
 worker:
   replicaCount: 3
   configOptions:
-    SPARK_WORKER_MEMORY: "4G"
-    SPARK_WORKER_CORES: "4"
+    # 7g: leaves ~1 GB for the JVM process itself inside the 8 GB container limit.
+    SPARK_WORKER_MEMORY: "7g"
+    SPARK_WORKER_CORES: "8"
     SPARK_EXTRA_CLASSPATH: "/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
   resources:
     requests:
-      memory: 1Gi
-      cpu: 500m
+      memory: 2Gi
+      cpu: "1"
     limits:
-      memory: 4Gi
-      cpu: "4"
+      # Nodes have 12 vCPU / ~9.3 GB. Leave ~1.3 GB for OS and other pods.
+      memory: 8Gi
+      cpu: "8"
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -64,6 +75,7 @@ worker:
                 values:
                   - worker2.local
                   - worker3.local
+                  - worker4.local
 
 security:
   rpc:

@@ -225,13 +225,24 @@ class BaoSparkInit:
         conf.set("spark.driver.extraJavaOptions",   _opens)
         conf.set("spark.executor.extraJavaOptions", _opens)
 
-        # ── Gluten opt-in: clear spark.plugins so GlutenPlugin is NOT loaded ──
-        # spark-defaults.conf in the image no longer sets spark.plugins, but an
-        # older image or a mounted ConfigMap might still set it.  Force empty so
-        # SparkContext never tries to load the Velox native library by default.
-        # To enable Gluten for a session, call:
-        #   spark.conf.set("spark.plugins", "io.glutenproject.GlutenPlugin")
-        conf.set("spark.plugins", "")
+        # ── Gluten + Velox opt-in (default: disabled) ─────────────────────────
+        # Set ENABLE_GLUTEN=1 to activate the Gluten columnar engine.
+        # When enabled:
+        #   - spark.plugins loads GlutenPlugin (Velox backend)
+        #   - off-heap is enabled (2g per executor — requires 8 GB worker pods)
+        # When disabled (default):
+        #   - spark.plugins is cleared so no ClassNotFoundException at startup
+        #   - off-heap is not reserved (frees ~2 GB per executor for heap use)
+        _gluten_enabled = os.environ.get("ENABLE_GLUTEN", "0") == "1"
+        if _gluten_enabled:
+            logger.info("Gluten/Velox enabled (ENABLE_GLUTEN=1).")
+            conf.set("spark.plugins", "io.glutenproject.GlutenPlugin")
+            conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
+            conf.set("spark.memory.offHeap.enabled", "true")
+            conf.set("spark.memory.offHeap.size",    "2g")
+        else:
+            conf.set("spark.plugins", "")
+            conf.set("spark.memory.offHeap.enabled", "false")
 
         # ── Iceberg extension ──────────────────────────────────────────────────
         conf.set(
