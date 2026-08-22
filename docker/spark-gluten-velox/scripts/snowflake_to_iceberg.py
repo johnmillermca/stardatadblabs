@@ -757,13 +757,31 @@ def _copy_table(
                     )
                 else:
                     # Fallback: no watermark in pipeline DB yet (first run wrote
-                    # nothing before crashing).  Capture a fresh timestamp.
+                    # nothing before crashing).  Capture a fresh timestamp and
+                    # eagerly persist it to Postgres NOW — before any batch —
+                    # so a second crash still leaves a recoverable sync-point.
                     sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
                     logger.info(
                         "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
                         "fresh sf_extraction_ts=%s, starting at offset=%d.",
                         table, already_written, sf_extraction_ts, already_written,
                     )
+                    try:
+                        pg_upsert_watermark(
+                            pg                = pg_creds,
+                            source_db         = SF_DATABASE,
+                            source_schema     = SF_SCHEMA,
+                            table_name        = table,
+                            sf_extraction_ts  = sf_extraction_ts,
+                            rows_copied       = already_written,
+                            iceberg_namespace = ICEBERG_NAMESPACE,
+                        )
+                        logger.info("[%s] Early watermark written to pipeline DB (resume fallback).", table)
+                    except Exception as _pg_err:
+                        logger.warning(
+                            "[%s] Could not write early watermark to pipeline DB: %s",
+                            table, _pg_err,
+                        )
             else:
                 # ── Fresh run: capture CDC sync-point BEFORE the first batch ──
                 # Must use Snowflake server-side CURRENT_TIMESTAMP() so the
