@@ -74,7 +74,6 @@ spec:
                     -o jsonpath='{.items[0].metadata.name}')
                   echo "Spark master pod: $MASTER"
                   kubectl exec -n prod "$MASTER" -c spark-master -- \
-                    env MAX_AGE_SECONDS=60 \
                     spark-app-cleanup
               resources:
                 requests:
