@@ -28,6 +28,11 @@
 > script via `<<'EOF'` requires the `-i` flag so kubectl wires up stdin to the remote
 > process. Without `-i` the heredoc is silently discarded and you get no output.
 
+> **All variables below (`$MASTER`, `$BAO_TOKEN`, `$PG_HOST`, `$PG_PASS`, `$PGPOD`) are
+> shell session variables** — they are lost when you open a new terminal or start a new
+> `kubectl exec` session. **Re-run the entire setup block at the top of every new
+> terminal before running any test.**
+
 Run these once in your terminal before any test. All tests below assume these variables are set.
 
 ```bash
