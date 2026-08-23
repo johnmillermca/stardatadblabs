@@ -135,9 +135,9 @@ RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.co
 # Gluten is ALWAYS ACTIVE on this cluster — bao_spark_init.py loads
 # GlutenPlugin and enables off-heap (2g) for every job by default.
 # To disable for one run: DISABLE_GLUTEN=1 starpump snowflake
-spark.plugins                                        io.glutenproject.GlutenPlugin
+# NOTE: JAR is org.apache.gluten (donated to Apache; old io.glutenproject is gone).
+spark.plugins                                        org.apache.gluten.GlutenPlugin
 spark.gluten.sql.columnar.backend.lib                velox
-spark.gluten.loadLibFromJar                          true
 spark.memory.offHeap.enabled                         true
 spark.memory.offHeap.size                            2g
 

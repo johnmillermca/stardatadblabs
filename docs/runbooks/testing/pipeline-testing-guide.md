@@ -851,7 +851,7 @@ print("gluten backend  :", backend)
 
 ```python
 # Enable Gluten + Velox for this SparkSession only
-spark.conf.set("spark.plugins",                         "io.glutenproject.GlutenPlugin")
+spark.conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
 spark.conf.set("spark.memory.offHeap.enabled",          "true")
 spark.conf.set("spark.memory.offHeap.size",             "2g")
 spark.conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
@@ -1074,7 +1074,7 @@ cur.close(); conn.close()
 
 ```python
 # Enable Velox acceleration
-spark.conf.set("spark.plugins",                         "io.glutenproject.GlutenPlugin")
+spark.conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
 spark.conf.set("spark.memory.offHeap.enabled",          "true")
 spark.conf.set("spark.memory.offHeap.size",             "2g")
 spark.conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
@@ -1114,7 +1114,7 @@ print(f"JVM elapsed   : {time.time() - t0:.2f}s")
 **Cell 16 — inspect the Gluten physical plan to confirm Velox operators:**
 
 ```python
-spark.conf.set("spark.plugins",                         "io.glutenproject.GlutenPlugin")
+spark.conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
 spark.conf.set("spark.memory.offHeap.enabled",          "true")
 spark.conf.set("spark.memory.offHeap.size",             "2g")
 spark.conf.set("spark.gluten.sql.columnar.backend.lib", "velox")

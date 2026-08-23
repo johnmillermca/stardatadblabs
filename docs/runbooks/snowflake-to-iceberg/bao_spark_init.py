@@ -229,7 +229,7 @@ class BaoSparkInit:
         _gluten_disabled = os.environ.get("DISABLE_GLUTEN", "0") == "1"
         if not _gluten_disabled:
             logger.info("Gluten/Velox enabled (default — set DISABLE_GLUTEN=1 to turn off).")
-            conf.set("spark.plugins",                         "io.glutenproject.GlutenPlugin")
+            conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
             conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
             conf.set("spark.memory.offHeap.enabled",          "true")
             conf.set("spark.memory.offHeap.size",             "2g")
