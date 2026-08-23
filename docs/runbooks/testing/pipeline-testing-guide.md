@@ -11,10 +11,16 @@
 
 > **After any image rebuild or pod rollout**, re-run the "Common Setup" block below to refresh `$MASTER` — the pod name changes after every restart and the old variable points to a pod that no longer exists. The scripts (`bao_spark_init.py`, `spark_iceberg_utils.py`, `snowflake_to_iceberg.py`) are baked into the image at `/opt/spark/work-dir/` and do **not** need to be copied manually.
 >
-> The pipeline is also available as a CLI command directly on `PATH`:
+> The pipeline is invoked via the `starpump` CLI command available directly on `PATH`:
 > ```bash
-> snowflake-to-iceberg   # equivalent to: python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+> starpump snowflake              # copy from Snowflake (default 8 threads)
+> starpump snowflake --threads 16 # use 16 parallel threads
+> starpump snowflake --threads 32 # use 32 parallel threads
+> # equivalent to: python3 /opt/spark/work-dir/snowflake_to_iceberg.py snowflake
 > ```
+> The first argument (`snowflake`) selects the source database driver.
+> Additional sources (e.g. `oracle`, `postgres`) can be added to the pipeline
+> later — just pass a different name.
 >
 > To rebuild and roll the pods:
 > ```bash
@@ -28,7 +34,7 @@
 > script via `<<'EOF'` requires the `-i` flag so kubectl wires up stdin to the remote
 > process. Without `-i` the heredoc is silently discarded and you get no output.
 
-> **All variables below (`$MASTER`, `$BAO_TOKEN`, `$PG_HOST`, `$PG_PASS`, `$PGPOD`) are
+> **All variables below (`$MASTER`, `$TOKEN`, `$PG_HOST`, `$PG_PASS`, `$PGPOD`) are
 > shell session variables** — they are lost when you open a new terminal or start a new
 > `kubectl exec` session. **Re-run the entire setup block at the top of every new
 > terminal before running any test.**
@@ -45,18 +51,21 @@ echo "Spark master pod: $MASTER"
 kubectl wait pod -n prod "$MASTER" --for=condition=Ready --timeout=120s
 echo "Pod is Ready."
 
-# OpenBao root token
-BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+# OpenBao root token (stored as $TOKEN — used as TOKEN= in all starpump calls)
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
   -o jsonpath='{.data.root-token}' | base64 -d)
+
+# OpenBao in-cluster address (stored as $ADDR — used as ADDR= in all starpump calls)
+ADDR="http://openbao.prod.svc.cluster.local:8200"
 
 # Pipeline PostgreSQL credentials
 PG_HOST=$(kubectl exec -n prod $MASTER -c spark-master -- \
-  curl -sf -H "X-Vault-Token: $BAO_TOKEN" \
-  http://openbao.prod.svc.cluster.local:8200/v1/secret/data/platform/pipeline_db \
+  curl -sf -H "X-Vault-Token: $TOKEN" \
+  ${ADDR}/v1/secret/data/platform/pipeline_db \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['data']['host'])")
 PG_PASS=$(kubectl exec -n prod $MASTER -c spark-master -- \
-  curl -sf -H "X-Vault-Token: $BAO_TOKEN" \
-  http://openbao.prod.svc.cluster.local:8200/v1/secret/data/platform/pipeline_db \
+  curl -sf -H "X-Vault-Token: $TOKEN" \
+  ${ADDR}/v1/secret/data/platform/pipeline_db \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['data']['password'])")
 
 # PostgreSQL pod — psql is not installed on the host; run all psql commands
@@ -78,15 +87,13 @@ Copy only `promotion` from `SNOWFLAKE_SAMPLE_DATA.TPCDS_SF10TCL`.
 `MAX_TABLE_SIZE_GB=0` disables the size filter so even a table reported as 0 bytes is included.
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      SF_DATABASE=SNOWFLAKE_SAMPLE_DATA \
-      SF_SCHEMA=TPCDS_SF10TCL \
-      INCLUDE_TABLES=promotion \
-      MAX_TABLE_SIZE_GB=0 \
-  snowflake-to-iceberg
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     DATABASE=SNOWFLAKE_SAMPLE_DATA \
+     SCHEMAS=TPCDS_SF10TCL \
+     INCLUDE_TABLES=promotion \
+     MAX_TABLE_SIZE_GB=0'
 ```
 
 **What to look for in the logs:**
@@ -105,8 +112,7 @@ Completed in X.Xs — 1/24 copied | 23 skipped (filtered) | 0 failed | 1000 rows
 
 ```bash
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -126,15 +132,13 @@ EOF
 Copy `reason`, `warehouse`, and `ship_mode` in one run:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      SF_DATABASE=SNOWFLAKE_SAMPLE_DATA \
-      SF_SCHEMA=TPCDS_SF10TCL \
-      INCLUDE_TABLES=reason,warehouse,ship_mode \
-      MAX_TABLE_SIZE_GB=0 \
-  snowflake-to-iceberg
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     DATABASE=SNOWFLAKE_SAMPLE_DATA \
+     SCHEMAS=TPCDS_SF10TCL \
+     INCLUDE_TABLES=reason,warehouse,ship_mode \
+     MAX_TABLE_SIZE_GB=0'
 ```
 
 **Expected size-report:**
@@ -153,15 +157,13 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 Copy all tables ≤ 1 GB but skip `catalog_returns` and `store_returns`:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      SF_DATABASE=SNOWFLAKE_SAMPLE_DATA \
-      SF_SCHEMA=TPCDS_SF10TCL \
-      EXCLUDE_TABLES=catalog_returns,store_returns \
-      MAX_TABLE_SIZE_GB=1.0 \
-  snowflake-to-iceberg
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     DATABASE=SNOWFLAKE_SAMPLE_DATA \
+     SCHEMAS=TPCDS_SF10TCL \
+     EXCLUDE_TABLES=catalog_returns,store_returns \
+     MAX_TABLE_SIZE_GB=1.0'
 ```
 
 **Expected size-report (excerpt):**
@@ -180,14 +182,12 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 Copy only tables whose compressed Snowflake size is ≤ 1 GB:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      SF_DATABASE=SNOWFLAKE_SAMPLE_DATA \
-      SF_SCHEMA=TPCDS_SF10TCL \
-      MAX_TABLE_SIZE_GB=1.0 \
-  snowflake-to-iceberg
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     DATABASE=SNOWFLAKE_SAMPLE_DATA \
+     SCHEMAS=TPCDS_SF10TCL \
+     MAX_TABLE_SIZE_GB=1.0'
 ```
 
 Tables such as `store_sales` (~22 GB), `catalog_sales` (~18 GB), `web_sales` (~9 GB),
@@ -220,14 +220,13 @@ Set `BATCH_SIZE=50000` to create more batches and give a wider window to kill it
 **Terminal 1 — start the job:**
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      INCLUDE_TABLES=customer \
-      MAX_TABLE_SIZE_GB=0 \
-      BATCH_SIZE=50000 \
-  snowflake-to-iceberg 2>&1 | tee /tmp/copy_run1.log
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     INCLUDE_TABLES=customer \
+     MAX_TABLE_SIZE_GB=0 \
+     BATCH_SIZE=50000' \
+  2>&1 | tee /tmp/copy_run1.log
 ```
 
 Watch for the first few batch lines:
@@ -258,8 +257,7 @@ You will see the job die mid-run in Terminal 1.
 ```bash
 # How many rows are in Iceberg
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -286,14 +284,13 @@ kubectl exec -n prod $PGPOD -- \
 ### B.4 Restart the job and observe resume behaviour
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      INCLUDE_TABLES=customer \
-      MAX_TABLE_SIZE_GB=0 \
-      BATCH_SIZE=50000 \
-  snowflake-to-iceberg 2>&1 | tee /tmp/copy_run2.log
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     INCLUDE_TABLES=customer \
+     MAX_TABLE_SIZE_GB=0 \
+     BATCH_SIZE=50000' \
+  2>&1 | tee /tmp/copy_run2.log
 ```
 
 **What to look for — proof of resume:**
@@ -316,8 +313,7 @@ Key things to confirm:
 
 ```bash
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -339,19 +335,26 @@ EOF
 
 ## Test C — Verify Parallel Thread Count
 
-### C.1 Run a multi-table copy and watch thread activity
-
-Copy 8 small tables simultaneously to see all threads active at once:
+The default thread count is **8**.  Pass `--threads N` to increase it:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion \
-      MAX_TABLE_SIZE_GB=0 \
-      MAX_THREADS=8 \
-  snowflake-to-iceberg 2>&1 | tee /tmp/copy_threads.log
+starpump snowflake --threads 16   # 16 parallel threads
+starpump snowflake --threads 32   # 32 parallel threads
+```
+
+### C.1 Run a multi-table copy and watch thread activity
+
+Copy 8 small tables simultaneously to see all threads active at once.
+The `--threads 8` flag is shown explicitly here; omitting it gives the same
+result since 8 is the default:
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake --threads 8 \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion \
+     MAX_TABLE_SIZE_GB=0' \
+  2>&1 | tee /tmp/copy_threads.log
 ```
 
 ### C.2 Confirm 8 threads in the logs
@@ -392,17 +395,16 @@ Example output:
 ### C.4 Confirm thread reuse (worker picks up next table)
 
 With 8 tables and 8 threads all threads start at the same time.
-To see a thread pick up a second table, run with 9+ tables and only 4 threads:
+To see a thread pick up a second table, run with 9+ tables and only 4 threads
+using `--threads 4`:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-      INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion,catalog_page \
-      MAX_TABLE_SIZE_GB=0 \
-      MAX_THREADS=4 \
-  snowflake-to-iceberg 2>&1 | grep START
+kubectl exec -n prod $MASTER -c spark-master -- bash -c \
+  'starpump snowflake --threads 4 \
+     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
+     INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion,catalog_page \
+     MAX_TABLE_SIZE_GB=0' \
+  2>&1 | grep START
 ```
 
 You will see 4 threads start first; as each finishes it picks up the 5th, 6th, … table.
@@ -500,8 +502,7 @@ Wait ~35 seconds for the Iceberg Sink's 30-second commit interval to flush.
 
 ```bash
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -553,9 +554,7 @@ done
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 /opt/spark/work-dir/04_schema_evolution_handler.py 2>&1 | tee /tmp/schema_handler.log &
 ```
 
@@ -570,8 +569,7 @@ grep -m1 "Subscribed to topic" /tmp/schema_handler.log
 
 ```bash
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -622,8 +620,7 @@ tail -f /tmp/schema_handler.log
 
 ```bash
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -657,8 +654,7 @@ Wait ~35 seconds for the Iceberg Sink commit, then:
 
 ```bash
 kubectl exec -n prod -i $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
   python3 - <<'EOF'
 import sys; sys.path.insert(0, '/opt/spark/work-dir')
 from pyspark.sql import SparkSession
@@ -682,9 +678,7 @@ To validate what the handler *would* do without touching Iceberg:
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave \
-      BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
       DRY_RUN=1 \
   python3 /opt/spark/work-dir/04_schema_evolution_handler.py 2>&1 | tee /tmp/schema_handler_dry.log
 ```
@@ -726,12 +720,13 @@ import urllib.request, json
 from pyspark.sql import SparkSession
 
 # ── Fetch credentials from OpenBao ────────────────────────────────────────────
-BAO_TOKEN = "<paste-token-here>"   # kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
+TOKEN = "<paste-token-here>"   # kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
+ADDR  = "http://openbao.prod.svc.cluster.local:8200"
 
 def _bao_get(path):
     req = urllib.request.Request(
-        f"http://openbao.prod.svc.cluster.local:8200/v1/{path}",
-        headers={"X-Vault-Token": BAO_TOKEN}
+        f"{ADDR}/v1/{path}",
+        headers={"X-Vault-Token": TOKEN}
     )
     return json.loads(urllib.request.urlopen(req).read())["data"]["data"]
 
@@ -780,11 +775,12 @@ print("App name      :", spark.sparkContext.appName)
 > **Tip — get all credentials from OpenBao in one call:**
 > ```python
 > import urllib.request, json
-> BAO_TOKEN = "<paste-token-here>"   # kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
+> TOKEN = "<paste-token-here>"   # kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d
+> ADDR  = "http://openbao.prod.svc.cluster.local:8200"
 > def _bao_get(path):
 >     req = urllib.request.Request(
->         f"http://openbao.prod.svc.cluster.local:8200/v1/{path}",
->         headers={"X-Vault-Token": BAO_TOKEN}
+>         f"{ADDR}/v1/{path}",
+>         headers={"X-Vault-Token": TOKEN}
 >     )
 >     return json.loads(urllib.request.urlopen(req).read())["data"]["data"]
 > pol = _bao_get("secret/data/platform/polaris")
@@ -1041,10 +1037,11 @@ spark.sql("""
 import psycopg2, urllib.request, json
 
 # Fetch pipeline DB creds from OpenBao
-BAO_TOKEN = "<paste-token>"
+TOKEN = "<paste-token>"
+ADDR  = "http://openbao.prod.svc.cluster.local:8200"
 req = urllib.request.Request(
-    "http://openbao.prod.svc.cluster.local:8200/v1/secret/data/platform/pipeline_db",
-    headers={"X-Vault-Token": BAO_TOKEN}
+    f"{ADDR}/v1/secret/data/platform/pipeline_db",
+    headers={"X-Vault-Token": TOKEN}
 )
 pg = json.loads(urllib.request.urlopen(req).read())["data"]["data"]
 

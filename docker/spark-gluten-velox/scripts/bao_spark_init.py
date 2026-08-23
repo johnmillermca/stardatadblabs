@@ -10,7 +10,7 @@ hard-coded anywhere.
 Authentication order
 --------------------
 1. K8s Service Account JWT  (used inside pods – role: platform-secrets-read)
-2. Root / bootstrap token   (env-var BAO_TOKEN – dev/local override only)
+2. Root / bootstrap token   (env-var TOKEN – dev/local override only)
 
 Usage
 -----
@@ -77,7 +77,12 @@ class BaoSparkInit:
         bao_role: str = "platform-secrets-read",
         k8s_auth_path: str = "auth/kubernetes/login",
     ) -> None:
-        self._address = bao_address or os.environ.get("BAO_ADDR", _BAO_IN_CLUSTER)
+        # Accept TOKEN/ADDR (starpump convention) or legacy BAO_TOKEN/BAO_ADDR.
+        self._address = (
+            bao_address
+            or os.environ.get("ADDR")
+            or os.environ.get("BAO_ADDR", _BAO_IN_CLUSTER)
+        )
         self._role = bao_role
         self._k8s_auth_path = k8s_auth_path
         self._token: str | None = None
@@ -89,8 +94,9 @@ class BaoSparkInit:
             return self._token
 
         # 1. Explicit env override (dev/bootstrap only)
-        if env_tok := os.environ.get("BAO_TOKEN"):
-            logger.info("Using BAO_TOKEN from environment (dev mode).")
+        # Accept TOKEN (starpump convention) or legacy BAO_TOKEN.
+        if env_tok := (os.environ.get("TOKEN") or os.environ.get("BAO_TOKEN")):
+            logger.info("Using TOKEN from environment (dev mode).")
             self._token = env_tok
             return self._token
 
@@ -112,7 +118,7 @@ class BaoSparkInit:
             return self._token
 
         raise RuntimeError(
-            "Cannot authenticate to OpenBao: no BAO_TOKEN env-var and "
+            "Cannot authenticate to OpenBao: no TOKEN env-var and "
             f"no K8s SA JWT at {_K8S_SA_JWT_FILE}"
         )
 

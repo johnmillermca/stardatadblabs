@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
 """
-snowflake_to_iceberg.py
-=======================
-Dynamic Snowflake → Spark Iceberg copy pipeline.
+starpump — universal source-to-Iceberg copy pipeline
+=====================================================
+
+CLI
+---
+  starpump <source> [--threads N]
+
+  <source>   Identifies the source connector to use.  The value maps to a
+             credentials block in OpenBao and determines which reader is
+             invoked.  Currently supported:
+
+               snowflake   Copy from a Snowflake database using the
+                           Snowflake Spark connector.
+
+  --threads N   Override the default 8 parallel copy threads.
+                Examples: --threads 16, --threads 32.
+
+  Additional sources can be added by extending the SOURCE_READERS dict in
+  this module — no other changes required.
 
 Design
 ------
-• Generic — works for ANY Snowflake database.schema, not just TPC-DS.
-• 8 worker threads — each copies one table at a time from Snowflake.
+• Generic — works for ANY database / schema, not just TPC-DS.
+• 8 worker threads by default (override with --threads N or MAX_THREADS env).
   Tables are drawn from a shared queue so threads pick the next table
   as soon as they finish the previous one (sequential per table,
-  8-way parallel across different tables).
+  N-way parallel across different tables).
 • 100 000-row batches — each batch is committed as a separate Iceberg
   snapshot so the job is resumable / restartable.
-• Iceberg namespace always equals the Snowflake schema name (lower-case).
+• Iceberg namespace always equals the source schema name (lower-case).
 • snap_id BIGINT and snap_timestamp TIMESTAMP are injected by
   IcebergTableBuilder on every table automatically.
 • 256 MB target file size enforced via IcebergTableBuilder.
@@ -26,14 +42,14 @@ Table filtering (applied in this order)
                      All other tables are ignored regardless of size.
 2. EXCLUDE_TABLES  — comma-separated list of tables to always skip.
                      Applied after INCLUDE_TABLES filter.
-3. MAX_TABLE_SIZE_GB — tables whose compressed bytes-in-storage in Snowflake
+3. MAX_TABLE_SIZE_GB — tables whose compressed bytes-in-storage in the source
                      exceed this threshold are skipped automatically.
                      Default: 3.0 GB.  Set to 0 to disable the size filter.
 4. TABLES          — legacy alias for INCLUDE_TABLES.  If both are set,
                      INCLUDE_TABLES takes precedence.
 
-Snowflake size discovery
-------------------------
+Source size discovery (Snowflake)
+----------------------------------
 Before the copy loop starts, the pipeline queries
   INFORMATION_SCHEMA.TABLE_STORAGE_METRICS
 to retrieve ACTIVE_BYTES (compressed on-disk bytes) for every table in
@@ -49,11 +65,11 @@ treated as 0 bytes and always included.
 
 Environment variables
 ---------------------
-  SPARK_USER          Spark RBAC user              (default: dave)
-  BAO_ADDR            OpenBao address              (default: http://openbao.prod.svc.cluster.local:8200)
-  BAO_TOKEN           Root/bootstrap token override (dev only)
-  SF_DATABASE         Snowflake source database    (default: SNOWFLAKE_SAMPLE_DATA)
-  SF_SCHEMA           Snowflake source schema      (default: TPCDS_SF10TCL)
+  USER                Pipeline run user            (default: dave)
+  ADDR                OpenBao address              (default: http://openbao.prod.svc.cluster.local:8200)
+  TOKEN               OpenBao root/bootstrap token override (dev only)
+  DATABASE            Source database name         (default: SNOWFLAKE_SAMPLE_DATA)
+  SCHEMAS             Source schema name           (default: TPCDS_SF10TCL)
   ICEBERG_CATALOG     Target Iceberg catalog name  (default: polaris)
   S3_BUCKET           Override S3 bucket from OpenBao   (optional)
   INCLUDE_TABLES      Comma-separated explicit include list  (optional)
@@ -64,33 +80,39 @@ Environment variables
   DRY_RUN             1 = create Iceberg DDL but skip data copy
   BATCH_SIZE          Rows per batch                (default: 100000)
   MAX_THREADS         Parallel copy threads         (default: 8)
+                      Overridden by --threads N on the CLI.
 
 Usage
 -----
-  # Copy all tables ≤ 3 GB (default):
-  export SPARK_USER=dave
-  python3 snowflake_to_iceberg.py
+  # Copy all Snowflake tables ≤ 3 GB (default 8 threads):
+  starpump snowflake
+
+  # Use 16 parallel threads:
+  starpump snowflake --threads 16
+
+  # Use 32 parallel threads:
+  starpump snowflake --threads 32
 
   # Include only specific tables (still respects size filter):
-  INCLUDE_TABLES=customer,item,store python3 snowflake_to_iceberg.py
+  starpump snowflake INCLUDE_TABLES=customer,item,store
 
   # Exclude specific tables regardless of size:
-  EXCLUDE_TABLES=web_sales,catalog_sales python3 snowflake_to_iceberg.py
+  starpump snowflake EXCLUDE_TABLES=web_sales,catalog_sales
 
   # Combine include + exclude:
-  INCLUDE_TABLES=customer,item,web_sales EXCLUDE_TABLES=web_sales python3 snowflake_to_iceberg.py
+  starpump snowflake INCLUDE_TABLES=customer,item,web_sales EXCLUDE_TABLES=web_sales
 
   # Raise the size cap to 10 GB:
-  MAX_TABLE_SIZE_GB=10 python3 snowflake_to_iceberg.py
+  starpump snowflake MAX_TABLE_SIZE_GB=10
 
   # Disable the size filter entirely (copy everything):
-  MAX_TABLE_SIZE_GB=0 python3 snowflake_to_iceberg.py
+  starpump snowflake MAX_TABLE_SIZE_GB=0
 
-  # Different Snowflake schema:
-  SF_DATABASE=MY_DB SF_SCHEMA=MY_SCHEMA python3 snowflake_to_iceberg.py
+  # Different database / schema:
+  starpump snowflake DATABASE=MY_DB SCHEMAS=MY_SCHEMA
 
   # Dry-run (DDL only, no data):
-  DRY_RUN=1 python3 snowflake_to_iceberg.py
+  starpump snowflake DRY_RUN=1
 
 TPC-DS TPCDS_SF10TCL known sizes (approximate, scale factor 10 TCL)
 ---------------------------------------------------------------------
@@ -110,6 +132,7 @@ Tables ≤ 3 GB that are copied by default:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import queue
@@ -149,17 +172,48 @@ logging.basicConfig(
     format="%(asctime)s [%(threadName)s] [%(levelname)s] %(name)s – %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
-logger = logging.getLogger("sf2iceberg")
+logger = logging.getLogger("starpump")
+
+# ── CLI argument parsing ───────────────────────────────────────────────────────
+# starpump <source> [--threads N]
+# Parsed early so MAX_THREADS can be overridden before any config is consumed.
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="starpump",
+        description="Universal source-to-Iceberg copy pipeline.",
+    )
+    parser.add_argument(
+        "source",
+        nargs="?",
+        default="snowflake",
+        help="Source connector to use (e.g. 'snowflake'). Default: snowflake",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override the number of parallel copy threads (default: 8, or MAX_THREADS env).",
+    )
+    # Parse only known args so pytest / spark-submit extra flags are ignored.
+    args, _ = parser.parse_known_args()
+    return args
+
+_ARGS = _parse_args()
 
 # ── Configuration from environment ────────────────────────────────────────────
-SPARK_USER      = os.environ.get("SPARK_USER", "dave")
-SF_DATABASE     = os.environ.get("SF_DATABASE", "SNOWFLAKE_SAMPLE_DATA")
-SF_SCHEMA       = os.environ.get("SF_SCHEMA",   "TPCDS_SF10TCL")
+USER            = os.environ.get("USER",      "dave")
+DATABASE        = os.environ.get("DATABASE",  "SNOWFLAKE_SAMPLE_DATA")
+SCHEMAS         = os.environ.get("SCHEMAS",   "TPCDS_SF10TCL")
 ICEBERG_CATALOG = os.environ.get("ICEBERG_CATALOG", "polaris")
 S3_BUCKET_OVERRIDE = os.environ.get("S3_BUCKET")
 DRY_RUN         = os.environ.get("DRY_RUN", "0") == "1"
 BATCH_SIZE      = int(os.environ.get("BATCH_SIZE",   "100000"))
-MAX_THREADS     = int(os.environ.get("MAX_THREADS",  "8"))
+# --threads CLI flag takes precedence over the MAX_THREADS env var (default 8).
+MAX_THREADS     = _ARGS.threads if _ARGS.threads is not None else int(os.environ.get("MAX_THREADS", "8"))
+
+# ── Source selection ───────────────────────────────────────────────────────────
+SOURCE = _ARGS.source.lower()
 
 # ── Table filtering env vars ───────────────────────────────────────────────────
 # INCLUDE_TABLES / TABLES: only copy these tables (comma-separated, lower-case).
@@ -181,11 +235,8 @@ EXCLUDE_TABLES: set[str] = {
 MAX_TABLE_SIZE_GB: float = float(os.environ.get("MAX_TABLE_SIZE_GB", "3.0"))
 _SIZE_FILTER_ENABLED = MAX_TABLE_SIZE_GB > 0
 
-# Iceberg namespace must match Snowflake schema name (lower-cased)
-ICEBERG_NAMESPACE = SF_SCHEMA.lower()
-
-# Spark catalog name registered for the Snowflake source database
-SF_SPARK_CATALOG = "snowflake_sample"
+# Iceberg namespace must match source schema name (lower-cased)
+ICEBERG_NAMESPACE = SCHEMAS.lower()
 
 # ── Snowflake → Spark type mapping ────────────────────────────────────────────
 _SF_TYPE_MAP: dict[str, Any] = {
@@ -429,17 +480,44 @@ def write_watermark_iceberg(
     )
 
 
-# ── Schema discovery ───────────────────────────────────────────────────────────
+# ── Source connector protocol ──────────────────────────────────────────────────
+# Each source (snowflake, oracle, postgres, …) registers three callables here.
+# The rest of the pipeline is fully generic — it never names a source directly.
+#
+# To add a new source later:
+#   1. Write the three _<source>_* functions below.
+#   2. Add one entry to _CONNECTORS.
+#   3. Add the source name to _CONNECTORS — that's it.
+#
+# connector fields
+#   build_opts(bao)          → dict   connection options fed to spark.read.format(...)
+#   list_tables(spark, opts) → list[str]   sorted lower-cased table names
+#   table_schema(spark, opts, table) → StructType
+#   table_sizes(spark, opts) → dict[str, float]  {table: gb}
 
-def discover_sf_tables(spark: SparkSession, sf_opts: dict) -> list[str]:
-    """
-    Dynamically discover all BASE TABLE names in the Snowflake schema.
-    Returns sorted list of lower-cased table names.
-    Does NOT apply any filtering — use apply_table_filters() for that.
-    """
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class _SourceConnector:
+    spark_format: str                                               # e.g. "net.snowflake.spark.snowflake"
+    build_opts:   Callable                                          # (bao) -> dict
+    list_tables:  Callable                                          # (spark, opts) -> list[str]
+    table_schema: Callable                                          # (spark, opts, table) -> StructType
+    table_sizes:  Callable                                          # (spark, opts) -> dict[str, float]
+
+
+# ── Snowflake connector implementation ─────────────────────────────────────────
+
+def _sf_build_opts(bao: "BaoSparkInit") -> dict:
+    return bao.snowflake_options(schema=SCHEMAS, database=DATABASE)
+
+
+def _sf_list_tables(spark: SparkSession, opts: dict) -> list[str]:
+    """Discover all BASE TABLE names in the Snowflake schema."""
     df: DataFrame = (
         spark.read.format("net.snowflake.spark.snowflake")
-        .options(**sf_opts)
+        .options(**opts)
         .option("query",
                 "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
                 "WHERE TABLE_SCHEMA = UPPER(CURRENT_SCHEMA()) "
@@ -449,47 +527,33 @@ def discover_sf_tables(spark: SparkSession, sf_opts: dict) -> list[str]:
     )
     names = sorted(row[0].lower() for row in df.collect())
     logger.info("Discovered %d tables in %s.%s: %s",
-                len(names), SF_DATABASE, SF_SCHEMA, names)
+                len(names), DATABASE, SCHEMAS, names)
     return names
 
 
-def discover_schema(spark: SparkSession, sf_opts: dict, table: str) -> StructType:
+def _sf_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
     """Read one row from Snowflake; return its StructType schema."""
     return (
         spark.read.format("net.snowflake.spark.snowflake")
-        .options(**sf_opts)
+        .options(**opts)
         .option("query", f'SELECT * FROM "{table.upper()}" LIMIT 1')
         .load()
     ).schema
 
 
-# ── Table size discovery ───────────────────────────────────────────────────────
-
-def discover_table_sizes(
-    spark: SparkSession,
-    sf_opts: dict,
-) -> dict[str, float]:
+def _sf_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
     """
-    Query Snowflake's TABLE_STORAGE_METRICS view to get the compressed
-    on-disk size (ACTIVE_BYTES) for every table in the current schema.
-
-    Returns a dict of {lower_table_name: size_in_gb}.
-    Tables not present in the result (e.g. empty or very new) map to 0.0 GB.
-
-    TABLE_STORAGE_METRICS requires ACCOUNTADMIN or SYSADMIN privilege, or the
-    MONITOR privilege on the table.  If the query fails (permissions), the
-    function falls back to TABLE_STORAGE_METRICS via INFORMATION_SCHEMA which
-    only shows tables the current role can access.
+    Query Snowflake TABLE_STORAGE_METRICS for compressed on-disk sizes.
+    Returns {lower_table_name: size_in_gb}.  Falls back to INFORMATION_SCHEMA
+    if ACCOUNT_USAGE is not accessible.
     """
-    # Primary: TABLE_STORAGE_METRICS (requires ACCOUNTADMIN / SYSADMIN)
-    # Fallback: INFORMATION_SCHEMA.TABLE_STORAGE_METRICS (role-filtered)
     queries = [
         (
             "SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS",
             f"SELECT LOWER(TABLE_NAME), ACTIVE_BYTES "
             f"FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS "
-            f"WHERE TABLE_SCHEMA = UPPER('{SF_SCHEMA}') "
-            f"AND TABLE_CATALOG = UPPER('{SF_DATABASE}') "
+            f"WHERE TABLE_SCHEMA = UPPER('{SCHEMAS}') "
+            f"AND TABLE_CATALOG = UPPER('{DATABASE}') "
             f"AND DELETED IS NULL",
         ),
         (
@@ -499,13 +563,12 @@ def discover_table_sizes(
             f"WHERE TABLE_SCHEMA = UPPER(CURRENT_SCHEMA())",
         ),
     ]
-
     _gb = 1024 ** 3
     for view_name, query in queries:
         try:
             df = (
                 spark.read.format("net.snowflake.spark.snowflake")
-                .options(**sf_opts)
+                .options(**opts)
                 .option("query", query)
                 .load()
             )
@@ -522,11 +585,36 @@ def discover_table_sizes(
             logger.warning(
                 "Could not query %s for sizes: %s — trying fallback.", view_name, exc
             )
-
     logger.warning(
         "All size queries failed — treating all tables as 0 GB (no size filter)."
     )
     return {}
+
+
+# ── Connector registry — add new sources here ─────────────────────────────────
+# To register a new source (e.g. "oracle"):
+#   1. Implement _oracle_build_opts, _oracle_list_tables,
+#      _oracle_table_schema, _oracle_table_sizes following the _sf_* pattern.
+#   2. Add:  "oracle": _SourceConnector("jdbc", _oracle_build_opts, ...)
+_CONNECTORS: dict[str, _SourceConnector] = {
+    "snowflake": _SourceConnector(
+        spark_format = "net.snowflake.spark.snowflake",
+        build_opts   = _sf_build_opts,
+        list_tables  = _sf_list_tables,
+        table_schema = _sf_table_schema,
+        table_sizes  = _sf_table_sizes,
+    ),
+    # "oracle":   _SourceConnector(...),   ← add future sources here
+    # "postgres": _SourceConnector(...),
+}
+
+# Validate source name against the registry (fail fast, friendly message).
+if SOURCE not in _CONNECTORS:
+    logger.error(
+        "Unsupported source %r — registered sources: %s",
+        SOURCE, ", ".join(sorted(_CONNECTORS)),
+    )
+    sys.exit(1)
 
 
 def log_size_report(
@@ -658,7 +746,8 @@ def _auto_partition_spec(schema: StructType) -> list[dict]:
 def _copy_table(
     spark:     SparkSession,
     builder:   IcebergTableBuilder,
-    sf_opts:   dict,
+    connector: "_SourceConnector",
+    conn_opts: dict,
     s3_bucket: str,
     table:     str,
     size_gb:   float,
@@ -667,7 +756,8 @@ def _copy_table(
     pg_creds:  dict,
 ) -> None:
     """
-    Copy one table from Snowflake → Iceberg (called inside a thread).
+    Copy one table from the source database → Iceberg (called inside a thread).
+    Source-agnostic: all source-specific I/O goes through *connector*.
 
     Watermark flow
     --------------
@@ -689,7 +779,7 @@ def _copy_table(
 
     try:
         logger.info("[%s] START: %.1f GB | discovering schema …", table, size_gb)
-        sf_raw_schema = discover_schema(spark, sf_opts, table)
+        sf_raw_schema = connector.table_schema(spark, conn_opts, table)
 
         # Map SF types → Spark/Iceberg types (builder injects snap cols)
         iceberg_schema = StructType([
@@ -742,7 +832,7 @@ def _copy_table(
                             _cur.execute(
                                 "SELECT sf_extraction_ts FROM pipeline_watermarks "
                                 "WHERE source_db=%s AND source_schema=%s AND table_name=%s",
-                                (SF_DATABASE, SF_SCHEMA, table),
+                                (DATABASE, SCHEMAS, table),
                             )
                             _row = _cur.fetchone()
                     sf_extraction_ts = _row[0] if _row and _row[0] else None
@@ -758,7 +848,7 @@ def _copy_table(
                 else:
                     # Fallback: no watermark in pipeline DB yet (first run wrote
                     # nothing before crashing).  Capture a fresh timestamp.
-                    sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
+                    sf_extraction_ts = capture_sf_extraction_ts(spark, conn_opts)
                     logger.info(
                         "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
                         "fresh sf_extraction_ts=%s, starting at offset=%d.",
@@ -769,7 +859,7 @@ def _copy_table(
                 # Must use Snowflake server-side CURRENT_TIMESTAMP() so the
                 # watermark reflects Snowflake's transaction timeline and maps
                 # precisely to an Oracle SCN via TIMESTAMP_TO_SCN().
-                sf_extraction_ts = capture_sf_extraction_ts(spark, sf_opts)
+                sf_extraction_ts = capture_sf_extraction_ts(spark, conn_opts)
                 logger.info("[%s] sf_extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
 
                 # Eagerly write the watermark to Postgres NOW — before the first
@@ -778,8 +868,8 @@ def _copy_table(
                 try:
                     pg_upsert_watermark(
                         pg                = pg_creds,
-                        source_db         = SF_DATABASE,
-                        source_schema     = SF_SCHEMA,
+                        source_db         = DATABASE,
+                        source_schema     = SCHEMAS,
                         table_name        = table,
                         sf_extraction_ts  = sf_extraction_ts,
                         rows_copied       = 0,
@@ -804,8 +894,8 @@ def _copy_table(
                     f"LIMIT {BATCH_SIZE} OFFSET {offset}"
                 )
                 batch: DataFrame = (
-                    spark.read.format("net.snowflake.spark.snowflake")
-                    .options(**sf_opts)
+                    spark.read.format(connector.spark_format)
+                    .options(**conn_opts)
                     .option("query", query)
                     .load()
                 )
@@ -860,8 +950,8 @@ def _copy_table(
                 spark             = spark,
                 catalog           = ICEBERG_CATALOG,
                 namespace         = ICEBERG_NAMESPACE,
-                source_db         = SF_DATABASE,
-                source_schema     = SF_SCHEMA,
+                source_db         = DATABASE,
+                source_schema     = SCHEMAS,
                 table_name        = table,
                 sf_extraction_ts  = sf_extraction_ts,
                 rows_copied       = rows_total,
@@ -871,8 +961,8 @@ def _copy_table(
             # Refresh rows_copied to the final count now that copy is complete.
             pg_upsert_watermark(
                 pg                = pg_creds,
-                source_db         = SF_DATABASE,
-                source_schema     = SF_SCHEMA,
+                source_db         = DATABASE,
+                source_schema     = SCHEMAS,
                 table_name        = table,
                 sf_extraction_ts  = sf_extraction_ts,
                 rows_copied       = rows_total,
@@ -899,13 +989,13 @@ def _copy_table(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    os.environ["SPARK_USER"] = SPARK_USER   # ensure env is set for submodules
+    os.environ["USER"] = USER   # ensure env is set for submodules
 
     run_id = str(uuid.uuid4())
 
     logger.info(
-        "=== Snowflake → Iceberg copy | run_id=%s user=%s db=%s schema=%s catalog=%s ===",
-        run_id, SPARK_USER, SF_DATABASE, SF_SCHEMA, ICEBERG_CATALOG,
+        "=== starpump %s | run_id=%s user=%s db=%s schema=%s catalog=%s threads=%d ===",
+        SOURCE, run_id, USER, DATABASE, SCHEMAS, ICEBERG_CATALOG, MAX_THREADS,
     )
     logger.info(
         "=== Filters: include=%s  exclude=%s  max_size=%.1f GB ===",
@@ -920,8 +1010,11 @@ def main() -> None:
     s3_bucket = S3_BUCKET_OVERRIDE or s3["bucket"]
     pg   = bao.pipeline_db_creds()
 
-    conf    = bao.spark_conf(app_name="sf-to-iceberg")
-    sf_opts = bao.snowflake_options(schema=SF_SCHEMA, database=SF_DATABASE)
+    # Resolve the connector for the requested source.
+    connector  = _CONNECTORS[SOURCE]
+    conn_opts  = connector.build_opts(bao)
+
+    conf  = bao.spark_conf(app_name=f"starpump-{SOURCE}")
 
     # ── 2. Spark session ──────────────────────────────────────────────────────
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
@@ -929,7 +1022,7 @@ def main() -> None:
 
     # ── 3. Log run start in pipeline DB ──────────────────────────────────────
     try:
-        pg_log_run_start(pg, run_id, SF_DATABASE, SF_SCHEMA)
+        pg_log_run_start(pg, run_id, DATABASE, SCHEMAS)
         logger.info("[run-log] run_id=%s recorded in pipeline DB.", run_id)
     except Exception as pg_err:
         logger.warning("[run-log] Could not write run start to pipeline DB: %s", pg_err)
@@ -938,19 +1031,19 @@ def main() -> None:
     run_err_detail = None
 
     try:
-        builder = IcebergTableBuilder(spark, running_user=SPARK_USER)
+        builder = IcebergTableBuilder(spark, running_user=USER)
         builder.ensure_namespace(ICEBERG_CATALOG, ICEBERG_NAMESPACE)
 
-        # ── 4. Table discovery ────────────────────────────────────────────────
-        all_tables = discover_sf_tables(spark, sf_opts)
+        # ── 4. Table discovery (via connector — source-agnostic) ──────────────
+        all_tables = connector.list_tables(spark, conn_opts)
         if not all_tables:
-            logger.error("No tables found in %s.%s — aborting.", SF_DATABASE, SF_SCHEMA)
+            logger.error("No tables found in %s.%s — aborting.", DATABASE, SCHEMAS)
             sys.exit(1)
 
-        # ── 5. Size discovery ─────────────────────────────────────────────────
+        # ── 5. Size discovery (via connector — source-agnostic) ───────────────
         sizes: dict[str, float] = {}
         if _SIZE_FILTER_ENABLED:
-            sizes = discover_table_sizes(spark, sf_opts)
+            sizes = connector.table_sizes(spark, conn_opts)
         else:
             logger.info("Size discovery skipped (MAX_TABLE_SIZE_GB=0).")
 
@@ -973,7 +1066,7 @@ def main() -> None:
             " [DRY RUN]" if DRY_RUN else "",
         )
 
-        # ── 7. 8-thread copy using a work queue ───────────────────────────────
+        # ── 7. N-thread copy using a work queue ──────────────────────────────
         # Each thread pulls the next table from the queue so they naturally
         # pick up new work as soon as they finish.
         work_q: queue.Queue[tuple[str, float]] = queue.Queue()
@@ -990,7 +1083,7 @@ def main() -> None:
                 except queue.Empty:
                     break
                 _copy_table(
-                    spark, builder, sf_opts, s3_bucket,
+                    spark, builder, connector, conn_opts, s3_bucket,
                     tbl, size_gb, results, lock,
                     pg_creds=pg,
                 )
