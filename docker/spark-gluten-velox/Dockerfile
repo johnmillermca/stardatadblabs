@@ -36,6 +36,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
      /opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar
 
+# ── Clear executable-stack bit from libvelox.so inside the Gluten bundle JAR ──
+# The centos_7 Velox build has PT_GNU_STACK flags=0x7 (rwx — exec bit set).
+# At runtime the JVM detects this and prints:
+#   "OpenJDK warning: You have loaded library libvelox.so which might have
+#    disabled stack guard. The VM will try to fix the stack guard now."
+# The JVM self-corrects so there is no functional impact, but the warning is
+# noise. We patch the ELF PT_GNU_STACK header directly in Python (flags &= ~1)
+# and repack the .so back into the JAR — no execstack/objcopy version required.
+RUN python3 - <<'PYEOF'
+import zipfile, os, struct, tempfile
+JAR = '/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar'
+def clear_execstack(raw):
+    data = bytearray(raw)
+    e_phoff     = struct.unpack_from('<Q', data, 32)[0]
+    e_phentsize = struct.unpack_from('<H', data, 54)[0]
+    e_phnum     = struct.unpack_from('<H', data, 56)[0]
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        if struct.unpack_from('<I', data, off)[0] == 0x6474e551:  # PT_GNU_STACK
+            flags = struct.unpack_from('<I', data, off + 4)[0]
+            struct.pack_into('<I', data, off + 4, flags & ~0x1)   # clear PF_X
+            print(f'PT_GNU_STACK: 0x{flags:03x} -> 0x{flags & ~0x1:03x}')
+    return bytes(data)
+with tempfile.NamedTemporaryFile(suffix='.jar', delete=False) as t:
+    tmp = t.name
+with zipfile.ZipFile(JAR, 'r') as zin, zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for item in zin.infolist():
+        raw = zin.read(item.filename)
+        if item.filename == 'libvelox.so':
+            raw = clear_execstack(raw)
+        zout.writestr(item, raw)
+os.replace(tmp, JAR)
+print('libvelox.so execstack bit cleared and repacked into Gluten JAR.')
+PYEOF
+
 COPY jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar \
      /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar
 
