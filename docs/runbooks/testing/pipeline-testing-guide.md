@@ -34,6 +34,12 @@
 > script via `<<'EOF'` requires the `-i` flag so kubectl wires up stdin to the remote
 > process. Without `-i` the heredoc is silently discarded and you get no output.
 
+> **`env` pattern:** All `starpump` exec blocks pass credentials and options via `env KEY=VAL`
+> directly to `starpump` — no shell wrapper, no quoting complexity.  `$TOKEN` and `$ADDR`
+> are expanded by your local shell before `kubectl` sends the command, so the remote pod
+> receives the actual values.  Extra options (`DATABASE`, `SCHEMAS`, `INCLUDE_TABLES`, …)
+> are also passed as `env` vars so any combination can be composed without quoting issues.
+
 > **All variables below (`$MASTER`, `$TOKEN`, `$PG_HOST`, `$PG_PASS`, `$PGPOD`) are
 > shell session variables** — they are lost when you open a new terminal or start a new
 > `kubectl exec` session. **Re-run the entire setup block at the top of every new
@@ -87,13 +93,11 @@ Copy only `promotion` from `SNOWFLAKE_SAMPLE_DATA.TPCDS_SF10TCL`.
 `MAX_TABLE_SIZE_GB=0` disables the size filter so even a table reported as 0 bytes is included.
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     DATABASE=SNOWFLAKE_SAMPLE_DATA \
-     SCHEMAS=TPCDS_SF10TCL \
-     INCLUDE_TABLES=promotion \
-     MAX_TABLE_SIZE_GB=0'
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN="$TOKEN" ADDR="$ADDR" USER=dave \
+      DATABASE=SNOWFLAKE_SAMPLE_DATA SCHEMAS=TPCDS_SF10TCL \
+      INCLUDE_TABLES=promotion MAX_TABLE_SIZE_GB=0 \
+  starpump snowflake
 ```
 
 **What to look for in the logs:**
@@ -132,13 +136,11 @@ EOF
 Copy `reason`, `warehouse`, and `ship_mode` in one run:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     DATABASE=SNOWFLAKE_SAMPLE_DATA \
-     SCHEMAS=TPCDS_SF10TCL \
-     INCLUDE_TABLES=reason,warehouse,ship_mode \
-     MAX_TABLE_SIZE_GB=0'
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN="$TOKEN" ADDR="$ADDR" USER=dave \
+      DATABASE=SNOWFLAKE_SAMPLE_DATA SCHEMAS=TPCDS_SF10TCL \
+      INCLUDE_TABLES=reason,warehouse,ship_mode MAX_TABLE_SIZE_GB=0 \
+  starpump snowflake
 ```
 
 **Expected size-report:**
@@ -157,13 +159,11 @@ kubectl exec -n prod $MASTER -c spark-master -- bash -c \
 Copy all tables ≤ 1 GB but skip `catalog_returns` and `store_returns`:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     DATABASE=SNOWFLAKE_SAMPLE_DATA \
-     SCHEMAS=TPCDS_SF10TCL \
-     EXCLUDE_TABLES=catalog_returns,store_returns \
-     MAX_TABLE_SIZE_GB=1.0'
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN="$TOKEN" ADDR="$ADDR" USER=dave \
+      DATABASE=SNOWFLAKE_SAMPLE_DATA SCHEMAS=TPCDS_SF10TCL \
+      EXCLUDE_TABLES=catalog_returns,store_returns MAX_TABLE_SIZE_GB=1.0 \
+  starpump snowflake
 ```
 
 **Expected size-report (excerpt):**
@@ -182,12 +182,11 @@ kubectl exec -n prod $MASTER -c spark-master -- bash -c \
 Copy only tables whose compressed Snowflake size is ≤ 1 GB:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     DATABASE=SNOWFLAKE_SAMPLE_DATA \
-     SCHEMAS=TPCDS_SF10TCL \
-     MAX_TABLE_SIZE_GB=1.0'
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN="$TOKEN" ADDR="$ADDR" USER=dave \
+      DATABASE=SNOWFLAKE_SAMPLE_DATA SCHEMAS=TPCDS_SF10TCL \
+      MAX_TABLE_SIZE_GB=1.0 \
+  starpump snowflake
 ```
 
 Tables such as `store_sales` (~22 GB), `catalog_sales` (~18 GB), `web_sales` (~9 GB),
@@ -220,13 +219,10 @@ Set `BATCH_SIZE=50000` to create more batches and give a wider window to kill it
 **Terminal 1 — start the job:**
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     INCLUDE_TABLES=customer \
-     MAX_TABLE_SIZE_GB=0 \
-     BATCH_SIZE=50000' \
-  2>&1 | tee /tmp/copy_run1.log
+kubectl exec -n prod $MASTER -c spark-master -- \
+  sh -c "TOKEN='$TOKEN' ADDR='$ADDR' USER=dave \
+    INCLUDE_TABLES=customer MAX_TABLE_SIZE_GB=0 BATCH_SIZE=50000 \
+    starpump snowflake 2>&1 | tee /tmp/copy_run1.log"
 ```
 
 Watch for the first few batch lines:
@@ -284,13 +280,10 @@ kubectl exec -n prod $PGPOD -- \
 ### B.4 Restart the job and observe resume behaviour
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     INCLUDE_TABLES=customer \
-     MAX_TABLE_SIZE_GB=0 \
-     BATCH_SIZE=50000' \
-  2>&1 | tee /tmp/copy_run2.log
+kubectl exec -n prod $MASTER -c spark-master -- \
+  sh -c "TOKEN='$TOKEN' ADDR='$ADDR' USER=dave \
+    INCLUDE_TABLES=customer MAX_TABLE_SIZE_GB=0 BATCH_SIZE=50000 \
+    starpump snowflake 2>&1 | tee /tmp/copy_run2.log"
 ```
 
 **What to look for — proof of resume:**
@@ -349,12 +342,11 @@ The `--threads 8` flag is shown explicitly here; omitting it gives the same
 result since 8 is the default:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake --threads 8 \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion \
-     MAX_TABLE_SIZE_GB=0' \
-  2>&1 | tee /tmp/copy_threads.log
+kubectl exec -n prod $MASTER -c spark-master -- \
+  sh -c "TOKEN='$TOKEN' ADDR='$ADDR' USER=dave \
+    INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion \
+    MAX_TABLE_SIZE_GB=0 \
+    starpump snowflake --threads 8 2>&1 | tee /tmp/copy_threads.log"
 ```
 
 ### C.2 Confirm 8 threads in the logs
@@ -399,12 +391,11 @@ To see a thread pick up a second table, run with 9+ tables and only 4 threads
 using `--threads 4`:
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- bash -c \
-  'starpump snowflake --threads 4 \
-     USER=dave TOKEN="$TOKEN" ADDR="$ADDR" \
-     INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion,catalog_page \
-     MAX_TABLE_SIZE_GB=0' \
-  2>&1 | grep START
+kubectl exec -n prod $MASTER -c spark-master -- \
+  sh -c "TOKEN='$TOKEN' ADDR='$ADDR' USER=dave \
+    INCLUDE_TABLES=income_band,ship_mode,warehouse,reason,call_center,web_site,web_page,promotion,catalog_page \
+    MAX_TABLE_SIZE_GB=0 \
+    starpump snowflake --threads 4 2>&1 | grep START"
 ```
 
 You will see 4 threads start first; as each finishes it picks up the 5th, 6th, … table.
