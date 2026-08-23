@@ -114,11 +114,12 @@ COPY scripts/snowflake_to_iceberg.py  /opt/spark/work-dir/snowflake_to_iceberg.p
 RUN chmod 644 /opt/spark/work-dir/*.py
 
 # ── CLI entry-points ──────────────────────────────────────────────────────────
-# snowflake-to-iceberg: thin wrapper so pipeline runs without explicit path.
-#   kubectl exec ... -- env SF_SCHEMA=X snowflake-to-iceberg
+# starpump: thin wrapper so the pipeline runs without an explicit path.
+#   kubectl exec ... -- bash -c 'starpump snowflake USER=dave ...'
 RUN printf '#!/bin/sh\nexec python3 /opt/spark/work-dir/snowflake_to_iceberg.py "$@"\n' \
-    > /usr/local/bin/snowflake-to-iceberg \
-    && chmod 755 /usr/local/bin/snowflake-to-iceberg
+    > /usr/local/bin/starpump \
+    && chmod 755 /usr/local/bin/starpump \
+    && ln -sf /usr/local/bin/starpump /usr/local/bin/snowflake-to-iceberg
 
 # spark-app-cleanup: kills stale/orphaned apps via the Spark master REST API.
 #   kubectl exec -n prod $MASTER -c spark-master -- spark-app-cleanup
@@ -132,7 +133,7 @@ RUN chmod 755 /usr/local/bin/spark-app-cleanup
 RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.conf" << 'EOF'
 # ── Gluten + Velox native execution (OPT-IN) ─────────────────────────────────
 # Gluten is disabled by default. To enable it for a job set:
-#   ENABLE_GLUTEN=1 snowflake-to-iceberg
+#   ENABLE_GLUTEN=1 starpump snowflake
 # or pass spark.plugins at session creation.
 # The off-heap reservation below is ONLY meaningful when Gluten is active —
 # bao_spark_init.py enables it conditionally based on ENABLE_GLUTEN.
