@@ -470,7 +470,7 @@ ORDER  BY scheduled_time DESC;
 ```sql
 -- In Doris (port 9030)
 SHOW CATALOGS;
--- Expect: iceberg_polaris, iceberg_polaris_rw, snowflake_jdbc, internal
+-- Expect: iceberg_polaris, iceberg_polaris_rw, internal
 
 USE iceberg_polaris;
 SHOW DATABASES;
@@ -500,26 +500,6 @@ kubectl patch cronjob doris-iceberg-warmup -n prod \
 # Disable
 kubectl patch cronjob doris-iceberg-warmup -n prod \
   -p '{"spec":{"suspend":true}}'
-```
-
-### 10.3 Doris Snowflake JDBC catalog
-
-```sql
--- Verify JDBC catalog reaches all 24 TPC-DS tables
-USE snowflake_jdbc;
-SHOW DATABASES;
--- Expect: SNOWFLAKE_SAMPLE_DATA
-
-USE `SNOWFLAKE_SAMPLE_DATA`.`TPCDS_SF10TCL`;
-SHOW TABLES;
--- Expect: 24 tables
-
--- Test join: Snowflake source vs Iceberg copy
-SELECT a.c_customer_id, b.snap_timestamp
-FROM   snowflake_jdbc.`SNOWFLAKE_SAMPLE_DATA`.`TPCDS_SF10TCL`.customer  a
-JOIN   iceberg_polaris.tpcds_sf10tcl.customer                           b
-  ON   a.c_customer_sk = b.c_customer_sk
-LIMIT  10;
 ```
 
 ---

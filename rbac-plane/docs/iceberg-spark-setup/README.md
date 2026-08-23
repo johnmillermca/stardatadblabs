@@ -14,12 +14,11 @@
 6. [C — Loading Data via JupyterHub / Spark](#c--loading-data-via-jupyterhub--spark)
 7. [D/E — Snowflake Iceberg Table & Refresh Jobs](#de--snowflake-iceberg-table--refresh-jobs)
 8. [F — Doris Iceberg Catalog & 1-Minute Warm-up](#f--doris-iceberg-catalog--1-minute-warm-up)
-9. [G — Doris Snowflake JDBC Catalog](#g--doris-snowflake-jdbc-catalog)
-10. [Doris Write to Iceberg](#doris-write-to-iceberg)
-11. [Token Refresh CronJob (OpenBao-aware)](#token-refresh-cronjob-openbao-aware)
-12. [OpenBao Secret Management](#openbao-secret-management)
-13. [Troubleshooting](#troubleshooting)
-14. [Key Files](#key-files)
+9. [Doris Write to Iceberg](#doris-write-to-iceberg)
+10. [Token Refresh CronJob (OpenBao-aware)](#token-refresh-cronjob-openbao-aware)
+11. [OpenBao Secret Management](#openbao-secret-management)
+12. [Troubleshooting](#troubleshooting)
+13. [Key Files](#key-files)
 
 ---
 
@@ -319,34 +318,6 @@ See [`05b_doris_warmup_cronjob.yaml`](05b_doris_warmup_cronjob.yaml) for the Cro
 
 ---
 
-## G — Doris Snowflake JDBC Catalog
-
-| Property | Value |
-|---|---|
-| Catalog | `snowflake_jdbc` |
-| Driver | `snowflake-jdbc-3.15.1.jar` (served from FE PVC via port 8888) |
-| Auth | JWT (PKCS8 PEM at `/opt/apache-doris/fe/doris-meta/jdbc_drivers/sf_rsa_key_pkcs8.pem`) |
-| Doris patch | `doris-fe.jar` bytecode-patched → maps `jdbc:snowflake` → `JdbcTrinoClient` |
-
-```sql
--- List Snowflake databases/schemas
-SHOW DATABASES FROM snowflake_jdbc;
-
--- Query Snowflake proprietary table through Doris
-SELECT * FROM snowflake_jdbc.lakehouse_db.events LIMIT 5;
-
--- Cross-catalog JOIN: Iceberg (S3) + Snowflake
-SELECT i.event_type, i.user_id, s.account_tier
-FROM iceberg_polaris.lakehouse.events          AS i
-JOIN snowflake_jdbc.lakehouse_db.user_profiles AS s
-    ON i.user_id = s.user_id
-LIMIT 20;
-```
-
-See [`05_doris_catalogs.sql`](05_doris_catalogs.sql) for full catalog DDL.
-
----
-
 ## Doris Write to Iceberg
 
 Doris writes to the Iceberg table through the `iceberg_polaris_rw` catalog (separate from the read-only `iceberg_polaris` catalog). Both tokens are refreshed every 55 minutes by the same CronJob.
@@ -543,7 +514,7 @@ spark.sql("SELECT COUNT(*) FROM polaris.lakehouse.events").show()
 | [`01_create_iceberg_table.py`](01_create_iceberg_table.py) | Spark table DDL + RBAC gate |
 | [`02_polaris_catalog_setup.sql`](02_polaris_catalog_setup.sql) | Polaris catalog + principal setup |
 | [`03_load_iceberg_data.ipynb`](03_load_iceberg_data.ipynb) | JupyterHub data load notebook |
-| [`05_doris_catalogs.sql`](05_doris_catalogs.sql) | Doris catalog DDL (Iceberg read/write + JDBC) |
+| [`05_doris_catalogs.sql`](05_doris_catalogs.sql) | Doris catalog DDL (Iceberg read/write) |
 | [`05b_doris_warmup_cronjob.yaml`](05b_doris_warmup_cronjob.yaml) | 1-minute warm-up CronJob |
 | [`06_snowflake_iceberg_setup_and_refresh.sql`](06_snowflake_iceberg_setup_and_refresh.sql) | Snowflake setup + refresh job management |
 | [`07_polaris_token_refresh_cronjob.yaml`](07_polaris_token_refresh_cronjob.yaml) | 55-min token refresh CronJob (OpenBao-aware) |
