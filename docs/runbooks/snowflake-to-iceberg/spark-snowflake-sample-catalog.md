@@ -1,18 +1,18 @@
-# Spark `snowflake_sample` Catalog — Setup & Reference
+# Spark `snowflake` Catalog — Setup & Reference
 
-**Purpose:** Document how the `snowflake_sample` Spark catalog was created, what it does, why it exists, and how to reproduce or extend it.
+**Purpose:** Document how the `snowflake` Spark catalog was created, what it does, why it exists, and how to reproduce or extend it.
 
 ---
 
 ## What it is
 
-`snowflake_sample` is a **Spark SQL catalog** entry that gives `starpump` a named namespace to validate against before starting a copy run. It is **not** a live query catalog — Spark does not read Snowflake tables through it. Actual data reads go through the **Snowflake Spark connector** (`net.snowflake.spark.snowflake` format) using credentials from OpenBao.
+`snowflake` is a **Spark SQL catalog** entry that gives `starpump` a named namespace to validate against before starting a copy run. It is **not** a live query catalog — Spark does not read Snowflake tables through it. Actual data reads go through the **Snowflake Spark connector** (`net.snowflake.spark.snowflake` format) using credentials from OpenBao.
 
 ```
 starpump snowflake           ← "snowflake" selects the _sf_* source connector
   │
-  ├─ bao_spark_init.py       ← builds SparkConf, registers snowflake_sample catalog
-  │    spark.sql.catalog.snowflake_sample  (hadoop type, warehouse=SNOWFLAKE_SAMPLE_DATA)
+  ├─ bao_spark_init.py       ← builds SparkConf, registers snowflake catalog
+  │    spark.sql.catalog.snowflake  (hadoop type, warehouse=SNOWFLAKE_SAMPLE_DATA)
   │
   └─ snowflake_to_iceberg.py ← reads tables via:
        spark.read.format("net.snowflake.spark.snowflake")
@@ -41,19 +41,19 @@ The `Dockerfile` copy handles any session that bypasses `bao_spark_init.py` (e.g
 
 ```properties
 # ── Snowflake source catalog (namespace = tpcds_sf10tcl) ─────────────────────
-spark.sql.catalog.snowflake_sample                   org.apache.iceberg.spark.SparkCatalog
-spark.sql.catalog.snowflake_sample.type              hadoop
-spark.sql.catalog.snowflake_sample.warehouse         SNOWFLAKE_SAMPLE_DATA
-spark.sql.catalog.snowflake_sample.default-namespace tpcds_sf10tcl
+spark.sql.catalog.snowflake                   org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.snowflake.type              hadoop
+spark.sql.catalog.snowflake.warehouse         SNOWFLAKE_SAMPLE_DATA
+spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
 ```
 
 ### In `bao_spark_init.py` (runtime, `spark_conf()` method)
 
 ```python
-conf.set("spark.sql.catalog.snowflake_sample",
+conf.set("spark.sql.catalog.snowflake",
          "org.apache.iceberg.spark.SparkCatalog")
-conf.set("spark.sql.catalog.snowflake_sample.type", "hadoop")
-conf.set("spark.sql.catalog.snowflake_sample.warehouse",
+conf.set("spark.sql.catalog.snowflake.type", "hadoop")
+conf.set("spark.sql.catalog.snowflake.warehouse",
          "SNOWFLAKE_SAMPLE_DATA")
 ```
 
@@ -69,7 +69,7 @@ Spark catalogs need a `type` to know how to resolve `SHOW TABLES`, `DESCRIBE`, e
 | `jdbc` | Queries Snowflake metadata tables directly — adds a live connection dependency at `SparkConf` build time |
 | `hadoop` | Lightweight — registers a named namespace without opening any connection; actual reads are done by the connector format |
 
-`hadoop` was chosen because `starpump` only needs the catalog for **namespace validation** (`spark.sql.catalog.snowflake_sample` must exist for `USE snowflake_sample.tpcds_sf10tcl` to resolve). The Snowflake Spark connector handles all real I/O separately.
+`hadoop` was chosen because `starpump` only needs the catalog for **namespace validation** (`spark.sql.catalog.snowflake` must exist for `USE snowflake.tpcds_sf10tcl` to resolve). The Snowflake Spark connector handles all real I/O separately.
 
 ---
 
@@ -124,7 +124,7 @@ Expected output:
 When `starpump snowflake` starts, `BaoSparkInit.spark_conf()` is called. It:
 
 1. Reads Snowflake credentials from OpenBao (`secret/platform/snowflake`)
-2. Adds `spark.sql.catalog.snowflake_sample` entries to `SparkConf`
+2. Adds `spark.sql.catalog.snowflake` entries to `SparkConf`
 3. Sets `sfUrl`, `sfUser`, `sfPassword`, `sfWarehouse` as Snowflake connector options (used later by `snowflake_options()`)
 
 ### Step 2 — `snowflake_to_iceberg.py` validates the namespace
@@ -221,15 +221,15 @@ MASTER=$(kubectl get pod -n prod -l component=master \
 
 # Check spark-defaults.conf has the catalog entry
 kubectl exec -n prod $MASTER -c spark-master -- \
-  grep "snowflake_sample" /opt/spark/conf/spark-defaults.conf
+  grep "snowflake" /opt/spark/conf/spark-defaults.conf
 ```
 
 Expected:
 ```
-spark.sql.catalog.snowflake_sample                   org.apache.iceberg.spark.SparkCatalog
-spark.sql.catalog.snowflake_sample.type              hadoop
-spark.sql.catalog.snowflake_sample.warehouse         SNOWFLAKE_SAMPLE_DATA
-spark.sql.catalog.snowflake_sample.default-namespace tpcds_sf10tcl
+spark.sql.catalog.snowflake                   org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.snowflake.type              hadoop
+spark.sql.catalog.snowflake.warehouse         SNOWFLAKE_SAMPLE_DATA
+spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
 ```
 
 ### Run a smoke test (table discovery only, no copy)

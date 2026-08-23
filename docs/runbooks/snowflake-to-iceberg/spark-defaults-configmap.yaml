@@ -6,7 +6,7 @@
 # Key global defaults enforced here:
 #   • 256 MB Iceberg target file size (write.target-file-size-bytes)
 #   • Polaris REST catalog registered as "polaris"
-#   • Snowflake source registered as "snowflake_sample" (namespace = TPCDS_SF10TCL)
+#   • Snowflake source registered as "snowflake" (namespace = TPCDS_SF10TCL)
 #     — namespace intentionally matches source schema name (tpcds_sf10tcl)
 #
 # Apply:
@@ -46,14 +46,14 @@ data:
     spark.sql.catalog.polaris.scope                 PRINCIPAL_ROLE:ALL
     # credential injected at runtime by bao_spark_init.py (secret/platform/polaris)
 
-    # ── Snowflake source catalog (catalog name: snowflake_sample) ─────────────
+    # ── Snowflake source catalog (catalog name: snowflake) ─────────────
     # Registered so the copy-job can validate catalog existence at startup.
     # Namespace is set to tpcds_sf10tcl to match the Snowflake schema name.
     # Actual reads use the Snowflake Spark connector, not this catalog entry.
-    spark.sql.catalog.snowflake_sample              org.apache.iceberg.spark.SparkCatalog
-    spark.sql.catalog.snowflake_sample.type         hadoop
-    spark.sql.catalog.snowflake_sample.warehouse    SNOWFLAKE_SAMPLE_DATA
-    spark.sql.catalog.snowflake_sample.default-namespace tpcds_sf10tcl
+    spark.sql.catalog.snowflake              org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.snowflake.type         hadoop
+    spark.sql.catalog.snowflake.warehouse    SNOWFLAKE_SAMPLE_DATA
+    spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
 
     # ── S3A defaults (credentials injected at runtime) ────────────────────────
     spark.hadoop.fs.s3a.impl                        org.apache.hadoop.fs.s3a.S3AFileSystem

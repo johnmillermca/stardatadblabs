@@ -201,7 +201,7 @@ kubectl exec -n prod deploy/spark-master -- \
 ```
 
 Expected output includes `spark.sql.catalog.polaris` and
-`spark.sql.catalog.snowflake_sample`.
+`spark.sql.catalog.snowflake`.
 
 ---
 
@@ -538,16 +538,16 @@ user in the `allowed_admins` set, or refactor to read the ConfigMap at runtime.
 
 ## 12. Troubleshooting
 
-### T1 — `RuntimeError: Spark catalog 'snowflake_sample' not found`
+### T1 — `RuntimeError: Spark catalog 'snowflake' not found`
 
 The `spark-defaults.conf` ConfigMap is not mounted or the pods have not
 restarted since the ConfigMap was applied.
 
 ```bash
-kubectl describe cm spark-defaults-conf -n prod | grep snowflake_sample
+kubectl describe cm spark-defaults-conf -n prod | grep snowflake
 kubectl rollout restart deployment spark-master spark-worker -n prod
 kubectl exec -n prod deploy/spark-master -- \
-  grep snowflake_sample /opt/spark/conf/spark-defaults.conf
+  grep snowflake /opt/spark/conf/spark-defaults.conf
 ```
 
 ### T2 — `PermissionError: RBAC check failed: user ''`

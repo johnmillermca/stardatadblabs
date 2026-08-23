@@ -182,7 +182,7 @@ class BaoSparkInit:
         """
         Build a SparkConf pre-wired with:
           - Polaris REST catalog  (catalog name: polaris)
-          - Snowflake catalog     (catalog name: snowflake_sample)
+          - Snowflake catalog     (catalog name: snowflake)
           - S3 credentials (AWS SDK v2 style)
           - Parquet + Iceberg defaults
         """
@@ -260,12 +260,12 @@ class BaoSparkInit:
                  f"{_POLARIS_URI}/v1/oauth/tokens")
 
         # ── Snowflake internal catalog (for reading source tables) ─────────────
-        conf.set("spark.sql.catalog.snowflake_sample",
+        conf.set("spark.sql.catalog.snowflake",
                  "org.apache.iceberg.spark.SparkCatalog")
-        conf.set("spark.sql.catalog.snowflake_sample.type", "hadoop")
+        conf.set("spark.sql.catalog.snowflake.type", "hadoop")
         # The Snowflake Spark connector is used for actual reads; the catalog
         # entry here declares the namespace so the copy app can validate it.
-        conf.set("spark.sql.catalog.snowflake_sample.warehouse",
+        conf.set("spark.sql.catalog.snowflake.warehouse",
                  "SNOWFLAKE_SAMPLE_DATA")
 
         # ── S3 / AWS credentials ───────────────────────────────────────────────

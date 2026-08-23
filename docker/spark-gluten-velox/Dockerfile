@@ -152,10 +152,10 @@ spark.sql.catalog.polaris.warehouse                  IcebergCatalog
 spark.sql.catalog.polaris.scope                      PRINCIPAL_ROLE:ALL
 
 # ── Snowflake source catalog (namespace = tpcds_sf10tcl) ─────────────────────
-spark.sql.catalog.snowflake_sample                   org.apache.iceberg.spark.SparkCatalog
-spark.sql.catalog.snowflake_sample.type              hadoop
-spark.sql.catalog.snowflake_sample.warehouse         SNOWFLAKE_SAMPLE_DATA
-spark.sql.catalog.snowflake_sample.default-namespace tpcds_sf10tcl
+spark.sql.catalog.snowflake                   org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.snowflake.type              hadoop
+spark.sql.catalog.snowflake.warehouse         SNOWFLAKE_SAMPLE_DATA
+spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
 
 # ── Global Iceberg write defaults (256 MB file size) ─────────────────────────
 spark.sql.iceberg.write.format.default               parquet
