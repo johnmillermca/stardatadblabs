@@ -131,14 +131,15 @@ RUN chmod 755 /usr/local/bin/spark-app-cleanup
 # Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —
 # they are injected at runtime by bao_spark_init.py from OpenBao.
 RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.conf" << 'EOF'
-# ── Gluten + Velox native execution (OPT-IN) ─────────────────────────────────
-# Gluten is disabled by default. To enable it for a job set:
-#   ENABLE_GLUTEN=1 starpump snowflake
-# or pass spark.plugins at session creation.
-# The off-heap reservation below is ONLY meaningful when Gluten is active —
-# bao_spark_init.py enables it conditionally based on ENABLE_GLUTEN.
+# ── Gluten + Velox native execution (DEFAULT ON) ─────────────────────────────
+# Gluten is ALWAYS ACTIVE on this cluster — bao_spark_init.py loads
+# GlutenPlugin and enables off-heap (2g) for every job by default.
+# To disable for one run: DISABLE_GLUTEN=1 starpump snowflake
+spark.plugins                                        io.glutenproject.GlutenPlugin
 spark.gluten.sql.columnar.backend.lib                velox
 spark.gluten.loadLibFromJar                          true
+spark.memory.offHeap.enabled                         true
+spark.memory.offHeap.size                            2g
 
 # ── SQL extensions (Iceberg only — Delta added per-session if needed) ─────────
 spark.sql.extensions                                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions

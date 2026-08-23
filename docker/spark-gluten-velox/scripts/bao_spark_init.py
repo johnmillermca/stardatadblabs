@@ -231,23 +231,27 @@ class BaoSparkInit:
         conf.set("spark.driver.extraJavaOptions",   _opens)
         conf.set("spark.executor.extraJavaOptions", _opens)
 
-        # ── Gluten + Velox opt-in (default: disabled) ─────────────────────────
-        # Set ENABLE_GLUTEN=1 to activate the Gluten columnar engine.
-        # When enabled:
+        # ── Gluten + Velox (DEFAULT: always enabled) ──────────────────────────
+        # Gluten/Velox columnar native execution is ON by default for every
+        # Spark job on this cluster.  Set DISABLE_GLUTEN=1 to turn it off for
+        # a specific run (e.g. debugging, compatibility testing).
+        #
+        # When enabled (default):
         #   - spark.plugins loads GlutenPlugin (Velox backend)
-        #   - off-heap is enabled (2g per executor — requires 8 GB worker pods)
-        # When disabled (default):
-        #   - spark.plugins is cleared so no ClassNotFoundException at startup
+        #   - off-heap memory: 2g per executor (workers are 8 GB; safe headroom)
+        # When disabled (DISABLE_GLUTEN=1):
+        #   - spark.plugins is cleared — no ClassNotFoundException at startup
         #   - off-heap is not reserved (frees ~2 GB per executor for heap use)
-        _gluten_enabled = os.environ.get("ENABLE_GLUTEN", "0") == "1"
-        if _gluten_enabled:
-            logger.info("Gluten/Velox enabled (ENABLE_GLUTEN=1).")
-            conf.set("spark.plugins", "io.glutenproject.GlutenPlugin")
+        _gluten_disabled = os.environ.get("DISABLE_GLUTEN", "0") == "1"
+        if not _gluten_disabled:
+            logger.info("Gluten/Velox enabled (default — set DISABLE_GLUTEN=1 to turn off).")
+            conf.set("spark.plugins",                         "io.glutenproject.GlutenPlugin")
             conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
-            conf.set("spark.memory.offHeap.enabled", "true")
-            conf.set("spark.memory.offHeap.size",    "2g")
+            conf.set("spark.memory.offHeap.enabled",          "true")
+            conf.set("spark.memory.offHeap.size",             "2g")
         else:
-            conf.set("spark.plugins", "")
+            logger.info("Gluten/Velox DISABLED (DISABLE_GLUTEN=1).")
+            conf.set("spark.plugins",                "")
             conf.set("spark.memory.offHeap.enabled", "false")
 
         # ── Iceberg extension ──────────────────────────────────────────────────
