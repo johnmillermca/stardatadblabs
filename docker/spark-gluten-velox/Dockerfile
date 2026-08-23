@@ -44,6 +44,10 @@ COPY jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
 # The JVM self-corrects so there is no functional impact, but the warning is
 # noise. We patch the ELF PT_GNU_STACK header directly in Python (flags &= ~1)
 # and repack the .so back into the JAR — no execstack/objcopy version required.
+#
+# IMPORTANT: native .so files MUST be stored uncompressed (ZIP_STORED) so the
+# JVM can memory-map them directly from the JAR. All other entries preserve
+# their original compression method from the source JAR.
 RUN python3 - <<'PYEOF'
 import zipfile, os, struct, tempfile
 JAR = '/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar'
@@ -61,11 +65,13 @@ def clear_execstack(raw):
     return bytes(data)
 with tempfile.NamedTemporaryFile(suffix='.jar', delete=False) as t:
     tmp = t.name
-with zipfile.ZipFile(JAR, 'r') as zin, zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+with zipfile.ZipFile(JAR, 'r') as zin, zipfile.ZipFile(tmp, 'w') as zout:
     for item in zin.infolist():
         raw = zin.read(item.filename)
         if item.filename == 'libvelox.so':
             raw = clear_execstack(raw)
+            # Native libs must be uncompressed so the JVM can mmap them
+            item.compress_type = zipfile.ZIP_STORED
         zout.writestr(item, raw)
 os.replace(tmp, JAR)
 print('libvelox.so execstack bit cleared and repacked into Gluten JAR.')
