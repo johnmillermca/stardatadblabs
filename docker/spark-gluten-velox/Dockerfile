@@ -115,16 +115,10 @@ RUN chmod 644 /opt/spark/work-dir/*.py
 # ── CLI entry-points ──────────────────────────────────────────────────────────
 # starpump: thin wrapper so the pipeline runs without an explicit path.
 #   kubectl exec ... -- env KEY=VAL ... starpump snowflake
-# The JVM emits a harmless execstack warning from the centos_7 Velox build;
-# it is suppressed here by redirecting stderr through grep -v before display.
-# stdout (INFO/WARN log lines) is unaffected. Exit code is preserved.
-RUN printf '#!/bin/bash\n\
-# Filter the harmless JVM execstack warning from Velox native lib.\n\
-# stderr is piped through grep -v; stdout passes through unchanged.\n\
-# bash pipefail+PIPESTATUS preserves the python3 exit code exactly.\n\
-set -o pipefail\n\
-python3 /opt/spark/work-dir/snowflake_to_iceberg.py "$@" \\\n\
-  2> >(grep -v "disabled stack guard\\|fix the library\\|execstack -c\\|-z noexecstack" >&2)\n' \
+# NOTE: the centos_7 Velox build prints a harmless JVM execstack warning once
+# per pod lifetime (on first Velox load). The JVM self-corrects immediately.
+# It cannot be suppressed without risking broken job execution — accept it.
+RUN printf '#!/bin/sh\nexec python3 /opt/spark/work-dir/snowflake_to_iceberg.py "$@"\n' \
     > /usr/local/bin/starpump \
     && chmod 755 /usr/local/bin/starpump \
     && ln -sf /usr/local/bin/starpump /usr/local/bin/snowflake-to-iceberg
