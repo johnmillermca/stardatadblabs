@@ -15,10 +15,11 @@
 7. [D/E — Snowflake Iceberg Table & Refresh Jobs](#de--snowflake-iceberg-table--refresh-jobs)
 8. [F — Doris Iceberg Catalog & 1-Minute Warm-up](#f--doris-iceberg-catalog--1-minute-warm-up)
 9. [Doris Write to Iceberg](#doris-write-to-iceberg)
-10. [Token Refresh CronJob (OpenBao-aware)](#token-refresh-cronjob-openbao-aware)
-11. [OpenBao Secret Management](#openbao-secret-management)
-12. [Troubleshooting](#troubleshooting)
-13. [Key Files](#key-files)
+10. [**G — Adding a New Iceberg Table (Spark → Snowflake)**](#g--adding-a-new-iceberg-table-spark--snowflake)
+11. [Token Refresh CronJob (OpenBao-aware)](#token-refresh-cronjob-openbao-aware)
+12. [OpenBao Secret Management](#openbao-secret-management)
+13. [Troubleshooting](#troubleshooting)
+14. [Key Files](#key-files)
 
 ---
 
@@ -339,6 +340,209 @@ SELECT * FROM my_staging_table;
 > ```python
 > spark.sql("DELETE FROM polaris.lakehouse.events WHERE <condition>")
 > ```
+
+---
+
+## G — Adding a New Iceberg Table (Spark → Snowflake)
+
+Follow these steps in order every time you need to create a new Iceberg table in Spark and expose it in Snowflake.
+
+> **Prerequisite:** You must hold the `iceberg_engineer` role. Verify with:
+> ```bash
+> rbacctl user roles <your-username>
+> ```
+
+---
+
+### Step 1 — Create the Iceberg table in Spark
+
+Open JupyterHub (`http://192.168.1.50:30080`) or submit a job and run the DDL. Replace `<namespace>`, `<table>`, and the column list with your values.
+
+```python
+from pyspark.sql import SparkSession
+import os
+
+spark = SparkSession.builder \
+    .appName("NewTableSetup") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.polaris",
+            "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.polaris.type",       "rest") \
+    .config("spark.sql.catalog.polaris.uri",
+            "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog") \
+    .config("spark.sql.catalog.polaris.credential",
+            "<spark_svc_id>:<spark_svc_secret>")   # from OpenBao secret/platform/polaris \
+    .config("spark.sql.catalog.polaris.warehouse",  "spark_lakehouse") \
+    .config("spark.sql.catalog.polaris.scope",      "PRINCIPAL_ROLE:ALL") \
+    .config("spark.hadoop.fs.s3a.access.key",
+            os.environ["AWS_ACCESS_KEY_ID"]) \
+    .config("spark.hadoop.fs.s3a.secret.key",
+            os.environ["AWS_SECRET_ACCESS_KEY"]) \
+    .config("spark.hadoop.fs.s3a.endpoint",
+            "https://s3.us-east-2.amazonaws.com") \
+    .config("spark.hadoop.fs.s3a.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .getOrCreate()
+
+CATALOG   = "polaris"
+NAMESPACE = "<namespace>"   # e.g. "lakehouse"
+TABLE     = "<table>"       # e.g. "orders"
+
+spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{NAMESPACE}")
+
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {CATALOG}.{NAMESPACE}.{TABLE} (
+        -- replace with your columns
+        id         BIGINT,
+        event_type STRING,
+        ts         TIMESTAMP
+    )
+    USING iceberg
+    PARTITIONED BY (hours(ts))
+    TBLPROPERTIES (
+        'write.format.default'            = 'parquet',
+        'write.parquet.compression-codec' = 'snappy',
+        'write.target-file-size-bytes'    = '2684354'
+    )
+    LOCATION 's3a://xdatatoiceberg1/warehouse/{NAMESPACE}/{TABLE}'
+""")
+
+spark.sql(f"DESCRIBE EXTENDED {CATALOG}.{NAMESPACE}.{TABLE}").show(truncate=False)
+spark.stop()
+```
+
+---
+
+### Step 2 — Write initial data (or verify the table exists)
+
+Load data using Spark before registering the table in Snowflake. Snowflake requires at least one committed Iceberg snapshot (i.e., at least one `metadata.json` file on S3).
+
+```python
+# Append data
+df.writeTo(f"{CATALOG}.{NAMESPACE}.{TABLE}") \
+  .option("write.target-file-size-bytes", "2684354") \
+  .append()
+
+# Confirm rows
+spark.sql(f"SELECT COUNT(*) FROM {CATALOG}.{NAMESPACE}.{TABLE}").show()
+```
+
+---
+
+### Step 3 — Find the latest Iceberg metadata file on S3
+
+Snowflake's `CREATE ICEBERG TABLE` requires the exact path of the latest `metadata.json` snapshot.
+
+```bash
+aws s3 ls s3://xdatatoiceberg1/warehouse/<namespace>/<table>/metadata/ \
+  --region us-east-2 | sort | tail -1
+# Copy the filename — e.g. 00001-abc123.metadata.json
+```
+
+---
+
+### Step 4 — Register the table in Snowflake
+
+Run the following in the Snowflake Worksheet (`https://app.snowflake.com/oqihhtj/ta50603/`) as `ACCOUNTADMIN`.
+
+The **External Volume** (`iceberg_s3_vol`) and **Catalog Integration** (`iceberg_object_store`) already exist — do **not** recreate them.
+
+```sql
+USE ROLE ACCOUNTADMIN;
+USE DATABASE LAKEHOUSE_DB;
+
+-- Create a schema for the new table (skip if reusing an existing schema)
+CREATE SCHEMA IF NOT EXISTS <SCHEMA_NAME>;   -- e.g. ORDERS
+USE SCHEMA <SCHEMA_NAME>;
+
+-- Register the Iceberg table using the metadata file found in Step 3
+-- BASE_LOCATION is relative to the external volume root:
+--   s3://xdatatoiceberg1/warehouse/  +  <namespace>/<table>/
+CREATE OR REPLACE ICEBERG TABLE <table>
+    CATALOG           = 'iceberg_object_store'
+    EXTERNAL_VOLUME   = 'iceberg_s3_vol'
+    BASE_LOCATION     = '<namespace>/<table>/'
+    METADATA_FILE_PATH = 'metadata/<filename-from-step-3>.metadata.json';
+
+-- Verify
+SELECT COUNT(*) FROM <table>;
+```
+
+---
+
+### Step 5 — Schedule hourly metadata refresh
+
+When Spark writes new data the metadata pointer on S3 advances. Create a Snowflake task to re-read it every hour.
+
+```sql
+USE ROLE ACCOUNTADMIN;
+USE DATABASE LAKEHOUSE_DB;
+USE SCHEMA <SCHEMA_NAME>;
+
+CREATE OR REPLACE TASK refresh_<table>
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE  = 'USING CRON 0 * * * * UTC'
+    COMMENT   = 'Hourly Iceberg metadata refresh — <namespace>.<table> via S3 OBJECT_STORE'
+AS
+    ALTER ICEBERG TABLE LAKEHOUSE_DB.<SCHEMA_NAME>.<table> REFRESH;
+
+-- Tasks start SUSPENDED — must explicitly RESUME
+ALTER TASK refresh_<table> RESUME;
+
+-- Confirm state = started
+SHOW TASKS LIKE 'refresh_<table>';
+```
+
+---
+
+### Step 6 — Grant Snowflake RBAC
+
+```sql
+GRANT USAGE  ON DATABASE LAKEHOUSE_DB              TO ROLE iceberg_engineer_sf;
+GRANT USAGE  ON SCHEMA   LAKEHOUSE_DB.<SCHEMA_NAME> TO ROLE iceberg_engineer_sf;
+GRANT SELECT ON TABLE    LAKEHOUSE_DB.<SCHEMA_NAME>.<table> TO ROLE iceberg_engineer_sf;
+
+GRANT USAGE  ON DATABASE LAKEHOUSE_DB              TO ROLE analyst_sf;
+GRANT USAGE  ON SCHEMA   LAKEHOUSE_DB.<SCHEMA_NAME> TO ROLE analyst_sf;
+GRANT SELECT ON TABLE    LAKEHOUSE_DB.<SCHEMA_NAME>.<table> TO ROLE analyst_sf;
+```
+
+---
+
+### Step 7 — Verify end-to-end
+
+```sql
+-- In Snowflake: confirm row count matches Spark output from Step 2
+SELECT COUNT(*) FROM LAKEHOUSE_DB.<SCHEMA_NAME>.<table>;
+
+-- Force an immediate out-of-schedule refresh if needed
+ALTER ICEBERG TABLE LAKEHOUSE_DB.<SCHEMA_NAME>.<table> REFRESH;
+
+-- Check last task run
+SELECT name, state, scheduled_time, completed_time, error_code
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START => DATEADD('hour', -1, CURRENT_TIMESTAMP),
+    TASK_NAME => 'refresh_<table>'
+))
+ORDER BY scheduled_time DESC LIMIT 5;
+```
+
+---
+
+### Re-register after many new Spark snapshots
+
+If the metadata file pointer drifts too far from the registered snapshot, refresh will fail. Re-register by pointing to the latest file (from Step 3) and then resume the task:
+
+```sql
+CREATE OR REPLACE ICEBERG TABLE <table>
+    CATALOG           = 'iceberg_object_store'
+    EXTERNAL_VOLUME   = 'iceberg_s3_vol'
+    BASE_LOCATION     = '<namespace>/<table>/'
+    METADATA_FILE_PATH = 'metadata/<latest-file>.metadata.json';
+
+ALTER TASK refresh_<table> RESUME;
+```
 
 ---
 

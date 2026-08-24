@@ -90,7 +90,7 @@ CREATE OR REPLACE TASK refresh_lakehouse_events
 AS
     ALTER ICEBERG TABLE LAKEHOUSE_DB.EVENTS.events REFRESH;
 
-ALTER TASK refresh_lakehouse_events RESUME;
+ALTER TASK refresh_lakehouse_events SUSPEND;
 
 SHOW TASKS LIKE 'refresh_lakehouse_events';
 -- Confirm state = started
