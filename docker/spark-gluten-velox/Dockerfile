@@ -36,6 +36,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
      /opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar
 
+# ── Silence JVM execstack warning from libvelox.so ───────────────────────────
+# The centos_7 Velox build has PT_GNU_STACK flags=0x7 (rwx). At runtime JDK 17
+# prints: "OpenJDK warning: loaded libvelox.so ... disabled stack guard."
+# Fix: clear the PF_X bit (0x7 → 0x6) in the ELF header inside the JAR.
+# Each entry is written back with its original compress_type so the JAR
+# structure is identical to the source — only the 4-byte flags field changes.
+RUN python3 - <<'PYEOF'
+import zipfile, os, struct, tempfile
+JAR = '/opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar'
+def clear_execstack(raw):
+    data = bytearray(raw)
+    e_phoff     = struct.unpack_from('<Q', data, 32)[0]
+    e_phentsize = struct.unpack_from('<H', data, 54)[0]
+    e_phnum     = struct.unpack_from('<H', data, 56)[0]
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        if struct.unpack_from('<I', data, off)[0] == 0x6474e551:  # PT_GNU_STACK
+            flags = struct.unpack_from('<I', data, off+4)[0]
+            struct.pack_into('<I', data, off+4, flags & ~0x1)     # clear PF_X
+            print(f'PT_GNU_STACK: 0x{flags:03x} -> 0x{flags & ~0x1:03x}')
+    return bytes(data)
+with tempfile.NamedTemporaryFile(suffix='.jar', delete=False) as t:
+    tmp = t.name
+with zipfile.ZipFile(JAR, 'r') as zin, zipfile.ZipFile(tmp, 'w') as zout:
+    for item in zin.infolist():
+        raw = zin.read(item.filename)
+        if item.filename == 'libvelox.so':
+            raw = clear_execstack(raw)
+        zout.writestr(item, raw, compress_type=item.compress_type)
+os.replace(tmp, JAR)
+print('libvelox.so execstack bit cleared — warning will no longer appear.')
+PYEOF
+
 COPY jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar \
      /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar
 
