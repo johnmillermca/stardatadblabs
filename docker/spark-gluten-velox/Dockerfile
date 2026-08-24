@@ -32,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+COPY jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
+     /opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar
+
 COPY jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar \
      /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar
 
