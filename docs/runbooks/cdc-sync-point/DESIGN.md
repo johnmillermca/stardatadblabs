@@ -190,13 +190,17 @@ in the redo log from which to begin streaming.
 
 ---
 
-## 6. Generic Pattern (Any SF Database/Schema)
+## 6. Generic Pattern (Any Source Database/Schema)
 
-This design is **not** TPC-DS specific.  For any `SF_DATABASE` / `SF_SCHEMA`:
+This design is **not** TPC-DS specific.  For any `DATABASE` / `SCHEMAS`:
 
-1. Run `snowflake_to_iceberg.py` with the appropriate env vars:
+1. Run `starpump` with the appropriate env vars:
    ```bash
-   SF_DATABASE=MY_DB SF_SCHEMA=MY_SCHEMA python3 snowflake_to_iceberg.py
+   kubectl exec -n prod $MASTER -c spark-master -- \
+     env USER=dave TOKEN="$TOKEN" \
+         ADDR="http://openbao.prod.svc.cluster.local:8200" \
+         DATABASE=MY_DB SCHEMAS=MY_SCHEMA \
+     starpump snowflake
    ```
 2. After completion, query watermarks:
    ```sql

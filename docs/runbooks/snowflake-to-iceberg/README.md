@@ -1,7 +1,7 @@
 # Snowflake → Iceberg Copy Pipeline — Runbook
 
-**Script:** `snowflake_to_iceberg.py`  
-**Last verified:** 2026-08-18  
+**CLI:** `starpump snowflake`
+**Last verified:** 2026-08-18
 **Validated table:** `TPCDS_SF10TCL.income_band` → `polaris.tpcds_sf10tcl.income_band` (20 rows ✓)
 
 ---
@@ -34,8 +34,8 @@ Every table gets:
 | Requirement | Detail |
 |---|---|
 | Running inside the cluster | Script must run on `spark-master` pod (`-c spark-master`) |
-| SPARK_USER | Must be `dave` (has `can_admin_catalog=true`, `can_write_iceberg=true`) |
-| OpenBao token | `BAO_TOKEN` or K8s SA JWT with role `platform-secrets-read` |
+| USER | Must be `dave` (has `can_admin_catalog=true`, `can_write_iceberg=true`) |
+| OpenBao token | `TOKEN` env-var or K8s SA JWT with role `platform-secrets-read` |
 | Polaris namespace | `tpcds_sf10tcl` already exists (created on first run) |
 
 ---
@@ -44,24 +44,20 @@ Every table gets:
 
 ```bash
 # 1. Get the spark-master pod name
-MASTER=$(kubectl get pod -n prod -l app=spark,component=master \
+MASTER=$(kubectl get pod -n prod -l component=master \
   -o jsonpath='{.items[0].metadata.name}')
 
-# 2. Get OpenBao root token (or use your own BAO_TOKEN)
-BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+# 2. Get OpenBao root token
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
   -o jsonpath='{.data.root-token}' | base64 -d)
 
-# 3. Copy the scripts onto the pod
-for f in bao_spark_init.py spark_iceberg_utils.py snowflake_to_iceberg.py; do
-  kubectl cp docs/runbooks/snowflake-to-iceberg/$f \
-    prod/$MASTER:/opt/spark/work-dir/$f -c spark-master
-done
+# 3. Scripts are baked into the image at /opt/spark/work-dir/ — no copy needed.
 
-# 4. Run — copies all tables ≤ 3 GB (default)
+# 4. Run — copies all tables ≤ 3 GB (default 8 threads)
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  starpump snowflake
 ```
 
 ---
@@ -70,11 +66,11 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 | Variable | Default | Description |
 |---|---|---|
-| `SPARK_USER` | `dave` | Running user — must have Iceberg write permissions |
-| `BAO_ADDR` | `http://openbao.prod.svc.cluster.local:8200` | OpenBao address |
-| `BAO_TOKEN` | _(K8s SA JWT)_ | Token override for dev/bootstrap |
-| `SF_DATABASE` | `SNOWFLAKE_SAMPLE_DATA` | Snowflake source database |
-| `SF_SCHEMA` | `TPCDS_SF10TCL` | Snowflake source schema |
+| `USER` | `dave` | Running user — must have Iceberg write permissions |
+| `ADDR` | `http://openbao.prod.svc.cluster.local:8200` | OpenBao address |
+| `TOKEN` | _(K8s SA JWT)_ | Token override for dev/bootstrap |
+| `DATABASE` | `SNOWFLAKE_SAMPLE_DATA` | Source database name |
+| `SCHEMAS` | `TPCDS_SF10TCL` | Source schema name |
 | `ICEBERG_CATALOG` | `polaris` | Target Spark/Iceberg catalog name |
 | `S3_BUCKET` | _(from OpenBao)_ | Override S3 bucket |
 | **`INCLUDE_TABLES`** | _(all)_ | Comma-separated allowlist — only these tables are copied |
@@ -83,7 +79,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 | **`MAX_TABLE_SIZE_GB`** | `3.0` | Auto-exclude tables larger than this. Set `0` to disable |
 | `DRY_RUN` | `0` | Set `1` to create Iceberg DDL without copying data |
 | `BATCH_SIZE` | `100000` | Rows per Snowflake batch / Iceberg commit |
-| `MAX_THREADS` | `8` | Parallel copy threads (one table per thread) |
+| `MAX_THREADS` | `8` | Parallel copy threads — overridden by `--threads N` on the CLI |
 
 ---
 
@@ -127,27 +123,30 @@ Before copying, the pipeline prints a full inventory:
 ### Copy a single table
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
       INCLUDE_TABLES=income_band \
       MAX_TABLE_SIZE_GB=0 \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+  starpump snowflake
 ```
 
 ### Copy a specific set of tables
 ```bash
-INCLUDE_TABLES=customer,item,store,date_dim,promotion \
-  MAX_TABLE_SIZE_GB=0 \
-  ...
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+      INCLUDE_TABLES=customer,item,store,date_dim,promotion \
+      MAX_TABLE_SIZE_GB=0 \
+  starpump snowflake
 ```
 
 ### Copy all tables under 3 GB (default — skips large fact tables)
 ```bash
 # No INCLUDE_TABLES needed — MAX_TABLE_SIZE_GB=3.0 is the default
-kubectl exec ... -- \
-  env SPARK_USER=dave BAO_TOKEN="$BAO_TOKEN" \
-      BAO_ADDR="http://openbao.prod.svc.cluster.local:8200" \
-  python3 /opt/spark/work-dir/snowflake_to_iceberg.py
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  starpump snowflake
 ```
 
 ### Copy all tables including large fact tables (raise cap to 50 GB)
@@ -178,11 +177,29 @@ INCLUDE_TABLES=customer,item,store_sales,web_sales \
 DRY_RUN=1 ...
 ```
 
-### Different Snowflake schema
+### Different database / schema
 ```bash
-SF_DATABASE=MY_DB SF_SCHEMA=MY_SCHEMA \
-  ICEBERG_CATALOG=polaris \
-  MAX_TABLE_SIZE_GB=5 ...
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+      DATABASE=MY_DB SCHEMAS=MY_SCHEMA \
+      ICEBERG_CATALOG=polaris \
+      MAX_TABLE_SIZE_GB=5 \
+  starpump snowflake
+```
+
+### Use more parallel threads (e.g. 16 or 32)
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  starpump snowflake --threads 16
+
+# or 32:
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  starpump snowflake --threads 32
 ```
 
 ---
@@ -274,7 +291,11 @@ WHERE source_db='SNOWFLAKE_SAMPLE_DATA'
 
 Then re-run:
 ```bash
-INCLUDE_TABLES=income_band python3 snowflake_to_iceberg.py
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      ADDR="http://openbao.prod.svc.cluster.local:8200" \
+      INCLUDE_TABLES=income_band MAX_TABLE_SIZE_GB=0 \
+  starpump snowflake
 ```
 
 ---

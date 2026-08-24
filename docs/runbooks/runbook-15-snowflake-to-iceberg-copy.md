@@ -19,13 +19,13 @@ managed by the Polaris REST catalog, stored on AWS S3, and queryable from both
 Apache Doris and JupyterHub.
 
 ```
-Snowflake                     Spark (k8s)               Polaris + S3
-─────────────────────         ─────────────────────      ─────────────────────
-SNOWFLAKE_SAMPLE_DATA  ──►   snowflake_to_iceberg.py ──► s3://xdatatoiceberg1/
-  TPCDS_SF10TCL                8 threads                   iceberg/tpcds_sf10tcl/
-  24 tables                    50 000 row batches           *.parquet (snappy)
-                                                           hourly + 4 hash parts
-                                                           snap_timestamp / snap_id
+Snowflake                     Spark (k8s)                  Polaris + S3
+─────────────────────         ──────────────────────────   ─────────────────────
+SNOWFLAKE_SAMPLE_DATA  ──►   starpump snowflake         ──► s3://xdatatoiceberg1/
+  TPCDS_SF10TCL                8 threads (default)           iceberg/tpcds_sf10tcl/
+  24 tables                    --threads 16/32 to scale       *.parquet (snappy)
+                               100 000 row batches            hourly + 4 hash parts
+                                                              snap_timestamp / snap_id
 ```
 
 ---
@@ -39,7 +39,7 @@ SNOWFLAKE_SAMPLE_DATA  ──►   snowflake_to_iceberg.py ──► s3://xdatat
 | `bao_spark_init.py` | Reads ALL credentials from OpenBao at runtime; builds `SparkConf` |
 | `spark_iceberg_utils.py` | Global `IcebergTableBuilder` — injects `snap_timestamp` + `snap_id` into every table |
 | `spark-defaults-configmap.yaml` | K8s ConfigMap delivering `spark-defaults.conf` to spark pods |
-| `snowflake_to_iceberg.py` | 8-thread copy app with RBAC guard + catalog existence guard |
+| `snowflake_to_iceberg.py` | `starpump` entry point — dynamic source routing, N-thread copy with resume |
 
 ### 2.2 Security model
 
@@ -52,10 +52,9 @@ SNOWFLAKE_SAMPLE_DATA  ──►   snowflake_to_iceberg.py ──► s3://xdatat
   | `secret/platform/polaris` | `spark_svc_id`, `spark_svc_secret` |
 
 - OpenBao auth: K8s SA JWT (role `platform-secrets-read`) → in-cluster pods;
-  `BAO_TOKEN` env-var for local / bootstrap use only.
+  `TOKEN` env-var for local / bootstrap use only.
 - **RBAC**: only users `bob` and `dave` (`can_admin_catalog=true`,
-  `can_write_iceberg=true`) may run the copy job. Enforced in
-  `snowflake_to_iceberg.py::_assert_rbac()`.
+  `can_write_iceberg=true`) may run the copy job.
 
 ### 2.3 Iceberg table layout
 
@@ -85,20 +84,20 @@ kubectl get pods -n prod | grep spark  # confirm spark-master + spark-worker run
 
 ```bash
 # Get root token (admin bootstrap only — never hard-code)
-BAO_ROOT=$(kubectl get secret openbao-unseal-keys -n prod \
-           -o jsonpath='{.data.root-token}' | base64 -d)
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+        -o jsonpath='{.data.root-token}' | base64 -d)
 
-BAO_ADDR=http://192.168.1.50:30820
+ADDR=http://192.168.1.50:30820
 
 # Check all three secret paths
-curl -s -H "X-Vault-Token: $BAO_ROOT" \
-  $BAO_ADDR/v1/secret/platform/snowflake | python3 -m json.tool | grep -E '"user"|"account"'
+curl -s -H "X-Vault-Token: $TOKEN" \
+  $ADDR/v1/secret/platform/snowflake | python3 -m json.tool | grep -E '"user"|"account"'
 
-curl -s -H "X-Vault-Token: $BAO_ROOT" \
-  $BAO_ADDR/v1/secret/platform/s3 | python3 -m json.tool | grep '"bucket"'
+curl -s -H "X-Vault-Token: $TOKEN" \
+  $ADDR/v1/secret/platform/s3 | python3 -m json.tool | grep '"bucket"'
 
-curl -s -H "X-Vault-Token: $BAO_ROOT" \
-  $BAO_ADDR/v1/secret/platform/polaris | python3 -m json.tool | grep '"spark_svc_id"'
+curl -s -H "X-Vault-Token: $TOKEN" \
+  $ADDR/v1/secret/platform/polaris | python3 -m json.tool | grep '"spark_svc_id"'
 ```
 
 Expected output contains `"account"`, `"bucket"`, and `"spark_svc_id"` keys.
@@ -207,21 +206,17 @@ Expected output includes `spark.sql.catalog.polaris` and
 
 ## 5. Running the Copy Job
 
-### 5.1 Copy helper scripts to spark-master
+### 5.1 Locate the spark-master pod
 
 ```bash
-# Copy all helper modules into spark-master
-SPARK_POD=$(kubectl get pod -n prod -l app=spark-master \
+# Scripts are baked into the image — no copy needed.
+SPARK_POD=$(kubectl get pod -n prod -l component=master \
             -o jsonpath='{.items[0].metadata.name}')
 
-kubectl cp docs/runbooks/snowflake-to-iceberg/bao_spark_init.py \
-  prod/$SPARK_POD:/tmp/bao_spark_init.py
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+        -o jsonpath='{.data.root-token}' | base64 -d)
 
-kubectl cp docs/runbooks/snowflake-to-iceberg/spark_iceberg_utils.py \
-  prod/$SPARK_POD:/tmp/spark_iceberg_utils.py
-
-kubectl cp docs/runbooks/snowflake-to-iceberg/snowflake_to_iceberg.py \
-  prod/$SPARK_POD:/tmp/snowflake_to_iceberg.py
+ADDR="http://openbao.prod.svc.cluster.local:8200"
 ```
 
 ### 5.2 Create Polaris namespace (first run only)
@@ -240,37 +235,54 @@ spark.sql("SHOW NAMESPACES IN polaris").show()
 spark.stop()
 ```
 
-### 5.3 Full copy (all 24 tables)
+### 5.3 Full copy (all 24 tables, default 8 threads)
 
 ```bash
-kubectl exec -n prod $SPARK_POD -- bash -c "
-  export SPARK_USER=bob
-  cd /tmp
-  python3 snowflake_to_iceberg.py
-"
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  starpump snowflake
 ```
 
 ### 5.4 Partial / targeted copy
 
 ```bash
 # Copy only customer and item tables
-kubectl exec -n prod $SPARK_POD -- bash -c "
-  export SPARK_USER=bob
-  export TABLES=customer,item
-  cd /tmp
-  python3 snowflake_to_iceberg.py
-"
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      INCLUDE_TABLES=customer,item MAX_TABLE_SIZE_GB=0 \
+  starpump snowflake
 ```
 
 ### 5.5 Dry-run (create tables, no data)
 
 ```bash
-kubectl exec -n prod $SPARK_POD -- bash -c "
-  export SPARK_USER=bob
-  export DRY_RUN=1
-  cd /tmp
-  python3 snowflake_to_iceberg.py
-"
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      DRY_RUN=1 \
+  starpump snowflake
+```
+
+### 5.6 Scale up parallel threads
+
+```bash
+# 16 threads
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  starpump snowflake --threads 16
+
+# 32 threads
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  starpump snowflake --threads 32
+```
+
+### 5.7 Copy from a different database / schema
+
+```bash
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      DATABASE=MY_DB SCHEMAS=MY_SCHEMA \
+  starpump snowflake
 ```
 
 ---
@@ -385,12 +397,12 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: copy-job
-              image: 192.168.1.50:30500/apache/spark:3.5.1
-              command: ["python3", "/scripts/snowflake_to_iceberg.py"]
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+              command: ["starpump", "snowflake"]
               env:
-                - name: SPARK_USER
+                - name: USER
                   value: "bob"
-                - name: BAO_ADDR
+                - name: ADDR
                   value: "http://openbao.prod.svc.cluster.local:8200"
               volumeMounts:
                 - name: scripts
@@ -520,9 +532,8 @@ kubectl get cm spark-rbac-allowlist -n prod -o yaml
 | `iceberg-engineer` | ❌ | ✅ | ✅ |
 | `alice` | ❌ | ❌ | ❌ |
 
-Only `bob` and `dave` may run `snowflake_to_iceberg.py`. The script calls
-`_assert_rbac()` at startup and exits with `PermissionError` if the user is
-not in the admin list.
+Only `bob` and `dave` may run `starpump`. Pass `USER=<name>` to identify the
+running user; the pipeline reads RBAC from the `spark-rbac-allowlist` ConfigMap.
 
 To add a new user:
 
@@ -530,9 +541,6 @@ To add a new user:
 kubectl edit cm spark-rbac-allowlist -n prod
 # Add new_user: can_admin_catalog=true, can_submit=true, can_write_iceberg=true
 ```
-
-Then update `_assert_rbac()` in `snowflake_to_iceberg.py` to include the new
-user in the `allowed_admins` set, or refactor to read the ConfigMap at runtime.
 
 ---
 
@@ -552,11 +560,12 @@ kubectl exec -n prod deploy/spark-master -- \
 
 ### T2 — `PermissionError: RBAC check failed: user ''`
 
-`SPARK_USER` env-var not set.
+`USER` env-var not set.
 
 ```bash
-export SPARK_USER=bob
-python3 snowflake_to_iceberg.py
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  starpump snowflake
 ```
 
 ### T3 — Snowflake connector `ClassNotFoundException`
@@ -577,10 +586,12 @@ kubectl exec -n prod deploy/spark-master -- \
 # Check if K8s auth is enabled
 curl -s http://192.168.1.50:30820/v1/sys/auth | python3 -m json.tool | grep kubernetes
 
-# Or use root token override
-export BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
-                  -o jsonpath='{.data.root-token}' | base64 -d)
-python3 snowflake_to_iceberg.py
+# Use root token override
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+        -o jsonpath='{.data.root-token}' | base64 -d)
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" ADDR="http://openbao.prod.svc.cluster.local:8200" \
+  starpump snowflake
 ```
 
 ### T5 — `NoSuchTableException` on Polaris
@@ -592,7 +603,7 @@ The namespace `tpcds_sf10tcl` doesn't exist yet. Run Step 5.2.
 Verify the HMAC credentials are stored correctly in OpenBao:
 
 ```bash
-curl -s -H "X-Vault-Token: $BAO_TOKEN" \
+curl -s -H "X-Vault-Token: $TOKEN" \
   http://192.168.1.50:30820/v1/secret/platform/s3 | python3 -m json.tool
 ```
 
@@ -619,7 +630,7 @@ ALTER TABLE `polaris`.`tpcds_sf10tcl`.`<table>`
 | `docs/runbooks/snowflake-to-iceberg/spark_iceberg_utils.py` | Global Iceberg table builder — auto-injects snap columns |
 | `docs/runbooks/snowflake-to-iceberg/bao_spark_init.py` | OpenBao credential loader + SparkConf builder |
 | `docs/runbooks/snowflake-to-iceberg/spark-defaults-configmap.yaml` | K8s ConfigMap for `spark-defaults.conf` + Deployment patches |
-| `docs/runbooks/snowflake-to-iceberg/snowflake_to_iceberg.py` | 8-thread copy app |
+| `docs/runbooks/snowflake-to-iceberg/snowflake_to_iceberg.py` | `starpump` entry point — dynamic source routing, N-thread copy |
 | `rbac-plane/docs/iceberg-spark-setup/README.md` | Iceberg lakehouse runbook (initial setup) |
 | `rbac-plane/docs/iceberg-spark-setup/01_create_iceberg_table.py` | Initial Iceberg table creation script |
 | `rbac-plane/docs/iceberg-spark-setup/06_snowflake_iceberg_setup_and_refresh.sql` | Snowflake OBJECT_STORE table + task SQL |
@@ -639,16 +650,22 @@ kubectl apply -f docs/runbooks/snowflake-to-iceberg/spark-defaults-configmap.yam
 # Restart Spark pods
 kubectl rollout restart deployment spark-master spark-worker -n prod
 
-# Run full copy (as bob)
-export SPARK_USER=bob
-python3 /tmp/snowflake_to_iceberg.py
+# Run full copy (as bob, default 8 threads)
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  starpump snowflake
+
+# Run full copy with 16 threads
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  starpump snowflake --threads 16
 
 # Run dry-run
-export DRY_RUN=1 SPARK_USER=bob
-python3 /tmp/snowflake_to_iceberg.py
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" DRY_RUN=1 \
+  starpump snowflake
 
-# Check Iceberg tables in Polaris
-# (in Spark session)
+# Check Iceberg tables in Polaris (in Spark session)
 spark.sql("SHOW TABLES IN `polaris`.`tpcds_sf10tcl`").show(30)
 
 # Suspend Snowflake refresh task
