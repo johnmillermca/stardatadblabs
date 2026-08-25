@@ -639,6 +639,17 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 
 ## Phase 8 — Auto-classification scan (T-24 to T-28)
 
+> **`dry_run` is optional.** Setting `dry_run: true` previews what would be tagged without writing anything to PostgreSQL — safe to run as many times as you like. Setting `dry_run: false` is the live run that persists the column tags. You can skip straight to `false` if you are confident in the results. Note: `columns_tagged` will always be `0` in dry-run mode — it only increments on a live run.
+
+> **Pre-requisite — fix `salary` glossary patterns before scanning.** The default seed data includes an overly broad pattern for the `salary` term that causes false positives on `payment_id` and `payment_method`. Run this patch once before T-24/T-25:
+> ```bash
+> curl -sf -X PATCH $CATALOG_URL/api/v1/glossary/salary \
+>   -H "Authorization: Bearer $CATALOG_TOKEN" \
+>   -H 'Content-Type: application/json' \
+>   -d '{"column_name_patterns": ["salary","annual_salary","base_salary","gross_salary","net_salary","compensation","wage"]}' \
+>   | jq '{name, column_name_patterns}'
+> ```
+
 ### T-24 · Dry-run detects 8 sensitive columns in customers
 
 ```bash
@@ -647,10 +658,10 @@ curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H 'Content-Type: application/json' \
   -d '{"doris_database":"governance_demo","doris_table":"customers","dry_run":true}' | \
   jq '.tables_results[0] | {table:.doris_table, columns_tagged,
-      hits: [.results[] | select(.score >= 0.7) | {col:.column_name, term:.matched_term, score}]}'
+      hits: [.results[] | select(.score >= 0.7) | {col:.column_name, term:.matched_term, score:.score}]}'
 ```
 
-✅ **Pass:** `columns_tagged = 8`, hits contain: `full_name`, `email`, `phone_number`, `date_of_birth`, `national_id`, `street_address`, `ip_address`, `salary`
+✅ **Pass:** `columns_tagged = 0` (dry-run — nothing written), hits contain all 8 columns with score 1.0: `full_name`, `email`, `phone_number`, `date_of_birth`, `national_id`, `street_address`, `ip_address`, `salary`
 
 ---
 
@@ -662,10 +673,11 @@ curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H 'Content-Type: application/json' \
   -d '{"doris_database":"governance_demo","doris_table":"payments","dry_run":true}' | \
   jq '.tables_results[0] | {table:.doris_table, columns_tagged,
-      hits: [.results[] | select(.score >= 0.7) | {col:.column_name, term:.matched_term}]}'
+      hits: [.results[] | select(.score >= 0.7) | {col:.column_name, term:.matched_term, score:.score}]}'
 ```
 
-✅ **Pass:** `columns_tagged = 2`, hits: `card_number → credit_card_number`, `credit_card_cvv → credit_card_cvv`
+✅ **Pass:** `columns_tagged = 0` (dry-run), hits: `card_number → credit_card_number (1.0)`, `credit_card_cvv → credit_card_cvv (0.9)`
+❌ **Fail: seeing `payment_id → salary` or `payment_method → salary`** → the `salary` glossary term has broad patterns — run the pre-requisite patch above to fix them, then re-run this test.
 
 ---
 
