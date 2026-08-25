@@ -60,29 +60,50 @@
 | `mysql` client | Available on the operator workstation |
 | `curl` + `jq` | Available on the operator workstation |
 
+> **Note on `psql`:** The `psql` client may not be installed on the operator workstation. All PostgreSQL commands below include a `kubectl exec` alternative that requires no local client.
+
 ---
 
 ## Part A — First-Time Setup
 
-### A.1 — Create the PostgreSQL catalog database
+### A.1 — Create the PostgreSQL catalog database and user
+
+Connect to the PostgreSQL pod directly — no local `psql` install required:
 
 ```bash
-psql -h 192.168.1.50 -p 30532 -U postgres
+kubectl exec -n prod postgresql-0 -- psql -U postgres -c "
+  CREATE DATABASE star_catalog;
+  CREATE USER star_catalog WITH PASSWORD 'changeme';
+  GRANT ALL PRIVILEGES ON DATABASE star_catalog TO star_catalog;
+"
 ```
 
-```sql
-CREATE DATABASE star_catalog;
-CREATE USER star_catalog WITH PASSWORD 'your-secure-password';
-GRANT ALL PRIVILEGES ON DATABASE star_catalog TO star_catalog;
-\q
+> **Password note:** Replace `changeme` with a secure value. Whatever you set here must be used in A.3 when creating the Kubernetes Secret (`PG_PASSWORD`) and when running the migration in A.2 (`PGPASSWORD`).
+
+If you have `psql` installed on the workstation, the equivalent is:
+
+```bash
+PGPASSWORD=<postgres-superuser-password> psql -h 192.168.1.50 -p 30532 -U postgres -c "
+  CREATE DATABASE star_catalog;
+  CREATE USER star_catalog WITH PASSWORD 'changeme';
+  GRANT ALL PRIVILEGES ON DATABASE star_catalog TO star_catalog;
+"
 ```
 
 ### A.2 — Run the schema migration
 
 ```bash
-psql -h 192.168.1.50 -p 30532 \
-  -U star_catalog \
-  -d star_catalog \
+# Via kubectl exec (no local psql required)
+kubectl exec -i -n prod postgresql-0 -- \
+  psql -U star_catalog -d star_catalog \
+  < star-knowledge-catalog/migrations/001_schema_and_seed.sql
+```
+
+If `psql` is installed locally, use `PGPASSWORD` to avoid the interactive prompt:
+
+```bash
+PGPASSWORD=changeme psql -h 192.168.1.50 -p 30532 \
+  -U star_catalog -d star_catalog \
   -f star-knowledge-catalog/migrations/001_schema_and_seed.sql
 ```
 
@@ -93,9 +114,11 @@ This migration creates all tables, indexes, and seeds:
 - Classification-level and term-level masking policies
 - Role masking exceptions for data_admin, platform_admin, account_admin
 
-**Verify:**
+**Verify (via kubectl exec):**
+
 ```bash
-psql -h 192.168.1.50 -p 30532 -U star_catalog -d star_catalog \
+kubectl exec -n prod postgresql-0 -- \
+  psql -U star_catalog -d star_catalog \
   -c "SELECT name, sensitivity FROM data_classifications ORDER BY name;"
 ```
 
@@ -110,6 +133,58 @@ Expected output:
  PUBLIC        | low
 ```
 
+### A.3 — Create the `star-catalog-credentials` Kubernetes Secret
+
+The Star Catalog deployment mounts this secret via `envFrom`. It must exist before the pods will start.
+
+```bash
+kubectl create secret generic star-catalog-credentials \
+  --namespace prod \
+  --from-literal=PG_PASSWORD=changeme \
+  --from-literal=DORIS_ADMIN_PASSWORD='' \
+  --from-literal=MASTER_TOKEN=changeme-catalog-master-token \
+  --from-literal=JWT_SECRET=changeme-catalog-jwt-secret-min-32-chars! \
+  --from-literal=RBAC_PLANE_TOKEN=changeme-rbac-master-token
+```
+
+> **If you changed the password in A.1,** replace `changeme` above with the same password.  
+> To update an existing secret: `kubectl delete secret star-catalog-credentials -n prod` then re-run the command above.
+
+### A.4 — Apply the deployment and restart pods
+
+If ArgoCD manages this deployment it will reconcile automatically. Otherwise apply manually:
+
+```bash
+kubectl apply -f star-knowledge-catalog/manifests/star-catalog-deployment.yaml
+```
+
+Force a rollout so the pods pick up the newly created secret:
+
+```bash
+kubectl rollout restart deployment/star-knowledge-catalog -n prod
+kubectl rollout status deployment/star-knowledge-catalog -n prod --timeout=120s
+```
+
+**Verify pods are running:**
+
+```bash
+kubectl get pods -n prod -l app=star-knowledge-catalog \
+  --no-headers -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,READY:.status.containerStatuses[0].ready
+```
+
+Expected: 2 rows, both `Running` / `true`.
+
+**Verify health endpoint:**
+
+```bash
+curl -sf http://192.168.1.50:30860/health | jq .
+```
+
+Expected:
+```json
+{"status": "ok", "version": "1.0.0", "service": "star-knowledge-catalog"}
+```
+
 ---
 
 ## Part B — Create Sample Doris Database
@@ -117,7 +192,7 @@ Expected output:
 ### B.1 — Create the governance_demo database and tables
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   < star-knowledge-catalog/doris/001_create_schema.sql
 ```
 
@@ -133,23 +208,26 @@ This creates `governance_demo` with four tables:
 ### B.2 — Load synthetic seed data
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   < star-knowledge-catalog/doris/002_seed_data.sql
 ```
 
 This loads 20 customers, 40 orders, 40 payments, 10 products.
 
 **Verify:**
+
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "SELECT COUNT(*) FROM governance_demo.customers;"
 # Expected: 20
 ```
 
+> **`MYSQL_PWD=""` note:** Passing `MYSQL_PWD` as an environment variable suppresses the interactive password prompt when the root password is empty. Use `MYSQL_PWD=<password>` if you have set a root password.
+
 ### B.3 — Confirm Doris users were created
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "SELECT user, host FROM mysql.user WHERE user IN ('analyst','data_admin_user');"
 ```
 
@@ -207,7 +285,7 @@ Expected: `{"results":[{"username":"alice","service":"doris","status":"synced"}]
 ### C.5 — Verify alice exists in Doris
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "SHOW GRANTS FOR 'alice'@'%';"
 ```
 
@@ -315,7 +393,7 @@ Expected:
 ### D.6 — Verify masked views exist in Doris
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "SHOW TABLES IN governance_demo;" | grep masked
 ```
 
@@ -589,8 +667,8 @@ Typical result on 20-row demo dataset: **< 10 ms**. For production-scale dataset
 ### I.2 — Compare base vs masked view on the same query
 
 ```bash
-# Base table (data_admin)
-time mysql -h 192.168.1.50 -P 30090 -u root \
+# Base table (root / data_admin)
+time MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "USE governance_demo; SELECT customer_tier, COUNT(*) FROM customers GROUP BY customer_tier;"
 
 # Masked view (analyst)
@@ -605,7 +683,7 @@ Both queries should return in sub-second time. The masked view adds only:
 ### I.3 — Explain plan for masked view
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "EXPLAIN SELECT * FROM governance_demo.customers_masked WHERE country_code='US' LIMIT 100;"
 ```
 
@@ -685,7 +763,7 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
 
 | Error message | Fix |
 |---|---|
-| `Access denied for user 'root'@...` | Check `DORIS_ADMIN_PASSWORD` in the secret |
+| `Access denied for user 'root'@...` | Check `DORIS_ADMIN_PASSWORD` in the `star-catalog-credentials` secret |
 | `Unknown column 'xxx' in 'field list'` | Column was renamed or dropped; re-run scan with `overwrite_existing: true` |
 | `connect_timeout expired` | Doris FE is not reachable — check `kubectl get pods -n prod \| grep doris` |
 
@@ -704,7 +782,7 @@ curl -s -X POST http://192.168.1.50:30850/api/v1/sync \
   -d '{"username":"alice","service":"doris"}' | jq .
 
 # Manually grant masked views if sync doesn't include view grants
-mysql -h 192.168.1.50 -P 30090 -u root \
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
   -e "GRANT SELECT_PRIV ON governance_demo.customers_masked TO 'alice'@'%';
       GRANT SELECT_PRIV ON governance_demo.payments_masked  TO 'alice'@'%';
       GRANT SELECT_PRIV ON governance_demo.orders           TO 'alice'@'%';
@@ -743,6 +821,49 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -d '{"doris_database":"governance_demo","force":true}' | jq .
 ```
 
+### T7 — `star-catalog-credentials` secret not found
+
+**Symptom:** `kubectl describe pod` shows `secret "star-catalog-credentials" not found`; catalog pods stuck in `Pending` or `Error`.
+
+**Cause:** Part A.3 was not completed — the secret was never created.
+
+**Fix:** Run Part A.3 above, then A.4 to restart the deployment.
+
+```bash
+# Quick check — list what's actually in the secret
+kubectl get secret star-catalog-credentials -n prod \
+  -o jsonpath='{.data}' | python3 -c \
+  "import json,sys,base64; d=json.load(sys.stdin); [print(k,'=',base64.b64decode(v).decode()) for k,v in d.items()]"
+```
+
+### T8 — `psql: command not found`
+
+**Symptom:** Running `psql` locally returns `bash: psql: command not found`.
+
+**Option 1 — Install the client only (no server):**
+```bash
+sudo dnf install -y postgresql
+```
+
+**Option 2 — Use `kubectl exec` with no local install (always available):**
+```bash
+kubectl exec -n prod postgresql-0 -- \
+  psql -U star_catalog -d star_catalog \
+  -c "SELECT 'pg_ok' AS status;"
+```
+
+### T9 — Doris `mysql` client prompts for password when `DORIS_ROOT_PASS` is empty
+
+**Symptom:** Running `mysql -h ... -u root -p"$DORIS_ROOT_PASS"` with an empty password shows `Enter password:`.
+
+**Cause:** The `mysql` client treats `-p""` as "prompt interactively". Just press Enter to proceed — the connection succeeds with an empty password.
+
+**To suppress the prompt entirely**, use `MYSQL_PWD`:
+```bash
+MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
+  -e "SELECT 'doris_ok' AS status;"
+```
+
 ---
 
 ## Service Endpoints Summary
@@ -758,11 +879,13 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
 
 ## OpenBao Secret Paths
 
-| Secret | Path |
-|---|---|
-| Star Catalog credentials | `secret/data/star-catalog/credentials` |
-| Doris credentials | `secret/data/doris/credentials` |
-| PostgreSQL credentials | `secret/data/postgresql/credentials` |
+| Secret | Path | Notes |
+|---|---|---|
+| Doris credentials | `secret/data/doris/credentials` | Managed by `12-seed-openbao-secrets.sh` |
+| PostgreSQL credentials | `secret/data/postgresql/credentials` | Managed by `12-seed-openbao-secrets.sh` |
+| Star Catalog credentials | _not in OpenBao_ | Created manually via `kubectl create secret` in Part A.3 |
+
+> **Why isn't `star-catalog-credentials` in OpenBao?** The Star Catalog was added after the initial OpenBao seeding script. Its credentials are plain Kubernetes Secrets. To migrate them into OpenBao, add a stanza to `scripts/master/12-seed-openbao-secrets.sh` following the existing pattern.
 
 ---
 
