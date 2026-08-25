@@ -641,13 +641,36 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 
 > **`dry_run` is optional.** Setting `dry_run: true` previews what would be tagged without writing anything to PostgreSQL — safe to run as many times as you like. Setting `dry_run: false` is the live run that persists the column tags. You can skip straight to `false` if you are confident in the results. Note: `columns_tagged` will always be `0` in dry-run mode — it only increments on a live run.
 
-> **Pre-requisite — fix `salary` glossary patterns before scanning.** The default seed data includes an overly broad pattern for the `salary` term that causes false positives on `payment_id` and `payment_method`. Run this patch once before T-24/T-25:
+> **Pre-requisite — fix overly broad glossary patterns before scanning.** The default seed data contains two patterns that cause false positives. Run both patches once before T-24/T-25:
+>
+> **1 — `salary` term:** bare `"pay"` pattern matches `payment_id` and `payment_method`:
 > ```bash
 > curl -sf -X PATCH $CATALOG_URL/api/v1/glossary/salary \
 >   -H "Authorization: Bearer $CATALOG_TOKEN" \
 >   -H 'Content-Type: application/json' \
 >   -d '{"column_name_patterns": ["salary","annual_salary","base_salary","gross_salary","net_salary","compensation","wage"]}' \
 >   | jq '{name, column_name_patterns}'
+> ```
+>
+> **2 — `full_name` term:** bare `"name"` pattern matches `products.name` (a product name is not PII):
+> ```bash
+> curl -sf -X PATCH $CATALOG_URL/api/v1/glossary/full_name \
+>   -H "Authorization: Bearer $CATALOG_TOKEN" \
+>   -H 'Content-Type: application/json' \
+>   -d '{"column_name_patterns": ["full_name","fullname","first_name","last_name","firstname","lastname","given_name","surname","customer_name","person_name"]}' \
+>   | jq '{name, column_name_patterns}'
+> ```
+> If `products` already appears in `GET /api/v1/masking/views?database=governance_demo`, clean it up:
+> ```bash
+> # Delete the false-positive tag
+> curl -sf -X DELETE "$CATALOG_URL/api/v1/columns/governance_demo/products/name" \
+>   -H "Authorization: Bearer $CATALOG_TOKEN" | jq .ok
+> # Re-scan products to confirm zero tags
+> curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
+>   -H "Authorization: Bearer $CATALOG_TOKEN" \
+>   -H 'Content-Type: application/json' \
+>   -d '{"doris_database":"governance_demo","doris_table":"products","dry_run":false,"overwrite_existing":true}' | \
+>   jq '.tables_results[0] | {table:.doris_table, columns_tagged}'
 > ```
 
 ### T-24 · Dry-run detects 8 sensitive columns in customers

@@ -171,9 +171,9 @@ FROM (VALUES
   ('full_name', 'Full Name',
    'Full given name and/or family name of a person.',
    'PII',
-   ARRAY['full_name','fullname','name','first_name','last_name','firstname',
+   ARRAY['full_name','fullname','first_name','last_name','firstname',
          'lastname','given_name','surname','customer_name','person_name'],
-   ARRAY['name','person','first','last','given','family','surname']),
+   ARRAY['person','first','last','given','family','surname']),
 
   ('phone_number', 'Phone Number',
    'Telephone or mobile number of a person or business.',
@@ -225,9 +225,9 @@ FROM (VALUES
   ('salary', 'Salary / Compensation',
    'Total compensation or salary amount paid to an employee.',
    'CONFIDENTIAL',
-   ARRAY['salary','compensation','pay','wage','ctc','annual_pay',
+   ARRAY['salary','compensation','wage','ctc','annual_pay',
          'base_salary','gross_salary','net_salary','total_comp'],
-   ARRAY['salary','compensation','wage','pay','earnings','remuneration'])
+   ARRAY['salary','compensation','wage','earnings','remuneration'])
 ) AS t(name, display_name, description, class_name, col_patterns, desc_patterns)
 JOIN data_classifications c ON c.name = t.class_name
 ON CONFLICT (name) DO NOTHING;
