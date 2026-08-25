@@ -23,6 +23,8 @@ This directory contains detailed operational runbooks for every application depl
 | [11](runbook-11-kerberos-integration.md) | **Kerberos Client Auth Integration** | MIT Kerberos KDC — platform toggle, adding users, enabling GSSAPI on Kafka/OpenSearch/Spark, Doris identity alignment | 88 (KDC), 749 (kadmin) |
 | [12](runbook-12-rbac-new-user-testing.md) | **RBAC New User Setup & Verification** | RBAC Control Plane — add users, bind roles, sync to Doris/Kafka/OpenSearch/Spark, verify access, offboard users | 30850 |
 | [13](runbook-13-user-groups-and-access-testing.md) | **User Groups, Role Binding & Access Testing** | Kerberos onboarding, `platform_admin` / `data_engineer` / `account_admin` user groups, end-to-end access tests, negative test (no KDC principal) | 30850, 88 |
+| [16](runbook-16-data-governance-masking.md) | **Data Governance & Automatic Column Masking** | Star Knowledge Catalog — data classifications, business glossary, masking algorithms, auto column tagging, Doris masked views, role-aware query routing, performance validation | 30860, 30090 |
+| [17](runbook-17-star-catalog-e2e-testing.md) | **Star Knowledge Catalog: End-to-End Testing** | 52 ordered tests across 16 phases — infrastructure checks, auth, CRUD, auto-classify, masked view apply, role-routing, negative tests, performance, idempotency, and smoke-test one-liner | 30860, 30090, 30850 |
 
 ---
 
@@ -53,6 +55,8 @@ This directory contains detailed operational runbooks for every application depl
 | Apache Polaris REST | http://192.168.1.50:30181 | `catalog` |
 | RBAC Control Plane API | http://192.168.1.50:30850 | `prod` |
 | RBAC Control Plane Docs | http://192.168.1.50:30850/docs | `prod` |
+| Star Knowledge Catalog API | http://192.168.1.50:30860 | `prod` |
+| Star Knowledge Catalog Docs | http://192.168.1.50:30860/docs | `prod` |
 | Kestra UI | http://192.168.1.50:30880 | `orchestration` |
 | SQLMesh UI | http://192.168.1.50:30883 | `analytics` |
 | MCP Prometheus | http://192.168.1.50:30320/mcp | `monitoring` |

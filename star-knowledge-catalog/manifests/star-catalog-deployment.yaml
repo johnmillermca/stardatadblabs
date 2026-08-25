@@ -1,0 +1,145 @@
+---
+# ── Star Knowledge Catalog — Kubernetes Manifests ──────────────
+# Namespace: prod
+# NodePort: 30860  →  http://192.168.1.50:30860
+# API docs:  http://192.168.1.50:30860/docs
+
+# ── ConfigMap ──────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: star-catalog-config
+  namespace: prod
+  labels:
+    app: star-knowledge-catalog
+data:
+  PG_HOST: "postgresql.prod.svc.cluster.local"
+  PG_PORT: "5432"
+  PG_DB: "star_catalog"
+  PG_USER: "star_catalog"
+  PG_POOL_MAX: "20"
+  REDIS_URL: "redis://redis.prod.svc.cluster.local:6379/1"
+  CACHE_TTL: "60"
+  DORIS_HOST: "doris-fe.prod.svc.cluster.local"
+  DORIS_PORT: "9030"
+  DORIS_ADMIN_USER: "root"
+  DORIS_DEMO_DATABASE: "governance_demo"
+  MASKED_VIEW_SUFFIX: "_masked"
+  RBAC_PLANE_URL: "http://rbac-plane.prod.svc.cluster.local:8080"
+  AUTO_CLASSIFY_THRESHOLD: "0.70"
+  LOG_LEVEL: "INFO"
+
+---
+# ── Deployment ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: star-knowledge-catalog
+  namespace: prod
+  labels:
+    app: star-knowledge-catalog
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: star-knowledge-catalog
+  template:
+    metadata:
+      labels:
+        app: star-knowledge-catalog
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: star-knowledge-catalog
+          image: 192.168.1.50:30500/star-knowledge-catalog:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: star-catalog-config
+            - secretRef:
+                name: star-catalog-credentials
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+---
+# ── Service ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: star-knowledge-catalog
+  namespace: prod
+  labels:
+    app: star-knowledge-catalog
+spec:
+  selector:
+    app: star-knowledge-catalog
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+      nodePort: 30860
+  type: NodePort
+
+---
+# ── HPA ────────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: star-knowledge-catalog
+  namespace: prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: star-knowledge-catalog
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

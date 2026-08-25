@@ -1,0 +1,28 @@
+# Star Knowledge Catalog — Python dependencies
+
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Auth
+pyjwt==2.10.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Cache
+redis[hiredis]==5.2.1
+
+# Doris / MySQL protocol (for masking engine + classifier)
+aiomysql==0.2.0
+
+# HTTP client (RBAC Control Plane API calls)
+httpx==0.28.1
+
+# Dev / testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
