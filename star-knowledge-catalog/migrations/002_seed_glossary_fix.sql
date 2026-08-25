@@ -1,0 +1,66 @@
+-- Fix for 001_schema_and_seed.sql glossary insert failure on PostgreSQL < 14
+-- The original VALUES clause used inline column type annotations (col TEXT[])
+-- which is not supported. This seeds the 10 glossary terms directly.
+INSERT INTO glossary_terms
+    (name, display_name, description, classification_id,
+     column_name_patterns, description_patterns, steward)
+SELECT
+    t.name, t.display_name, t.description,
+    c.id,
+    t.col_patterns,
+    t.desc_patterns,
+    'data_steward'
+FROM (VALUES
+  ('email_address', 'Email Address',
+   'Electronic mail address of a natural person.',
+   'PII',
+   ARRAY['email','e_mail','email_addr','emailaddress','user_email','contact_email'],
+   ARRAY['email','e-mail','electronic mail']),
+  ('full_name', 'Full Name',
+   'Full given name and/or family name of a person.',
+   'PII',
+   ARRAY['full_name','fullname','name','first_name','last_name','firstname','lastname','given_name','surname','customer_name','person_name'],
+   ARRAY['name','person','first','last','given','family','surname']),
+  ('phone_number', 'Phone Number',
+   'Telephone or mobile number of a person or business.',
+   'PII',
+   ARRAY['phone','phone_number','phonenumber','mobile','telephone','tel','phone_no','mobile_no','contact_number'],
+   ARRAY['phone','telephone','mobile','contact number']),
+  ('date_of_birth', 'Date of Birth',
+   'Biological birth date of a person.',
+   'PII',
+   ARRAY['dob','date_of_birth','birth_date','birthdate','born_on','birth_day'],
+   ARRAY['birth','date of birth','born','dob']),
+  ('national_id', 'National Identifier',
+   'Government-issued national identifier (SSN, NIN, NID, passport, etc.).',
+   'PII',
+   ARRAY['ssn','national_id','nin','tax_id','passport','id_number','gov_id','national_number','fiscal_id','sin'],
+   ARRAY['ssn','national','passport','government id','tax id','fiscal']),
+  ('credit_card_number', 'Credit Card Number',
+   'Primary Account Number (PAN) of a payment card.',
+   'PCI',
+   ARRAY['card_number','credit_card','cc_number','pan','card_no','creditcard','card_num','cc_num'],
+   ARRAY['credit card','card number','pan','payment card','primary account']),
+  ('credit_card_cvv', 'Credit Card CVV',
+   'Card Verification Value (CVV/CVC/CVV2) security code on a payment card.',
+   'PCI',
+   ARRAY['cvv','cvc','cvv2','security_code','card_cvv','verification_code'],
+   ARRAY['cvv','cvc','security code','verification']),
+  ('ip_address', 'IP Address',
+   'Network IP address that may indirectly identify a person under GDPR.',
+   'PII',
+   ARRAY['ip','ip_address','ipaddress','remote_ip','client_ip','source_ip','user_ip','login_ip'],
+   ARRAY['ip address','network address','client ip','remote address']),
+  ('street_address', 'Street Address',
+   'Physical postal street address of a person or business.',
+   'PII',
+   ARRAY['address','street_address','addr','street','mailing_address','home_address','billing_address','shipping_address','postal_address'],
+   ARRAY['address','street','mailing','home address','postal','billing']),
+  ('salary', 'Salary / Compensation',
+   'Total compensation or salary amount paid to an employee.',
+   'CONFIDENTIAL',
+   ARRAY['salary','compensation','pay','wage','ctc','annual_pay','base_salary','gross_salary','net_salary','total_comp'],
+   ARRAY['salary','compensation','wage','pay','earnings','remuneration'])
+) AS t(name, display_name, description, class_name, col_patterns, desc_patterns)
+JOIN data_classifications c ON c.name = t.class_name
+ON CONFLICT (name) DO NOTHING;

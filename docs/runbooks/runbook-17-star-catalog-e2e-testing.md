@@ -69,46 +69,129 @@ This runbook is a single, ordered test script. Run every section from top to bot
 
 ## Phase 0 — Pre-flight: first-time setup
 
-> **Skip this phase if the catalog is already deployed and healthy.** Run it only on a fresh cluster or after a wipe.
+> **Skip this phase if the catalog is already deployed and healthy** (T-06 returns `ok`). Run it only on a fresh cluster or after a wipe.
 
-### 0.1 — Create the PostgreSQL database and user
+All credentials are stored in **OpenBao** and synced to a Kubernetes Secret — no plaintext passwords in YAML files.
+
+### 0.1 — Generate a password and store credentials in OpenBao
+
+```bash
+# Read the OpenBao root token (generated during Runbook 01)
+ROOT_TOKEN=$(cat ~/openbao-init-keys.json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['root_token'])")
+BAO_ADDR="http://192.168.1.50:30820"
+
+# Generate secrets
+PG_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
+MASTER_TOKEN=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 32)
+JWT_SECRET=$(openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 48)
+RBAC_PLANE_TOKEN="changeme-master-token"   # must match RBAC Control Plane secret
+
+# Store in OpenBao at secret/data/star-catalog/credentials
+curl -sf -X POST \
+  -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"data\":{
+    \"pg-user\":\"star_catalog\",
+    \"pg-password\":\"${PG_PASSWORD}\",
+    \"master-token\":\"${MASTER_TOKEN}\",
+    \"jwt-secret\":\"${JWT_SECRET}\",
+    \"doris-admin-password\":\"\",
+    \"rbac-plane-token\":\"${RBAC_PLANE_TOKEN}\"
+  }}" \
+  "${BAO_ADDR}/v1/secret/data/star-catalog/credentials"
+
+echo "Stored at secret/data/star-catalog/credentials"
+echo "PG_PASSWORD=${PG_PASSWORD}"
+echo "MASTER_TOKEN=${MASTER_TOKEN}"
+```
+
+### 0.2 — Create the PostgreSQL database and user
 
 ```bash
 kubectl exec -n prod postgresql-0 -- psql -U postgres -c "
   CREATE DATABASE star_catalog;
-  CREATE USER star_catalog WITH PASSWORD 'changeme';
+  CREATE USER star_catalog WITH PASSWORD '${PG_PASSWORD}';
   GRANT ALL PRIVILEGES ON DATABASE star_catalog TO star_catalog;
 "
+
+# Grant schema access
+kubectl exec -n prod postgresql-0 -- psql -U postgres -d star_catalog -c \
+  "GRANT ALL ON SCHEMA public TO star_catalog;"
 ```
 
-### 0.2 — Run the schema migration
+### 0.3 — Run the schema migration
 
 ```bash
-kubectl exec -i -n prod postgresql-0 -- \
-  psql -U star_catalog -d star_catalog \
-  < star-knowledge-catalog/migrations/001_schema_and_seed.sql
+kubectl cp star-knowledge-catalog/migrations/001_schema_and_seed.sql \
+  prod/postgresql-0:/tmp/001_schema_and_seed.sql
+
+kubectl exec -n prod postgresql-0 -- \
+  env PGPASSWORD="${PG_PASSWORD}" \
+  psql -U star_catalog -d star_catalog -f /tmp/001_schema_and_seed.sql
 ```
 
-### 0.3 — Create the Kubernetes secret
+> If you see `ERROR: syntax error at or near "TEXT"` on the glossary INSERT, run the fix migration:
+> ```bash
+> kubectl cp star-knowledge-catalog/migrations/002_seed_glossary_fix.sql \
+>   prod/postgresql-0:/tmp/002_seed_glossary_fix.sql
+> kubectl exec -n prod postgresql-0 -- \
+>   env PGPASSWORD="${PG_PASSWORD}" \
+>   psql -U star_catalog -d star_catalog -f /tmp/002_seed_glossary_fix.sql
+> ```
+
+### 0.4 — Create the Kubernetes Secret from OpenBao values
 
 ```bash
+# Read back from OpenBao to ensure K8s secret is authoritative
+DATA=$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  "${BAO_ADDR}/v1/secret/data/star-catalog/credentials" | \
+  python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['data']['data']))")
+
 kubectl create secret generic star-catalog-credentials \
   --namespace prod \
-  --from-literal=PG_PASSWORD=changeme \
-  --from-literal=DORIS_ADMIN_PASSWORD='' \
-  --from-literal=MASTER_TOKEN=changeme-catalog-master-token \
-  --from-literal=JWT_SECRET=changeme-catalog-jwt-secret-min-32-chars! \
-  --from-literal=RBAC_PLANE_TOKEN=changeme-rbac-master-token
+  --from-literal=PG_PASSWORD=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['pg-password'])") \
+  --from-literal=DORIS_ADMIN_PASSWORD=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['doris-admin-password'])") \
+  --from-literal=MASTER_TOKEN=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['master-token'])") \
+  --from-literal=JWT_SECRET=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['jwt-secret'])") \
+  --from-literal=RBAC_PLANE_TOKEN=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['rbac-plane-token'])") \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-> If the secret already exists and you need to update it: `kubectl delete secret star-catalog-credentials -n prod` then re-run.
-
-### 0.4 — Restart the deployment
+### 0.5 — Build and push the container image
 
 ```bash
-kubectl rollout restart deployment/star-knowledge-catalog -n prod
-kubectl rollout status deployment/star-knowledge-catalog -n prod --timeout=120s
+podman build \
+  -t 192.168.1.50:30500/star-knowledge-catalog:1.0.0 \
+  -f star-knowledge-catalog/docker/Dockerfile \
+  star-knowledge-catalog/
+
+podman push --tls-verify=false 192.168.1.50:30500/star-knowledge-catalog:1.0.0
 ```
+
+### 0.6 — Deploy and verify
+
+```bash
+kubectl apply -f star-knowledge-catalog/manifests/star-catalog-deployment.yaml
+kubectl rollout status deployment/star-knowledge-catalog -n prod --timeout=120s
+curl -sf http://192.168.1.50:30860/health | python3 -m json.tool
+```
+
+Expected: `{"status": "ok", "version": "1.0.0", "service": "star-knowledge-catalog"}`
+
+### 0.7 — Read the master token for testing
+
+The CATALOG_MASTER_TOKEN to use in all tests is stored in OpenBao. Retrieve it:
+
+```bash
+ROOT_TOKEN=$(cat ~/openbao-init-keys.json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['root_token'])")
+curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/star-catalog/credentials | \
+  python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['master-token'])"
+```
+
+Use the printed value as `CATALOG_MASTER_TOKEN` in the shell environment block below.
 
 ---
 

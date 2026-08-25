@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS glossary_terms (
     classification_id    INT REFERENCES data_classifications(id) ON DELETE SET NULL,
     column_name_patterns TEXT[] NOT NULL DEFAULT '{}',
     description_patterns TEXT[] NOT NULL DEFAULT '{}',
+    negative_patterns    TEXT[] NOT NULL DEFAULT '{}',
     steward              TEXT,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -227,8 +228,7 @@ FROM (VALUES
    ARRAY['salary','compensation','pay','wage','ctc','annual_pay',
          'base_salary','gross_salary','net_salary','total_comp'],
    ARRAY['salary','compensation','wage','pay','earnings','remuneration'])
-) AS t(name, display_name, description, class_name,
-       col_patterns TEXT[], desc_patterns TEXT[])
+) AS t(name, display_name, description, class_name, col_patterns, desc_patterns)
 JOIN data_classifications c ON c.name = t.class_name
 ON CONFLICT (name) DO NOTHING;
 

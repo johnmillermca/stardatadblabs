@@ -881,11 +881,29 @@ MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
 
 | Secret | Path | Notes |
 |---|---|---|
+| Star Catalog credentials | `secret/data/star-catalog/credentials` | Seeded by Part A.1 |
 | Doris credentials | `secret/data/doris/credentials` | Managed by `12-seed-openbao-secrets.sh` |
 | PostgreSQL credentials | `secret/data/postgresql/credentials` | Managed by `12-seed-openbao-secrets.sh` |
-| Star Catalog credentials | _not in OpenBao_ | Created manually via `kubectl create secret` in Part A.3 |
 
-> **Why isn't `star-catalog-credentials` in OpenBao?** The Star Catalog was added after the initial OpenBao seeding script. Its credentials are plain Kubernetes Secrets. To migrate them into OpenBao, add a stanza to `scripts/master/12-seed-openbao-secrets.sh` following the existing pattern.
+Keys stored under `secret/data/star-catalog/credentials`:
+
+| Key | Used as env var | Description |
+|---|---|---|
+| `pg-password` | `PG_PASSWORD` | star_catalog PostgreSQL user password |
+| `pg-user` | — | Always `star_catalog` |
+| `master-token` | `MASTER_TOKEN` | API bootstrap token — use as `CATALOG_MASTER_TOKEN` in tests |
+| `jwt-secret` | `JWT_SECRET` | JWT signing secret (min 32 chars) |
+| `doris-admin-password` | `DORIS_ADMIN_PASSWORD` | Doris root password (empty on first boot) |
+| `rbac-plane-token` | `RBAC_PLANE_TOKEN` | Must match RBAC Control Plane master token |
+
+To read the master token at any time:
+```bash
+ROOT_TOKEN=$(cat ~/openbao-init-keys.json | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['root_token'])")
+curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/star-catalog/credentials | \
+  python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['master-token'])"
+```
 
 ---
 
