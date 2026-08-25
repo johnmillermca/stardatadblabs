@@ -50,11 +50,10 @@ CREATE TABLE customers (
     -- CONFIDENTIAL — salary → FULL_REDACT (glossary term: salary)
     salary          DECIMAL(15,2),
     customer_tier   VARCHAR(20)     NOT NULL DEFAULT 'standard'
-                        CHECK (customer_tier IN ('standard','silver','gold','platinum')),
-    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
+                        COMMENT 'standard|silver|gold|platinum',
+    is_active       TINYINT         NOT NULL DEFAULT 1,
     created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP
-                        ON UPDATE CURRENT_TIMESTAMP
 )
 DUPLICATE KEY(customer_id)
 DISTRIBUTED BY HASH(customer_id) BUCKETS 8
@@ -75,7 +74,7 @@ CREATE TABLE orders (
     customer_id     BIGINT          NOT NULL,
     order_date      DATETIME        NOT NULL,
     status          VARCHAR(30)     NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending','confirmed','shipped','delivered','cancelled','refunded')),
+                        COMMENT 'pending|confirmed|shipped|delivered|cancelled|refunded',
     total_amount    DECIMAL(15,2)   NOT NULL,
     currency        CHAR(3)         NOT NULL DEFAULT 'USD',
     channel         VARCHAR(30)     NOT NULL DEFAULT 'web',
@@ -133,7 +132,7 @@ CREATE TABLE products (
     subcategory     VARCHAR(100),
     unit_price      DECIMAL(12,2)   NOT NULL,
     currency        CHAR(3)         NOT NULL DEFAULT 'USD',
-    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
+    is_active       TINYINT         NOT NULL DEFAULT 1,
     created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 DUPLICATE KEY(product_id)
