@@ -70,6 +70,12 @@ This runbook is a single, ordered test script. Run every section from top to bot
 ## Phase 0 — Pre-flight: first-time setup
 
 > **Skip this phase if the catalog is already deployed and healthy** (T-06 returns `ok`). Run it only on a fresh cluster or after a wipe.
+>
+> **Already deployed?** Confirm with:
+> ```bash
+> kubectl exec -n prod postgresql-0 -- psql -U postgres -c "\l" | grep star_catalog
+> ```
+> If `star_catalog` appears in the output, the database and user already exist — **skip Phase 0 entirely** and jump to [Setup: shell environment](#setup-shell-environment).
 
 All credentials are stored in **OpenBao** and synced to a Kubernetes Secret — no plaintext passwords in YAML files.
 
@@ -107,6 +113,12 @@ echo "MASTER_TOKEN=${MASTER_TOKEN}"
 ```
 
 ### 0.2 — Create the PostgreSQL database and user
+
+> **Skip if already exists.** The `star_catalog` database and user were created during the initial platform deployment and persist across pod restarts. Only run this step on a brand-new cluster or after a full PostgreSQL wipe. Verify first:
+> ```bash
+> kubectl exec -n prod postgresql-0 -- psql -U postgres -c "\l" | grep star_catalog
+> # If star_catalog is listed → skip this step.
+> ```
 
 ```bash
 kubectl exec -n prod postgresql-0 -- psql -U postgres -c "
@@ -372,7 +384,7 @@ curl -sf $CATALOG_URL/api/v1/classifications \
 ```
 
 ✅ **Pass:** `5`  
-❌ **Fail:** `0` → re-run Phase 0.2 (schema migration)
+❌ **Fail:** `0` → re-run Phase 0.3 (schema migration)
 
 ---
 
