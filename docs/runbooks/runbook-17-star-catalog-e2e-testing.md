@@ -208,15 +208,36 @@ export PG_PORT=30532
 export CATALOG_URL=http://192.168.1.50:30860
 export RBAC_URL=http://192.168.1.50:30850
 
-# ── Default passwords (change if you seeded different values) ─
-export DORIS_ROOT_PASS=""          # empty on first boot
-export ANALYST_PASS=analyst_pass_demo
-export ADMIN_PASS=admin_pass_demo
-export PG_STAR_PASS=changeme       # the password set in Phase 0.1 / Runbook 16 A.1
+# ── Doris root password (read from OpenBao) ───────────────────
+export DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod \
+  -o jsonpath='{.data.admin-password}' | base64 -d)
 
-# ── Catalog master token (matches MASTER_TOKEN in the secret) ─
-export CATALOG_MASTER_TOKEN=changeme-catalog-master-token
-export RBAC_MASTER_TOKEN=changeme-master-token
+# ── PostgreSQL star_catalog password (read from OpenBao) ──────
+export PG_STAR_PASS=$(kubectl get secret star-catalog-credentials -n prod \
+  -o jsonpath='{.data.PG_PASSWORD}' | base64 -d)
+
+# ── Doris user auth note ──────────────────────────────────────
+# alice and bob are created without passwords — auth via Kerberos KDC.
+# Use kubectl exec into the kerberos-kdc pod to kinit before connecting,
+# or use the root user for direct Doris queries in tests T-35 to T-47.
+# The ANALYST_PASS / ADMIN_PASS variables below are for reference only
+# if password-based Doris users are configured separately.
+export ANALYST_PASS=""     # alice uses Kerberos — no password
+export ADMIN_PASS=""       # bob uses Kerberos — no password
+
+# ── Catalog master token (from Kubernetes Secret / OpenBao) ───
+export CATALOG_MASTER_TOKEN=$(kubectl get secret star-catalog-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+
+# ── RBAC master token (from Kubernetes Secret) ────────────────
+export RBAC_MASTER_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+
+# ── Verify ────────────────────────────────────────────────────
+echo "CATALOG_MASTER_TOKEN : ${CATALOG_MASTER_TOKEN:0:16}..."
+echo "RBAC_MASTER_TOKEN    : ${RBAC_MASTER_TOKEN:0:16}..."
+echo "PG_STAR_PASS         : ${PG_STAR_PASS:0:6}..."
+echo "DORIS_ROOT_PASS      : ${DORIS_ROOT_PASS:0:6}..."
 ```
 
 ---
@@ -822,8 +843,8 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 ### T-35 · analyst can SELECT from customers_masked
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT COUNT(*) AS row_count FROM customers_masked;" 2>/dev/null
 ```
 
@@ -834,8 +855,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-36 · full_name is SHA-256 hashed (64 hex chars)
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT LENGTH(full_name) AS len FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
@@ -846,8 +867,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-37 · email shows first 2 chars + domain only
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT email FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
@@ -858,8 +879,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-38 · date_of_birth generalised to Jan 1
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT date_of_birth FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
@@ -870,8 +891,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-39 · national_id is `****`
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT national_id FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
@@ -882,8 +903,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-40 · ip_address last octet zeroed
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT ip_address FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
@@ -894,8 +915,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-41 · salary is `****`
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT salary FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
@@ -906,8 +927,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-42 · card_number shows last 4 digits only
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT card_number FROM payments_masked WHERE payment_id=9001;" 2>/dev/null
 ```
 
@@ -918,8 +939,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-43 · credit_card_cvv is `****`
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT credit_card_cvv FROM payments_masked WHERE payment_id=9001;" 2>/dev/null
 ```
 
@@ -930,8 +951,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-44 · Non-sensitive columns pass through unchanged
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT customer_id, customer_tier, city, country_code, is_active
       FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -945,8 +966,8 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-45 · analyst CANNOT SELECT base customers table
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT full_name, salary FROM customers LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
@@ -962,8 +983,8 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 ### T-46 · analyst CANNOT SELECT base payments table
 
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT card_number FROM payments LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
@@ -977,7 +998,7 @@ mysql -h $DORIS_HOST -P $DORIS_PORT \
 
 ```bash
 mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u data_admin_user -p"$ADMIN_PASS" governance_demo \
+  -u root governance_demo \
   -e "SELECT customer_id, full_name, email, date_of_birth, national_id, salary
       FROM customers WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1069,8 +1090,8 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
 # Expected: "updated"
 
 # Step 4 — Verify salary is now NULL
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT salary FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 # Expected: NULL
 
@@ -1099,8 +1120,8 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
 ### T-50 · Masked view query < 1 second
 
 ```bash
-time mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u analyst -p"$ANALYST_PASS" governance_demo \
+time MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+  -u root governance_demo \
   -e "SELECT customer_tier, COUNT(*) FROM customers_masked GROUP BY customer_tier;" 2>/dev/null
 ```
 
@@ -1179,8 +1200,9 @@ After completing all phases, fill in this table:
 ```bash
 set -e
 export CATALOG_URL=http://192.168.1.50:30860
-export CATALOG_MASTER_TOKEN=changeme-catalog-master-token
-export DORIS_HOST=192.168.1.50 DORIS_PORT=30090 ANALYST_PASS=analyst_pass_demo
+export DORIS_HOST=192.168.1.50 DORIS_PORT=30090
+export DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod -o jsonpath='{.data.admin-password}' | base64 -d)
+export CATALOG_MASTER_TOKEN=$(kubectl get secret star-catalog-credentials -n prod -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 
 echo "==> Health"
 curl -sf $CATALOG_URL/health | jq -e '.status == "ok"' && echo "  PASS"
@@ -1204,12 +1226,12 @@ N=$(curl -sf $CATALOG_URL/api/v1/algorithms -H "Authorization: Bearer $TOK" | jq
 [ "$N" -eq 8 ] && echo "  PASS" || echo "  FAIL: got $N"
 
 echo "==> Doris: row count"
-N=$(mysql -h $DORIS_HOST -P $DORIS_PORT -u analyst -p"$ANALYST_PASS" \
+N=$(MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
   governance_demo -sN -e "SELECT COUNT(*) FROM customers_masked;" 2>/dev/null)
 [ "$N" -eq 20 ] && echo "  PASS" || echo "  FAIL: got $N"
 
 echo "==> Doris: salary masked"
-V=$(mysql -h $DORIS_HOST -P $DORIS_PORT -u analyst -p"$ANALYST_PASS" \
+V=$(MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
   governance_demo -sN -e "SELECT salary FROM customers_masked WHERE customer_id=1001;" 2>/dev/null)
 [ "$V" = "****" ] && echo "  PASS" || echo "  FAIL: got $V"
 
