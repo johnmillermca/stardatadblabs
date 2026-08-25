@@ -185,7 +185,7 @@ def _build_view_ddl(
     return ddl
 
 
-# ── Grant helper ─────────────────────────────────────────────────────────────
+# ── Grant / revoke helpers ────────────────────────────────────────────────────
 
 async def _grant_view_to_user(database: str, view_name: str, doris_user: str) -> None:
     """Grant SELECT on the masked view to *doris_user*@'%'."""
@@ -200,6 +200,130 @@ async def _grant_view_to_user(database: str, view_name: str, doris_user: str) ->
         log.warning(
             "Masking: could not grant view %s.%s to %s: %s",
             database, view_name, doris_user, exc,
+        )
+
+
+async def _revoke_base_table_from_user(database: str, table: str, doris_user: str) -> None:
+    """
+    Revoke SELECT_PRIV on the base table from *doris_user*@'%'.
+
+    This is called after a masked view is applied for every non-exempt Doris
+    user that held a broad grant (e.g. SELECT_PRIV ON *.*).  It ensures that
+    no non-privileged user can bypass the masked view by querying the base
+    table directly.
+
+    Errors are suppressed — the user may not have held the privilege.
+    """
+    sql = (
+        f"REVOKE SELECT_PRIV ON `{database}`.`{table}` "
+        f"FROM '{doris_user}'@'%';"
+    )
+    try:
+        await _doris_execute(sql)
+        log.info(
+            "Masking: revoked base-table SELECT on %s.%s from %s",
+            database, table, doris_user,
+        )
+    except Exception as exc:
+        log.debug(
+            "Masking: revoke base-table %s.%s from %s (ignored): %s",
+            database, table, doris_user, exc,
+        )
+
+
+async def _get_doris_users_for_role(role_name: str) -> list[str]:
+    """
+    Fetch all Doris usernames that correspond to a given RBAC role by
+    querying the RBAC Control Plane.  Returns an empty list on error.
+    """
+    from .rbac_client import get_rbac_client
+    import httpx
+    from ..config import get_settings
+    s = get_settings()
+    url = f"{s.rbac_plane_url}/api/v1/users"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {s.rbac_plane_token}"},
+            )
+            if resp.status_code != 200:
+                return []
+            users = resp.json()
+        # For each user, check if they hold the given role
+        rbac = get_rbac_client()
+        result = []
+        for user in users:
+            roles = await rbac.role_names(user["username"])
+            if role_name in roles:
+                result.append(user["username"])
+        return result
+    except Exception as exc:
+        log.warning("Masking: could not fetch RBAC users for role %s: %s", role_name, exc)
+        return []
+
+
+async def _enforce_base_table_lockdown(
+    database: str,
+    table: str,
+    exempt_roles: list[str],
+) -> None:
+    """
+    After a masked view is created or updated, revoke direct SELECT_PRIV on
+    the base *table* from every Doris user that is NOT in an exempt role.
+
+    Strategy:
+      1. Fetch all Doris usernames from information_schema.user_privileges
+         that currently hold SELECT_PRIV on this table (or on *.* / db.*).
+      2. Skip users whose RBAC roles are in *exempt_roles* (they are allowed
+         to see clear data — e.g. data_admin, platform_admin).
+      3. Revoke base-table SELECT from every remaining user.
+      4. Re-grant SELECT on the masked view to those same users.
+
+    This is called once at apply-time — not at query time.
+    """
+    # Fetch all non-system Doris users that hold any SELECT privilege
+    conn = await _doris_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT DISTINCT GRANTEE FROM information_schema.USER_PRIVILEGES "
+                "WHERE PRIVILEGE_TYPE = 'Select' "
+                "AND GRANTEE NOT IN (\"'root'@'%'\", \"'admin'@'%'\")"
+            )
+            rows = await cur.fetchall()
+        raw_users = [r[0].strip("'").split("'@'")[0] for r in rows]
+    except Exception as exc:
+        log.warning("Masking: could not fetch Doris user list: %s", exc)
+        return
+    finally:
+        conn.close()
+
+    if not raw_users:
+        return
+
+    from .rbac_client import get_rbac_client
+    rbac = get_rbac_client()
+
+    for doris_user in raw_users:
+        # Resolve roles for this user from the RBAC Control Plane
+        roles = await rbac.role_names(doris_user)
+
+        # If user holds any exempt role → skip (they may read base table)
+        if any(r in exempt_roles for r in roles):
+            log.debug(
+                "Masking: lockdown — %s is exempt (roles: %s), skipping",
+                doris_user, roles,
+            )
+            continue
+
+        # Non-exempt: revoke base table, re-confirm view grant
+        view_name = f"{table}{get_settings().masked_view_suffix}"
+        await _revoke_base_table_from_user(database, table, doris_user)
+        await _grant_view_to_user(database, view_name, doris_user)
+        log.info(
+            "Masking: lockdown — %s revoked from base %s.%s, granted %s",
+            doris_user, database, table, view_name,
         )
 
 
@@ -311,8 +435,25 @@ async def apply_masking_view(
             "detail": str(exc),
         }
 
-    # Grant to analyst Doris user (best-effort)
+    # ── Access control enforcement ───────────────────────────────────────────
+    # Roles that are allowed to query the base table directly (CLEAR access).
+    # All other roles are locked to the masked view only.
+    # This list is derived from the role_masking_exceptions table in PostgreSQL.
+    from ..models import RoleMaskingException
+    async with db_session() as session:
+        exempt_result = await session.execute(
+            select(RoleMaskingException.role_name).distinct()
+        )
+        exempt_roles = [r[0] for r in exempt_result.all()]
+
+    # 1. Grant the masked view to the hardcoded 'analyst' user (demo bootstrap)
     await _grant_view_to_user(database, view_name, "analyst")
+
+    # 2. Scan all Doris users, revoke base-table access from non-exempt roles,
+    #    and re-confirm masked-view grant for each of them.
+    #    This is the enforcement step that closes the "any user can bypass
+    #    the view by querying the base table" gap.
+    await _enforce_base_table_lockdown(database, table, exempt_roles)
 
     # Persist manifest
     async with db_session() as session:
