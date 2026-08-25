@@ -839,34 +839,42 @@ curl -sf "$CATALOG_URL/api/v1/masking/views?database=governance_demo" \
 Ensure RBAC users exist first (idempotent — safe to re-run):
 
 ```bash
-RBAC_TOKEN=$(curl -sf -X POST $RBAC_URL/api/v1/auth/token \
-  -H 'Content-Type: application/json' \
-  -d "{\"token\":\"$RBAC_MASTER_TOKEN\"}" | jq -r .access_token)
+# Note: RBAC auth uses a query parameter, not a JSON body
+RBAC_TOKEN=$(curl -sf -X POST "$RBAC_URL/api/v1/auth/token?raw_token=$RBAC_MASTER_TOKEN" \
+  | jq -r .access_token)
+echo "RBAC token length: ${#RBAC_TOKEN}"  # must be > 0 before continuing
 
 # alice = analyst
 curl -s -X POST $RBAC_URL/api/v1/users \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","display_name":"Alice Fontaine","email":"alice@example.com"}' | jq .username 2>/dev/null || true
+  -d '{"username":"alice","display_name":"Alice Fontaine","email":"alice@example.com"}' | jq . 2>/dev/null || true
 
 curl -s -X POST $RBAC_URL/api/v1/users/alice/bindings \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"role_name":"analyst","service_name":"doris"}' | jq .role_name 2>/dev/null || true
+  -d '{"role_name":"analyst","service_name":"doris"}' | jq '{role_name, service_name}' 2>/dev/null || true
 
 # bob = data_admin
 curl -s -X POST $RBAC_URL/api/v1/users \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"bob","display_name":"Bob Admin","email":"bob@example.com"}' | jq .username 2>/dev/null || true
+  -d '{"username":"bob","display_name":"Bob Admin","email":"bob@example.com"}' | jq . 2>/dev/null || true
 
 curl -s -X POST $RBAC_URL/api/v1/users/bob/bindings \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"role_name":"data_admin","service_name":"doris"}' | jq .role_name 2>/dev/null || true
+  -d '{"role_name":"data_admin","service_name":"doris"}' | jq '{role_name, service_name}' 2>/dev/null || true
 
 echo "RBAC users ready"
 ```
+
+> **If you see `null` outputs on the create step** — the user already exists (`{"detail":"User 'alice' already exists"}`). This is fine — the script is idempotent. Verify with:
+> ```bash
+> curl -sf $RBAC_URL/api/v1/users/alice -H "Authorization: Bearer $RBAC_TOKEN" | jq '{username, enabled}'
+> curl -sf $RBAC_URL/api/v1/users/alice/bindings -H "Authorization: Bearer $RBAC_TOKEN" | jq '[.[] | {role_name, service_name}]'
+> ```
+> ✅ **Pass:** alice exists with `analyst` binding, bob exists with `data_admin` binding.
 
 ---
 
