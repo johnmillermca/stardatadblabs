@@ -75,6 +75,13 @@ class GlossaryTerm(Base):
     # e.g. for full_name: ["company","display","brand","product","vendor"]
     # prevents "company_name", "display_name" from being tagged as full_name.
     negative_patterns    = Column(ARRAY(Text), nullable=False, default=list)
+    # Signal D — table-name context tokens.
+    # table_name_negative_patterns: REJECT if TABLE name contains any token.
+    # e.g. full_name: ["product","item","inventory"] rejects 'name' in 'products'.
+    table_name_negative_patterns = Column(ARRAY(Text), nullable=False, default=list)
+    # table_name_positive_patterns: BOOST +0.20 if TABLE name contains any token.
+    # e.g. full_name: ["customer","employee","user"] boosts 'name' in 'customers'.
+    table_name_positive_patterns = Column(ARRAY(Text), nullable=False, default=list)
     steward              = Column(Text)   # data steward username
     created_at           = Column(DateTime(timezone=True), server_default=_now())
     updated_at           = Column(DateTime(timezone=True), server_default=_now(), onupdate=_now())

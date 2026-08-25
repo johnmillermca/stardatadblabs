@@ -23,17 +23,19 @@ CREATE TABLE IF NOT EXISTS data_classifications (
 
 -- ── Glossary Terms ─────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS glossary_terms (
-    id                   SERIAL PRIMARY KEY,
-    name                 TEXT NOT NULL UNIQUE,
-    display_name         TEXT NOT NULL,
-    description          TEXT,
-    classification_id    INT REFERENCES data_classifications(id) ON DELETE SET NULL,
-    column_name_patterns TEXT[] NOT NULL DEFAULT '{}',
-    description_patterns TEXT[] NOT NULL DEFAULT '{}',
-    negative_patterns    TEXT[] NOT NULL DEFAULT '{}',
-    steward              TEXT,
-    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                           SERIAL PRIMARY KEY,
+    name                         TEXT NOT NULL UNIQUE,
+    display_name                 TEXT NOT NULL,
+    description                  TEXT,
+    classification_id            INT REFERENCES data_classifications(id) ON DELETE SET NULL,
+    column_name_patterns         TEXT[] NOT NULL DEFAULT '{}',
+    description_patterns         TEXT[] NOT NULL DEFAULT '{}',
+    negative_patterns            TEXT[] NOT NULL DEFAULT '{}',
+    table_name_negative_patterns TEXT[] NOT NULL DEFAULT '{}',
+    table_name_positive_patterns TEXT[] NOT NULL DEFAULT '{}',
+    steward                      TEXT,
+    created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ── Masking Algorithms ──────────────────────────────────────────────────────
@@ -154,81 +156,110 @@ ON CONFLICT (name) DO NOTHING;
 -- ── Seed: Glossary Terms ───────────────────────────────────────────────────
 INSERT INTO glossary_terms
     (name, display_name, description, classification_id,
-     column_name_patterns, description_patterns, steward)
+     column_name_patterns, description_patterns,
+     table_name_negative_patterns, table_name_positive_patterns, steward)
 SELECT
     t.name, t.display_name, t.description,
     c.id,
     t.col_patterns,
     t.desc_patterns,
+    t.tbl_neg_patterns,
+    t.tbl_pos_patterns,
     'data_steward'
 FROM (VALUES
   ('email_address', 'Email Address',
    'Electronic mail address of a natural person.',
    'PII',
    ARRAY['email','e_mail','email_addr','emailaddress','user_email','contact_email'],
-   ARRAY['email','e-mail','electronic mail']),
+   ARRAY['email','e-mail','electronic mail'],
+   ARRAY[]::TEXT[],
+   ARRAY[]::TEXT[]),
 
   ('full_name', 'Full Name',
    'Full given name and/or family name of a person.',
    'PII',
    ARRAY['full_name','fullname','first_name','last_name','firstname',
          'lastname','given_name','surname','customer_name','person_name'],
-   ARRAY['person','first','last','given','family','surname']),
+   ARRAY['person','first','last','given','family','surname'],
+   ARRAY['product','item','inventory','catalog','sku','category',
+         'material','asset','equipment'],
+   ARRAY['customer','employee','user','person','staff','contact',
+         'member','patient','client','account','vendor','supplier',
+         'driver','agent','applicant']),
 
   ('phone_number', 'Phone Number',
    'Telephone or mobile number of a person or business.',
    'PII',
    ARRAY['phone','phone_number','phonenumber','mobile','telephone','tel',
          'phone_no','mobile_no','contact_number'],
-   ARRAY['phone','telephone','mobile','contact number']),
+   ARRAY['phone','telephone','mobile','contact number'],
+   ARRAY[]::TEXT[],
+   ARRAY[]::TEXT[]),
 
   ('date_of_birth', 'Date of Birth',
    'Biological birth date of a person.',
    'PII',
    ARRAY['dob','date_of_birth','birth_date','birthdate','born_on','birth_day'],
-   ARRAY['birth','date of birth','born','dob']),
+   ARRAY['birth','date of birth','born','dob'],
+   ARRAY[]::TEXT[],
+   ARRAY[]::TEXT[]),
 
   ('national_id', 'National Identifier',
    'Government-issued national identifier (SSN, NIN, NID, passport, etc.).',
    'PII',
    ARRAY['ssn','national_id','nin','tax_id','passport','id_number','gov_id',
          'national_number','fiscal_id','sin'],
-   ARRAY['ssn','national','passport','government id','tax id','fiscal']),
+   ARRAY['ssn','national','passport','government id','tax id','fiscal'],
+   ARRAY[]::TEXT[],
+   ARRAY['customer','employee','user','person','staff','member',
+         'patient','client','applicant','identity','kyc']),
 
   ('credit_card_number', 'Credit Card Number',
    'Primary Account Number (PAN) of a payment card — 13–19 digit string.',
    'PCI',
    ARRAY['card_number','credit_card','cc_number','pan','card_no','creditcard',
          'card_num','cc_num'],
-   ARRAY['credit card','card number','pan','payment card','primary account']),
+   ARRAY['credit card','card number','pan','payment card','primary account'],
+   ARRAY[]::TEXT[],
+   ARRAY[]::TEXT[]),
 
   ('credit_card_cvv', 'Credit Card CVV',
    'Card Verification Value (CVV/CVC/CVV2) security code on a payment card.',
    'PCI',
    ARRAY['cvv','cvc','cvv2','security_code','card_cvv','verification_code'],
-   ARRAY['cvv','cvc','security code','verification']),
+   ARRAY['cvv','cvc','security code','verification'],
+   ARRAY[]::TEXT[],
+   ARRAY[]::TEXT[]),
 
   ('ip_address', 'IP Address',
    'Network IP address that may indirectly identify a person under GDPR.',
    'PII',
    ARRAY['ip','ip_address','ipaddress','remote_ip','client_ip','source_ip',
          'user_ip','login_ip'],
-   ARRAY['ip address','network address','client ip','remote address']),
+   ARRAY['ip address','network address','client ip','remote address'],
+   ARRAY['server','device','router','switch','node','host','network','infra'],
+   ARRAY['session','login','audit','access','user','activity','event']),
 
   ('street_address', 'Street Address',
    'Physical postal street address of a person or business.',
    'PII',
    ARRAY['address','street_address','addr','street','mailing_address',
          'home_address','billing_address','shipping_address','postal_address'],
-   ARRAY['address','street','mailing','home address','postal','billing']),
+   ARRAY['address','street','mailing','home address','postal','billing'],
+   ARRAY['warehouse','depot','store','branch','location','venue','region','zone'],
+   ARRAY['customer','employee','user','person','contact','member','patient','client']),
 
   ('salary', 'Salary / Compensation',
    'Total compensation or salary amount paid to an employee.',
    'CONFIDENTIAL',
    ARRAY['salary','compensation','wage','ctc','annual_pay',
          'base_salary','gross_salary','net_salary','total_comp'],
-   ARRAY['salary','compensation','wage','earnings','remuneration'])
-) AS t(name, display_name, description, class_name, col_patterns, desc_patterns)
+   ARRAY['salary','compensation','wage','earnings','remuneration'],
+   ARRAY['payment','transaction','order','invoice','receipt','ledger','billing'],
+   ARRAY['employee','staff','payroll','hr','salary','compensation',
+         'workforce','headcount'])
+) AS t(name, display_name, description, class_name, col_patterns, desc_patterns,
+       tbl_neg_patterns, tbl_pos_patterns)
 JOIN data_classifications c ON c.name = t.class_name
 ON CONFLICT (name) DO NOTHING;
 

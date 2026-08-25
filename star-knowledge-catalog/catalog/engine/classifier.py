@@ -36,7 +36,19 @@ Score 0.7       → run three independent arbitration signals:
            e.g.  full_name term has negative ["company","display","brand",
                  "product","vendor"] so "company_name" is rejected.
 
-Combined arbitration score  =  0.7 base + A + B
+  Signal D — Table name context
+    -1.0 (immediate REJECT) if the TABLE name contains any token from
+           the glossary term's table_name_negative_patterns list.
+           e.g.  full_name has table_name_negatives ["product","item",
+                 "inventory","catalog","sku"] so a column called "name"
+                 inside "products" or "item_catalog" is rejected.
+    +0.20 (strong boost) if the TABLE name contains a token from the
+           glossary term's table_name_positive_patterns list.
+           e.g.  full_name has table_name_positives ["customer","employee",
+                 "user","person","staff","contact"] so "name" in
+                 "customers" receives a strong context boost.
+
+Combined arbitration score  =  0.7 base + A + B + D_boost
   ≥ 0.85  → MEDIUM confidence  → tag with conservative masking
   ≥ 0.95  → HIGH   confidence  → tag with full term masking
   any REJECT signal fired      → REJECT (not tagged, stored in audit log)
@@ -107,8 +119,11 @@ class TermSpec:
     classification_id: Optional[int]
     classification_name: Optional[str]
     classification_sensitivity: str
-    patterns: list[str]          = field(default_factory=list)
-    negative_patterns: list[str] = field(default_factory=list)
+    patterns: list[str]                    = field(default_factory=list)
+    negative_patterns: list[str]           = field(default_factory=list)
+    # Signal D — table name context
+    table_name_negative_patterns: list[str] = field(default_factory=list)
+    table_name_positive_patterns: list[str] = field(default_factory=list)
 
 
 # ── Term spec loader ──────────────────────────────────────────────────────────
@@ -138,6 +153,8 @@ async def _load_term_specs() -> list[TermSpec]:
                 classification_sensitivity=cls.sensitivity if cls else "low",
                 patterns=[p.lower() for p in (t.column_name_patterns or [])],
                 negative_patterns=[p.lower() for p in (t.negative_patterns or [])],
+                table_name_negative_patterns=[p.lower() for p in (t.table_name_negative_patterns or [])],
+                table_name_positive_patterns=[p.lower() for p in (t.table_name_positive_patterns or [])],
             )
         )
     return specs
@@ -238,6 +255,38 @@ def _signal_C_negative_guard(
     return False, ""
 
 
+def _signal_D_table_context(
+    table_lower: str,
+    ts: TermSpec,
+) -> tuple[bool, float, str]:
+    """
+    Signal D — table name context.
+    Returns (rejected, boost, description).
+
+    If the table name contains a token from table_name_negative_patterns
+    → immediately reject (e.g. 'name' in 'products' table).
+    If the table name contains a token from table_name_positive_patterns
+    → boost by +0.20 (e.g. 'name' in 'customers' table).
+    """
+    for neg in ts.table_name_negative_patterns:
+        if not neg:
+            continue
+        if re.search(r"(?<![a-z0-9])" + re.escape(neg) + r"(?![a-z0-9])", table_lower):
+            return True, 0.0, f"D:table_reject — table '{table_lower}' contains '{neg}'"
+        if table_lower.startswith(neg) or table_lower.endswith(neg):
+            return True, 0.0, f"D:table_reject — table '{table_lower}' starts/ends with '{neg}'"
+
+    for pos in ts.table_name_positive_patterns:
+        if not pos:
+            continue
+        if re.search(r"(?<![a-z0-9])" + re.escape(pos) + r"(?![a-z0-9])", table_lower):
+            return False, 0.20, f"D:table_boost(+0.20) — table '{table_lower}' contains '{pos}'"
+        if table_lower.startswith(pos) or table_lower.endswith(pos):
+            return False, 0.20, f"D:table_boost(+0.20) — table '{table_lower}' starts/ends with '{pos}'"
+
+    return False, 0.0, f"D:table_neutral(+0.00) — table '{table_lower}' matches no context patterns"
+
+
 # ── Arbitration orchestrator ──────────────────────────────────────────────────
 
 def _arbitrate(
@@ -245,9 +294,10 @@ def _arbitrate(
     matched_pat: str,
     ts: TermSpec,
     already_tagged: list[ColumnMatch],
+    table_lower: str = "",
 ) -> tuple[Confidence, float, list[str]]:
     """
-    Run all three signals and return (Confidence, arb_score, signal_descriptions).
+    Run all four signals and return (Confidence, arb_score, signal_descriptions).
     Called only when base score == 0.7.
     """
     signals: list[str] = []
@@ -258,6 +308,15 @@ def _arbitrate(
         signals.append(reason)
         return Confidence.REJECT, 0.0, signals
 
+    # Signal D — table name context (fast exit on table-level reject)
+    if table_lower:
+        d_rejected, d_boost, d_desc = _signal_D_table_context(table_lower, ts)
+        signals.append(d_desc)
+        if d_rejected:
+            return Confidence.REJECT, 0.0, signals
+    else:
+        d_boost = 0.0
+
     # Signal A — position
     a_boost, a_desc = _signal_A_position(col_lower, matched_pat)
     signals.append(a_desc)
@@ -266,7 +325,7 @@ def _arbitrate(
     b_boost, b_desc = _signal_B_sibling_context(ts.classification_name, already_tagged)
     signals.append(b_desc)
 
-    arb_score = 0.7 + a_boost + b_boost
+    arb_score = 0.7 + a_boost + b_boost + d_boost
     signals.append(f"arb_total={arb_score:.2f}")
 
     if arb_score >= _ARB_HIGH_THRESHOLD:
@@ -282,6 +341,7 @@ def classify_columns(
     column_names: list[str],
     term_specs: list[TermSpec],
     threshold: float = _BASE_THRESHOLD,
+    table_name: str = "",
 ) -> list[ColumnMatch]:
     """
     Classify a list of column names against term specs using two-stage scoring.
@@ -298,10 +358,13 @@ def classify_columns(
     hits in the same table scan.  Column order is Doris ordinal position, so
     primary identifying columns (id, name, email) typically appear first and
     provide context for later ambiguous columns.
+
+    `table_name` is passed to Signal D for table-level context filtering.
     """
     results: list[ColumnMatch] = []
     # Accumulates confirmed matches so far — used by Signal B
     already_tagged: list[ColumnMatch] = []
+    table_lower = table_name.lower().replace(" ", "_")
 
     for col in column_names:
         col_lower = col.lower().replace(" ", "_")
@@ -315,13 +378,25 @@ def classify_columns(
 
             if base >= 0.9:
                 # High-confidence base score — no arbitration needed
-                confidence = Confidence.HIGH
-                arb_score = base
-                arb_signals = [f"base_score={base} → direct HIGH"]
+                # Still run Signal D table reject even for high base scores
+                if table_lower and ts.table_name_negative_patterns:
+                    d_rejected, _, d_desc = _signal_D_table_context(table_lower, ts)
+                    if d_rejected:
+                        confidence = Confidence.REJECT
+                        arb_score = 0.0
+                        arb_signals = [f"base_score={base}", d_desc]
+                    else:
+                        confidence = Confidence.HIGH
+                        arb_score = base
+                        arb_signals = [f"base_score={base} → direct HIGH", d_desc]
+                else:
+                    confidence = Confidence.HIGH
+                    arb_score = base
+                    arb_signals = [f"base_score={base} → direct HIGH"]
             else:
                 # base == 0.7 — run arbitration
                 confidence, arb_score, arb_signals = _arbitrate(
-                    col_lower, matched_pat, ts, already_tagged
+                    col_lower, matched_pat, ts, already_tagged, table_lower
                 )
 
             # Build a candidate match
@@ -429,7 +504,7 @@ async def scan_table(
         term_specs = await _load_term_specs()
     columns = await _get_doris_columns(database, table)
     log.info("Classifier: scanning %s.%s — %d columns", database, table, len(columns))
-    return classify_columns(columns, term_specs, threshold)
+    return classify_columns(columns, term_specs, threshold, table_name=table)
 
 
 async def scan_database(
