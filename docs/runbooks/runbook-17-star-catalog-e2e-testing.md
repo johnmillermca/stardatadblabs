@@ -211,6 +211,8 @@ Use the printed value as `CATALOG_MASTER_TOKEN` in the shell environment block b
 
 Run these once at the top of your terminal session. Every test below references these variables.
 
+> **Must re-run in every new terminal.** These `export` statements are not persisted to your shell profile — if you open a new tab or reconnect, paste this block again before running any test.
+
 ```bash
 # ── Connection details ───────────────────────────────────────
 export DORIS_HOST=192.168.1.50
@@ -220,37 +222,47 @@ export PG_PORT=30532
 export CATALOG_URL=http://192.168.1.50:30860
 export RBAC_URL=http://192.168.1.50:30850
 
-# ── Doris root password (read from OpenBao) ───────────────────
+# ── Doris root password ───────────────────────────────────────
+# Read from the K8s Secret 'doris-credentials' (seeded into OpenBao
+# by 12-seed-openbao-secrets.sh during initial platform setup).
+# All Doris queries in this runbook run as root using this password.
 export DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
 
-# ── PostgreSQL star_catalog password (read from OpenBao) ──────
+# ── PostgreSQL star_catalog password ──────────────────────────
+# Read from the K8s Secret 'star-catalog-credentials' (seeded during
+# Phase 0 of this runbook).
 export PG_STAR_PASS=$(kubectl get secret star-catalog-credentials -n prod \
   -o jsonpath='{.data.PG_PASSWORD}' | base64 -d)
 
-# ── Doris user auth note ──────────────────────────────────────
-# alice and bob are created without passwords — auth via Kerberos KDC.
-# Use kubectl exec into the kerberos-kdc pod to kinit before connecting,
-# or use the root user for direct Doris queries in tests T-35 to T-47.
-# The ANALYST_PASS / ADMIN_PASS variables below are for reference only
-# if password-based Doris users are configured separately.
-export ANALYST_PASS=""     # alice uses Kerberos — no password
-export ADMIN_PASS=""       # bob uses Kerberos — no password
-
-# ── Catalog master token (from Kubernetes Secret / OpenBao) ───
+# ── Catalog master token ──────────────────────────────────────
+# Read from the K8s Secret 'star-catalog-credentials'. This is the
+# bootstrap token used to authenticate all /api/v1/* calls below.
+# Original value is stored in OpenBao at secret/data/star-catalog/credentials.
 export CATALOG_MASTER_TOKEN=$(kubectl get secret star-catalog-credentials -n prod \
   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 
-# ── RBAC master token (from Kubernetes Secret) ────────────────
+# ── RBAC master token ─────────────────────────────────────────
+# Read from the K8s Secret 'rbac-plane-credentials'. Generated and
+# stored by rbac-plane/scripts/seed-rbac-credentials.sh.
+# Also available in OpenBao at secret/data/rbac-plane/credentials.
 export RBAC_MASTER_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 
-# ── Verify ────────────────────────────────────────────────────
-echo "CATALOG_MASTER_TOKEN : ${CATALOG_MASTER_TOKEN:0:16}..."
-echo "RBAC_MASTER_TOKEN    : ${RBAC_MASTER_TOKEN:0:16}..."
-echo "PG_STAR_PASS         : ${PG_STAR_PASS:0:6}..."
-echo "DORIS_ROOT_PASS      : ${DORIS_ROOT_PASS:0:6}..."
+# ── Verify all four variables loaded ─────────────────────────
+echo "DORIS_ROOT_PASS      : ${DORIS_ROOT_PASS:0:6}...  (length: ${#DORIS_ROOT_PASS})"
+echo "PG_STAR_PASS         : ${PG_STAR_PASS:0:6}...  (length: ${#PG_STAR_PASS})"
+echo "CATALOG_MASTER_TOKEN : ${CATALOG_MASTER_TOKEN:0:16}...  (length: ${#CATALOG_MASTER_TOKEN})"
+echo "RBAC_MASTER_TOKEN    : ${RBAC_MASTER_TOKEN:0:16}...  (length: ${#RBAC_MASTER_TOKEN})"
 ```
+
+> **If any value shows `length: 0`** the K8s Secret is missing or the key name is wrong. Run:
+> ```bash
+> kubectl get secret doris-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
+> kubectl get secret star-catalog-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
+> kubectl get secret rbac-plane-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
+> ```
+> to see the exact key names available in each secret.
 
 ---
 
