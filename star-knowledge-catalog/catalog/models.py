@@ -71,6 +71,10 @@ class GlossaryTerm(Base):
     column_name_patterns = Column(ARRAY(Text), nullable=False, default=list)
     # JSON array of lowercase keywords checked against column descriptions
     description_patterns = Column(ARRAY(Text), nullable=False, default=list)
+    # Tokens that REJECT a 0.7 substring match (negative guard — Signal C).
+    # e.g. for full_name: ["company","display","brand","product","vendor"]
+    # prevents "company_name", "display_name" from being tagged as full_name.
+    negative_patterns    = Column(ARRAY(Text), nullable=False, default=list)
     steward              = Column(Text)   # data steward username
     created_at           = Column(DateTime(timezone=True), server_default=_now())
     updated_at           = Column(DateTime(timezone=True), server_default=_now(), onupdate=_now())
@@ -194,6 +198,28 @@ class RoleMaskingException(Base):
     granted_at        = Column(DateTime(timezone=True), server_default=_now())
 
     classification = relationship("DataClassification", back_populates="role_exceptions")
+
+
+# ── Governance Database Switch ────────────────────────────────────────────────
+
+class GovernanceDatabase(Base):
+    """
+    One row per Doris database.  When governance_enabled = False the masking
+    engine skips that database entirely and the query planner routes all users
+    to base tables (circuit-breaker / maintenance mode).
+    """
+    __tablename__ = "governance_databases"
+
+    id                 = Column(Integer, primary_key=True)
+    doris_database     = Column(Text, nullable=False, unique=True)
+    governance_enabled = Column(Boolean, nullable=False, default=True)
+    disabled_reason    = Column(Text)
+    disabled_by        = Column(Text)
+    disabled_at        = Column(DateTime(timezone=True))
+    enabled_at         = Column(DateTime(timezone=True))
+    created_at         = Column(DateTime(timezone=True), server_default=_now())
+    updated_at         = Column(DateTime(timezone=True), server_default=_now(),
+                                onupdate=_now())
 
 
 # ── Doris Masked View Manifest ────────────────────────────────────────────────

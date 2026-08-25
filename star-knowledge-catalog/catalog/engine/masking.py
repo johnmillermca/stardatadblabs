@@ -327,6 +327,26 @@ async def _enforce_base_table_lockdown(
         )
 
 
+# ── Governance switch check ───────────────────────────────────────────────────
+
+async def _is_governance_enabled(database: str) -> bool:
+    """
+    Returns False when the database-level governance switch is OFF.
+    Defaults to True when the database has no row yet (safe default).
+    """
+    from ..models import GovernanceDatabase
+    async with db_session() as session:
+        result = await session.execute(
+            select(GovernanceDatabase).where(
+                GovernanceDatabase.doris_database == database
+            )
+        )
+        row = result.scalar_one_or_none()
+    if row is None:
+        return True   # not registered → assume enabled
+    return row.governance_enabled
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 async def apply_masking_view(
@@ -341,6 +361,19 @@ async def apply_masking_view(
     Returns a result dict with keys:
       view_name, columns_masked, action, detail
     """
+    # Circuit breaker — skip entirely when governance is disabled for this DB
+    if not await _is_governance_enabled(database):
+        return {
+            "view_name": f"{table}{get_settings().masked_view_suffix}",
+            "columns_masked": [],
+            "action": "skipped",
+            "detail": (
+                f"Governance is DISABLED for database '{database}'. "
+                "Re-enable via POST /api/v1/governance-switch/{database}/enable "
+                "before applying masking."
+            ),
+        }
+
     s = get_settings()
     view_name = f"{table}{s.masked_view_suffix}"
 
@@ -509,6 +542,16 @@ async def resolve_query_target(
     """
     s = get_settings()
     view_name = f"{table}{s.masked_view_suffix}"
+
+    # Circuit breaker — governance disabled → all users see base table
+    if not await _is_governance_enabled(database):
+        return {
+            "target": "base_table",
+            "view_name": view_name,
+            "columns_masked": [],
+            "role": roles[0] if roles else "unknown",
+            "governance_disabled": True,
+        }
 
     # Fetch tags for this table
     async with db_session() as session:

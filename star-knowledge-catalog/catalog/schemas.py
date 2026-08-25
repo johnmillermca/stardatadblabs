@@ -54,6 +54,14 @@ class GlossaryTermCreate(BaseModel):
     classification_id: Optional[int] = None
     column_name_patterns: list[str] = Field(default_factory=list)
     description_patterns: list[str] = Field(default_factory=list)
+    negative_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tokens that REJECT a 0.7 substring match. "
+            "e.g. ['company','display'] prevents 'company_name' / 'display_name' "
+            "from being auto-tagged as this term."
+        ),
+    )
     steward: Optional[str] = None
 
 
@@ -63,6 +71,7 @@ class GlossaryTermUpdate(BaseModel):
     classification_id: Optional[int] = None
     column_name_patterns: Optional[list[str]] = None
     description_patterns: Optional[list[str]] = None
+    negative_patterns: Optional[list[str]] = None
     steward: Optional[str] = None
 
 
@@ -75,6 +84,7 @@ class GlossaryTermOut(BaseModel):
     classification_name: Optional[str] = None
     column_name_patterns: list[str]
     description_patterns: list[str]
+    negative_patterns: list[str]
     steward: Optional[str]
     created_at: datetime
 
@@ -215,7 +225,11 @@ class ScanColumnResult(BaseModel):
     matched_term: Optional[str]
     matched_classification: Optional[str]
     score: float
-    action: str  # "tagged" | "skipped" | "dry_run"
+    confidence: str = "LOW"      # HIGH | MEDIUM | LOW | REJECT
+    arb_score: float = 0.0       # final arbitration score (0.7 cols only)
+    arb_signals: list[str] = Field(default_factory=list)  # per-signal debug strings
+    use_conservative_policy: bool = False  # True when MEDIUM → class-level policy used
+    action: str = "skipped"      # "tagged" | "tagged_conservative" | "skipped" | "dry_run" | "rejected"
 
 
 class ScanTableResult(BaseModel):

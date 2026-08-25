@@ -12,12 +12,13 @@ from sqlalchemy.orm import selectinload
 
 from ..database import db_session, cache_invalidate_prefix, COLUMN_TAG_PREFIX
 from ..middleware.auth import require_read, require_write, require_admin
-from ..models import ColumnTag, DataClassification, GlossaryTerm
+from ..models import ColumnTag, DataClassification, GlossaryTerm, MaskingPolicy
 from ..schemas import (
     ColumnTagCreate, ColumnTagOut, OkResponse,
     ScanRequest, ScanResponse, ScanColumnResult, ScanTableResult,
 )
 from ..engine import classifier as clf
+from ..engine.classifier import Confidence
 
 router = APIRouter(prefix="/columns", tags=["Column Tags"])
 
@@ -158,6 +159,30 @@ async def delete_column_tag(
 
 # ── Auto-classification scan ──────────────────────────────────────────────────
 
+async def _get_class_default_policy_id(
+    session, classification_id: Optional[int]
+) -> Optional[int]:
+    """
+    For MEDIUM-confidence hits: look up the highest-priority enabled policy
+    that targets the *classification* (not a specific glossary term).
+    Returns the policy id, or None if not found.
+    """
+    if classification_id is None:
+        return None
+    result = await session.execute(
+        select(MaskingPolicy)
+        .where(
+            MaskingPolicy.classification_id == classification_id,
+            MaskingPolicy.glossary_term_id.is_(None),
+            MaskingPolicy.enabled.is_(True),
+        )
+        .order_by(MaskingPolicy.priority.asc())
+        .limit(1)
+    )
+    policy = result.scalar_one_or_none()
+    return policy.id if policy else None
+
+
 @router.post("/scan", response_model=ScanResponse,
              summary="Auto-classify columns using glossary patterns")
 async def scan_columns(
@@ -168,10 +193,17 @@ async def scan_columns(
     Scans the given Doris database (or single table) and automatically
     tags columns by matching their names against glossary term patterns.
 
-    Returns a per-table summary of matches. Persists tags unless `dry_run=true`.
-    Manual (non-auto-detected) tags are never overwritten regardless of `overwrite_existing`.
+    Confidence-aware tagging rules
+    ───────────────────────────────
+    HIGH   → tag with the term's own glossary_term_id + classification_id
+    MEDIUM → tag with classification_id only (conservative: no term link),
+             uses the classification-level default masking policy
+    LOW    → skip (below arbitration threshold)
+    REJECT → skip with action="rejected" (negative guard fired)
+
+    Manual (non-auto-detected) tags are never overwritten regardless of
+    `overwrite_existing`.
     """
-    s_settings = None
     from ..config import get_settings as _gs
     threshold = _gs().auto_classify_threshold
 
@@ -189,55 +221,101 @@ async def scan_columns(
         )
 
     table_results: list[ScanTableResult] = []
+
     for table_name, matches in tables_matches.items():
         col_results: list[ScanColumnResult] = []
         tagged = 0
 
         for m in matches:
-            if m.score < threshold or m.term_id is None:
+            conf = m.confidence
+
+            # ── Columns that produce no tag ──────────────────────────────────
+            if conf == Confidence.REJECT:
                 col_results.append(ScanColumnResult(
                     column_name=m.column_name,
-                    matched_term=None,
-                    matched_classification=None,
-                    score=m.score,
+                    matched_term=m.term_name,
+                    matched_classification=m.classification_name,
+                    score=round(m.score, 2),
+                    confidence=conf.value,
+                    arb_score=round(m.arb_score, 3),
+                    arb_signals=m.arb_signals,
+                    use_conservative_policy=False,
+                    action="rejected",
+                ))
+                continue
+
+            if conf == Confidence.LOW or m.term_id is None:
+                col_results.append(ScanColumnResult(
+                    column_name=m.column_name,
+                    matched_term=m.term_name,
+                    matched_classification=m.classification_name,
+                    score=round(m.score, 2),
+                    confidence=conf.value,
+                    arb_score=round(m.arb_score, 3),
+                    arb_signals=m.arb_signals,
+                    use_conservative_policy=False,
                     action="skipped",
                 ))
                 continue
 
-            action = "dry_run" if body.dry_run else "tagged"
+            # ── MEDIUM: conservative — tag classification only, no term link ─
+            if conf == Confidence.MEDIUM:
+                tag_term_id = None                   # do NOT link the specific term
+                tag_classification_id = m.classification_id
+            else:
+                # HIGH
+                tag_term_id = m.term_id
+                tag_classification_id = m.classification_id
 
-            if not body.dry_run:
-                async with db_session() as session:
-                    existing = await session.execute(
-                        select(ColumnTag).where(
-                            ColumnTag.doris_database == body.doris_database,
-                            ColumnTag.doris_table == table_name,
-                            ColumnTag.column_name == m.column_name,
-                        )
+            action_label = "tagged_conservative" if conf == Confidence.MEDIUM else "tagged"
+
+            if body.dry_run:
+                col_results.append(ScanColumnResult(
+                    column_name=m.column_name,
+                    matched_term=m.term_name,
+                    matched_classification=m.classification_name,
+                    score=round(m.score, 2),
+                    confidence=conf.value,
+                    arb_score=round(m.arb_score, 3),
+                    arb_signals=m.arb_signals,
+                    use_conservative_policy=m.use_conservative_policy,
+                    action="dry_run",
+                ))
+                continue
+
+            # ── Persist tag ──────────────────────────────────────────────────
+            action = action_label
+            async with db_session() as session:
+                existing = await session.execute(
+                    select(ColumnTag).where(
+                        ColumnTag.doris_database == body.doris_database,
+                        ColumnTag.doris_table == table_name,
+                        ColumnTag.column_name == m.column_name,
                     )
-                    ex_tag = existing.scalar_one_or_none()
+                )
+                ex_tag = existing.scalar_one_or_none()
 
-                    if ex_tag:
-                        if not ex_tag.auto_detected:
-                            action = "skipped"  # never overwrite manual tags
-                        elif body.overwrite_existing:
-                            ex_tag.glossary_term_id = m.term_id
-                            ex_tag.classification_id = m.classification_id
-                            ex_tag.detection_score = m.score
-                        else:
-                            action = "skipped"
+                if ex_tag:
+                    if not ex_tag.auto_detected:
+                        action = "skipped"   # never overwrite manual tags
+                    elif body.overwrite_existing:
+                        ex_tag.glossary_term_id = tag_term_id
+                        ex_tag.classification_id = tag_classification_id
+                        ex_tag.detection_score = m.score
                     else:
-                        session.add(ColumnTag(
-                            doris_database=body.doris_database,
-                            doris_table=table_name,
-                            column_name=m.column_name,
-                            glossary_term_id=m.term_id,
-                            classification_id=m.classification_id,
-                            auto_detected=True,
-                            detection_score=m.score,
-                        ))
+                        action = "skipped"
+                else:
+                    session.add(ColumnTag(
+                        doris_database=body.doris_database,
+                        doris_table=table_name,
+                        column_name=m.column_name,
+                        glossary_term_id=tag_term_id,
+                        classification_id=tag_classification_id,
+                        auto_detected=True,
+                        detection_score=m.score,
+                    ))
 
-            if action == "tagged":
+            if action != "skipped":
                 tagged += 1
                 await cache_invalidate_prefix(COLUMN_TAG_PREFIX)
 
@@ -246,6 +324,10 @@ async def scan_columns(
                 matched_term=m.term_name,
                 matched_classification=m.classification_name,
                 score=round(m.score, 2),
+                confidence=conf.value,
+                arb_score=round(m.arb_score, 3),
+                arb_signals=m.arb_signals,
+                use_conservative_policy=m.use_conservative_policy,
                 action=action,
             ))
 

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from .config import get_settings
 from .database import get_engine
 from .models import Base
-from .routers import auth, classifications, glossary, algorithms, policies, columns, masking, exceptions
+from .routers import auth, classifications, glossary, algorithms, policies, columns, masking, exceptions, governance_switch
 
 log = logging.getLogger(__name__)
 
@@ -93,14 +93,15 @@ def create_app() -> FastAPI:
 
     # ── Routers ────────────────────────────────────────────
     prefix = s.api_prefix
-    app.include_router(auth.router,            prefix=prefix)
-    app.include_router(classifications.router, prefix=prefix)
-    app.include_router(glossary.router,        prefix=prefix)
-    app.include_router(algorithms.router,      prefix=prefix)
-    app.include_router(policies.router,        prefix=prefix)
-    app.include_router(columns.router,         prefix=prefix)
-    app.include_router(masking.router,         prefix=prefix)
-    app.include_router(exceptions.router,      prefix=prefix)
+    app.include_router(auth.router,              prefix=prefix)
+    app.include_router(classifications.router,   prefix=prefix)
+    app.include_router(glossary.router,          prefix=prefix)
+    app.include_router(algorithms.router,        prefix=prefix)
+    app.include_router(policies.router,          prefix=prefix)
+    app.include_router(columns.router,           prefix=prefix)
+    app.include_router(masking.router,           prefix=prefix)
+    app.include_router(exceptions.router,        prefix=prefix)
+    app.include_router(governance_switch.router, prefix=prefix)
 
     return app
 
