@@ -755,7 +755,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
   jq '.results[0] | {action, view_name, columns_masked}'
 ```
 
-✅ **Pass:** `action: "dry_run"`, `view_name: "customers_masked"`, `columns_masked` contains 8 columns
+✅ **Pass:** `action: "dry_run"`, `view_name: "customers_masked"`, `columns_masked` contains 9 columns (`full_name`, `email`, `phone_number`, `date_of_birth`, `national_id`, `street_address`, `ip_address`, `salary` from auto-scan + `city` from the manual tag added in T-28)
 
 ---
 
@@ -792,10 +792,11 @@ curl -sf "$CATALOG_URL/api/v1/masking/views?database=governance_demo" \
 ✅ **Pass:**
 ```json
 [
-  {"base_table": "customers", "view_name": "customers_masked", "columns_masked_count": 8},
+  {"base_table": "customers", "view_name": "customers_masked", "columns_masked_count": 9},
   {"base_table": "payments",  "view_name": "payments_masked",  "columns_masked_count": 2}
 ]
 ```
+> **Note:** `customers` has 9 masked columns (not 8) because T-28 manually tagged `city` as PII before this step. The masking engine includes all tagged columns — both auto-detected and manual.
 
 ---
 
