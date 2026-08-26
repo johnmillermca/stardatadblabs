@@ -935,8 +935,25 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 
 ## Phase 11 — Doris masked query execution (T-35 to T-44)
 
-> **Note on Doris user authentication:** Doris SQL users are `alice` (analyst role) and `bob` (data_admin role).
-> Passwords are stored in OpenBao — retrieve them once and export before running these tests:
+> **How masking works in this setup**
+>
+> Masking is implemented as **view DDL** — the transformation (SHA-256, `****`, partial email, etc.)
+> is baked into the `customers_masked` and `payments_masked` view definitions.
+> It is **not** a per-user row-level policy. This means:
+>
+> | User | Queries | Sees |
+> |------|---------|------|
+> | `root` | `customers_masked` (view) | **Masked** — the view transforms the data for everyone |
+> | `root` | `customers` (base table) | **Raw** — root is a superuser, no grant restrictions |
+> | `alice` | `customers_masked` (view) | **Masked** — same view, same output as root |
+> | `alice` | `customers` (base table) | ❌ **Permission denied** — Doris grant restricts alice to views only |
+> | `bob` | `customers` (base table) | **Raw** — bob has admin privs, queries base table directly |
+>
+> Tests T-35 to T-44 connect as **root querying the masked view** — root gets masked output
+> because it is reading the view, not because root is restricted.
+> Root querying the **base table** always returns raw data.
+>
+> **Retrieve user passwords from OpenBao before running T-45a onwards:**
 >
 > ```bash
 > VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
@@ -947,7 +964,8 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 >   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/bob")
 > ```
 >
-> The `krb-doris-guard` sidecar (port 19030) validates that each connecting username has a matching principal in the Kerberos KDC via `kadmin -kt`. `root` is always exempt. Tests T-35 to T-44 connect as **root** to verify masking expressions directly. Tests T-45, T-46, and T-47 connect as `alice` and `bob` using the passwords above.
+> The `krb-doris-guard` sidecar (port 19030) validates KDC principal existence via `kadmin -kt`
+> before forwarding any connection to Doris. `root` is always exempt from this check.
 
 ### T-35 · customers_masked returns 20 rows (masking expressions verified via root)
 
@@ -1071,44 +1089,99 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 
 ---
 
-## Phase 12 — Negative tests (T-45 to T-46)
+## Phase 12 — Alice reads masked views (T-45a to T-45c)
 
-> **These tests must connect as `alice` (analyst role) — not root.** Root is a Doris superuser and is never denied access.
-> The `krb-doris-guard` will pass `alice` through after confirming `alice@STARDATADBLABS.LOCAL` exists in the KDC.
-> Doris then enforces table-level grants — `alice` has `SELECT_PRIV` only on the masked views, not base tables.
+> These are **positive** tests — alice should be able to query the masked views and receive masked (not raw) data.
+> All commands connect as `alice` using `$ALICE_PASS` (retrieve from OpenBao — see Phase 11 note).
+
+### T-45a · alice CAN SELECT from customers_masked — data is masked
+
+```bash
+MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+  -e "SELECT customer_id, full_name, email, national_id, salary
+      FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
+```
+
+✅ **Pass:**
+- `full_name` is a 64-char hex string (SHA-256 hash) — **not** `Alice Fontaine`
+- `email` is partially masked (e.g. `al*************@example.com`) — **not** the real address
+- `national_id` = `****`
+- `salary` = `****`
+
+❌ **Fail:** real values appear → alice still has catalog-level `SELECT_PRIV` — fix:
+```bash
+MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+  -e "REVOKE SELECT_PRIV ON *.* FROM 'alice'@'%';
+      GRANT SELECT_PRIV ON governance_demo.customers_masked TO 'alice'@'%';
+      GRANT SELECT_PRIV ON governance_demo.payments_masked  TO 'alice'@'%';
+      GRANT SELECT_PRIV ON governance_demo.orders    TO 'alice'@'%';
+      GRANT SELECT_PRIV ON governance_demo.products  TO 'alice'@'%';"
+```
+
+---
+
+### T-45b · alice CAN SELECT from payments_masked — card number is masked
+
+```bash
+MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+  -e "SELECT payment_id, card_number, credit_card_cvv, amount
+      FROM payments_masked WHERE payment_id=9001;" 2>/dev/null
+```
+
+✅ **Pass:**
+- `card_number` ends in the last 4 digits only (e.g. `************9005`)
+- `credit_card_cvv` = `****`
+- `amount` is the real value (non-sensitive — passes through)
+
+---
+
+### T-45c · alice CAN SELECT from orders and products (no masking)
+
+```bash
+MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+  -e "SELECT order_id, customer_id, status FROM orders LIMIT 3;" 2>/dev/null
+
+MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+  -e "SELECT product_id, product_name, price FROM products LIMIT 3;" 2>/dev/null
+```
+
+✅ **Pass:** both queries return real data — these tables have no sensitive columns
+
+---
+
+## Phase 13 — Negative tests (T-46 to T-47)
+
+> **These tests must connect as `alice` — not root.** Root is a Doris superuser and is never denied access.
+> Doris enforces table-level grants — `alice` has `SELECT_PRIV` only on the masked views, not base tables.
 >
 > Ensure `$ALICE_PASS` is set (see Phase 11 note above), then run directly against the NodePort:
 
-### T-45 · alice (analyst) CANNOT SELECT base customers table
+### T-46 · alice (analyst) CANNOT SELECT base customers table
 
 ```bash
 MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
   -e "SELECT full_name, salary FROM customers LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
-✅ **Pass:** output contains `ERROR 1045` — Access denied
-❌ **Fail:** query returns data → alice has direct table access — revoke it:
-```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
-  -e "REVOKE SELECT_PRIV ON governance_demo.customers FROM 'alice'@'%';"
-```
+✅ **Pass:** output contains `ERROR` — Permission denied
+❌ **Fail:** query returns data → see T-45a remediation above to re-scope alice's grants.
 
 ---
 
-### T-46 · alice (analyst) CANNOT SELECT base payments table
+### T-47 · alice (analyst) CANNOT SELECT base payments table
 
 ```bash
 MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
   -e "SELECT card_number FROM payments LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
-✅ **Pass:** output contains `ERROR 1045` — Access denied
+✅ **Pass:** output contains `ERROR` — Permission denied
 
 ---
 
-## Phase 13 — Admin clear access (T-47)
+## Phase 14 — Admin clear access (T-48)
 
-### T-47 · bob (data_admin) sees raw unmasked data
+### T-48 · bob (data_admin) sees raw unmasked data
 
 Connect as `bob` — this user has full admin privs in Doris (`Node_priv`, `Admin_priv`) and queries the base table directly with no masking:
 
@@ -1122,7 +1195,7 @@ MYSQL_PWD="$BOB_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u bob governance_demo
 
 ---
 
-## Phase 14 — Masking exception grant (T-48)
+## Phase 15 — Masking exception grant (T-49)
 
 ### T-48 · Exception changes routing from masked_view to base_table
 
@@ -1178,7 +1251,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 
 ---
 
-## Phase 15 — Policy update → view regeneration (T-49)
+## Phase 16 — Policy update → view regeneration (T-50)
 
 ### T-49 · Change algorithm, re-apply, verify new expression
 
@@ -1230,7 +1303,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
 
 ---
 
-## Phase 16 — Performance & idempotency (T-50 to T-52)
+## Phase 17 — Performance & idempotency (T-51 to T-53)
 
 ### T-50 · Masked view query < 1 second
 
