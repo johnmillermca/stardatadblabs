@@ -24,6 +24,15 @@ data:
     polaris.realm-context.require-header=false
     polaris.features.ALLOW_WILDCARD_LOCATION=true
     polaris.features.INITIALIZE_DEFAULT_CATALOG_FILEIO_FOR_WRITES=true
+    # Disable STS vended-credential delegation — watsonx-s3-connector is an IAM
+    # user (not a role) so sts:AssumeRole is not valid. Spark supplies its own
+    # S3 credentials via spark.sql.catalog.*.s3.* properties instead.
+    polaris.features.ALLOW_EXTERNAL_CATALOG_CREDENTIAL_VENDING=false
+    # Inject static AWS credentials so Polaris S3FileIO can validate locations
+    # and write metadata directly without requiring an IAM role assumption.
+    aws.accessKeyId=${AWS_ACCESS_KEY_ID}
+    aws.secretAccessKey=${AWS_SECRET_ACCESS_KEY}
+    aws.region=us-east-2
     logging.level.org.apache.polaris=INFO
     management.endpoints.web.exposure.include=health,info,metrics
     management.endpoint.health.show-details=always
