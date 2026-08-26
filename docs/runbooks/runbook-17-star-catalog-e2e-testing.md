@@ -91,7 +91,12 @@ BAO_ADDR="http://192.168.1.50:30820"
 PG_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
 MASTER_TOKEN=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 32)
 JWT_SECRET=$(openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 48)
-RBAC_PLANE_TOKEN="changeme-master-token"   # must match RBAC Control Plane secret
+
+# Read the real RBAC Control Plane master token — must already exist in rbac-plane-credentials
+# (created by rbac-plane/scripts/seed-rbac-credentials.sh before this step)
+RBAC_PLANE_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+echo "RBAC_PLANE_TOKEN length: ${#RBAC_PLANE_TOKEN}"  # must be > 0
 
 # Store in OpenBao at secret/data/star-catalog/credentials
 curl -sf -X POST \
@@ -111,6 +116,8 @@ echo "Stored at secret/data/star-catalog/credentials"
 echo "PG_PASSWORD=${PG_PASSWORD}"
 echo "MASTER_TOKEN=${MASTER_TOKEN}"
 ```
+
+> **Pre-requisite:** `rbac-plane-credentials` must exist in the `prod` namespace before running this step. It is created by `rbac-plane/scripts/seed-rbac-credentials.sh`. If it does not exist yet, run that script first, then return here.
 
 ### 0.2 — Create the PostgreSQL database and user
 
@@ -169,6 +176,26 @@ kubectl create secret generic star-catalog-credentials \
   --from-literal=RBAC_PLANE_TOKEN=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['rbac-plane-token'])") \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+> **Verify `RBAC_PLANE_TOKEN` is not the placeholder.** If this value is `changeme-master-token` the catalog's query planner (T-33/T-34) will fail with `"User not found in RBAC Control Plane"` at test time. Confirm:
+> ```bash
+> kubectl get secret star-catalog-credentials -n prod \
+>   -o jsonpath='{.data.RBAC_PLANE_TOKEN}' | base64 -d && echo
+> # Must NOT print: changeme-master-token
+> # Must print the same value as:
+> kubectl get secret rbac-plane-credentials -n prod \
+>   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d && echo
+> ```
+> If it shows `changeme-master-token`, patch it immediately:
+> ```bash
+> REAL_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
+>   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
+> kubectl patch secret star-catalog-credentials -n prod \
+>   --type='json' \
+>   -p="[{\"op\":\"replace\",\"path\":\"/data/RBAC_PLANE_TOKEN\",\"value\":\"$(echo -n $REAL_TOKEN | base64)\"}]"
+> kubectl rollout restart deployment/star-knowledge-catalog -n prod
+> kubectl rollout status deployment/star-knowledge-catalog -n prod --timeout=60s
+> ```
 
 ### 0.5 — Build and push the container image
 
