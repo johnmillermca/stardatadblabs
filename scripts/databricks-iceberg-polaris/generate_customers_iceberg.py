@@ -26,9 +26,9 @@ Run via kubectl (spark-submit inside the spark-master pod):
 
 import os
 import random
-import string
 import sys
 from datetime import date, timedelta
+from decimal import Decimal
 
 # ── Spark / Iceberg bootstrap ──────────────────────────────────────────────────
 sys.path.insert(0, "/opt/spark/scripts")
@@ -110,8 +110,8 @@ def rand_ip() -> str:
     return f"{random.randint(1,254)}.{random.randint(0,254)}.{random.randint(0,254)}.{random.randint(1,254)}"
 
 
-def rand_salary() -> float:
-    return round(random.uniform(28000, 220000), 2)
+def rand_salary() -> Decimal:
+    return Decimal(str(round(random.uniform(28000, 220000), 2)))
 
 
 def generate_rows(n: int) -> list:
@@ -158,20 +158,31 @@ def main():
 
     # ── Load credentials from OpenBao ──────────────────────────────────────────
     bao = BaoSparkInit()
-    conf = bao.get_spark_conf()
+    pol = bao.polaris_creds()
+    conf = bao.spark_conf(app_name="generate_customers_iceberg")
 
-    # Override catalog to star_lakehouse
+    # Override / add star_lakehouse catalog (spark_conf pre-wires 'polaris';
+    # this job targets the star_lakehouse catalog name instead)
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}",
              "org.apache.iceberg.spark.SparkCatalog")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.type", "rest")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.uri",
              "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.credential",
-             f"{bao.get_secret('platform/polaris', 'spark_svc_id')}:"
-             f"{bao.get_secret('platform/polaris', 'spark_svc_secret')}")
+             f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.scope",    "PRINCIPAL_ROLE:ALL")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.warehouse", POLARIS_CATALOG)
-    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.header.X-Iceberg-Access-Delegation", "vended-credentials")
+    # Do NOT use vended-credentials: Polaris storageConfigInfo points at an IAM
+    # user ARN (not a role), so sts:AssumeRole is not valid. S3A credentials
+    # supplied via spark.hadoop.fs.s3a.* / catalog s3.* handle storage access.
+    # conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.header.X-Iceberg-Access-Delegation", "vended-credentials")
+    # S3 credentials scoped to star_lakehouse catalog (mirrors polaris catalog block)
+    s3 = bao.s3_creds()
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.access-key-id",     s3["access_key"])
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.secret-access-key", s3["secret_key"])
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.endpoint",          s3["endpoint"])
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.path-style-access", "true")
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.client.region",        s3["region"])
 
     spark = SparkSession.builder \
         .config(conf=conf) \

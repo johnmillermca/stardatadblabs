@@ -105,24 +105,31 @@ def _get_polaris_token(client_id: str, client_secret: str) -> str:
 
 def copy_via_spark(bao: BaoSparkInit, workspace: str, token: str) -> None:
     """CTAS: read Polaris Iceberg → write Databricks managed Delta table."""
-    conf = bao.get_spark_conf()
+    pol = bao.polaris_creds()
+    s3  = bao.s3_creds()
+    conf = bao.spark_conf(app_name="starpump_to_databricks")
 
-    # Polaris source catalog
+    # Polaris source catalog (star_lakehouse — separate from the default 'polaris' entry)
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.type", "rest")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.uri",
              "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.credential",
-             f"{bao.get_secret('platform/polaris','spark_svc_id')}:"
-             f"{bao.get_secret('platform/polaris','spark_svc_secret')}")
+             f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.scope",    "PRINCIPAL_ROLE:ALL")
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.warehouse", POLARIS_CATALOG)
     conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.header.X-Iceberg-Access-Delegation",
              "vended-credentials")
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.access-key-id",     s3["access_key"])
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.secret-access-key", s3["secret_key"])
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.endpoint",          s3["endpoint"])
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.s3.path-style-access", "true")
+    conf.set(f"spark.sql.catalog.{POLARIS_CATALOG}.client.region",        s3["region"])
 
     # Databricks target catalog via Unity Catalog JDBC
-    db_token = bao.get_secret("databricks/pat", "token")
-    db_ws    = bao.get_secret("databricks/pat", "workspace")
+    db_creds = bao.db_creds() if hasattr(bao, "db_creds") else {"token": token, "workspace": workspace}
+    db_token = db_creds.get("token", token)
+    db_ws    = db_creds.get("workspace", workspace)
     warehouse_id = "2c23ed9f013093c4"   # Serverless Starter Warehouse
     jdbc_url = (f"jdbc:databricks://{db_ws.replace('https://','')}"
                 f"/default;transportMode=http;ssl=1"
@@ -157,11 +164,13 @@ def copy_via_spark(bao: BaoSparkInit, workspace: str, token: str) -> None:
 
 def main():
     bao      = BaoSparkInit()
-    workspace    = bao.get_secret("databricks/pat", "workspace")
-    db_token     = bao.get_secret("databricks/pat", "token")
-    polaris_url  = bao.get_secret("platform/polaris", "url")
-    polaris_id   = bao.get_secret("platform/polaris", "spark_svc_id")
-    polaris_sec  = bao.get_secret("platform/polaris", "spark_svc_secret")
+    db       = bao._read_secret("secret/data/databricks/pat")
+    workspace    = db["workspace"]
+    db_token     = db["token"]
+    pol          = bao.polaris_creds()
+    polaris_url  = pol.get("url", "http://192.168.1.50:30181")
+    polaris_id   = pol["spark_svc_id"]
+    polaris_sec  = pol["spark_svc_secret"]
 
     ensure_db_catalog(workspace, db_token, polaris_url, polaris_id, polaris_sec)
     copy_via_spark(bao, workspace, db_token)

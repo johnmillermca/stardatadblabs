@@ -200,7 +200,7 @@ SPARK_POD=$(kubectl get pods -n prod -l app=spark-master \
   --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 
 # Copy script into pod
-kubectl cp docs/runbooks/databricks-iceberg-polaris/generate_customers_iceberg.py \
+kubectl cp scripts/databricks-iceberg-polaris/generate_customers_iceberg.py \
   prod/$SPARK_POD:/tmp/generate_customers_iceberg.py
 
 # Submit job
@@ -349,7 +349,7 @@ SPARK_POD=$(kubectl get pods -n prod -l app=spark-master \
   --field-selector=status.phase=Running \
   --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 
-kubectl cp docs/runbooks/databricks-iceberg-polaris/starpump_to_databricks.py \
+kubectl cp scripts/databricks-iceberg-polaris/starpump_to_databricks.py \
   prod/$SPARK_POD:/tmp/starpump_to_databricks.py
 
 kubectl exec -n prod $SPARK_POD -c spark-master -- \
@@ -449,5 +449,5 @@ The Iceberg table was not written yet. Run Step 3 (generate_customers_iceberg.py
 | Databricks SQL warehouse | `2c23ed9f013093c4` (Serverless Starter) |
 | OpenBao PAT | `secret/databricks/pat` |
 | OpenBao Polaris connector | `secret/databricks/polaris-connector` |
-| Script: Spark data gen | `docs/runbooks/databricks-iceberg-polaris/generate_customers_iceberg.py` |
-| Script: STARPUMP copy | `docs/runbooks/databricks-iceberg-polaris/starpump_to_databricks.py` |
+| Script: Spark data gen | `scripts/databricks-iceberg-polaris/generate_customers_iceberg.py` |
+| Script: STARPUMP copy | `scripts/databricks-iceberg-polaris/starpump_to_databricks.py` |
