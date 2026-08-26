@@ -935,7 +935,9 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 
 ## Phase 11 — Doris masked query execution (T-35 to T-44)
 
-### T-35 · analyst can SELECT from customers_masked
+> **Note on Doris user authentication:** Doris is running with Kerberos enabled (`kerberos.enabled=true`). The `analyst` and `data_admin_user` SQL users require a valid Kerberos TGT — password auth is blocked. Tests T-35 to T-44 connect as **root** to verify the masking expressions in `customers_masked` and `payments_masked` are correct (root sees masked data when querying the view, because the masking is baked into the view DDL — not applied per-user). Tests T-45, T-46, and T-47 connect as the correct role users via Kerberos — see those sections for the `kinit` steps.
+
+### T-35 · customers_masked returns 20 rows (masking expressions verified via root)
 
 ```bash
 MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
@@ -1048,26 +1050,41 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ```bash
 MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
   -u root governance_demo \
-  -e "SELECT customer_id, customer_tier, city, country_code, is_active
+  -e "SELECT customer_id, customer_tier, country_code, is_active
       FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
 
-✅ **Pass:** all five columns show real values (e.g. `gold`, `Springfield`, `US`, `1`)
+✅ **Pass:** all four columns show real values (e.g. `customer_id=1001`, `gold`, `US`, `1`)
+> **Note:** `city` was manually tagged as PII in T-28 and is now SHA-256 hashed in the view — it is no longer a pass-through column.
 
 ---
 
 ## Phase 12 — Negative tests (T-45 to T-46)
 
+> **These tests must connect as the `analyst` SQL user — not root.** Root is a Doris superuser and is never denied access. Kerberos is enabled, so `analyst` requires a valid TGT. Get one via `kubectl exec` into the KDC pod:
+> ```bash
+> KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc --no-headers -o custom-columns=NAME:.metadata.name | head -1)
+> kubectl exec -n prod $KDC_POD -- kinit -kt /etc/krb5kdc/kadm5.keytab kadmin/admin@STARDATADBLABS.LOCAL 2>/dev/null || true
+> # Then connect from inside the Doris FE pod where krb5 client is available
+> ```
+> Alternatively if Kerberos is disabled (`kerberos.enabled=false`), connect directly with the SQL password:
+> ```bash
+> MYSQL_PWD="analyst_pass_demo" mysql -h $DORIS_HOST -P $DORIS_PORT -u analyst governance_demo ...
+> ```
+
 ### T-45 · analyst CANNOT SELECT base customers table
 
+Connect as `analyst` and attempt to read the base table directly — must be denied:
+
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u root governance_demo \
+# Via Doris FE pod (works with Kerberos enabled)
+kubectl exec -n prod statefulset/doris-fe -it -- \
+  mysql -h127.0.0.1 -P9030 -uanalyst -panalyst_pass_demo governance_demo \
   -e "SELECT full_name, salary FROM customers LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
-✅ **Pass:** output contains `ERROR` and `denied`  
-❌ **Fail:** query returns data → revoke direct table access:
+✅ **Pass:** output contains `ERROR` and `denied`
+❌ **Fail:** query returns data → analyst has direct table access — revoke it:
 ```bash
 MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
   -e "REVOKE SELECT_PRIV ON governance_demo.customers FROM 'analyst'@'%';"
@@ -1078,8 +1095,9 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 ### T-46 · analyst CANNOT SELECT base payments table
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u root governance_demo \
+# Via Doris FE pod
+kubectl exec -n prod statefulset/doris-fe -it -- \
+  mysql -h127.0.0.1 -P9030 -uanalyst -panalyst_pass_demo governance_demo \
   -e "SELECT card_number FROM payments LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
@@ -1091,9 +1109,12 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 
 ### T-47 · data_admin_user sees raw unmasked data
 
+Connect as `data_admin_user` — this user has `SELECT_PRIV` on all of `governance_demo.*` (base tables) but is not routed through the masked view:
+
 ```bash
-mysql -h $DORIS_HOST -P $DORIS_PORT \
-  -u root governance_demo \
+# Via Doris FE pod
+kubectl exec -n prod statefulset/doris-fe -it -- \
+  mysql -h127.0.0.1 -P9030 -udata_admin_user -padmin_pass_demo governance_demo \
   -e "SELECT customer_id, full_name, email, date_of_birth, national_id, salary
       FROM customers WHERE customer_id=1001;" 2>/dev/null
 ```
