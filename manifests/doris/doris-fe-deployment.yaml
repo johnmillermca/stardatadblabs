@@ -16,18 +16,21 @@
 #
 #   The guard:
 #     1. Intercepts the MySQL HandshakeResponse and extracts the username.
-#     2. Runs:  kadmin -kt <KADMIN_KEYTAB> -p <KADMIN_PRINCIPAL> getprinc <user>@REALM
-#        to check whether the KDC principal exists (direct admin lookup — no password,
-#        no anonymous PKINIT, no allow_anonymous required in KDC config).
-#     3. If the principal does NOT exist → MySQL ERR_Packet 1045 (Access denied)
-#        with message:
-#          "principal <user>@REALM not found in Kerberos KDC"
+#     2. Runs:  kadmin -kt <KADMIN_KEYTAB> -p kadmin/admin@REALM getprinc <user>@REALM
+#        Direct admin lookup — no password exchange, no anonymous PKINIT, no
+#        allow_anonymous required in KDC config. Keytab mounted from K8s secret
+#        'kadmin-keytab' (created from KDC's /var/kerberos/krb5kdc/kadm5.keytab).
+#     3. If the principal does NOT exist → MySQL ERR_Packet 1045 (Access denied).
 #     4. If the principal DOES exist → transparent proxy to Doris :9030.
 #        Doris validates the password; Doris enforces authorization natively.
 #
 #   The Service routes port 9030 → guard port 19030 (not Doris port 9030).
 #   Doris FE is only accessible via the guard; port 9030 is not exposed directly.
 #   root is exempt (EXEMPT_USERS=root) so admin operations are unaffected.
+#
+#   Doris SQL users and passwords:
+#     alice (analyst)    — password stored in OpenBao: secret/doris/users/alice
+#     bob   (data_admin) — password stored in OpenBao: secret/doris/users/bob
 # =============================================================================
 ---
 apiVersion: v1

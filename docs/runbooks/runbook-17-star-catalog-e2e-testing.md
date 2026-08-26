@@ -935,7 +935,19 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 
 ## Phase 11 — Doris masked query execution (T-35 to T-44)
 
-> **Note on Doris user authentication:** Doris is running with Kerberos enabled (`kerberos.enabled=true`). The `analyst` and `data_admin_user` SQL users require a valid Kerberos TGT — password auth is blocked. Tests T-35 to T-44 connect as **root** to verify the masking expressions in `customers_masked` and `payments_masked` are correct (root sees masked data when querying the view, because the masking is baked into the view DDL — not applied per-user). Tests T-45, T-46, and T-47 connect as the correct role users via Kerberos — see those sections for the `kinit` steps.
+> **Note on Doris user authentication:** Doris SQL users are `alice` (analyst role) and `bob` (data_admin role).
+> Passwords are stored in OpenBao — retrieve them once and export before running these tests:
+>
+> ```bash
+> VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+>   -o jsonpath='{.data.root-token}' | base64 -d)
+> ALICE_PASS=$(kubectl exec -n prod openbao-0 -- \
+>   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/alice")
+> BOB_PASS=$(kubectl exec -n prod openbao-0 -- \
+>   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/bob")
+> ```
+>
+> The `krb-doris-guard` sidecar (port 19030) validates that each connecting username has a matching principal in the Kerberos KDC via `kadmin -kt`. `root` is always exempt. Tests T-35 to T-44 connect as **root** to verify masking expressions directly. Tests T-45, T-46, and T-47 connect as `alice` and `bob` using the passwords above.
 
 ### T-35 · customers_masked returns 20 rows (masking expressions verified via root)
 
@@ -1061,60 +1073,47 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 
 ## Phase 12 — Negative tests (T-45 to T-46)
 
-> **These tests must connect as the `analyst` SQL user — not root.** Root is a Doris superuser and is never denied access. Kerberos is enabled, so `analyst` requires a valid TGT. Get one via `kubectl exec` into the KDC pod:
-> ```bash
-> KDC_POD=$(kubectl get pod -n prod -l app=kerberos-kdc --no-headers -o custom-columns=NAME:.metadata.name | head -1)
-> kubectl exec -n prod $KDC_POD -- kinit -kt /etc/krb5kdc/kadm5.keytab kadmin/admin@STARDATADBLABS.LOCAL 2>/dev/null || true
-> # Then connect from inside the Doris FE pod where krb5 client is available
-> ```
-> Alternatively if Kerberos is disabled (`kerberos.enabled=false`), connect directly with the SQL password:
-> ```bash
-> MYSQL_PWD="analyst_pass_demo" mysql -h $DORIS_HOST -P $DORIS_PORT -u analyst governance_demo ...
-> ```
+> **These tests must connect as `alice` (analyst role) — not root.** Root is a Doris superuser and is never denied access.
+> The `krb-doris-guard` will pass `alice` through after confirming `alice@STARDATADBLABS.LOCAL` exists in the KDC.
+> Doris then enforces table-level grants — `alice` has `SELECT_PRIV` only on the masked views, not base tables.
+>
+> Ensure `$ALICE_PASS` is set (see Phase 11 note above), then run directly against the NodePort:
 
-### T-45 · analyst CANNOT SELECT base customers table
-
-Connect as `analyst` and attempt to read the base table directly — must be denied:
+### T-45 · alice (analyst) CANNOT SELECT base customers table
 
 ```bash
-# Via Doris FE pod (works with Kerberos enabled)
-kubectl exec -n prod statefulset/doris-fe -it -- \
-  mysql -h127.0.0.1 -P9030 -uanalyst -panalyst_pass_demo governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
   -e "SELECT full_name, salary FROM customers LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
-✅ **Pass:** output contains `ERROR` and `denied`
-❌ **Fail:** query returns data → analyst has direct table access — revoke it:
+✅ **Pass:** output contains `ERROR 1045` — Access denied
+❌ **Fail:** query returns data → alice has direct table access — revoke it:
 ```bash
 MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
-  -e "REVOKE SELECT_PRIV ON governance_demo.customers FROM 'analyst'@'%';"
+  -e "REVOKE SELECT_PRIV ON governance_demo.customers FROM 'alice'@'%';"
 ```
 
 ---
 
-### T-46 · analyst CANNOT SELECT base payments table
+### T-46 · alice (analyst) CANNOT SELECT base payments table
 
 ```bash
-# Via Doris FE pod
-kubectl exec -n prod statefulset/doris-fe -it -- \
-  mysql -h127.0.0.1 -P9030 -uanalyst -panalyst_pass_demo governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
   -e "SELECT card_number FROM payments LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
-✅ **Pass:** output contains `ERROR` and `denied`
+✅ **Pass:** output contains `ERROR 1045` — Access denied
 
 ---
 
 ## Phase 13 — Admin clear access (T-47)
 
-### T-47 · data_admin_user sees raw unmasked data
+### T-47 · bob (data_admin) sees raw unmasked data
 
-Connect as `data_admin_user` — this user has `SELECT_PRIV` on all of `governance_demo.*` (base tables) but is not routed through the masked view:
+Connect as `bob` — this user has full admin privs in Doris (`Node_priv`, `Admin_priv`) and queries the base table directly with no masking:
 
 ```bash
-# Via Doris FE pod
-kubectl exec -n prod statefulset/doris-fe -it -- \
-  mysql -h127.0.0.1 -P9030 -udata_admin_user -padmin_pass_demo governance_demo \
+MYSQL_PWD="$BOB_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u bob governance_demo \
   -e "SELECT customer_id, full_name, email, date_of_birth, national_id, salary
       FROM customers WHERE customer_id=1001;" 2>/dev/null
 ```

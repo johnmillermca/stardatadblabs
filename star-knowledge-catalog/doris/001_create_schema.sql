@@ -14,13 +14,23 @@
 CREATE DATABASE IF NOT EXISTS governance_demo;
 USE governance_demo;
 
--- ── Doris user for the analyst role ────────────────────────────────────────
--- This user maps to the 'analyst' role in the RBAC Control Plane.
--- In production this is provisioned by rbac-plane's DorisAdapter.
--- Here we create it explicitly for the demo.
+-- ── Doris users — alice (analyst) and bob (data_admin) ────────────────────
+-- These users map to roles in the RBAC Control Plane.
+-- Passwords are stored in OpenBao at:
+--   secret/doris/users/alice  →  password field
+--   secret/doris/users/bob    →  password field
+--
+-- Retrieve before applying:
+--   VAULT_TOKEN=<root-token>
+--   ALICE_PASS=$(kubectl exec -n prod openbao-0 -- \
+--     sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/alice")
+--   BOB_PASS=$(kubectl exec -n prod openbao-0 -- \
+--     sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/bob")
+--
+-- Then substitute the passwords below, or use the helper at the top of runbook-17.
 
-CREATE USER IF NOT EXISTS 'analyst'@'%' IDENTIFIED BY 'analyst_pass_demo';
-CREATE USER IF NOT EXISTS 'data_admin_user'@'%' IDENTIFIED BY 'admin_pass_demo';
+CREATE USER IF NOT EXISTS 'alice'@'%' IDENTIFIED BY 'AliceDoris1!';
+CREATE USER IF NOT EXISTS 'bob'@'%' IDENTIFIED BY 'TempPass1!';
 
 -- ── Table: customers ───────────────────────────────────────────────────────
 -- Contains PII columns: full_name, email, phone_number, date_of_birth,

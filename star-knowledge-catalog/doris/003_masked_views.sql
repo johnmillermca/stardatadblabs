@@ -69,10 +69,19 @@ SELECT
   paid_at
 FROM governance_demo.payments;
 
--- ── Grant SELECT on masked views to analyst user ──────────────────────────────
-GRANT SELECT_PRIV ON governance_demo.customers_masked TO 'analyst'@'%';
-GRANT SELECT_PRIV ON governance_demo.payments_masked  TO 'analyst'@'%';
+-- ── Grants for alice (analyst role) ──────────────────────────────────────────
+-- IMPORTANT: alice must NOT have catalog-level (*.* ) SELECT_PRIV — that would
+-- grant access to all base tables. Revoke any broad grant first, then scope down.
+REVOKE SELECT_PRIV ON *.* FROM 'alice'@'%';
+
+-- alice may only query masked views — NOT the base tables customers/payments.
+GRANT SELECT_PRIV ON governance_demo.customers_masked TO 'alice'@'%';
+GRANT SELECT_PRIV ON governance_demo.payments_masked  TO 'alice'@'%';
 
 -- orders and products have no sensitive columns — grant base table directly
-GRANT SELECT_PRIV ON governance_demo.orders    TO 'analyst'@'%';
-GRANT SELECT_PRIV ON governance_demo.products  TO 'analyst'@'%';
+GRANT SELECT_PRIV ON governance_demo.orders    TO 'alice'@'%';
+GRANT SELECT_PRIV ON governance_demo.products  TO 'alice'@'%';
+
+-- ── Grants for bob (data_admin role) ─────────────────────────────────────────
+-- bob has full admin privs in Doris (Node_priv, Admin_priv) — no explicit grants needed.
+-- Documented here for clarity: bob can SELECT base tables directly (raw, unmasked data).
