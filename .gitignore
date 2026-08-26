@@ -30,3 +30,6 @@ jars/*.jar
 # Helm dependency downloads (re-fetchable via helm dep update)
 **/charts/
 **/Chart.lock
+
+# Large Spark JARs — stored locally, not in git
+docker/spark-gluten-velox/jars/*.jar
