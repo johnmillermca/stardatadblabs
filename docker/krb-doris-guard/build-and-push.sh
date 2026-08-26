@@ -2,7 +2,7 @@
 # Build and push krb-doris-guard to private registry
 set -euo pipefail
 REGISTRY="192.168.1.50:30500"
-IMAGE="${REGISTRY}/krb-doris-guard:1.0.0"
+IMAGE="${REGISTRY}/krb-doris-guard:1.0.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> Building $IMAGE"

@@ -9,24 +9,30 @@ For every new TCP connection it:
   2. Forwards it to the client unchanged.
   3. Reads the client's HandshakeResponse (login request) which contains the username.
   4. Checks whether username@REALM exists as a principal in the KDC
-     by running:  kinit -V -n <username>@REALM </dev/null
-     (This does not require the user's password — it just asks the KDC whether
-      the principal exists. A non-existent principal returns KDC error immediately.)
+     by running:  kadmin -kt <KADMIN_KEYTAB> -p <KADMIN_PRINCIPAL> getprinc <user>@REALM
+     This is a direct kadmin lookup — no password required, no TGS round-trip,
+     no dependency on allow_anonymous in the KDC config.
+     The kadmin-keytab must contain kadmin/admin@REALM and be mounted at
+     KADMIN_KEYTAB (default: /etc/security/keytabs/kadmin.keytab).
   5. If the principal does NOT exist → send MySQL error packet (Access denied) and
      close the connection. The client sees:
        ERROR 1045 (28000): Access denied — principal bob@REALM not found in KDC.
   6. If the principal DOES exist → forward the HandshakeResponse to Doris and
      transparently proxy all subsequent bytes in both directions.
-     Doris still validates the password and enforces authorization natively.
+     Doris still validates the password; Doris enforces authorization natively.
 
 Environment variables:
-  KDC_REALM        Kerberos realm  (default: STARDATADBLABS.LOCAL)
-  KRB5_CONFIG      Path to krb5.conf (default: /etc/krb5.conf.d/cluster.conf)
-  DORIS_HOST       Upstream Doris host (default: 127.0.0.1)
-  DORIS_PORT       Upstream Doris port (default: 9030)
-  LISTEN_PORT      Port this proxy listens on (default: 19030)
-  EXEMPT_USERS     Comma-separated usernames that bypass KDC check (default: root)
-  LOG_LEVEL        DEBUG / INFO / WARNING (default: INFO)
+  KDC_REALM          Kerberos realm  (default: STARDATADBLABS.LOCAL)
+  KRB5_CONFIG        Path to krb5.conf (default: /etc/krb5.conf.d/cluster.conf)
+  KADMIN_KEYTAB      Path to kadmin keytab for principal lookup
+                     (default: /etc/security/keytabs/kadmin.keytab)
+  KADMIN_PRINCIPAL   kadmin principal in the keytab
+                     (default: kadmin/admin@STARDATADBLABS.LOCAL)
+  DORIS_HOST         Upstream Doris host (default: 127.0.0.1)
+  DORIS_PORT         Upstream Doris port (default: 9030)
+  LISTEN_PORT        Port this proxy listens on (default: 19030)
+  EXEMPT_USERS       Comma-separated usernames that bypass KDC check (default: root)
+  LOG_LEVEL          DEBUG / INFO / WARNING (default: INFO)
 """
 
 import asyncio
@@ -37,13 +43,15 @@ import subprocess
 import sys
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-KDC_REALM    = os.getenv("KDC_REALM",    "STARDATADBLABS.LOCAL")
-KRB5_CONFIG  = os.getenv("KRB5_CONFIG",  "/etc/krb5.conf.d/cluster.conf")
-DORIS_HOST   = os.getenv("DORIS_HOST",   "127.0.0.1")
-DORIS_PORT   = int(os.getenv("DORIS_PORT",   "9030"))
-LISTEN_PORT  = int(os.getenv("LISTEN_PORT",  "19030"))
-EXEMPT_USERS = set(os.getenv("EXEMPT_USERS", "root").split(","))
-LOG_LEVEL    = os.getenv("LOG_LEVEL",    "INFO")
+KDC_REALM          = os.getenv("KDC_REALM",          "STARDATADBLABS.LOCAL")
+KRB5_CONFIG        = os.getenv("KRB5_CONFIG",        "/etc/krb5.conf.d/cluster.conf")
+KADMIN_KEYTAB      = os.getenv("KADMIN_KEYTAB",      "/etc/security/keytabs/kadmin.keytab")
+KADMIN_PRINCIPAL   = os.getenv("KADMIN_PRINCIPAL",   "kadmin/admin@STARDATADBLABS.LOCAL")
+DORIS_HOST         = os.getenv("DORIS_HOST",         "127.0.0.1")
+DORIS_PORT         = int(os.getenv("DORIS_PORT",     "9030"))
+LISTEN_PORT        = int(os.getenv("LISTEN_PORT",    "19030"))
+EXEMPT_USERS       = set(os.getenv("EXEMPT_USERS",   "root").split(","))
+LOG_LEVEL          = os.getenv("LOG_LEVEL",          "INFO")
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
@@ -57,22 +65,34 @@ log = logging.getLogger(__name__)
 def principal_exists(username: str) -> bool:
     """
     Ask the KDC whether <username>@REALM is a valid principal.
-    Uses 'kinit -V -n <principal> </dev/null':
-      - '-n' = anonymous, no password attempt
-      - </dev/null = no terminal input
-    A non-existent principal causes kinit to print:
-      "Client '<principal>' not found in Kerberos database"
-    and exit non-zero.
 
-    We parse the stderr/stdout for that KDC error message to distinguish
-    "principal not found" from other errors (KDC unreachable, etc.).
-    On KDC unreachable we DENY by default (fail-closed).
+    Method: kadmin -kt <keytab> -p kadmin/admin@REALM getprinc <user>@REALM
+    This is a direct administrative lookup — no password exchange, no TGS
+    round-trip, no dependency on allow_anonymous in the KDC configuration.
+
+    Output for an existing principal contains "Principal: <name>@REALM".
+    Output for a missing principal contains "Principal does not exist".
+
+    The kadmin-keytab must be mounted at KADMIN_KEYTAB and must contain
+    KADMIN_PRINCIPAL (kadmin/admin@REALM by default).
+
+    On KDC unreachable or keytab errors we DENY by default (fail-closed).
     """
     principal = f"{username}@{KDC_REALM}"
-    env = {**os.environ, "KRB5_CONFIG": KRB5_CONFIG, "HOME": "/tmp"}
+    env = {
+        **os.environ,
+        "KRB5_CONFIG": KRB5_CONFIG,
+        "HOME": "/tmp",
+    }
+
     try:
         result = subprocess.run(
-            ["kinit", "-V", "-n", principal],
+            [
+                "kadmin",
+                "-kt", KADMIN_KEYTAB,
+                "-p", KADMIN_PRINCIPAL,
+                "-q", f"getprinc {principal}",
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -80,18 +100,21 @@ def principal_exists(username: str) -> bool:
             env=env,
         )
         output = result.stdout.decode(errors="replace")
-        log.debug("kinit output for %s: %s", principal, output.strip())
+        log.debug("kadmin getprinc %s: exit=%d output=%s",
+                  principal, result.returncode, output.strip())
 
-        # kinit exit 0 should not happen for -n (anonymous) but handle it
-        if result.returncode == 0:
+        # Successful lookup — principal exists
+        if f"Principal: {principal}" in output:
+            log.debug("KDC confirmed principal exists: %s", principal)
             return True
 
-        # "not found in Kerberos database" → principal definitively absent
-        if "not found in Kerberos database" in output:
+        # Explicit "does not exist" response from kadmin
+        if "Principal does not exist" in output or \
+           "does not exist" in output.lower():
             log.info("KDC check DENIED: principal %s does not exist", principal)
             return False
 
-        # Any other non-zero (KDC unreachable, clock skew, etc.) → fail-closed
+        # Any other failure (KDC unreachable, keytab invalid, etc.) → fail-closed
         log.warning("KDC check FAILED for %s (exit %d): %s — denying",
                     principal, result.returncode, output.strip())
         return False
@@ -99,8 +122,8 @@ def principal_exists(username: str) -> bool:
     except subprocess.TimeoutExpired:
         log.warning("KDC check TIMEOUT for %s — denying", principal)
         return False
-    except FileNotFoundError:
-        log.error("kinit not found — cannot enforce KDC check. Denying all.")
+    except FileNotFoundError as exc:
+        log.error("Required binary not found (%s) — denying all.", exc)
         return False
 
 
