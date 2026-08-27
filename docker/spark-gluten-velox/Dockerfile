@@ -77,7 +77,8 @@ RUN pip3 install --no-cache-dir \
         "pyarrow==17.0.0" \
         "pandas==2.2.3" \
         "pyiceberg==0.7.1" \
-        "psycopg2-binary==2.9.10"
+        "psycopg2-binary==2.9.10" \
+        "thrift==0.24.0"
 
 # ── Set HOME for Snowflake JDBC credential cache + log directory ──────────────
 # Done early (before COPY conf/) so /home/spark exists and is owned by spark
