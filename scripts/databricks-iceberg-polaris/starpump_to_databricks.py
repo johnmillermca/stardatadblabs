@@ -130,7 +130,7 @@ def copy_via_spark(bao: BaoSparkInit, workspace: str, token: str) -> None:
     db_creds = bao.db_creds() if hasattr(bao, "db_creds") else {"token": token, "workspace": workspace}
     db_token = db_creds.get("token", token)
     db_ws    = db_creds.get("workspace", workspace)
-    warehouse_id = "2c23ed9f013093c4"   # Serverless Starter Warehouse
+    warehouse_id = "942026cf5e55f3c3"   # Serverless Starter Warehouse
     jdbc_url = (f"jdbc:databricks://{db_ws.replace('https://','')}"
                 f"/default;transportMode=http;ssl=1"
                 f";httpPath=/sql/1.0/warehouses/{warehouse_id}"

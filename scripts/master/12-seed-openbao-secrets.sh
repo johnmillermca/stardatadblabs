@@ -22,6 +22,7 @@
 #   jupyterhub-credentials      → prod
 #   kestra-credentials          → prod
 #   sqlmesh-credentials         → prod
+#   hive-metastore-credentials  → prod
 #   grafana-credentials         → monitoring
 #   prometheus-credentials      → monitoring
 # =============================================================================
@@ -242,7 +243,30 @@ else
   ok "polaris-db-credentials"
 fi
 
-# ─── 11b. Apache Polaris — bootstrap (root catalog) credentials ───────────────
+# ─── 11b. Hive Metastore ──────────────────────────────────────────────────────
+ensure_ns prod
+if bao_secret_exists "secret/data/hive/credentials"; then
+  skip "hive-metastore-credentials"
+else
+  HIVE_PASS=$(gen_password)
+  AWS_KEY=$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" "${BAO_ADDR}/v1/secret/data/platform/s3" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['access_key'])")
+  AWS_SEC=$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" "${BAO_ADDR}/v1/secret/data/platform/s3" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['secret_key'])")
+  bao_write "secret/data/hive/credentials" \
+    "db-user=hive" \
+    "db-password=${HIVE_PASS}" \
+    "jdbc-url=jdbc:postgresql://postgresql.prod.svc.cluster.local:5432/hive_metastore" \
+    "aws-access-key=${AWS_KEY}" \
+    "aws-secret-key=${AWS_SEC}"
+  kube_secret hive-metastore-credentials prod \
+    "db-password=${HIVE_PASS}" \
+    "aws-access-key=${AWS_KEY}" \
+    "aws-secret-key=${AWS_SEC}"
+  ok "hive-metastore-credentials"
+fi
+
+# ─── 11c. Apache Polaris — bootstrap (root catalog) credentials ───────────────
 # Polaris reads POLARIS_BOOTSTRAP_CREDENTIALS env var (System.getenv).
 # Format: clientId:clientSecret  (16-hex-char ID, 32-hex-char secret).
 # Without this, Polaris regenerates random credentials every restart.
@@ -401,8 +425,9 @@ printf "  %-38s %-15s  %s\n" "debezium-credentials"         "prod"            "s
 printf "  %-38s %-15s  %s\n" "schema-registry-credentials"  "prod"            "secret/data/schema-registry/credentials"
 printf "  %-38s %-15s  %s\n" "opensearch-credentials"       "prod"            "secret/data/opensearch/credentials"
 printf "  %-38s %-15s  %s\n" "kerberos-admin"               "prod"            "secret/data/kerberos/credentials"
-printf "  %-38s %-15s  %s\n" "polaris-db-credentials"       "prod"            "secret/data/polaris/credentials"
-printf "  %-38s %-15s  %s\n" "polaris-bootstrap-credentials" "prod"           "secret/data/polaris/bootstrap"
+printf "  %-38s %-15s  %s\n" "polaris-db-credentials"        "prod"            "secret/data/polaris/credentials"
+printf "  %-38s %-15s  %s\n" "polaris-bootstrap-credentials"  "prod"            "secret/data/polaris/bootstrap"
+printf "  %-38s %-15s  %s\n" "hive-metastore-credentials"    "prod"            "secret/data/hive/credentials"
 printf "  %-38s %-15s  %s\n" "doris-credentials"            "prod"            "secret/data/doris/credentials"
 printf "  %-38s %-15s  %s\n" "jupyterhub-credentials"       "prod"            "secret/data/jupyterhub/credentials"
 printf "  %-38s %-15s  %s\n" "kestra-credentials"           "prod"            "secret/data/kestra/credentials"

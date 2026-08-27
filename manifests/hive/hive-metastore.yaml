@@ -1,0 +1,263 @@
+# =============================================================================
+# Apache Hive Metastore 3.1.3 — prod namespace
+#
+# Role   : Standalone HMS (no HiveServer2) — provides a Thrift metastore
+#          endpoint for Spark's HiveExternalCatalog so Unity Catalog FOREIGN
+#          catalog federation (T-08 / T-09) can resolve Iceberg table metadata
+#          without requiring Polaris REST catalog support to be enabled on the
+#          Databricks account.
+#
+# Backend: PostgreSQL 17 — database hive_metastore, user hive
+#          Credentials in K8s Secret: hive-metastore-credentials (key: db-password)
+#          OpenBao path: secret/platform/hive_metastore
+#
+# Access : hive-metastore.prod.svc.cluster.local:9083 (Thrift, in-cluster only)
+#          NodePort 192.168.1.50:30983               (external, for testing)
+#
+# hive-site.xml : mounted from ConfigMap hive-site-config
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hive-site-config
+  namespace: prod
+  labels:
+    app: hive-metastore
+data:
+  hive-site.xml: |
+    <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+    <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+    <configuration>
+
+      <!-- ── Metastore backend ─────────────────────────────────────────────── -->
+      <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://postgresql.prod.svc.cluster.local:5432/hive_metastore?createDatabaseIfNotExist=true</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+      </property>
+      <!-- Password injected via HIVE_DB_PASSWORD env-var at pod startup
+           using sed substitution in the entrypoint wrapper.             -->
+      <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>__HIVE_DB_PASSWORD__</value>
+      </property>
+
+      <!-- ── Schema auto-init ───────────────────────────────────────────────── -->
+      <property>
+        <name>datanucleus.autoCreateSchema</name>
+        <value>true</value>
+      </property>
+      <property>
+        <name>datanucleus.fixedDatastore</name>
+        <value>false</value>
+      </property>
+      <property>
+        <name>datanucleus.autoCreateTables</name>
+        <value>true</value>
+      </property>
+      <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>false</value>
+      </property>
+
+      <!-- ── Warehouse location (S3) ───────────────────────────────────────── -->
+      <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>s3://stardata-databricks/hive/warehouse</value>
+      </property>
+
+      <!-- ── Thrift endpoint ───────────────────────────────────────────────── -->
+      <property>
+        <name>hive.metastore.uris</name>
+        <value>thrift://hive-metastore.prod.svc.cluster.local:9083</value>
+      </property>
+      <property>
+        <name>hive.metastore.port</name>
+        <value>9083</value>
+      </property>
+
+      <!-- ── Iceberg integration ───────────────────────────────────────────── -->
+      <!-- Enable Iceberg tables to be registered in HMS as EXTERNAL tables     -->
+      <property>
+        <name>iceberg.catalog.hive_catalog.type</name>
+        <value>hive</value>
+      </property>
+      <property>
+        <name>iceberg.catalog.hive_catalog.uri</name>
+        <value>thrift://hive-metastore.prod.svc.cluster.local:9083</value>
+      </property>
+      <property>
+        <name>iceberg.catalog.hive_catalog.warehouse</name>
+        <value>s3://stardata-databricks/iceberg/warehouse</value>
+      </property>
+
+      <!-- ── HMS server settings ───────────────────────────────────────────── -->
+      <property>
+        <name>hive.metastore.event.db.notification.api.auth</name>
+        <value>false</value>
+      </property>
+      <property>
+        <name>hive.metastore.disallow.incompatible.col.type.changes</name>
+        <value>false</value>
+      </property>
+      <property>
+        <name>metastore.task.threads.always</name>
+        <value>org.apache.hadoop.hive.metastore.events.EventCleanerTask</value>
+      </property>
+      <property>
+        <name>metastore.expression.proxy</name>
+        <value>org.apache.hadoop.hive.metastore.DefaultPartitionExpressionProxy</value>
+      </property>
+
+      <!-- ── S3 / AWS credentials (injected via env-var substitution) ──────── -->
+      <property>
+        <name>fs.s3a.access.key</name>
+        <value>__AWS_ACCESS_KEY__</value>
+      </property>
+      <property>
+        <name>fs.s3a.secret.key</name>
+        <value>__AWS_SECRET_KEY__</value>
+      </property>
+      <property>
+        <name>fs.s3a.endpoint</name>
+        <value>s3.us-east-2.amazonaws.com</value>
+      </property>
+      <property>
+        <name>fs.s3a.path.style.access</name>
+        <value>true</value>
+      </property>
+      <property>
+        <name>fs.s3a.impl</name>
+        <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+      </property>
+
+    </configuration>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hive-metastore
+  namespace: prod
+  labels:
+    app: hive-metastore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hive-metastore
+  template:
+    metadata:
+      labels:
+        app: hive-metastore
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        # Substitute runtime secrets into hive-site.xml before HMS starts.
+        # Credentials come from K8s secrets (not baked into the ConfigMap).
+        - name: hive-config-init
+          image: 192.168.1.50:30500/busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              sed \
+                -e "s/__HIVE_DB_PASSWORD__/${HIVE_DB_PASSWORD}/g" \
+                -e "s/__AWS_ACCESS_KEY__/${AWS_ACCESS_KEY}/g" \
+                -e "s/__AWS_SECRET_KEY__/${AWS_SECRET_KEY}/g" \
+                /template/hive-site.xml > /conf/hive-site.xml
+              echo "hive-site.xml rendered ✅"
+          env:
+            - name: HIVE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hive-metastore-credentials
+                  key: db-password
+            - name: AWS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hive-metastore-credentials
+                  key: aws-access-key
+            - name: AWS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hive-metastore-credentials
+                  key: aws-secret-key
+          volumeMounts:
+            - name: hive-site-template
+              mountPath: /template
+            - name: hive-conf
+              mountPath: /conf
+      containers:
+        - name: hive-metastore
+          # Uses the Spark image which already has all Hive + Hadoop JARs
+          # (hive-metastore-2.3.9, hive-exec-2.3.9-core, hive-jdbc-2.3.9,
+          #  hadoop-client-api/runtime-3.3.4, libthrift-0.12.0) plus the
+          # PostgreSQL JDBC driver added in the latest image build.
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              export HIVE_CONF_DIR=/hive-conf
+              exec /opt/spark/bin/spark-class \
+                org.apache.hadoop.hive.metastore.HiveMetaStore \
+                -p 9083
+          ports:
+            - name: thrift
+              containerPort: 9083
+          volumeMounts:
+            - name: hive-conf
+              mountPath: /hive-conf
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          readinessProbe:
+            tcpSocket:
+              port: 9083
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          livenessProbe:
+            tcpSocket:
+              port: 9083
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: hive-site-template
+          configMap:
+            name: hive-site-config
+        - name: hive-conf
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hive-metastore
+  namespace: prod
+  labels:
+    app: hive-metastore
+spec:
+  selector:
+    app: hive-metastore
+  type: NodePort
+  ports:
+    - name: thrift
+      port: 9083
+      targetPort: 9083
+      nodePort: 30983

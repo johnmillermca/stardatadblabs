@@ -42,13 +42,17 @@ _BAO_NODEPORT    = "http://192.168.1.50:30820"
 _K8S_SA_JWT_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 # ── Secret paths (OpenBao KV v2 — read via secret/data/<path>) ───────────────
-_PATH_S3        = "secret/data/platform/s3"
-_PATH_SNOWFLAKE = "secret/data/platform/snowflake"
-_PATH_POLARIS   = "secret/data/platform/polaris"
-_PATH_DORIS     = "secret/data/platform/doris"
-_PATH_ORACLE       = "secret/data/platform/oracle"
-_PATH_KAFKA        = "secret/data/platform/kafka"
-_PATH_PIPELINE_DB  = "secret/data/platform/pipeline_db"
+_PATH_S3             = "secret/data/platform/s3"
+_PATH_SNOWFLAKE      = "secret/data/platform/snowflake"
+_PATH_POLARIS        = "secret/data/platform/polaris"
+_PATH_DORIS          = "secret/data/platform/doris"
+_PATH_ORACLE         = "secret/data/platform/oracle"
+_PATH_KAFKA          = "secret/data/platform/kafka"
+_PATH_PIPELINE_DB    = "secret/data/platform/pipeline_db"
+_PATH_HIVE_METASTORE = "secret/data/hive/credentials"
+
+_HMS_THRIFT_URI  = "thrift://hive-metastore.prod.svc.cluster.local:9083"
+_HMS_WAREHOUSE   = "s3://stardata-databricks/iceberg/warehouse"
 
 # JARs baked into the spark-gluten-velox:3.5.1 image
 _ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
@@ -173,6 +177,15 @@ class BaoSparkInit:
         """
         return self._read_secret(_PATH_PIPELINE_DB)
 
+    def hive_metastore_creds(self) -> dict[str, str]:
+        """
+        Return Hive Metastore credentials.
+        Keys: db-user, db-password, jdbc-url, aws-access-key, aws-secret-key.
+        Used to configure the hive_catalog Iceberg catalog backed by the
+        standalone HMS Thrift endpoint at hive-metastore.prod.svc.cluster.local:9083.
+        """
+        return self._read_secret(_PATH_HIVE_METASTORE)
+
     # ── SparkConf builder ──────────────────────────────────────────────────────
     def spark_conf(
         self,
@@ -284,6 +297,25 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.snowflake.warehouse",
                  "SNOWFLAKE_SAMPLE_DATA")
 
+        # ── Hive Metastore catalog (T-08 / T-09 path for Databricks) ──────────
+        # Provides a Thrift-backed HiveCatalog so tables registered here are
+        # visible to Databricks Unity Catalog FOREIGN catalog federation via HMS.
+        # S3 credentials are also wired so HMS can resolve table locations.
+        conf.set("spark.sql.catalog.hive_catalog",
+                 "org.apache.iceberg.spark.SparkCatalog")
+        conf.set("spark.sql.catalog.hive_catalog.type", "hive")
+        conf.set("spark.sql.catalog.hive_catalog.uri",  _HMS_THRIFT_URI)
+        conf.set("spark.sql.catalog.hive_catalog.warehouse", _HMS_WAREHOUSE)
+        conf.set("spark.sql.catalog.hive_catalog.s3.access-key-id",
+                 s3["access_key"])
+        conf.set("spark.sql.catalog.hive_catalog.s3.secret-access-key",
+                 s3["secret_key"])
+        conf.set("spark.sql.catalog.hive_catalog.s3.endpoint",
+                 s3["endpoint"])
+        conf.set("spark.sql.catalog.hive_catalog.s3.path-style-access", "true")
+        conf.set("spark.sql.catalog.hive_catalog.client.region",
+                 s3["region"])
+
         # ── S3 / AWS credentials ───────────────────────────────────────────────
         conf.set("spark.hadoop.fs.s3a.access.key",  s3["access_key"])
         conf.set("spark.hadoop.fs.s3a.secret.key",  s3["secret_key"])
@@ -333,6 +365,7 @@ class BaoSparkInit:
             _SNOWFLAKE_JDBC_JAR,
             "/opt/spark/jars/hadoop-aws-3.3.4.jar",
             "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
+            "/opt/spark/jars/postgresql-42.7.4.jar",
         ]))
 
         if extra_conf:

@@ -9,6 +9,7 @@
 #   snowflake-jdbc-4.0.2.jar                                      (Snowflake JDBC)
 #   hadoop-aws-3.3.4.jar                                          (S3A filesystem)
 #   aws-java-sdk-bundle-1.12.262.jar                              (AWS SDK v1 — S3A)
+#   postgresql-42.7.4.jar                                         (Hive Metastore backend — PostgreSQL JDBC)
 #
 # Python packages:
 #   pyspark==3.5.1, snowflake-connector-python, confluent-kafka,
@@ -55,6 +56,11 @@ COPY jars/aws-java-sdk-bundle-1.12.262.jar \
 # required by iceberg-spark-runtime 1.9.2 — absent from aws-java-sdk-bundle (v1).
 COPY jars/iceberg-aws-bundle-1.9.2.jar \
      /opt/spark/jars/iceberg-aws-bundle-1.9.2.jar
+
+# PostgreSQL JDBC driver — required by Hive Metastore to connect to the
+# hive_metastore database on the cluster's PostgreSQL 17 instance.
+COPY jars/postgresql-42.7.4.jar \
+     /opt/spark/jars/postgresql-42.7.4.jar
 
 # ── Python packages — split into layers to avoid pip botocore conflict ────────
 # Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
@@ -158,6 +164,13 @@ spark.sql.catalog.snowflake                   org.apache.iceberg.spark.SparkCata
 spark.sql.catalog.snowflake.type              hadoop
 spark.sql.catalog.snowflake.warehouse         SNOWFLAKE_SAMPLE_DATA
 spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
+
+# ── Hive Metastore catalog (HMS Thrift — for Databricks Unity Catalog T-08/T-09)
+# Credentials (thrift URI) injected at runtime by bao_spark_init.hive_metastore_creds()
+spark.sql.catalog.hive_catalog                org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.hive_catalog.type           hive
+spark.sql.catalog.hive_catalog.uri            thrift://hive-metastore.prod.svc.cluster.local:9083
+spark.sql.catalog.hive_catalog.warehouse      s3://stardata-databricks/iceberg/warehouse
 
 # ── Global Iceberg write defaults (256 MB file size) ─────────────────────────
 spark.sql.iceberg.write.format.default               parquet

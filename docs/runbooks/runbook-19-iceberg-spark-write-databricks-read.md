@@ -88,7 +88,7 @@ pipeline. It covers:
 | S3 bucket | `s3://stardata-databricks` · `us-east-2` | Stores parquet + metadata |
 | OpenBao | `prod/openbao-0` | All credentials — never hard-coded |
 | `bao_spark_init.py` | `/tmp/` on Spark pod | Reads creds + builds `SparkConf` |
-| Databricks SQL | `dbc-48ef5678-3df7.cloud.databricks.com` | Queries data via `read_files()` |
+| Databricks SQL | `dbc-11a1dbc5-061a.cloud.databricks.com` | Queries data via `read_files()` |
 
 ### 2.3 Credentials map
 
@@ -137,8 +137,8 @@ AWS_SECRET=$(kubectl exec -n prod openbao-0 -- \
 # ── Databricks PAT ────────────────────────────────────────────────────────────
 DB_TOKEN=$(kubectl exec -n prod openbao-0 -- \
   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=token secret/databricks/pat")
-DB_WS="https://dbc-48ef5678-3df7.cloud.databricks.com"
-WAREHOUSE_ID="2c23ed9f013093c4"
+DB_WS="https://dbc-11a1dbc5-061a.cloud.databricks.com"
+WAREHOUSE_ID="942026cf5e55f3c3"
 
 # ── Spark pod ─────────────────────────────────────────────────────────────────
 SPARK_POD=$(kubectl get pods -n prod | grep spark-master | grep Running \
@@ -348,7 +348,7 @@ EOF
 
 ### 6.1 How to open the console
 
-1. Go to **`https://dbc-48ef5678-3df7.cloud.databricks.com`**
+1. Go to **`https://dbc-11a1dbc5-061a.cloud.databricks.com`**
 2. Left sidebar → **SQL Editor**
 3. Select warehouse: **Serverless Starter Warehouse** (starts automatically)
 
@@ -401,9 +401,9 @@ Use this from scripts or CI to avoid opening the browser:
 python3 - "$AWS_KEY" "$AWS_SECRET" <<'PYEOF'
 import sys, json, time, urllib.request
 
-DB_WS        = "https://dbc-48ef5678-3df7.cloud.databricks.com"
+DB_WS        = "https://dbc-11a1dbc5-061a.cloud.databricks.com"
 DB_TOKEN     = "$(kubectl exec -n prod openbao-0 -- sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=token secret/databricks/pat")"
-WAREHOUSE_ID = "2c23ed9f013093c4"
+WAREHOUSE_ID = "942026cf5e55f3c3"
 TABLE_NAME   = "customers"      # ← change to your table name
 AWS_KEY, AWS_SECRET = sys.argv[1], sys.argv[2]
 
@@ -469,8 +469,52 @@ snapshot-aware**. This means:
 | You ran `.append()` twice | ✅ Correct — reads both batches combined |
 | You ran `.createOrReplace()` twice | ⚠️ May double-count — old files may still be on S3 until Iceberg expires them |
 
-For snapshot-correct reads on free Databricks, use the Polaris REST API (Section 5.1)
-or run a count via Spark inside the cluster (Section 7).
+For snapshot-correct reads on free Databricks, use the Polaris REST API (Section 5.1),
+run a count via Spark inside the cluster (Section 7), or use Option B below (§6.5).
+
+### 6.5 Option B — Snapshot-correct reads from a Databricks notebook
+
+When `read_files()` is not sufficient (e.g. after multiple appends, or when you need
+full Iceberg semantics like time-travel or snapshot history), use a Databricks notebook
+that connects directly to the Polaris REST catalog via Spark + OAuth2.
+
+> **Why this works:** The notebook configures `star_lakehouse` as a Spark
+> `SparkCatalog` pointing at `http://192.168.1.50:30181/api/catalog` — the same path
+> used by the on-cluster Spark jobs. No Unity Catalog federation (`FOREIGN` catalog)
+> is needed, so it works on the free Databricks tier without any account entitlement.
+
+**Pre-conditions:**
+- Databricks cluster with Iceberg JARs attached (see [RB-18 §10.1](runbook-18-databricks-iceberg-polaris.md#101-prerequisites))
+- Polaris `spark-iceberg-svc` principal has `star_lakehouse_admin` role (see §8 troubleshooting)
+- AWS credentials available (Databricks secret scope or cluster env vars)
+
+**Run the notebook:**
+
+```bash
+# Upload once — then open and run from the Databricks UI
+export DATABRICKS_HOST=https://dbc-11a1dbc5-061a.cloud.databricks.com
+export DATABRICKS_TOKEN=$(kubectl exec -n prod openbao-0 -- \
+  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=token secret/databricks/pat")
+
+databricks workspace import \
+  scripts/databricks-iceberg-polaris/databricks_notebook_polaris_read.py \
+  /Shared/star-lakehouse/databricks_notebook_polaris_read \
+  --language PYTHON --overwrite
+
+echo "Open: https://dbc-11a1dbc5-061a.cloud.databricks.com/#workspace/Shared/star-lakehouse/databricks_notebook_polaris_read"
+```
+
+**What the notebook checks:**
+
+| Cell | Query | Expected |
+|---|---|---|
+| T-10a | `SELECT COUNT(*) FROM star_lakehouse.demo.customers` | 10 000 rows |
+| T-10b | `SELECT * … LIMIT 10` | Real customer data visible |
+| T-10c | Tier distribution | 4 tiers — standard / silver / gold / platinum |
+| T-10d | `SELECT … FROM .snapshots` | ≥ 1 committed Iceberg snapshot |
+| T-10e | Schema validation | All 15 columns present |
+
+Full setup, expected output, and troubleshooting: [RB-18 §10](runbook-18-databricks-iceberg-polaris.md#10-option-b--direct-polaris-read-from-databricks-notebook).
 
 ---
 
@@ -544,9 +588,9 @@ echo ""
 echo "Querying from Databricks..."
 python3 - "$AWS_KEY" "$AWS_SECRET" "$TABLE" <<'PYEOF'
 import sys, json, time, urllib.request
-DB_WS="https://dbc-48ef5678-3df7.cloud.databricks.com"
+DB_WS="https://dbc-11a1dbc5-061a.cloud.databricks.com"
 DB_TOKEN="<DB_TOKEN_HERE>"   # replace or source from pre-flight block
-WAREHOUSE_ID="2c23ed9f013093c4"
+WAREHOUSE_ID="942026cf5e55f3c3"
 AWS_KEY, AWS_SECRET, TABLE = sys.argv[1], sys.argv[2], sys.argv[3]
 S3_PATH=f"s3://stardata-databricks/iceberg/warehouse/demo/{TABLE}/data/"
 HDRS={"Authorization":f"Bearer {DB_TOKEN}","Content-Type":"application/json"}
@@ -653,8 +697,10 @@ kubectl cp docker/spark-gluten-velox/scripts/bao_spark_init.py \
 | Polaris catalog API | `http://192.168.1.50:30181/api/catalog/v1/star_lakehouse/` |
 | Polaris management API | `http://192.168.1.50:30181/api/management/v1/` |
 | Polaris in-cluster URI | `http://polaris-rest.prod.svc.cluster.local:8181/api/catalog` |
-| Databricks workspace | `https://dbc-48ef5678-3df7.cloud.databricks.com` |
-| Databricks SQL editor | `https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor` |
-| Databricks SQL warehouse | `2c23ed9f013093c4` (Serverless Starter) |
+| Databricks workspace | `https://dbc-11a1dbc5-061a.cloud.databricks.com` |
+| Databricks SQL editor | `https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor` |
+| Databricks SQL warehouse | `942026cf5e55f3c3` (Serverless Starter) |
 | `bao_spark_init.py` (source) | `docker/spark-gluten-velox/scripts/bao_spark_init.py` |
 | `generate_customers_iceberg.py` | `scripts/databricks-iceberg-polaris/generate_customers_iceberg.py` |
+| `starpump_to_databricks.py` | `scripts/databricks-iceberg-polaris/starpump_to_databricks.py` |
+| Databricks notebook (Option B) | `scripts/databricks-iceberg-polaris/databricks_notebook_polaris_read.py` |

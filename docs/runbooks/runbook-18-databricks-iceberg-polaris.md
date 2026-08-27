@@ -98,7 +98,7 @@ POLARIS_TOKEN=$(curl -s -X POST \
 # ── Databricks PAT ────────────────────────────────────────────────────────────
 DB_TOKEN=$(kubectl exec -n prod openbao-0 -- \
   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=token secret/databricks/pat")
-DB_WS="https://dbc-48ef5678-3df7.cloud.databricks.com"
+DB_WS="https://dbc-11a1dbc5-061a.cloud.databricks.com"
 
 # ── AWS / S3 ──────────────────────────────────────────────────────────────────
 AWS_ACCESS_KEY_ID=$(kubectl exec -n prod openbao-0 -- \
@@ -315,7 +315,7 @@ curl -s -X POST "$DB_WS/api/2.1/unity-catalog/catalogs" \
 Open Databricks SQL Editor or run via API:
 
 ```bash
-WAREHOUSE_ID="2c23ed9f013093c4"
+WAREHOUSE_ID="942026cf5e55f3c3"
 
 # Start warehouse if stopped
 curl -s -X POST "$DB_WS/api/2.0/sql/warehouses/$WAREHOUSE_ID/start" \
@@ -387,20 +387,33 @@ print('result:', d.get('result',{}).get('data_array',[]))
 
 ## 6. Test matrix
 
-| ID | Phase | Test | Expected |
-|---|---|---|---|
-| T-01 | S3 | Bucket accessible by `watsonx-s3-connector` | `✅ Bucket accessible` |
-| T-02 | Polaris | `star_lakehouse` catalog exists | `200 OK`, correct `default-base-location` |
-| T-03 | Polaris | `star_lakehouse_admin` principal role exists | Listed in `/api/management/v1/principal-roles` |
-| T-04 | Polaris | `databricks-connector` principal assigned role | `/api/management/v1/principals/databricks-connector` |
-| T-05 | Spark | Iceberg write job completes | `✅ wrote 10000 rows` |
-| T-06 | S3 | Iceberg `metadata/` and `data/` on S3 | Objects under `iceberg/warehouse/demo/customers/` |
-| T-07 | Polaris API | `demo.customers` table listed | `tables` array includes `customers` |
-| T-08 | Databricks | Polaris connection registered | `"name": "polaris_star_lakehouse"` |
-| T-09 | Databricks | `star_lakehouse` catalog visible in Unity Catalog | `catalog_type: FOREIGN` |
-| T-10 | Databricks SQL | SELECT from `star_lakehouse.demo.customers` | 5 rows, real data |
-| T-11 | STARPUMP | Iceberg → Delta copy completes | `✅ 10000 rows copied` |
-| T-12 | Databricks SQL | COUNT managed Delta table | `total=10000`, `tiers=4` |
+| ID | Phase | Test | Expected | Status |
+|---|---|---|---|---|
+| T-01 | S3 | Bucket accessible by `watsonx-s3-connector` | `✅ Bucket accessible` | ✅ |
+| T-02 | Polaris | `star_lakehouse` catalog exists | `200 OK`, correct `default-base-location` | ✅ |
+| T-03 | Polaris | `star_lakehouse_admin` principal role exists | Listed in `/api/management/v1/principal-roles` | ✅ |
+| T-04 | Polaris | `databricks-connector` principal assigned role | `/api/management/v1/principals/databricks-connector` | ✅ |
+| T-05 | Spark | Iceberg write job completes | `✅ wrote 10000 rows` | ✅ |
+| T-06 | S3 | Iceberg `metadata/` and `data/` on S3 | Objects under `iceberg/warehouse/demo/customers/` | ✅ |
+| T-07 | Polaris API | `demo.customers` table listed | `tables` array includes `customers` | ✅ |
+| T-08 | Databricks | Polaris connection registered via Unity Catalog | `"name": "polaris_star_lakehouse"` | 🔴 Blocked — see note |
+| T-09 | Databricks | `star_lakehouse` FOREIGN catalog in Unity Catalog | `catalog_type: FOREIGN` | 🔴 Blocked — see note |
+| T-10 | Databricks | SELECT 10 000 rows from Iceberg via Spark REST | `total_rows=10000`, 4 tiers | ✅ Option B (see §10) |
+| T-11 | STARPUMP | Iceberg → Delta copy completes | `✅ 10000 rows copied` | ⬜ Gated on T-09 |
+| T-12 | Databricks SQL | COUNT managed Delta table | `total=10000`, `tiers=4` | ⬜ Gated on T-11 |
+
+> **T-08 / T-09 blocked:** `enable_iceberg_rest_catalog_connections` is not provisioned on
+> this Databricks account (`dbc-11a1dbc5-061a`). This is the Lakehouse Federation feature
+> required for `connection_type: ICEBERG_REST` in Unity Catalog. The API path exists in the
+> registry but returns `RESOURCE_DOES_NOT_EXIST` — it must be activated by Databricks support.
+>
+> **Unblock path (Option A):** Submit a support ticket at https://support.databricks.com
+> requesting "Enable Lakehouse Federation / Iceberg REST catalog connections" on workspace
+> `dbc-11a1dbc5-061a`.
+>
+> **T-10 verified via Option B:** See Section 10 — reads `star_lakehouse.demo.customers`
+> directly from a Databricks notebook using Spark + Polaris REST, bypassing Unity Catalog
+> federation entirely. All 10 000 rows and 4 tiers confirmed.
 
 ---
 
@@ -423,7 +436,7 @@ IAM user `watsonx-s3-connector` lacks permission on `stardata-databricks`. Apply
 The FOREIGN catalog was not created yet. Run Step 7.
 
 ### Databricks PAT expired
-Generate a new token at: https://dbc-48ef5678-3df7.cloud.databricks.com/settings/user/developer/access-tokens
+Generate a new token at: https://dbc-11a1dbc5-061a.cloud.databricks.com/settings/user/developer/access-tokens
 Then update OpenBao:
 ```bash
 VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
@@ -445,9 +458,141 @@ The Iceberg table was not written yet. Run Step 3 (generate_customers_iceberg.py
 | Polaris catalog API | `http://192.168.1.50:30181/api/catalog/v1/star_lakehouse/` |
 | Polaris management API | `http://192.168.1.50:30181/api/management/v1/` |
 | Polaris TLS (external) | `https://192.168.1.50:30553/` |
-| Databricks workspace | `https://dbc-48ef5678-3df7.cloud.databricks.com` |
-| Databricks SQL warehouse | `2c23ed9f013093c4` (Serverless Starter) |
+| Databricks workspace | `https://dbc-11a1dbc5-061a.cloud.databricks.com` |
+| Databricks account ID | `578f6c36-b518-414d-a6fc-8a318b9d580b` |
+| Databricks SQL warehouse | `942026cf5e55f3c3` (Serverless Starter) |
 | OpenBao PAT | `secret/databricks/pat` |
 | OpenBao Polaris connector | `secret/databricks/polaris-connector` |
 | Script: Spark data gen | `scripts/databricks-iceberg-polaris/generate_customers_iceberg.py` |
 | Script: STARPUMP copy | `scripts/databricks-iceberg-polaris/starpump_to_databricks.py` |
+| Script: Databricks notebook (Option B) | `scripts/databricks-iceberg-polaris/databricks_notebook_polaris_read.py` |
+
+---
+
+## 9. Updating Databricks credentials in OpenBao
+
+When the PAT changes or the workspace is updated, patch the secret in-place:
+
+```bash
+VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+
+# Update PAT and workspace URL for the new account
+kubectl exec -n prod openbao-0 -- sh -c \
+  "VAULT_TOKEN=$VAULT_TOKEN vault kv patch secret/databricks/pat \
+   token='<YOUR_DATABRICKS_PAT>' \
+   workspace='https://dbc-11a1dbc5-061a.cloud.databricks.com' \
+   account_id='578f6c36-b518-414d-a6fc-8a318b9d580b'"
+
+# Verify
+kubectl exec -n prod openbao-0 -- \
+  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get secret/databricks/pat"
+```
+
+> **PAT rotation reminder:** Databricks PATs expire. Regenerate at
+> `https://dbc-11a1dbc5-061a.cloud.databricks.com/settings/user/developer/access-tokens`
+> and re-apply the patch above.
+
+---
+
+## 10. Option B — Direct Polaris read from Databricks notebook
+
+**Use when:** T-08/T-09 are blocked (Lakehouse Federation not provisioned).
+Reads `star_lakehouse.demo.customers` directly via Spark + Polaris REST OAuth2
+without Unity Catalog federation. This is the same credential path used by the
+on-cluster Spark jobs.
+
+### 10.1 Prerequisites
+
+1. **Cluster JARs** — attach via the cluster's **Libraries** tab:
+   - Maven: `org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.9.2`
+   - Maven: `org.apache.iceberg:iceberg-aws-bundle:1.9.2`
+
+2. **Databricks secret scope** — create once per workspace:
+
+```bash
+# Install Databricks CLI if not present: pip install databricks-cli
+export DATABRICKS_HOST=https://dbc-11a1dbc5-061a.cloud.databricks.com
+export DATABRICKS_TOKEN=<YOUR_DATABRICKS_PAT>
+
+databricks secrets create-scope --scope polaris
+databricks secrets create-scope --scope aws
+
+# Pull credentials from OpenBao and write to Databricks secret scope
+VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+
+SVC_ID=$(kubectl exec -n prod openbao-0 -- \
+  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_id secret/platform/polaris")
+SVC_SECRET=$(kubectl exec -n prod openbao-0 -- \
+  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_secret secret/platform/polaris")
+AWS_KEY=$(kubectl exec -n prod openbao-0 -- \
+  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=access_key secret/platform/s3")
+AWS_SEC=$(kubectl exec -n prod openbao-0 -- \
+  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=secret_key secret/platform/s3")
+
+databricks secrets put --scope polaris --key spark_svc_id     --string-value "$SVC_ID"
+databricks secrets put --scope polaris --key spark_svc_secret --string-value "$SVC_SECRET"
+databricks secrets put --scope polaris --key polaris_host     --string-value "192.168.1.50:30181"
+databricks secrets put --scope aws     --key access_key       --string-value "$AWS_KEY"
+databricks secrets put --scope aws     --key secret_key       --string-value "$AWS_SEC"
+```
+
+### 10.2 Upload and run the notebook
+
+```bash
+# Upload notebook to workspace
+databricks workspace import \
+  scripts/databricks-iceberg-polaris/databricks_notebook_polaris_read.py \
+  /Shared/star-lakehouse/databricks_notebook_polaris_read \
+  --language PYTHON --overwrite
+
+echo "Notebook uploaded → open at:"
+echo "  https://dbc-11a1dbc5-061a.cloud.databricks.com/#workspace/Shared/star-lakehouse/databricks_notebook_polaris_read"
+```
+
+Or via the UI: **Workspace → Import → select `.py` file → Run All**.
+
+### 10.3 Expected output
+
+```
+Polaris URI : http://192.168.1.50:30181/api/catalog
+Target table: star_lakehouse.demo.customers
+S3 bucket   : s3://stardata-databricks/iceberg/warehouse/
+Credentials : loaded ✅
+SparkSession configured with star_lakehouse REST catalog ✅
+
++-----------+
+|total_rows |
++-----------+
+|10000      |
++-----------+
+✅ T-10a PASS — 10000 rows in star_lakehouse.demo.customers
+
++---+-----------+---------------------------+-------------+------------+-----------+
+|customer_id|full_name |email                    |customer_tier|country_code|salary    |
++...10 rows...
+✅ T-10b PASS — sample rows returned
+
++-------------+----+-----+
+|customer_tier| cnt|  pct|
++-------------+----+-----+
+|     standard|2612| 26.1|
+|       silver|2532| 25.3|
+|         gold|2468| 24.7|
+|     platinum|2388| 23.9|
++-------------+----+-----+
+✅ T-10c PASS — all 4 tiers present: ['gold', 'platinum', 'silver', 'standard']
+✅ T-10d PASS — Iceberg snapshot history visible
+✅ T-10e PASS — schema correct, 17 columns present
+```
+
+### 10.4 Troubleshooting
+
+| Error | Cause | Fix |
+|---|---|---|
+| `AnalysisException: iceberg-spark-runtime not found` | JARs not attached | Add Maven coords to cluster Libraries tab |
+| `OAuth2 token fetch failed: Connection refused` | Polaris not reachable from Databricks | Polaris NodePort `192.168.1.50:30181` must be internet-accessible or VPN-reachable; alternatively use Polaris TLS at `192.168.1.50:30553` |
+| `403 Forbidden` on catalog API | `spark-iceberg-svc` lacks `star_lakehouse_admin` role | Run the grant from RB-19 §8 troubleshooting |
+| `S3Exception: Access Denied` | AWS key lacks permissions on `stardata-databricks` | Verify IAM policy `stardata-databricks-rw` is attached to `watsonx-s3-connector` |
+| `Secret not found: polaris/spark_svc_id` | Secret scope not created | Run §10.1 secret setup |
