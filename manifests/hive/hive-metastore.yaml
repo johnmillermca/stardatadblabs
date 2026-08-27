@@ -68,10 +68,12 @@ data:
         <value>false</value>
       </property>
 
-      <!-- ── Warehouse location (S3) ───────────────────────────────────────── -->
+      <!-- ── Warehouse location (S3A) ──────────────────────────────────────── -->
+      <!-- HMS requires s3a:// (Hadoop S3AFileSystem) not s3:// — the bare s3:// -->
+      <!-- scheme has no FileSystem binding in this Hadoop build.               -->
       <property>
         <name>hive.metastore.warehouse.dir</name>
-        <value>s3://stardata-databricks/hive/warehouse</value>
+        <value>s3a://stardata-databricks/hive/warehouse</value>
       </property>
 
       <!-- ── Thrift endpoint ───────────────────────────────────────────────── -->
@@ -96,7 +98,7 @@ data:
       </property>
       <property>
         <name>iceberg.catalog.hive_catalog.warehouse</name>
-        <value>s3://stardata-databricks/iceberg/warehouse</value>
+        <value>s3a://stardata-databricks/iceberg/warehouse</value>
       </property>
 
       <!-- ── HMS server settings ───────────────────────────────────────────── -->
@@ -117,7 +119,7 @@ data:
         <value>org.apache.hadoop.hive.metastore.DefaultPartitionExpressionProxy</value>
       </property>
 
-      <!-- ── S3 / AWS credentials (injected via env-var substitution) ──────── -->
+      <!-- ── S3A / AWS credentials (injected via env-var substitution) ─────── -->
       <property>
         <name>fs.s3a.access.key</name>
         <value>__AWS_ACCESS_KEY__</value>
@@ -137,6 +139,19 @@ data:
       <property>
         <name>fs.s3a.impl</name>
         <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+      </property>
+      <!-- Bind bare s3:// to S3AFileSystem so any legacy paths also resolve -->
+      <property>
+        <name>fs.s3.impl</name>
+        <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+      </property>
+      <property>
+        <name>fs.s3.access.key</name>
+        <value>__AWS_ACCESS_KEY__</value>
+      </property>
+      <property>
+        <name>fs.s3.secret.key</name>
+        <value>__AWS_SECRET_KEY__</value>
       </property>
 
     </configuration>
@@ -173,12 +188,14 @@ spec:
             - sh
             - -c
             - |
+              # Use | as sed delimiter — avoids conflicts with / in AWS keys/URLs
               sed \
-                -e "s/__HIVE_DB_PASSWORD__/${HIVE_DB_PASSWORD}/g" \
-                -e "s/__AWS_ACCESS_KEY__/${AWS_ACCESS_KEY}/g" \
-                -e "s/__AWS_SECRET_KEY__/${AWS_SECRET_KEY}/g" \
+                -e "s|__HIVE_DB_PASSWORD__|${HIVE_DB_PASSWORD}|g" \
+                -e "s|__AWS_ACCESS_KEY__|${AWS_ACCESS_KEY}|g" \
+                -e "s|__AWS_SECRET_KEY__|${AWS_SECRET_KEY}|g" \
                 /template/hive-site.xml > /conf/hive-site.xml
-              echo "hive-site.xml rendered ✅"
+              [ -s /conf/hive-site.xml ] || { echo "ERROR: hive-site.xml empty after substitution"; exit 1; }
+              echo "hive-site.xml rendered ✅ ($(wc -c < /conf/hive-site.xml) bytes)"
           env:
             - name: HIVE_DB_PASSWORD
               valueFrom:
@@ -212,7 +229,13 @@ spec:
             - -c
             - |
               export HIVE_CONF_DIR=/hive-conf
-              exec /opt/spark/bin/spark-class \
+              # Disable log4j2 AsyncAppender — disruptor JAR not present in image.
+              # log4j2.asynclogger.ExceptionHandler is also absent; sync mode is safe.
+              export JAVA_TOOL_OPTIONS="-Dlog4j2.contextSelector=org.apache.logging.log4j.core.selector.BasicContextSelector"
+              exec java \
+                -cp "/opt/spark/jars/*:/opt/spark/work-dir/*" \
+                -Dlog4j.configurationFile= \
+                -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver \
                 org.apache.hadoop.hive.metastore.HiveMetaStore \
                 -p 9083
           ports:
