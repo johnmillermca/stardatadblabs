@@ -396,24 +396,27 @@ print('result:', d.get('result',{}).get('data_array',[]))
 | T-05 | Spark | Iceberg write job completes | `✅ wrote 10000 rows` | ✅ |
 | T-06 | S3 | Iceberg `metadata/` and `data/` on S3 | Objects under `iceberg/warehouse/demo/customers/` | ✅ |
 | T-07 | Polaris API | `demo.customers` table listed | `tables` array includes `customers` | ✅ |
-| T-08 | Databricks | Polaris connection registered via Unity Catalog | `"name": "polaris_star_lakehouse"` | 🔴 Blocked — see note |
-| T-09 | Databricks | `star_lakehouse` FOREIGN catalog in Unity Catalog | `catalog_type: FOREIGN` | 🔴 Blocked — see note |
-| T-10 | Databricks | SELECT 10 000 rows from Iceberg via Spark REST | `total_rows=10000`, 4 tiers | ✅ Option B (see §10) |
-| T-11 | STARPUMP | Iceberg → Delta copy completes | `✅ 10000 rows copied` | ⬜ Gated on T-09 |
-| T-12 | Databricks SQL | COUNT managed Delta table | `total=10000`, `tiers=4` | ⬜ Gated on T-11 |
+| T-08 | Databricks | HMS connection registered in Unity Catalog | `"name": "hms_star_lakehouse"`, `ACTIVE` | ✅ |
+| T-09 | Databricks | `star_lakehouse` FOREIGN catalog in Unity Catalog | `catalog_type: FOREIGN_CATALOG` | ✅ |
+| T-10 | Databricks | SELECT 10 000 rows from `star_lakehouse.demo.customers` | `total_rows=10000`, 4 tiers | ✅ see §10 |
+| T-11 | STARPUMP | Iceberg → Delta copy completes | `✅ 10000 rows copied` | ⬜ Pending |
+| T-12 | Databricks SQL | COUNT via FOREIGN catalog | `total_rows=10000`, `tiers=4` | ✅ see §10 |
 
-> **T-08 / T-09 blocked:** `enable_iceberg_rest_catalog_connections` is not provisioned on
-> this Databricks account (`dbc-11a1dbc5-061a`). This is the Lakehouse Federation feature
-> required for `connection_type: ICEBERG_REST` in Unity Catalog. The API path exists in the
-> registry but returns `RESOURCE_DOES_NOT_EXIST` — it must be activated by Databricks support.
+> **T-08 / T-09 implemented via HMS federation (Option A):**
+> `ICEBERG_REST` connection type (`enable_iceberg_rest_catalog_connections`) is not
+> provisioned on this workspace. Instead, the `demo.customers` Iceberg table is registered
+> in a standalone **Hive Metastore 2.3.9** (`hive-metastore.prod.svc.cluster.local:9083`,
+> NodePort `192.168.1.50:30983`) backed by PostgreSQL, and exposed to Databricks as a
+> `HIVE_METASTORE` FOREIGN catalog connection — which **is** provisioned on this account.
 >
-> **Unblock path (Option A):** Submit a support ticket at https://support.databricks.com
-> requesting "Enable Lakehouse Federation / Iceberg REST catalog connections" on workspace
-> `dbc-11a1dbc5-061a`.
->
-> **T-10 verified via Option B:** See Section 10 — reads `star_lakehouse.demo.customers`
-> directly from a Databricks notebook using Spark + Polaris REST, bypassing Unity Catalog
-> federation entirely. All 10 000 rows and 4 tiers confirmed.
+> | Resource | Value |
+> |---|---|
+> | HMS connection | `hms_star_lakehouse` (`HIVE_METASTORE`, `ACTIVE`) |
+> | FOREIGN catalog | `star_lakehouse` (`FOREIGN_CATALOG`) |
+> | Storage credential | `stardata_databricks_s3` (IAM role `arn:aws:iam::586643076710:role/databricks-unity-catalog`) |
+> | External location | `stardata_databricks_iceberg` (`s3://stardata-databricks/`) |
+> | HMS K8s service | `hive-metastore.prod.svc.cluster.local:9083` · NodePort `30983` |
+> | HMS manifest | `manifests/hive/hive-metastore.yaml` |
 
 ---
 
@@ -463,9 +466,18 @@ The Iceberg table was not written yet. Run Step 3 (generate_customers_iceberg.py
 | Databricks SQL warehouse | `942026cf5e55f3c3` (Serverless Starter) |
 | OpenBao PAT | `secret/databricks/pat` |
 | OpenBao Polaris connector | `secret/databricks/polaris-connector` |
+| OpenBao HMS credentials | `secret/hive/credentials` |
 | Script: Spark data gen | `scripts/databricks-iceberg-polaris/generate_customers_iceberg.py` |
 | Script: STARPUMP copy | `scripts/databricks-iceberg-polaris/starpump_to_databricks.py` |
-| Script: Databricks notebook (Option B) | `scripts/databricks-iceberg-polaris/databricks_notebook_polaris_read.py` |
+| Script: HMS table registration | `scripts/databricks-iceberg-polaris/t09_t12_verify.py` |
+| HMS manifest | `manifests/hive/hive-metastore.yaml` |
+| HMS Thrift (in-cluster) | `hive-metastore.prod.svc.cluster.local:9083` |
+| HMS Thrift (NodePort) | `192.168.1.50:30983` |
+| AWS IAM role | `arn:aws:iam::586643076710:role/databricks-unity-catalog` |
+| Databricks storage credential | `stardata_databricks_s3` |
+| Databricks external location | `stardata_databricks_iceberg` (`s3://stardata-databricks/`) |
+| Databricks HMS connection | `hms_star_lakehouse` (`HIVE_METASTORE`) |
+| Databricks FOREIGN catalog | `star_lakehouse` (`FOREIGN_CATALOG`) |
 
 ---
 
@@ -495,104 +507,339 @@ kubectl exec -n prod openbao-0 -- \
 
 ---
 
-## 10. Option B — Direct Polaris read from Databricks notebook
+## 10. Architecture — Spark / Iceberg / HMS / Databricks
 
-**Use when:** T-08/T-09 are blocked (Lakehouse Federation not provisioned).
-Reads `star_lakehouse.demo.customers` directly via Spark + Polaris REST OAuth2
-without Unity Catalog federation. This is the same credential path used by the
-on-cluster Spark jobs.
+### 10.1 Full data flow
 
-### 10.1 Prerequisites
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Spark (k8s — prod namespace)                                                │
+│                                                                              │
+│  df.writeTo("star_lakehouse.demo.<table>")  ← writes Iceberg parquet + meta │
+│  spark.table("star_lakehouse.demo.<table>") ← reads                         │
+└──────────────┬───────────────────────────────────────────────────────────────┘
+               │  Iceberg REST API  (OAuth2 client_credentials)
+               │  http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Apache Polaris 1.6.0  (k8s, prod namespace)                                 │
+│                                                                              │
+│  Catalog  : star_lakehouse   (INTERNAL, S3-backed)                           │
+│  Namespace: demo                                                             │
+│  Tables   : customers, <your_tables>                                         │
+│                                                                              │
+│  • Manages Iceberg metadata (snapshots, manifests, schema evolution)         │
+│  • Authorises writes via principal role star_lakehouse_admin                 │
+└──────────────┬───────────────────────────────────────────────────────────────┘
+               │  writes / reads Iceberg parquet + metadata JSON
+               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  AWS S3 — s3://stardata-databricks/                                          │
+│                                                                              │
+│  iceberg/warehouse/                                                          │
+│  └── demo/                                                                   │
+│      └── <table>/                                                            │
+│          ├── metadata/  ← .metadata.json, snap-*.avro, *-m0.avro            │
+│          └── data/      ← snappy parquet, partitioned by bucket(customer_id) │
+└──────────────┬───────────────────────────────────────────────────────────────┘
+               │  HMS registers table location + metadata_location pointer
+               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Hive Metastore 2.3.9  (k8s, prod namespace)                                 │
+│                                                                              │
+│  Thrift endpoint : hive-metastore.prod.svc.cluster.local:9083                │
+│  NodePort        : 192.168.1.50:30983                                        │
+│  Backend DB      : PostgreSQL hive_metastore (postgresql.prod:5432)          │
+│                                                                              │
+│  Stores EXTERNAL_TABLE entry for every registered Iceberg table:             │
+│    table_type        = ICEBERG                                               │
+│    metadata_location = s3://stardata-databricks/iceberg/warehouse/           │
+│                        demo/<table>/metadata/<latest>.metadata.json          │
+│    location          = s3://stardata-databricks/iceberg/warehouse/demo/<tbl> │
+└──────────────┬───────────────────────────────────────────────────────────────┘
+               │  HIVE_METASTORE FOREIGN catalog connection
+               │  hms_star_lakehouse  (Unity Catalog API 2.1)
+               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Databricks Unity Catalog                                                    │
+│                                                                              │
+│  Storage credential : stardata_databricks_s3                                 │
+│    IAM role         : arn:aws:iam::586643076710:role/databricks-unity-catalog │
+│    Trusted by       : arn:aws:iam::414351767826:role/unity-catalog-prod-*    │
+│    External ID      : 578f6c36-b518-414d-a6fc-8a318b9d580b                  │
+│                                                                              │
+│  External location  : stardata_databricks_iceberg                            │
+│    URL              : s3://stardata-databricks/                              │
+│                                                                              │
+│  FOREIGN catalog    : star_lakehouse  (FOREIGN_CATALOG)                      │
+│    Connection       : hms_star_lakehouse                                     │
+│    authorized_paths : s3://stardata-databricks/iceberg/warehouse             │
+│                       s3://stardata-databricks/hive/warehouse                │
+│                                                                              │
+│  Visible in SQL Editor:                                                      │
+│    SELECT * FROM star_lakehouse.demo.<table>                                 │
+│    SHOW TABLES IN star_lakehouse.demo                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
-1. **Cluster JARs** — attach via the cluster's **Libraries** tab:
-   - Maven: `org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.9.2`
-   - Maven: `org.apache.iceberg:iceberg-aws-bundle:1.9.2`
+### 10.2 Key rules
 
-2. **Databricks secret scope** — create once per workspace:
+| Rule | Detail |
+|---|---|
+| **Write path** | Always write via `star_lakehouse` Polaris catalog from Spark. Never write directly to S3. |
+| **Polaris = truth** | Polaris owns the Iceberg snapshot chain. HMS is a read-only mirror pointing at the metadata file. |
+| **After every Spark write** | Re-register the table in HMS using `scripts/databricks-iceberg-polaris/t09_t12_verify.py` (or the helper below) so Databricks sees the latest snapshot. |
+| **HMS re-registration is lightweight** | It only updates the `metadata_location` pointer in PostgreSQL — no data movement. |
+| **S3 credentials** | Databricks reads S3 via the IAM role `databricks-unity-catalog` (cross-account assume-role). The IAM user `watsonx-s3-connector` is used by Spark only. |
+
+---
+
+## 11. Write data in Spark → see latest in Databricks
+
+This is the day-to-day developer workflow: write new or updated data from Spark, then query it immediately from Databricks SQL.
+
+### Step 1 — Pre-flight (once per terminal session)
 
 ```bash
-# Install Databricks CLI if not present: pip install databricks-cli
-export DATABRICKS_HOST=https://dbc-11a1dbc5-061a.cloud.databricks.com
-export DATABRICKS_TOKEN=<YOUR_DATABRICKS_PAT>
+# Get Spark pod name
+SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
+  --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 
-databricks secrets create-scope --scope polaris
-databricks secrets create-scope --scope aws
-
-# Pull credentials from OpenBao and write to Databricks secret scope
+# Get OpenBao root token
 VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
   -o jsonpath='{.data.root-token}' | base64 -d)
 
-SVC_ID=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_id secret/platform/polaris")
-SVC_SECRET=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_secret secret/platform/polaris")
+# Copy bao_spark_init.py to pod (once per session — survives restarts if pod is same)
+kubectl cp docker/spark-gluten-velox/scripts/bao_spark_init.py \
+  prod/$SPARK_POD:/tmp/bao_spark_init.py -c spark-master
+
+echo "Pod: $SPARK_POD  Token: ${VAULT_TOKEN:0:8}..."
+```
+
+### Step 2 — Write data to Iceberg via Spark
+
+Write your script locally, copy it to the pod, and submit. Minimal example:
+
+```python
+# my_write.py — runs inside the Spark pod
+import sys
+sys.path.insert(0, "/tmp")
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.types import StructType, StructField, LongType, StringType
+
+CATALOG   = "star_lakehouse"
+NAMESPACE = "demo"
+TABLE     = "my_table"          # change per table
+
+bao  = BaoSparkInit()
+pol  = bao.polaris_creds()
+s3   = bao.s3_creds()
+conf = bao.spark_conf(app_name=f"write-{TABLE}")
+
+# Wire star_lakehouse Polaris catalog
+conf.set(f"spark.sql.catalog.{CATALOG}",             "org.apache.iceberg.spark.SparkCatalog")
+conf.set(f"spark.sql.catalog.{CATALOG}.type",        "rest")
+conf.set(f"spark.sql.catalog.{CATALOG}.uri",         "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog")
+conf.set(f"spark.sql.catalog.{CATALOG}.credential",  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
+conf.set(f"spark.sql.catalog.{CATALOG}.scope",       "PRINCIPAL_ROLE:ALL")
+conf.set(f"spark.sql.catalog.{CATALOG}.warehouse",   CATALOG)
+conf.set(f"spark.sql.catalog.{CATALOG}.s3.access-key-id",     s3["access_key"])
+conf.set(f"spark.sql.catalog.{CATALOG}.s3.secret-access-key", s3["secret_key"])
+conf.set(f"spark.sql.catalog.{CATALOG}.s3.endpoint",          s3["endpoint"])
+conf.set(f"spark.sql.catalog.{CATALOG}.s3.path-style-access", "true")
+conf.set(f"spark.sql.catalog.{CATALOG}.client.region",        s3["region"])
+
+spark = SparkSession.builder.config(conf=conf).getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
+
+# Create namespace if needed
+spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{NAMESPACE}")
+
+# Build your DataFrame
+schema = StructType([
+    StructField("id",    LongType(),   False),
+    StructField("name",  StringType(), False),
+    StructField("value", StringType(), True),
+])
+rows = [(1, "alice", "100"), (2, "bob", "200")]
+df = spark.createDataFrame(rows, schema).withColumn("updated_at", F.current_timestamp())
+
+# Write — use .append() to add rows, .createOrReplace() for full reload
+df.writeTo(f"{CATALOG}.{NAMESPACE}.{TABLE}") \
+  .tableProperty("write.format.default", "parquet") \
+  .tableProperty("write.parquet.compression-codec", "snappy") \
+  .createOrReplace()
+
+count = spark.table(f"{CATALOG}.{NAMESPACE}.{TABLE}").count()
+print(f"SUCCESS: wrote {count} rows to {CATALOG}.{NAMESPACE}.{TABLE}")
+spark.stop()
+```
+
+```bash
+# Copy and submit
+kubectl cp my_write.py prod/$SPARK_POD:/tmp/my_write.py -c spark-master
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env PYTHONPATH=/tmp DISABLE_GLUTEN=1 TOKEN=$VAULT_TOKEN \
+  spark-submit \
+    --master spark://spark-master-internal.prod.svc.cluster.local:17077 \
+    --conf spark.executor.memory=2g \
+    --conf spark.driver.memory=2g \
+    /tmp/my_write.py 2>&1 | tail -5
+```
+
+✅ **Pass:** last line contains `SUCCESS: wrote N rows to star_lakehouse.demo.my_table`
+
+### Step 3 — Register the table in HMS
+
+After every `createOrReplace()` or the first write of a new table, register (or re-register) it in HMS so Databricks picks up the latest metadata pointer.
+
+```bash
+# hms_register.sh — register any table by name
+TABLE_NAME="my_table"    # ← change this
+
+# Find the latest metadata.json for the table
+VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
 AWS_KEY=$(kubectl exec -n prod openbao-0 -- \
   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=access_key secret/platform/s3")
 AWS_SEC=$(kubectl exec -n prod openbao-0 -- \
   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=secret_key secret/platform/s3")
 
-databricks secrets put --scope polaris --key spark_svc_id     --string-value "$SVC_ID"
-databricks secrets put --scope polaris --key spark_svc_secret --string-value "$SVC_SECRET"
-databricks secrets put --scope polaris --key polaris_host     --string-value "192.168.1.50:30181"
-databricks secrets put --scope aws     --key access_key       --string-value "$AWS_KEY"
-databricks secrets put --scope aws     --key secret_key       --string-value "$AWS_SEC"
+METADATA_FILE=$(python3 - "$AWS_KEY" "$AWS_SEC" "$TABLE_NAME" <<'PYEOF'
+import sys, boto3
+KEY, SEC, TBL = sys.argv[1], sys.argv[2], sys.argv[3]
+s3 = boto3.client('s3', region_name='us-east-2',
+    aws_access_key_id=KEY, aws_secret_access_key=SEC)
+r = s3.list_objects_v2(
+    Bucket='stardata-databricks',
+    Prefix=f'iceberg/warehouse/demo/{TBL}/metadata/')
+objects = [o for o in r.get('Contents',[]) if o['Key'].endswith('.metadata.json')]
+objects.sort(key=lambda x: x['LastModified'], reverse=True)
+print(f"s3://stardata-databricks/{objects[0]['Key']}")
+PYEOF
+)
+echo "Latest metadata: $METADATA_FILE"
+
+# Register in HMS via direct Thrift client
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env PYTHONPATH=/tmp TOKEN=$VAULT_TOKEN \
+  python3 - "$TABLE_NAME" "$METADATA_FILE" <<'PYEOF'
+import sys, time, getpass
+from thrift.transport import TSocket, TTransport
+from thrift.protocol  import TBinaryProtocol
+from hive_metastore   import ThriftHiveMetastore
+from hive_metastore.ttypes import Table, StorageDescriptor, SerDeInfo, FieldSchema
+
+TABLE_NAME    = sys.argv[1]
+METADATA_FILE = sys.argv[2]
+TABLE_LOCATION = METADATA_FILE.rsplit('/metadata/', 1)[0]
+
+t = TTransport.TBufferedTransport(
+    TSocket.TSocket("hive-metastore.prod.svc.cluster.local", 9083))
+c = ThriftHiveMetastore.Client(TBinaryProtocol.TBinaryProtocol(t))
+t.open()
+
+# Drop stale entry if present
+if TABLE_NAME in c.get_all_tables("demo"):
+    c.drop_table("demo", TABLE_NAME, deleteData=False)
+
+ts = int(time.time())
+c.create_table(Table(
+    dbName="demo", tableName=TABLE_NAME,
+    owner=getpass.getuser(),
+    createTime=ts, lastAccessTime=ts,
+    tableType="EXTERNAL_TABLE",
+    sd=StorageDescriptor(
+        cols=[], location=TABLE_LOCATION,
+        inputFormat="org.apache.iceberg.mr.hive.HiveIcebergInputFormat",
+        outputFormat="org.apache.iceberg.mr.hive.HiveIcebergOutputFormat",
+        compressed=False,
+        serdeInfo=SerDeInfo(
+            serializationLib="org.apache.iceberg.mr.hive.HiveIcebergSerDe",
+            parameters={}),
+        parameters={}),
+    parameters={
+        "table_type": "ICEBERG",
+        "metadata_location": METADATA_FILE,
+        "EXTERNAL": "TRUE",
+    }
+))
+print(f"HMS: demo.{TABLE_NAME} registered -> {METADATA_FILE}")
+t.close()
+PYEOF
 ```
 
-### 10.2 Upload and run the notebook
+✅ **Pass:** prints `HMS: demo.<table> registered -> s3://...metadata.json`
+
+> **Note for `.append()` writes:** appending adds a new Iceberg snapshot but does not change
+> the table root location — only the latest `metadata.json` file changes. Re-run Step 3 after
+> every append to point HMS at the new snapshot so Databricks sees all rows.
+
+### Step 4 — Query in Databricks SQL
+
+Open the **SQL Editor** at `https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor` and paste:
+
+```sql
+-- Check the table is visible
+SHOW TABLES IN star_lakehouse.demo;
+
+-- Row count
+SELECT COUNT(*) AS total_rows
+FROM star_lakehouse.demo.my_table;     -- replace my_table with your table name
+
+-- Sample rows
+SELECT *
+FROM star_lakehouse.demo.my_table
+LIMIT 10;
+
+-- Filter
+SELECT *
+FROM star_lakehouse.demo.my_table
+WHERE value = '100';
+```
+
+✅ **Pass:** `SHOW TABLES` lists your table; `COUNT(*)` returns the expected row count.
+
+> **Warehouse auto-start:** the Serverless Starter Warehouse starts automatically on first
+> query. Allow 20–30 seconds if it was stopped.
+
+> **Snapshot lag:** Databricks reads the metadata pointer stored in HMS. If you wrote new
+> rows via `.append()` but forgot to re-run Step 3, Databricks will see the old snapshot
+> count until HMS is updated.
+
+### Step 5 — Verify HMS registration at any time
 
 ```bash
-# Upload notebook to workspace
-databricks workspace import \
-  scripts/databricks-iceberg-polaris/databricks_notebook_polaris_read.py \
-  /Shared/star-lakehouse/databricks_notebook_polaris_read \
-  --language PYTHON --overwrite
+# List all tables registered in HMS
+kubectl exec -n prod $(kubectl get pods -n prod -l app=hive-metastore \
+  --no-headers -o custom-columns=NAME:.metadata.name | head -1) -- \
+  python3 - <<'PYEOF'
+from thrift.transport import TSocket, TTransport
+from thrift.protocol  import TBinaryProtocol
+from hive_metastore   import ThriftHiveMetastore
 
-echo "Notebook uploaded → open at:"
-echo "  https://dbc-11a1dbc5-061a.cloud.databricks.com/#workspace/Shared/star-lakehouse/databricks_notebook_polaris_read"
+t = TTransport.TBufferedTransport(
+    TSocket.TSocket("hive-metastore.prod.svc.cluster.local", 9083))
+c = ThriftHiveMetastore.Client(TBinaryProtocol.TBinaryProtocol(t))
+t.open()
+for db in c.get_all_databases():
+    tables = c.get_all_tables(db)
+    for tbl in tables:
+        entry = c.get_table(db, tbl)
+        meta = entry.parameters.get("metadata_location","n/a")
+        print(f"  {db:10s}.{tbl:25s}  {meta[-70:]}")
+t.close()
+PYEOF
 ```
 
-Or via the UI: **Workspace → Import → select `.py` file → Run All**.
+### 10.3 Troubleshooting
 
-### 10.3 Expected output
-
-```
-Polaris URI : http://192.168.1.50:30181/api/catalog
-Target table: star_lakehouse.demo.customers
-S3 bucket   : s3://stardata-databricks/iceberg/warehouse/
-Credentials : loaded ✅
-SparkSession configured with star_lakehouse REST catalog ✅
-
-+-----------+
-|total_rows |
-+-----------+
-|10000      |
-+-----------+
-✅ T-10a PASS — 10000 rows in star_lakehouse.demo.customers
-
-+---+-----------+---------------------------+-------------+------------+-----------+
-|customer_id|full_name |email                    |customer_tier|country_code|salary    |
-+...10 rows...
-✅ T-10b PASS — sample rows returned
-
-+-------------+----+-----+
-|customer_tier| cnt|  pct|
-+-------------+----+-----+
-|     standard|2612| 26.1|
-|       silver|2532| 25.3|
-|         gold|2468| 24.7|
-|     platinum|2388| 23.9|
-+-------------+----+-----+
-✅ T-10c PASS — all 4 tiers present: ['gold', 'platinum', 'silver', 'standard']
-✅ T-10d PASS — Iceberg snapshot history visible
-✅ T-10e PASS — schema correct, 17 columns present
-```
-
-### 10.4 Troubleshooting
-
-| Error | Cause | Fix |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `AnalysisException: iceberg-spark-runtime not found` | JARs not attached | Add Maven coords to cluster Libraries tab |
-| `OAuth2 token fetch failed: Connection refused` | Polaris not reachable from Databricks | Polaris NodePort `192.168.1.50:30181` must be internet-accessible or VPN-reachable; alternatively use Polaris TLS at `192.168.1.50:30553` |
-| `403 Forbidden` on catalog API | `spark-iceberg-svc` lacks `star_lakehouse_admin` role | Run the grant from RB-19 §8 troubleshooting |
-| `S3Exception: Access Denied` | AWS key lacks permissions on `stardata-databricks` | Verify IAM policy `stardata-databricks-rw` is attached to `watsonx-s3-connector` |
-| `Secret not found: polaris/spark_svc_id` | Secret scope not created | Run §10.1 secret setup |
+| `CATALOG_NOT_FOUND: star_lakehouse` | FOREIGN catalog not created | Verify T-09 — re-create via §5 Step 6 |
+| Databricks returns stale row count | HMS `metadata_location` not updated after write | Re-run Step 3 (HMS re-registration) |
+| `EXTERNAL_LOCATION_DOES_NOT_EXIST` | S3 path not covered by `stardata_databricks_iceberg` | External location covers `s3://stardata-databricks/` — all sub-paths are covered |
+| `403 Access Denied` from Databricks on S3 | IAM role `databricks-unity-catalog` lacks S3 permission | Verify inline policy `stardata-databricks-rw` is attached to the role in AWS Console |
+| `HMS: TTransportException` on Step 3 | HMS pod restarted | `kubectl get pods -n prod -l app=hive-metastore` — wait for `1/1 Running` |
+| `hive_metastore` Thrift: table already exists | Previous registration not dropped | Step 3 script drops stale entry automatically before re-creating |
