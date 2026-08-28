@@ -61,6 +61,15 @@ COPY aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
 COPY iceberg-aws-bundle-${ICEBERG_AWS_BUNDLE_VERSION}.jar \
      /opt/conda/lib/python3.11/site-packages/pyspark/jars/iceberg-aws-bundle.jar
 
+# Gluten/Velox plugin JAR — must be on the DRIVER classpath as well as the workers.
+# spark.plugins=org.apache.gluten.GlutenPlugin causes the driver JVM to call
+# Class.forName("org.apache.gluten.GlutenPlugin") at SparkContext init — before
+# any executor is launched — so the class must be visible to the driver.
+# Without this JAR the driver throws: ClassNotFoundException: org.apache.gluten.GlutenPlugin
+# Copied from docker/spark-gluten-velox/jars/ (same file baked into worker image).
+COPY gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
+     /opt/conda/lib/python3.11/site-packages/pyspark/jars/gluten-velox-bundle.jar
+
 # spark_iceberg_utils.py — platform write wrapper; provides IcebergTableBuilder
 # including write_append() which injects snap_id and snap_timestamp automatically.
 # Copied from docker/spark-gluten-velox/scripts/ (keep in sync).
