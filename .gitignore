@@ -33,3 +33,4 @@ jars/*.jar
 
 # Large Spark JARs — stored locally, not in git
 docker/spark-gluten-velox/jars/*.jar
+docker/jupyter-spark/*.jar
