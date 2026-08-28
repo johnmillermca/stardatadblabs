@@ -33,6 +33,9 @@ hub:
       c.DummyAuthenticator.password = os.environ.get('DUMMY_AUTH_PASSWORD', 'changeme')
     01-tolerations: |
       c.KubeSpawner.tolerations = []
+    02-no-cloud-metadata: |
+      c.KubeSpawner.extra_container_config = {}
+      c.KubeSpawner.init_containers = []
   # Workers only — no master
   nodeSelector: {}
 
@@ -47,6 +50,8 @@ proxy:
       tag: "4.6.2"
 
 singleuser:
+  cloudMetadata:
+    blockWithIptables: false
   image:
     name: 192.168.1.50:30500/jupyter-spark
     tag: latest
