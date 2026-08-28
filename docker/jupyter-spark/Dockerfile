@@ -52,5 +52,11 @@ COPY aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
 RUN mkdir -p /usr/local/spark/conf
 COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
 
+# Point PySpark at the conf dir where spark-defaults.conf lives.
+# Without this, the file is never loaded and catalog registrations
+# (spark.sql.catalog.polaris) are absent from the JVM, causing:
+#   CatalogNotFoundException: spark.sql.catalog.polaris is not defined
+ENV SPARK_CONF_DIR=/usr/local/spark/conf
+
 USER ${NB_USER}
 WORKDIR /home/${NB_USER}

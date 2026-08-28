@@ -79,16 +79,16 @@ print("✅ OpenBao helper ready")
 
 ### Cell 2 — Build the Spark session
 
-> The S3A JARs, filesystem config, and executor classpath are all baked into the image (`spark-defaults.conf`). The only runtime values needed here are the credentials from OpenBao and the Polaris catalog config.
+> The catalog class registration, Iceberg extensions, S3A wiring, and executor classpath are all set here explicitly so this cell works on any pod — whether or not `SPARK_CONF_DIR` is loading `spark-defaults.conf` from the image.
 >
-> **Always run this cell after Cell 1, even on a fresh kernel.** The session stop guard below ensures any stale session (from a previous run) is cleared before rebuilding with the current credentials. Without it, `.getOrCreate()` silently returns the old session with no catalog config, causing `REQUIRES_SINGLE_PART_NAMESPACE` errors on `polaris.demo.*` queries.
+> **Always run this cell after Cell 1, even on a fresh kernel.** The session stop guard at the top ensures any stale session is cleared first. Without it, `.getOrCreate()` silently returns the old session with none of these configs applied.
 
 ```python
 from pyspark.sql import SparkSession
 import os
 
-# Stop any stale session so .getOrCreate() always creates a fresh one with the
-# correct polaris catalog config.  Safe to call on a clean kernel (no-op).
+# Stop any stale session so .getOrCreate() always creates a fresh one.
+# Safe to call on a clean kernel (no-op).
 _s = SparkSession.getActiveSession()
 if _s is not None:
     _s.stop()
@@ -110,10 +110,20 @@ spark = SparkSession.builder \
     .config("spark.driver.bindAddress", DRIVER_IP) \
     .config("spark.executor.memory", "2g") \
     .config("spark.driver.memory",   "2g") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.polaris",
+            "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.polaris.type",        "rest") \
+    .config("spark.sql.catalog.polaris.uri",
+            "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog") \
     .config("spark.sql.defaultCatalog",              "polaris") \
+    .config("spark.hadoop.fs.s3a.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
     .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
     .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
     .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
+    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
     .config("spark.sql.catalog.polaris.credential",  f"{POLARIS_ID}:{POLARIS_SECRET}") \
     .config("spark.sql.catalog.polaris.scope",       "PRINCIPAL_ROLE:ALL") \
     .config("spark.sql.catalog.polaris.warehouse",   "star_lakehouse") \
@@ -377,6 +387,35 @@ kubectl exec -n prod jupyter-admin -- \
 **Fix — pick one:**
 - **Recommended:** Cell 2 now contains a session stop guard at the top. Re-run Cell 2 — the guard stops the stale session and `.getOrCreate()` builds a fresh one with all catalog configs applied.
 - **Quick fix:** Restart the kernel (Kernel → Restart Kernel), then re-run Cell 1 and Cell 2 from scratch.
+
+### `CatalogNotFoundException: spark.sql.catalog.polaris is not defined`
+
+**Symptom:** `Catalog 'polaris' plugin class not found: spark.sql.catalog.polaris is not defined`.
+
+**Cause:** The `jupyter-spark` pod is running an **old image** built before `SPARK_CONF_DIR` was set in the Dockerfile. Without that env var, PySpark never loads `/usr/local/spark/conf/spark-defaults.conf`, so the `polaris` catalog class registration (`org.apache.iceberg.spark.SparkCatalog`) is never seen by the JVM. Cell 2's `.config()` calls alone cannot register a catalog class — that must come from `spark-defaults.conf`.
+
+**Fix — rebuild the image and respawn the pod:**
+
+```bash
+# 1. Rebuild and push the jupyter-spark image
+cd /home/star_master/k8s-platform
+docker build -t 192.168.1.50:30500/jupyter-spark:latest docker/jupyter-spark/
+docker push 192.168.1.50:30500/jupyter-spark:latest
+
+# 2. Delete the singleuser pod — JupyterHub respawns it with the new image
+kubectl delete pod jupyter-admin -n prod
+# Log back in at http://192.168.1.50:30888
+
+# 3. Verify SPARK_CONF_DIR is set in the new pod
+kubectl exec -n prod jupyter-admin -- printenv SPARK_CONF_DIR
+# Expected: /usr/local/spark/conf
+
+# 4. Verify spark-defaults.conf is loaded (polaris catalog must appear)
+kubectl exec -n prod jupyter-admin -- cat /usr/local/spark/conf/spark-defaults.conf | grep polaris
+# Expected: spark.sql.catalog.polaris   org.apache.iceberg.spark.SparkCatalog
+```
+
+After the pod is up, re-run Cell 1 and Cell 2 from scratch.
 
 ### Databricks count unchanged after write
 You skipped Section 5 (HMS re-register). Run it and query Databricks again.
