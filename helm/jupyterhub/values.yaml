@@ -31,6 +31,8 @@ hub:
     00-auth: |
       import os
       c.DummyAuthenticator.password = os.environ.get('DUMMY_AUTH_PASSWORD', 'changeme')
+    01-tolerations: |
+      c.KubeSpawner.tolerations = []
   # Workers only — no master
   nodeSelector: {}
 
@@ -64,6 +66,7 @@ singleuser:
     - display_name: "Standard — Python + PySpark"
       description: "Python 3.11, PySpark 3.5, Iceberg"
       default: true
+  extraTolerations: []
 
 scheduling:
   userScheduler:
