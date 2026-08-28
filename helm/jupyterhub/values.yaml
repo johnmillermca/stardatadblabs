@@ -52,6 +52,42 @@ proxy:
 singleuser:
   cloudMetadata:
     blockWithIptables: false
+  networkPolicy:
+    egress:
+      - ports:
+          - port: 8200
+            protocol: TCP
+          - port: 8201
+            protocol: TCP
+        to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: openbao
+      - ports:
+          - port: 7077
+            protocol: TCP
+          - port: 17077
+            protocol: TCP
+          - port: 4040
+            protocol: TCP
+        to:
+          - podSelector:
+              matchLabels:
+                app: spark
+      - ports:
+          - port: 9083
+            protocol: TCP
+        to:
+          - podSelector:
+              matchLabels:
+                app: hive-metastore
+      - ports:
+          - port: 8181
+            protocol: TCP
+        to:
+          - podSelector:
+              matchLabels:
+                app: polaris
   image:
     name: 192.168.1.50:30500/jupyter-spark
     tag: latest
