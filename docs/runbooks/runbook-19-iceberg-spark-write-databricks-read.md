@@ -51,29 +51,31 @@ Open **`http://192.168.1.50:30888`**, log in (`admin` / see OpenBao), create a n
 
 ### Cell 1 — Fetch credentials from OpenBao
 
+First get the OpenBao root token from your terminal:
+
+```bash
+kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d && echo
+```
+
+Paste the token into the notebook cell below:
+
 ```python
 import urllib.request, json
 
 OPENBAO_ADDR  = "http://openbao.prod.svc.cluster.local:8200"
-OPENBAO_TOKEN = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxxxxxxxxxxx"   # ← paste token here
 
 def bao(path, field):
-    """Read a KV secret field from OpenBao using the pod's service account token."""
     req = urllib.request.Request(
         f"{OPENBAO_ADDR}/v1/{path}",
         headers={"X-Vault-Token": OPENBAO_TOKEN}
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())["data"]["data"][field]
-```
 
-> **If OpenBao is not reachable from the notebook** (service account may lack permission), paste the token directly from your terminal:
-> ```bash
-> # Run on master terminal, copy the output into the notebook
-> kubectl get secret openbao-unseal-keys -n prod \
->   -o jsonpath='{.data.root-token}' | base64 -d
-> ```
-> Then replace `OPENBAO_TOKEN` with that value in the cell above.
+print("✅ OpenBao helper ready")
+```
 
 ### Cell 2 — Build the Spark session
 
@@ -296,17 +298,13 @@ ORDER BY customer_tier;
 
 ## 7. Troubleshooting
 
-### OpenBao not reachable from notebook
-The Jupyter service account may not have permission to read OpenBao. Use the root token directly:
+### OpenBao `URLError` or token error in notebook
+The token in Cell 1 has expired or is wrong. Get a fresh one from the terminal:
 ```bash
-# Run on master terminal — paste the output into the notebook as OPENBAO_TOKEN
 kubectl get secret openbao-unseal-keys -n prod \
-  -o jsonpath='{.data.root-token}' | base64 -d
+  -o jsonpath='{.data.root-token}' | base64 -d && echo
 ```
-Then in the notebook:
-```python
-OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxx"   # paste token here
-```
+Paste it into `OPENBAO_TOKEN` in Cell 1 and re-run.
 
 ### `ForbiddenException: not authorized for INSERT`
 The `spark-iceberg-svc` principal lacks the `star_lakehouse_admin` role:
