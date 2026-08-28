@@ -317,23 +317,35 @@ import sys, time, getpass
 from thrift.transport import TSocket, TTransport
 from thrift.protocol  import TBinaryProtocol
 from hive_metastore   import ThriftHiveMetastore
-from hive_metastore.ttypes import Table, StorageDescriptor, SerDeInfo
+from hive_metastore.ttypes import Table, StorageDescriptor, SerDeInfo, Database
 
 TABLE_NAME     = sys.argv[1]
 METADATA_FILE  = sys.argv[2]
 TABLE_LOCATION = METADATA_FILE.rsplit('/metadata/', 1)[0]
+DB_NAME        = "lakehouse_db"
+DB_LOCATION    = "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/"
 
 t = TTransport.TBufferedTransport(
     TSocket.TSocket("hive-metastore.prod.svc.cluster.local", 9083))
 c = ThriftHiveMetastore.Client(TBinaryProtocol.TBinaryProtocol(t))
 t.open()
 
-if TABLE_NAME in c.get_all_tables("lakehouse_db"):
-    c.drop_table("lakehouse_db", TABLE_NAME, deleteData=False)
+# Create the HMS database if it doesn't exist.
+# Databricks cannot list tables without this database entry in HMS.
+if DB_NAME not in c.get_all_databases():
+    c.create_database(Database(
+        name=DB_NAME,
+        description="Iceberg lakehouse — Polaris star_lakehouse",
+        locationUri=DB_LOCATION,
+        parameters={}))
+    print(f"✅ HMS database created: {DB_NAME}")
+
+if TABLE_NAME in c.get_all_tables(DB_NAME):
+    c.drop_table(DB_NAME, TABLE_NAME, deleteData=False)
 
 ts = int(time.time())
 c.create_table(Table(
-    dbName="lakehouse_db", tableName=TABLE_NAME, owner=getpass.getuser(),
+    dbName=DB_NAME, tableName=TABLE_NAME, owner=getpass.getuser(),
     createTime=ts, lastAccessTime=ts, tableType="EXTERNAL_TABLE",
     sd=StorageDescriptor(
         cols=[], location=TABLE_LOCATION,
@@ -345,7 +357,7 @@ c.create_table(Table(
             parameters={}),
         parameters={}),
     parameters={"table_type":"ICEBERG","metadata_location":METADATA_FILE,"EXTERNAL":"TRUE"}))
-print(f"✅ HMS updated: lakehouse_db.{TABLE_NAME} → {METADATA_FILE}")
+print(f"✅ HMS updated: {DB_NAME}.{TABLE_NAME} → {METADATA_FILE}")
 t.close()
 PYEOF
 ```
