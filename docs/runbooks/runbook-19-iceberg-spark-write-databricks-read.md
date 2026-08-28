@@ -117,6 +117,8 @@ spark = SparkSession.builder \
     .config("spark.sql.catalog.polaris.type",        "rest") \
     .config("spark.sql.catalog.polaris.uri",
             "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog") \
+    .config("spark.sql.catalog.polaris.oauth2-server-uri",
+            "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog/v1/oauth/tokens") \
     .config("spark.sql.defaultCatalog",              "polaris") \
     .config("spark.hadoop.fs.s3a.impl",
             "org.apache.hadoop.fs.s3a.S3AFileSystem") \
