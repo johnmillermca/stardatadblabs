@@ -162,18 +162,18 @@ spark.sql("""
 INSERT INTO polaris.demo.customers
   (customer_id, full_name, email, phone_number, date_of_birth,
    national_id, street_address, city, country_code, ip_address,
-   salary, customer_tier, is_active)
+   salary, customer_tier, is_active, created_at, updated_at)
 VALUES
   (10001, 'John Miller',  'john.miller@example.com',  '+1-555-0101', DATE '1985-03-14',
-   'ID-001-JM', '12 Maple St',      'Toronto', 'CA', '192.168.10.1',  95000.00, 'gold',     1),
+   'ID-001-JM', '12 Maple St',      'Toronto', 'CA', '192.168.10.1',  95000.00, 'gold',     1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
   (10002, 'Sara Khan',    'sara.khan@example.com',    '+1-555-0102', DATE '1990-07-22',
-   'ID-002-SK', '88 Oak Ave',       'London',  'GB', '10.0.0.12',     72000.00, 'silver',   1),
+   'ID-002-SK', '88 Oak Ave',       'London',  'GB', '10.0.0.12',     72000.00, 'silver',   1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
   (10003, 'Luca Rossi',   'luca.rossi@example.com',   '+39-06-5550', DATE '1978-11-05',
-   'ID-003-LR', 'Via Roma 3',       'Rome',    'IT', '172.16.0.5',   110000.00, 'platinum', 1),
+   'ID-003-LR', 'Via Roma 3',       'Rome',    'IT', '172.16.0.5',   110000.00, 'platinum', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
   (10004, 'Amira Nasser', 'amira.nasser@example.com', '+20-2-5550',  DATE '1995-01-30',
-   'ID-004-AN', '45 Nile Corniche', 'Cairo',   'EG', '10.10.10.10',   48000.00, 'standard', 1),
+   'ID-004-AN', '45 Nile Corniche', 'Cairo',   'EG', '10.10.10.10',   48000.00, 'standard', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
   (10005, 'Wei Zhang',    'wei.zhang@example.com',    '+86-10-5550', DATE '1988-09-17',
-   'ID-005-WZ', '8 Jingshan Rd',    'Beijing', 'CN', '192.168.1.100',130000.00, 'platinum', 1)
+   'ID-005-WZ', '8 Jingshan Rd',    'Beijing', 'CN', '192.168.1.100',130000.00, 'platinum', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00')
 """)
 
 # Confirm
