@@ -31,25 +31,23 @@ RUN pip install --no-cache-dir \
     "s3fs>=2023.1.0" \
     sqlmesh boto3 matplotlib seaborn scikit-learn
 
-# Download all extra JARs into the pyspark jars directory so they are on the
-# driver classpath automatically — no spark.jars upload, no manual copy needed.
+# Download Iceberg + PostgreSQL JARs from Maven (small files, fast).
+# hadoop-aws and aws-java-sdk-bundle are COPY'd from the build context to avoid
+# re-downloading the 268 MB SDK bundle on every rebuild.
 RUN PYSPARK_JARS=$(python3 -c "import pyspark; print(pyspark.__file__.replace('__init__.py','jars'))") && \
-    # Iceberg Spark runtime
     curl -fsSL \
     "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_${SCALA_VERSION}/${ICEBERG_VERSION}/iceberg-spark-runtime-3.5_${SCALA_VERSION}-${ICEBERG_VERSION}.jar" \
     -o "${PYSPARK_JARS}/iceberg-spark-runtime.jar" && \
-    # PostgreSQL JDBC
     curl -fsSL \
     "https://jdbc.postgresql.org/download/postgresql-${POSTGRES_JDBC_VERSION}.jar" \
-    -o "${PYSPARK_JARS}/postgresql.jar" && \
-    # hadoop-aws — S3A filesystem implementation
-    curl -fsSL \
-    "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" \
-    -o "${PYSPARK_JARS}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" && \
-    # aws-java-sdk-bundle — AWS SDK v1 required by hadoop-aws
-    curl -fsSL \
-    "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_VERSION}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar" \
-    -o "${PYSPARK_JARS}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar"
+    -o "${PYSPARK_JARS}/postgresql.jar"
+
+# Copy S3A JARs from build context (pre-fetched from the Spark master pod).
+# To update versions: copy new JARs into docker/jupyter-spark/ and update ARG above.
+COPY hadoop-aws-${HADOOP_AWS_VERSION}.jar \
+     /opt/conda/lib/python3.11/site-packages/pyspark/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar
+COPY aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
+     /opt/conda/lib/python3.11/site-packages/pyspark/jars/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar
 
 RUN mkdir -p /usr/local/spark/conf
 COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
