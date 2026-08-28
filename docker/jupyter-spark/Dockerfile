@@ -61,6 +61,11 @@ COPY aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
 COPY iceberg-aws-bundle-${ICEBERG_AWS_BUNDLE_VERSION}.jar \
      /opt/conda/lib/python3.11/site-packages/pyspark/jars/iceberg-aws-bundle.jar
 
+# spark_iceberg_utils.py — platform write wrapper; provides IcebergTableBuilder
+# including write_append() which injects snap_id and snap_timestamp automatically.
+# Copied from docker/spark-gluten-velox/scripts/ (keep in sync).
+COPY spark_iceberg_utils.py /opt/conda/lib/python3.11/site-packages/spark_iceberg_utils.py
+
 RUN mkdir -p /usr/local/spark/conf
 COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
 
