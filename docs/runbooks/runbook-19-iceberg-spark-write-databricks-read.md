@@ -90,21 +90,27 @@ S3_KEY         = bao("secret/data/platform/s3",      "access_key")
 S3_SECRET      = bao("secret/data/platform/s3",      "secret_key")
 S3_ENDPOINT    = bao("secret/data/platform/s3",      "endpoint")
 
-JAR_DIR = "/home/jovyan/jars"
+import socket
+
+DRIVER_IP = socket.gethostbyname(socket.gethostname())   # resolves to pod IP
+DRIVER_JARS = "/home/jovyan/jars/hadoop-aws-3.3.4.jar:/home/jovyan/jars/aws-java-sdk-bundle-1.12.262.jar"
+WORKER_JARS = "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar"
 
 spark = SparkSession.builder \
     .master("spark://spark-master-internal.prod.svc.cluster.local:17077") \
     .appName("jupyter-iceberg-dml") \
+    .config("spark.driver.host",        DRIVER_IP) \
+    .config("spark.driver.bindAddress", DRIVER_IP) \
     .config("spark.executor.memory", "2g") \
     .config("spark.driver.memory",   "2g") \
-    .config("spark.jars",
-            f"{JAR_DIR}/hadoop-aws-3.3.4.jar,{JAR_DIR}/aws-java-sdk-bundle-1.12.262.jar") \
-    .config("spark.hadoop.fs.s3a.impl",
-            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-    .config("spark.hadoop.fs.s3a.access.key",             S3_KEY) \
-    .config("spark.hadoop.fs.s3a.secret.key",             S3_SECRET) \
-    .config("spark.hadoop.fs.s3a.endpoint",               S3_ENDPOINT) \
-    .config("spark.hadoop.fs.s3a.path.style.access",      "true") \
+    .config("spark.driver.extraClassPath",   DRIVER_JARS) \
+    .config("spark.executor.extraClassPath", WORKER_JARS) \
+    .config("spark.hadoop.fs.s3a.impl",              "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3.impl",               "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
+    .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
+    .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
+    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
     .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
     .config("spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
@@ -123,7 +129,7 @@ spark = SparkSession.builder \
     .config("spark.sql.catalog.polaris.client.region",        "us-east-2") \
     .getOrCreate()
 
-spark.sparkContext.setLogLevel("ERROR")
+spark.sparkContext.setLogLevel("WARN")
 print("✅ Spark", spark.version, "connected")
 ```
 
