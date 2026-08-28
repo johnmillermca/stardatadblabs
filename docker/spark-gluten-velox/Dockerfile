@@ -23,6 +23,25 @@ FROM apache/spark:3.5.1-scala2.12-java17-python3-ubuntu
 
 USER root
 
+# ── Python 3.11 — match the JupyterHub driver (Python 3.10 is the base image default)
+# PYSPARK_PYTHON must be identical on driver and every executor or Spark aborts
+# with: [PYTHON_VERSION_MISMATCH] Python in worker has different version (3,10)
+# than that in driver 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-distutils python3.11-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.11 the default python3 for Spark workers
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 2 \
+    && update-alternatives --set python3 /usr/bin/python3.11 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+
+# Tell Spark executors to use Python 3.11 — must match PYSPARK_DRIVER_PYTHON on driver
+ENV PYSPARK_PYTHON=python3.11
+
 # ── System libs required by Velox native engine ───────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgflags-dev \

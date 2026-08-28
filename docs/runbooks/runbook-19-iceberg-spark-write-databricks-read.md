@@ -110,6 +110,8 @@ spark = SparkSession.builder \
     .config("spark.driver.bindAddress", DRIVER_IP) \
     .config("spark.executor.memory", "2g") \
     .config("spark.driver.memory",   "2g") \
+    .config("spark.pyspark.python",        "python3.11") \
+    .config("spark.pyspark.driver.python", "python3.11") \
     .config("spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
     .config("spark.sql.catalog.polaris",
