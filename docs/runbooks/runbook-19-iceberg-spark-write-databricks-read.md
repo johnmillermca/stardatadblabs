@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / data-lakehouse |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-08-27 |
+| **Last Updated** | 2026-08-28 |
 | **Related** | RB-18 (infrastructure setup), RB-15 (Snowflake→Iceberg), RB-01 (OpenBao) |
 
 ---
@@ -16,9 +16,9 @@
 **Day-to-day guide** for running SQL DML (`INSERT`, `UPDATE`, `DELETE`) against the Iceberg table in Spark and immediately seeing those changes in Databricks SQL.
 
 Three steps every time:
-1. Open a `spark-sql` shell on the Spark master pod (catalog pre-configured)
-2. Run your SQL — `INSERT`, `UPDATE`, or `DELETE`
-3. Re-register the table in HMS, then query in Databricks
+1. **JupyterHub** — open a notebook, connect to Spark, run your SQL
+2. **Terminal** — re-register the table in HMS after the write
+3. **Databricks SQL editor** — verify the new data is visible
 
 > **Pre-condition:** [RB-18](runbook-18-databricks-iceberg-polaris.md) infrastructure must be live — Polaris, S3, HMS, and the Databricks `star_lakehouse` FOREIGN catalog must all exist.
 
@@ -27,150 +27,183 @@ Three steps every time:
 ## 2. How it works
 
 ```
-spark-sql (on Spark pod)
-  INSERT / UPDATE / DELETE
+JupyterHub notebook (http://192.168.1.50:30888)
+  PySpark → INSERT / UPDATE / DELETE
          │
          ▼ Iceberg REST (Polaris)
   New snapshot written to S3
   s3://stardata-databricks/iceberg/warehouse/demo/customers/
          │
-         ▼ HMS re-register (updates metadata_location pointer)
+         ▼ Terminal — HMS re-register (updates metadata_location pointer)
   hive-metastore.prod.svc.cluster.local:9083
          │
          ▼ Databricks FOREIGN catalog reads updated pointer
   SELECT * FROM star_lakehouse.demo.customers   ← sees new data
 ```
 
-> **Why the HMS step?** Databricks doesn't read Polaris directly. It reads the `metadata_location` pointer stored in HMS. After every write, that pointer must be updated to the new `.metadata.json` file so Databricks sees the latest snapshot.
+> **Why the HMS step?** Databricks reads the `metadata_location` pointer stored in HMS. After every Spark write, that pointer must be updated to the new `.metadata.json` so Databricks sees the latest snapshot.
 
 ---
 
-## 3. Open a spark-sql shell
+## 3. Step 1 — Connect to Spark from JupyterHub
+
+Open **`http://192.168.1.50:30888`**, log in (`admin` / see OpenBao), create a new notebook, and run the following cells in order.
+
+### Cell 1 — Fetch credentials from OpenBao
+
+```python
+import urllib.request, json
+
+OPENBAO_ADDR  = "http://openbao.prod.svc.cluster.local:8200"
+OPENBAO_TOKEN = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+
+def bao(path, field):
+    """Read a KV secret field from OpenBao using the pod's service account token."""
+    req = urllib.request.Request(
+        f"{OPENBAO_ADDR}/v1/{path}",
+        headers={"X-Vault-Token": OPENBAO_TOKEN}
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())["data"]["data"][field]
+```
+
+> **If OpenBao is not reachable from the notebook** (service account may lack permission), paste the token directly from your terminal:
+> ```bash
+> # Run on master terminal, copy the output into the notebook
+> kubectl get secret openbao-unseal-keys -n prod \
+>   -o jsonpath='{.data.root-token}' | base64 -d
+> ```
+> Then replace `OPENBAO_TOKEN` with that value in the cell above.
+
+### Cell 2 — Build the Spark session
+
+```python
+from pyspark.sql import SparkSession
+
+POLARIS_ID     = bao("secret/data/platform/polaris", "spark_svc_id")
+POLARIS_SECRET = bao("secret/data/platform/polaris", "spark_svc_secret")
+S3_KEY         = bao("secret/data/platform/s3",      "access_key")
+S3_SECRET      = bao("secret/data/platform/s3",      "secret_key")
+S3_ENDPOINT    = bao("secret/data/platform/s3",      "endpoint")
+
+spark = SparkSession.builder \
+    .master("spark://spark-master-internal.prod.svc.cluster.local:17077") \
+    .appName("jupyter-iceberg-dml") \
+    .config("spark.executor.memory", "2g") \
+    .config("spark.driver.memory",   "2g") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.polaris",
+            "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.polaris.type",        "rest") \
+    .config("spark.sql.catalog.polaris.uri",
+            "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog") \
+    .config("spark.sql.catalog.polaris.credential",  f"{POLARIS_ID}:{POLARIS_SECRET}") \
+    .config("spark.sql.catalog.polaris.scope",       "PRINCIPAL_ROLE:ALL") \
+    .config("spark.sql.catalog.polaris.warehouse",   "star_lakehouse") \
+    .config("spark.sql.catalog.polaris.s3.access-key-id",     S3_KEY) \
+    .config("spark.sql.catalog.polaris.s3.secret-access-key", S3_SECRET) \
+    .config("spark.sql.catalog.polaris.s3.endpoint",          S3_ENDPOINT) \
+    .config("spark.sql.catalog.polaris.s3.path-style-access", "true") \
+    .config("spark.sql.catalog.polaris.client.region",        "us-east-2") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("ERROR")
+print("✅ Spark", spark.version, "connected")
+```
+
+### Cell 3 — Check current state
+
+```python
+spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
+spark.sql("""
+    SELECT customer_id, full_name, email, customer_tier
+    FROM polaris.demo.customers
+    LIMIT 5
+""").show(truncate=False)
+```
+
+---
+
+## 4. Step 1 (continued) — Run your DML
+
+### INSERT new rows
+
+```python
+spark.sql("""
+INSERT INTO polaris.demo.customers
+  (customer_id, full_name, email, phone_number, date_of_birth,
+   national_id, street_address, city, country_code, ip_address,
+   salary, customer_tier, is_active)
+VALUES
+  (10001, 'John Miller',  'john.miller@example.com',  '+1-555-0101', DATE '1985-03-14',
+   'ID-001-JM', '12 Maple St',      'Toronto', 'CA', '192.168.10.1',  95000.00, 'gold',     1),
+  (10002, 'Sara Khan',    'sara.khan@example.com',    '+1-555-0102', DATE '1990-07-22',
+   'ID-002-SK', '88 Oak Ave',       'London',  'GB', '10.0.0.12',     72000.00, 'silver',   1),
+  (10003, 'Luca Rossi',   'luca.rossi@example.com',   '+39-06-5550', DATE '1978-11-05',
+   'ID-003-LR', 'Via Roma 3',       'Rome',    'IT', '172.16.0.5',   110000.00, 'platinum', 1),
+  (10004, 'Amira Nasser', 'amira.nasser@example.com', '+20-2-5550',  DATE '1995-01-30',
+   'ID-004-AN', '45 Nile Corniche', 'Cairo',   'EG', '10.10.10.10',   48000.00, 'standard', 1),
+  (10005, 'Wei Zhang',    'wei.zhang@example.com',    '+86-10-5550', DATE '1988-09-17',
+   'ID-005-WZ', '8 Jingshan Rd',    'Beijing', 'CN', '192.168.1.100',130000.00, 'platinum', 1)
+""")
+
+# Confirm
+spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
+# Expected: 10005
+```
+
+### UPDATE existing rows
+
+```python
+# Promote a customer tier
+spark.sql("""
+    UPDATE polaris.demo.customers
+    SET customer_tier = 'platinum'
+    WHERE customer_id = 10002
+""")
+
+# Deactivate customers in a city
+spark.sql("""
+    UPDATE polaris.demo.customers
+    SET is_active = 0
+    WHERE city = 'Cairo'
+""")
+
+spark.sql("SELECT customer_id, full_name, customer_tier, is_active FROM polaris.demo.customers WHERE customer_id IN (10002, 10004)").show()
+```
+
+### DELETE rows
+
+```python
+# Delete a specific customer
+spark.sql("DELETE FROM polaris.demo.customers WHERE customer_id = 10004")
+
+# Delete by condition
+spark.sql("DELETE FROM polaris.demo.customers WHERE is_active = 0")
+
+spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
+```
+
+---
+
+## 5. Step 2 — Re-register the table in HMS (Terminal)
+
+**Run this on your master terminal after every DML operation.** This updates the `metadata_location` pointer in HMS so Databricks reads the new snapshot.
 
 ```bash
-# ── Terminal setup (once per session) ────────────────────────────────────────
 VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
   -o jsonpath='{.data.root-token}' | base64 -d)
 
 SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
   --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 
-# ── Fetch catalog credentials from OpenBao ────────────────────────────────────
-POLARIS_SVC_ID=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_id secret/platform/polaris")
-POLARIS_SVC_SECRET=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_secret secret/platform/polaris")
-S3_KEY=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=access_key secret/platform/s3")
-S3_SECRET=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=secret_key secret/platform/s3")
-S3_ENDPOINT=$(kubectl exec -n prod openbao-0 -- \
-  sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=endpoint secret/platform/s3")
-
-# ── Open the spark-sql shell ──────────────────────────────────────────────────
-kubectl exec -it -n prod $SPARK_POD -c spark-master -- \
-  spark-sql \
-    --master spark://spark-master-internal.prod.svc.cluster.local:17077 \
-    --conf spark.executor.memory=2g \
-    --conf spark.driver.memory=2g \
-    --conf spark.sql.catalog.star_lakehouse=org.apache.iceberg.spark.SparkCatalog \
-    --conf spark.sql.catalog.star_lakehouse.type=rest \
-    --conf spark.sql.catalog.star_lakehouse.uri=http://polaris-rest.prod.svc.cluster.local:8181/api/catalog \
-    --conf spark.sql.catalog.star_lakehouse.credential="${POLARIS_SVC_ID}:${POLARIS_SVC_SECRET}" \
-    --conf spark.sql.catalog.star_lakehouse.scope=PRINCIPAL_ROLE:ALL \
-    --conf spark.sql.catalog.star_lakehouse.warehouse=star_lakehouse \
-    --conf spark.sql.catalog.star_lakehouse.s3.access-key-id="${S3_KEY}" \
-    --conf spark.sql.catalog.star_lakehouse.s3.secret-access-key="${S3_SECRET}" \
-    --conf spark.sql.catalog.star_lakehouse.s3.endpoint="${S3_ENDPOINT}" \
-    --conf spark.sql.catalog.star_lakehouse.s3.path-style-access=true \
-    --conf spark.sql.catalog.star_lakehouse.client.region=us-east-2
-```
-
-You will get a `spark-sql>` prompt. The `star_lakehouse` catalog is ready.
-
----
-
-## 4. Run SQL — INSERT / UPDATE / DELETE
-
-### Check current state first
-
-```sql
--- Row count before your change
-SELECT COUNT(*) FROM star_lakehouse.demo.customers;
-
--- Sample a few rows
-SELECT customer_id, full_name, email, customer_tier
-FROM star_lakehouse.demo.customers
-LIMIT 5;
-```
-
-### INSERT new rows
-
-```sql
-INSERT INTO star_lakehouse.demo.customers
-  (customer_id, full_name, email, phone_number, date_of_birth,
-   national_id, street_address, city, country_code, ip_address,
-   salary, customer_tier, is_active)
-VALUES
-  (10001, 'John Miller',  'john.miller@example.com',  '+1-555-0101', DATE '1985-03-14',
-   'ID-001-JM', '12 Maple St',       'Toronto', 'CA', '192.168.10.1',  95000.00, 'gold',     1),
-  (10002, 'Sara Khan',    'sara.khan@example.com',    '+1-555-0102', DATE '1990-07-22',
-   'ID-002-SK', '88 Oak Ave',        'London',  'GB', '10.0.0.12',     72000.00, 'silver',   1),
-  (10003, 'Luca Rossi',   'luca.rossi@example.com',   '+39-06-5550', DATE '1978-11-05',
-   'ID-003-LR', 'Via Roma 3',        'Rome',    'IT', '172.16.0.5',   110000.00, 'platinum', 1),
-  (10004, 'Amira Nasser', 'amira.nasser@example.com', '+20-2-5550',  DATE '1995-01-30',
-   'ID-004-AN', '45 Nile Corniche',  'Cairo',   'EG', '10.10.10.10',   48000.00, 'standard', 1),
-  (10005, 'Wei Zhang',    'wei.zhang@example.com',    '+86-10-5550', DATE '1988-09-17',
-   'ID-005-WZ', '8 Jingshan Rd',     'Beijing', 'CN', '192.168.1.100',130000.00, 'platinum', 1);
-```
-
-Confirm immediately inside the same shell:
-```sql
-SELECT COUNT(*) FROM star_lakehouse.demo.customers;
--- Expected: 10005
-```
-
-### UPDATE existing rows
-
-```sql
--- Promote a customer tier
-UPDATE star_lakehouse.demo.customers
-SET customer_tier = 'platinum'
-WHERE customer_id = 10002;
-
--- Deactivate customers in a city
-UPDATE star_lakehouse.demo.customers
-SET is_active = 0
-WHERE city = 'Cairo';
-```
-
-### DELETE rows
-
-```sql
--- Delete a specific customer
-DELETE FROM star_lakehouse.demo.customers
-WHERE customer_id = 10004;
-
--- Delete by condition
-DELETE FROM star_lakehouse.demo.customers
-WHERE is_active = 0;
-```
-
-Type `exit;` or `Ctrl+D` to close the shell when done.
-
----
-
-## 5. Re-register the table in HMS
-
-**Run this after every INSERT / UPDATE / DELETE.** This updates the `metadata_location` pointer in HMS so Databricks reads the new snapshot.
-
-```bash
-# Find the latest metadata.json on S3
 AWS_KEY=$(kubectl exec -n prod openbao-0 -- \
   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=access_key secret/platform/s3")
 AWS_SECRET=$(kubectl exec -n prod openbao-0 -- \
   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=secret_key secret/platform/s3")
 
+# Find the latest metadata.json on S3
 METADATA_FILE=$(python3 - "$AWS_KEY" "$AWS_SECRET" <<'PYEOF'
 import sys, boto3
 s3 = boto3.client('s3', region_name='us-east-2',
@@ -184,7 +217,7 @@ PYEOF
 )
 echo "Latest metadata: $METADATA_FILE"
 
-# Update HMS entry via Thrift
+# Update HMS entry via Thrift (thrift is baked into the Spark image)
 kubectl exec -n prod $SPARK_POD -c spark-master -- \
   python3 - "customers" "$METADATA_FILE" <<'PYEOF'
 import sys, time, getpass
@@ -193,8 +226,8 @@ from thrift.protocol  import TBinaryProtocol
 from hive_metastore   import ThriftHiveMetastore
 from hive_metastore.ttypes import Table, StorageDescriptor, SerDeInfo
 
-TABLE_NAME    = sys.argv[1]
-METADATA_FILE = sys.argv[2]
+TABLE_NAME     = sys.argv[1]
+METADATA_FILE  = sys.argv[2]
 TABLE_LOCATION = METADATA_FILE.rsplit('/metadata/', 1)[0]
 
 t = TTransport.TBufferedTransport(
@@ -228,7 +261,7 @@ PYEOF
 
 ---
 
-## 6. Verify in Databricks SQL
+## 6. Step 3 — Verify in Databricks SQL
 
 Open **`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`**, select **Serverless Starter Warehouse**, and run:
 
@@ -263,17 +296,28 @@ ORDER BY customer_tier;
 
 ## 7. Troubleshooting
 
-### `CATALOG_NOT_FOUND: star_lakehouse` in spark-sql
-The `--conf spark.sql.catalog.star_lakehouse.*` flags were not passed. Exit and re-open the shell using the full command from Section 3.
+### OpenBao not reachable from notebook
+The Jupyter service account may not have permission to read OpenBao. Use the root token directly:
+```bash
+# Run on master terminal — paste the output into the notebook as OPENBAO_TOKEN
+kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d
+```
+Then in the notebook:
+```python
+OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxx"   # paste token here
+```
 
 ### `ForbiddenException: not authorized for INSERT`
 The `spark-iceberg-svc` principal lacks the `star_lakehouse_admin` role:
 ```bash
+VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d)
+POLARIS_ID=$(kubectl exec -n prod openbao-0 -- sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_id secret/platform/polaris")
+POLARIS_SECRET=$(kubectl exec -n prod openbao-0 -- sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=spark_svc_secret secret/platform/polaris")
 POLARIS_TOKEN=$(curl -s -X POST http://192.168.1.50:30181/api/catalog/v1/oauth/tokens \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=${POLARIS_SVC_ID}&client_secret=${POLARIS_SVC_SECRET}&scope=PRINCIPAL_ROLE:ALL" \
+  -d "grant_type=client_credentials&client_id=${POLARIS_ID}&client_secret=${POLARIS_SECRET}&scope=PRINCIPAL_ROLE:ALL" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-
 curl -s -X PUT \
   "http://192.168.1.50:30181/api/management/v1/principals/spark-iceberg-svc/principal-roles" \
   -H "Authorization: Bearer $POLARIS_TOKEN" \
@@ -316,9 +360,11 @@ Generate new token at: `https://dbc-11a1dbc5-061a.cloud.databricks.com/settings/
 
 | Resource | Path / URL |
 |---|---|
-| Spark master pod | `prod/spark-master-*` · label `app=spark,component=master` |
+| JupyterHub | `http://192.168.1.50:30888` |
+| Spark master (in-cluster) | `spark://spark-master-internal.prod.svc.cluster.local:17077` |
 | Polaris in-cluster URI | `http://polaris-rest.prod.svc.cluster.local:8181/api/catalog` |
-| Polaris catalog API (NodePort) | `http://192.168.1.50:30181/api/catalog/v1/star_lakehouse/` |
+| Iceberg catalog name (in notebook) | `polaris` |
+| Iceberg table (in notebook) | `polaris.demo.customers` |
 | S3 Iceberg warehouse | `s3://stardata-databricks/iceberg/warehouse/demo/` |
 | HMS Thrift (in-cluster) | `hive-metastore.prod.svc.cluster.local:9083` |
 | HMS Thrift (NodePort) | `192.168.1.50:30983` |
