@@ -53,6 +53,11 @@ singleuser:
   cloudMetadata:
     blockWithIptables: false
   networkPolicy:
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app: spark
     egress:
       - ports:
           - port: 8200

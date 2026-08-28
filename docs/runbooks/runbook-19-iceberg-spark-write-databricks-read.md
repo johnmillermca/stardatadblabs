@@ -79,6 +79,8 @@ print("✅ OpenBao helper ready")
 
 ### Cell 2 — Build the Spark session
 
+> **Note:** The two JARs below (`hadoop-aws`, `aws-java-sdk-bundle`) must exist in `/home/jovyan/jars/` inside the Jupyter pod before running this cell. They are copied there as part of the initial setup — see the [Troubleshooting](#s3-no-filesystem-for-scheme-s3) section if they are missing.
+
 ```python
 from pyspark.sql import SparkSession
 
@@ -88,11 +90,22 @@ S3_KEY         = bao("secret/data/platform/s3",      "access_key")
 S3_SECRET      = bao("secret/data/platform/s3",      "secret_key")
 S3_ENDPOINT    = bao("secret/data/platform/s3",      "endpoint")
 
+JAR_DIR = "/home/jovyan/jars"
+
 spark = SparkSession.builder \
     .master("spark://spark-master-internal.prod.svc.cluster.local:17077") \
     .appName("jupyter-iceberg-dml") \
     .config("spark.executor.memory", "2g") \
     .config("spark.driver.memory",   "2g") \
+    .config("spark.jars",
+            f"{JAR_DIR}/hadoop-aws-3.3.4.jar,{JAR_DIR}/aws-java-sdk-bundle-1.12.262.jar") \
+    .config("spark.hadoop.fs.s3a.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3a.access.key",             S3_KEY) \
+    .config("spark.hadoop.fs.s3a.secret.key",             S3_SECRET) \
+    .config("spark.hadoop.fs.s3a.endpoint",               S3_ENDPOINT) \
+    .config("spark.hadoop.fs.s3a.path.style.access",      "true") \
+    .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
     .config("spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
     .config("spark.sql.catalog.polaris",
@@ -334,6 +347,35 @@ SET internal_properties = jsonb_set(internal_properties,'{storage_configuration_
 WHERE name = 'star_lakehouse';"
 kubectl rollout restart deployment/polaris -n prod && kubectl rollout status deployment/polaris -n prod --timeout=90s
 ```
+
+### S3 `No FileSystem for scheme "s3"` or `"s3a"` in notebook
+
+The Jupyter pod is acting as the Spark **driver** and needs the S3A JARs locally — they are not automatically distributed from the Spark master. Copy them in:
+
+```bash
+SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
+  --no-headers -o custom-columns=NAME:.metadata.name | head -1)
+
+kubectl cp prod/$SPARK_POD:/opt/spark/jars/hadoop-aws-3.3.4.jar \
+  /tmp/hadoop-aws-3.3.4.jar -c spark-master
+kubectl cp prod/$SPARK_POD:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar \
+  /tmp/aws-java-sdk-bundle-1.12.262.jar -c spark-master
+
+kubectl exec -n prod jupyter-admin -- mkdir -p /home/jovyan/jars
+
+kubectl cp /tmp/hadoop-aws-3.3.4.jar \
+  prod/jupyter-admin:/home/jovyan/jars/hadoop-aws-3.3.4.jar
+kubectl cp /tmp/aws-java-sdk-bundle-1.12.262.jar \
+  prod/jupyter-admin:/home/jovyan/jars/aws-java-sdk-bundle-1.12.262.jar
+
+kubectl exec -n prod jupyter-admin -- ls -lh /home/jovyan/jars/
+```
+
+✅ **Pass:** both JARs listed (hadoop-aws ~941 K, aws-java-sdk-bundle ~268 M)
+
+Then re-run Cell 2. The `spark.jars` and `spark.hadoop.fs.s3a.*` configs wire them in automatically.
+
+> **Note:** `/home/jovyan/jars/` lives on the PVC (`local-path`), so the JARs survive notebook server restarts within the same pod lifetime. If the pod is deleted and recreated, re-run the copy commands above.
 
 ### Databricks count unchanged after write
 You skipped Section 5 (HMS re-register). Run it and query Databricks again.
