@@ -44,6 +44,10 @@ data:
         {
           "node": "worker4.local",
           "paths": ["/home/local-path-provisioner"]
+        },
+        {
+          "node": "worker5.local",
+          "paths": ["/home/local-path-provisioner"]
         }
       ]
     }

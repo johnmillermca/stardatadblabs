@@ -96,7 +96,15 @@ singleuser:
   image:
     name: 192.168.1.50:30500/jupyter-spark
     tag: latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
+  # Inject pod IP as SPARK_LOCAL_IP so the Spark driver binds to and advertises
+  # the pod's routable IP — executors can then connect back without DNS.
+  # status.podIP is available via the Downward API at pod start.
+  extraEnv:
+    SPARK_LOCAL_IP:
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
   storage:
     type: dynamic
     capacity: 10Gi
