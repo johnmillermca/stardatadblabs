@@ -132,9 +132,10 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
     .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
     .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-    .config("spark.sql.catalog.databricks.credential",  f"{POLARIS_ID}:{POLARIS_SECRET}") \
-    .config("spark.sql.catalog.databricks.scope",       "PRINCIPAL_ROLE:ALL") \
-    .config("spark.sql.catalog.databricks.warehouse",   "star_lakehouse") \
+    .config("spark.sql.catalog.databricks.credential",    f"{POLARIS_ID}:{POLARIS_SECRET}") \
+    .config("spark.sql.catalog.databricks.scope",         "PRINCIPAL_ROLE:ALL") \
+    .config("spark.sql.catalog.databricks.warehouse",     "star_lakehouse") \
+    .config("spark.sql.catalog.databricks.rest.auth.type","oauth2") \
     .config("spark.sql.catalog.databricks.s3.access-key-id",     S3_KEY) \
     .config("spark.sql.catalog.databricks.s3.secret-access-key", S3_SECRET) \
     .config("spark.sql.catalog.databricks.s3.endpoint",          S3_ENDPOINT) \
@@ -150,13 +151,56 @@ spark.sparkContext.setLogLevel("WARN")
 print("✅ Spark", spark.version, "connected —", DRIVER_IP)
 ```
 
-### Cell 3 — Ensure namespace exists and check current state
+### Cell 3 — Ensure namespace and table exist, then check current state
 
-> Run this once per session. `CREATE NAMESPACE IF NOT EXISTS` is a no-op if `lakehouse_db` already exists.
+> Run this once per session. Both `CREATE NAMESPACE` and `CREATE TABLE` are no-ops if they already exist.
+> The `customers` table must be created before the first SELECT. `IcebergTableBuilder.create_table()` is
+> idempotent (`IF NOT EXISTS` by default) — safe to re-run every session.
 
 ```python
-spark.sql("CREATE NAMESPACE IF NOT EXISTS databricks.lakehouse_db")
+from pyspark.sql.types import (
+    StructType, StructField, IntegerType, StringType,
+    DateType, TimestampType, DoubleType
+)
+from spark_iceberg_utils import IcebergTableBuilder
 
+builder = IcebergTableBuilder(spark, running_user="dave")
+
+# Ensure namespace exists
+builder.ensure_namespace("databricks", "lakehouse_db")
+
+# Create customers table if it doesn't exist yet.
+# snap_id and snap_timestamp are appended automatically by create_table().
+customer_schema = StructType([
+    StructField("customer_id",     IntegerType(),   nullable=False),
+    StructField("full_name",       StringType(),    nullable=True),
+    StructField("email",           StringType(),    nullable=True),
+    StructField("phone_number",    StringType(),    nullable=True),
+    StructField("date_of_birth",   DateType(),      nullable=True),
+    StructField("national_id",     StringType(),    nullable=True),
+    StructField("street_address",  StringType(),    nullable=True),
+    StructField("city",            StringType(),    nullable=True),
+    StructField("country_code",    StringType(),    nullable=True),
+    StructField("ip_address",      StringType(),    nullable=True),
+    StructField("salary",          DoubleType(),    nullable=True),
+    StructField("customer_tier",   StringType(),    nullable=True),
+    StructField("is_active",       IntegerType(),   nullable=True),
+    StructField("created_at",      TimestampType(), nullable=True),
+    StructField("updated_at",      TimestampType(), nullable=True),
+])
+
+builder.create_table(
+    catalog="databricks",
+    namespace="lakehouse_db",
+    table="customers",
+    schema=customer_schema,
+    partition_spec=[
+        IcebergTableBuilder.hours("snap_timestamp"),
+        IcebergTableBuilder.bucket("snap_id", 4),
+    ],
+)
+
+# Check current state — returns 0 rows on a brand-new table, which is expected.
 spark.sql("SELECT COUNT(*) AS total FROM databricks.lakehouse_db.customers").show()
 spark.sql("""
     SELECT customer_id, full_name, email, customer_tier
