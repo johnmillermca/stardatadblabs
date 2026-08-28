@@ -196,6 +196,12 @@ spark.sql.catalog.hive_catalog.warehouse      s3://stardata-databricks/iceberg/w
 spark.sql.iceberg.write.format.default               parquet
 spark.sql.iceberg.target-file-size-bytes             268435456
 
+# ── Iceberg query optimisations ───────────────────────────────────────────────
+# COUNT(*) / COUNT(1) answered from snapshot manifest metadata — no S3 data scan.
+# Enabled on workers too so the optimisation applies whether the query runs from
+# a notebook driver or from a spark-submit job on the cluster.
+spark.sql.iceberg.aggregate-pushdown.enabled         true
+
 # ── S3A defaults (credentials injected at runtime) ───────────────────────────
 spark.hadoop.fs.s3a.impl                             org.apache.hadoop.fs.s3a.S3AFileSystem
 spark.hadoop.fs.s3a.endpoint                         https://s3.us-east-2.amazonaws.com

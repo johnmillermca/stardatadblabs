@@ -1,0 +1,104 @@
+# =============================================================================
+# spark-image-pull — pre-pull Jobs for worker4 and worker5
+#
+# Purpose: spark-gluten-velox:3.5.1 is cached on worker1/worker2/worker3 but
+# NOT on worker4 or worker5.  These two Jobs each schedule a single pod on one
+# of those nodes whose only job is to pull the image.  The init container does
+# the actual pull (imagePullPolicy: Always); the main container is a one-shot
+# no-op so the pod completes cleanly.  Once complete, containerd has cached the
+# image and any subsequent spark-worker pod scheduled to that node starts
+# immediately without a fresh pull.
+#
+# Apply once:
+#   kubectl apply -f manifests/spark/spark-image-pull.yaml
+#
+# Verify pull complete (both jobs should show COMPLETIONS=1/1):
+#   kubectl get jobs -n prod -l app=spark-image-pull
+#
+# After both are complete, delete the Jobs (no longer needed):
+#   kubectl delete -f manifests/spark/spark-image-pull.yaml
+# =============================================================================
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-image-pull-worker4
+  namespace: prod
+  labels:
+    app: spark-image-pull
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: spark-image-pull
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker4.local
+      restartPolicy: OnFailure
+      initContainers:
+        - name: pull-spark-gluten-velox
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          # Always pull so the image is guaranteed to be cached in containerd
+          # even if a partial/stale layer exists from a previous attempt.
+          imagePullPolicy: Always
+          command: ["true"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: done
+          image: busybox:1.36
+          command: ["sh", "-c", "echo image cached on worker4; exit 0"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-image-pull-worker5
+  namespace: prod
+  labels:
+    app: spark-image-pull
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: spark-image-pull
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker5.local
+      restartPolicy: OnFailure
+      initContainers:
+        - name: pull-spark-gluten-velox
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          imagePullPolicy: Always
+          command: ["true"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: done
+          image: busybox:1.36
+          command: ["sh", "-c", "echo image cached on worker5; exit 0"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi

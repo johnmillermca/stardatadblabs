@@ -284,10 +284,10 @@ class IcebergTableBuilder:
         snap_timestamp — current_timestamp(): wall-clock at write time, same
                          for every row in the batch.
 
-        Returns the number of rows written.
+        Returns the number of rows written (read from the committed snapshot
+        summary so no extra Spark job is triggered).
         """
         fqn = f"{catalog}.{namespace}.{table}"
-        n   = df.count()
         (
             df
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
@@ -296,6 +296,17 @@ class IcebergTableBuilder:
             .option("mergeSchema", "true")
             .append()
         )
+        # Read the added-records count from the freshly committed snapshot
+        # summary — no extra Spark job, no S3 scan.
+        try:
+            snap_row = self._spark.sql(
+                f"SELECT summary['added-records'] AS n "
+                f"FROM {fqn}.snapshots "
+                f"ORDER BY committed_at DESC LIMIT 1"
+            ).collect()[0]
+            n = int(snap_row["n"] or 0)
+        except Exception:
+            n = -1
         logger.info("[%s] write_append → %s: %d rows", self._user, fqn, n)
         return n
 

@@ -1,8 +1,22 @@
 # =============================================================================
-# Apache Spark 3.5.1 — 1 master + 3 workers
-# Image    : 192.168.1.50:30500/apache/spark:3.5.1
+# Apache Spark 3.5.1 — 1 master + 3 standard workers + 1 large worker (worker5)
+# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1
 # Access   : http://192.168.1.5x:30707  (Master UI — no auth gate)
 #            spark://192.168.1.5x:30777 (RPC — via krb-spark-guard)
+#
+# Worker layout:
+#   spark-worker        (replicas=3) — worker1/worker2/worker3, 4 GB / 4 cores each
+#   spark-worker-large  (replicas=1) — worker5 only, 12 GB / 8 cores
+#                                      worker5 has 25 GB RAM / 12 CPUs and is
+#                                      currently only 4% memory-utilised.
+#
+#   worker4 (9.4 GB) is excluded: Kafka and JupyterHub Hub already consume
+#   ~8 GB of requests on that node, leaving less than 1.5 GB of headroom —
+#   insufficient for a safe Spark worker allocation.
+#
+# Pre-requisite: spark-gluten-velox:3.5.1 must be cached on worker5 before
+# spark-worker-large is scheduled.  Apply spark-image-pull.yaml first and wait
+# for its pod on worker5 to complete, then apply this file.
 #
 # Kerberos enforcement — krb-spark-guard sidecar:
 #   Spark standalone has no auth gate on port 7077. The krb-spark-guard sidecar
@@ -222,6 +236,12 @@ spec:
           secret:
             secretName: spark-keytab
 ---
+# ── Standard workers — worker1 / worker2 / worker3 (9.5 GB RAM, 12 CPUs each) ─
+# SPARK_WORKER_MEMORY=4g → 3 executor slots per worker at spark.executor.memory=1g
+# (4g worker − ~300 MB JVM overhead = ~3.7 GB usable; 3 × 1g = 3g fits safely).
+# Gluten off-heap (2g per executor) is allocated from outside JVM heap and does
+# NOT count against SPARK_WORKER_MEMORY — it is bounded only by the container
+# memory limit (set to 6 Gi to accommodate 1g heap + 2g off-heap + overhead).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -290,8 +310,81 @@ spec:
               memory: 1Gi
               cpu: 500m
             limits:
-              memory: 4Gi
+              memory: 6Gi
               cpu: "4"
+      volumes:
+        - name: krb5-conf
+          configMap:
+            name: kerberos-integration-config
+            items:
+              - key: krb5.conf
+                path: krb5.conf
+---
+# ── Large worker — worker5 only (25 GB RAM / 12 CPUs) ─────────────────────────
+# worker5 is currently only 4% memory-utilised (1 GB requests out of 25 GB).
+# SPARK_WORKER_MEMORY=12g → up to 12 executor slots at 1g each (or 4 at 3g each).
+# Container memory limit=14Gi covers: 12g Spark worker heap + 2g Gluten off-heap
+# headroom + ~300 MB JVM overhead.
+# Prerequisites:
+#   1. spark-image-pull.yaml applied and pod on worker5 shows STATUS=Completed.
+#   2. kubectl apply -f manifests/spark/spark.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker-large
+  namespace: prod
+  labels:
+    app: spark
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark
+      component: worker-large
+  template:
+    metadata:
+      labels:
+        app: spark
+        component: worker-large
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker5.local
+      containers:
+        - name: spark-worker
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.worker.Worker
+            - spark://spark-master-internal.prod.svc.cluster.local:17077
+          env:
+            - name: SPARK_WORKER_MEMORY
+              value: "12g"
+            - name: SPARK_WORKER_CORES
+              value: "8"
+            # ── Kerberos: point JVM JAAS at the cluster krb5.conf ─────────────
+            - name: SPARK_DAEMON_JAVA_OPTS
+              value: "-Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf"
+          ports:
+            - containerPort: 8081
+          volumeMounts:
+            - name: krb5-conf
+              mountPath: /etc/krb5.conf.d/cluster.conf
+              subPath: krb5.conf
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: "1"
+            limits:
+              memory: 14Gi
+              cpu: "8"
       volumes:
         - name: krb5-conf
           configMap:

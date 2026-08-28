@@ -82,6 +82,8 @@ print("✅ OpenBao helper ready")
 > The catalog class registration, Iceberg extensions, S3A wiring, and executor classpath are all set here explicitly so this cell works on any pod — whether or not `SPARK_CONF_DIR` is loading `spark-defaults.conf` from the image.
 >
 > **Always run this cell after Cell 1, even on a fresh kernel.** The session stop guard at the top ensures any stale session is cleared first. Without it, `.getOrCreate()` silently returns the old session with none of these configs applied.
+>
+> **Gluten/Velox must be activated from the driver session.** The Gluten JAR is baked into every worker pod (`spark-gluten-velox:3.5.1`) but it is only initialised when the driver advertises `spark.plugins=org.apache.gluten.GlutenPlugin`. Without the four Gluten lines below, Spark silently falls back to the vanilla JVM engine and you get zero Velox acceleration despite the JAR being present.
 
 ```python
 from pyspark.sql import SparkSession
@@ -136,6 +138,10 @@ spark = SparkSession.builder \
     .config("spark.sql.catalog.polaris.s3.endpoint",          S3_ENDPOINT) \
     .config("spark.sql.catalog.polaris.s3.path-style-access", "true") \
     .config("spark.sql.catalog.polaris.client.region",        "us-east-2") \
+    .config("spark.plugins",                             "org.apache.gluten.GlutenPlugin") \
+    .config("spark.gluten.sql.columnar.backend.lib",     "velox") \
+    .config("spark.memory.offHeap.enabled",              "true") \
+    .config("spark.memory.offHeap.size",                 "2g") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -162,6 +168,8 @@ spark.sql("""
 > `snap_id` and `snap_timestamp` are injected automatically by `write_append()` —
 > you only provide the business columns. Do **not** use raw `spark.sql("INSERT INTO … VALUES …")`
 > or `df.writeTo().append()` directly — neither has snap column injection.
+>
+> **Why small batches are still somewhat slow:** The table is partitioned by `hours(snap_timestamp) + bucket(4, snap_id)`. Even 5 rows are distributed across 4 hash buckets, producing 4 separate Parquet files and 4 individual S3 `PutObject` calls. This is normal Iceberg behaviour — the partition spec is optimised for large table scans, not for individual small writes. Expect ~15–30 s cold-executor overhead per batch regardless of row count; this is inherent to Spark's executor allocation cycle, not a bug.
 
 ```python
 from pyspark.sql import Row
@@ -445,7 +453,71 @@ Generate new token at: `https://dbc-11a1dbc5-061a.cloud.databricks.com/settings/
 
 ---
 
-## 8. Key paths reference
+## 8. Expanding Spark workers to worker5 (one-time setup)
+
+> **Why worker5 and not worker4?** `worker4.local` has ~8 GB of memory already requested by Kafka and the JupyterHub Hub pod — less than 1.5 GB of headroom remains, which is not enough for a safe Spark executor. `worker5.local` has 25 GB RAM and is currently only 4% utilised, making it the right candidate.
+
+### Step 1 — Pre-pull the Gluten/Velox image on worker5
+
+`spark-gluten-velox:3.5.1` is cached on worker1/2/3 but not on worker5. Apply the pre-pull Jobs to cache it:
+
+```bash
+kubectl apply -f manifests/spark/spark-image-pull.yaml
+```
+
+Wait for both Jobs to complete (pulls ~600 MB from local registry; typically 1–2 min):
+
+```bash
+kubectl get jobs -n prod -l app=spark-image-pull -w
+# Wait until both jobs show COMPLETIONS=1/1
+```
+
+Confirm the image is now cached on worker5:
+
+```bash
+kubectl get node worker5.local \
+  -o jsonpath='{range .status.images[*]}{.names[-1]}{"\n"}{end}' \
+  | grep spark-gluten
+# Expected: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+```
+
+Clean up the Jobs — they are no longer needed after the pull:
+
+```bash
+kubectl delete -f manifests/spark/spark-image-pull.yaml
+```
+
+### Step 2 — Deploy the large worker on worker5
+
+```bash
+kubectl apply -f manifests/spark/spark.yaml
+kubectl rollout status deployment/spark-worker-large -n prod --timeout=120s
+```
+
+Verify the new worker registered with the Spark master (open the UI or run):
+
+```bash
+kubectl get pods -n prod -l component=worker-large -o wide
+# Expected: 1 pod Running on worker5.local
+```
+
+The Spark master UI at `http://192.168.1.50:30707` will now show **4 workers** total:
+- 3 × standard (worker1/2/3) — 4 GB / 4 cores each → **12 GB / 12 cores** combined
+- 1 × large (worker5) — **12 GB / 8 cores**
+- **Total cluster capacity: 24 GB RAM / 20 cores**
+
+### Memory accounting for Gluten off-heap
+
+Gluten/Velox allocates its native memory **off-heap** via `spark.memory.offHeap.size`. This is separate from `SPARK_WORKER_MEMORY` and is bounded only by the container `limits.memory`. The limits are set accordingly:
+
+| Worker | `SPARK_WORKER_MEMORY` | Off-heap budget | Container limit |
+|---|---|---|---|
+| worker1/2/3 | 4 g | 2 g × executors | 6 Gi |
+| worker5 | 12 g | 2 g × executors | 14 Gi |
+
+---
+
+## 9. Key paths reference
 
 | Resource | Path / URL |
 |---|---|
