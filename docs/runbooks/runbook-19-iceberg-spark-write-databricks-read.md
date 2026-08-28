@@ -80,10 +80,18 @@ print("✅ OpenBao helper ready")
 ### Cell 2 — Build the Spark session
 
 > The S3A JARs, filesystem config, and executor classpath are all baked into the image (`spark-defaults.conf`). The only runtime values needed here are the credentials from OpenBao and the Polaris catalog config.
+>
+> **Always run this cell after Cell 1, even on a fresh kernel.** The session stop guard below ensures any stale session (from a previous run) is cleared before rebuilding with the current credentials. Without it, `.getOrCreate()` silently returns the old session with no catalog config, causing `REQUIRES_SINGLE_PART_NAMESPACE` errors on `polaris.demo.*` queries.
 
 ```python
 from pyspark.sql import SparkSession
 import os
+
+# Stop any stale session so .getOrCreate() always creates a fresh one with the
+# correct polaris catalog config.  Safe to call on a clean kernel (no-op).
+_s = SparkSession.getActiveSession()
+if _s is not None:
+    _s.stop()
 
 POLARIS_ID     = bao("secret/data/platform/polaris", "spark_svc_id")
 POLARIS_SECRET = bao("secret/data/platform/polaris", "spark_svc_secret")
@@ -102,6 +110,7 @@ spark = SparkSession.builder \
     .config("spark.driver.bindAddress", DRIVER_IP) \
     .config("spark.executor.memory", "2g") \
     .config("spark.driver.memory",   "2g") \
+    .config("spark.sql.defaultCatalog",              "polaris") \
     .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
     .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
     .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
@@ -358,6 +367,16 @@ kubectl exec -n prod jupyter-admin -- \
   ls /opt/conda/lib/python3.11/site-packages/pyspark/jars/ | grep -E "hadoop-aws|aws-java"
 # Expected: hadoop-aws-3.3.4.jar  aws-java-sdk-bundle-1.12.262.jar
 ```
+
+### `AnalysisException: REQUIRES_SINGLE_PART_NAMESPACE` on `polaris.demo.*`
+
+**Symptom:** `spark_catalog requires a single-part namespace, but got polaris.demo`.
+
+**Cause:** `.getOrCreate()` returned a stale `SparkSession` from a previous run. None of the Cell 2 `.config(...)` calls took effect, so Spark has no `polaris` catalog registered and mis-routes the query through `spark_catalog` (the built-in Hive catalog), which rejects a two-part namespace.
+
+**Fix — pick one:**
+- **Recommended:** Cell 2 now contains a session stop guard at the top. Re-run Cell 2 — the guard stops the stale session and `.getOrCreate()` builds a fresh one with all catalog configs applied.
+- **Quick fix:** Restart the kernel (Kernel → Restart Kernel), then re-run Cell 1 and Cell 2 from scratch.
 
 ### Databricks count unchanged after write
 You skipped Section 5 (HMS re-register). Run it and query Databricks again.
