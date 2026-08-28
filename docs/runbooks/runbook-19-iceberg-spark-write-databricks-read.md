@@ -157,24 +157,29 @@ spark.sql("""
 
 ### INSERT new rows
 
+> `snap_id` and `snap_timestamp` are injected automatically by `write_append()` —
+> you only provide the business columns. Do **not** use raw `spark.sql("INSERT INTO … VALUES …")`
+> or `df.writeTo().append()` directly — neither has snap column injection.
+
 ```python
-spark.sql("""
-INSERT INTO polaris.demo.customers
-  (customer_id, full_name, email, phone_number, date_of_birth,
-   national_id, street_address, city, country_code, ip_address,
-   salary, customer_tier, is_active, created_at, updated_at)
-VALUES
-  (10001, 'John Miller',  'john.miller@example.com',  '+1-555-0101', DATE '1985-03-14',
-   'ID-001-JM', '12 Maple St',      'Toronto', 'CA', '192.168.10.1',  95000.00, 'gold',     1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
-  (10002, 'Sara Khan',    'sara.khan@example.com',    '+1-555-0102', DATE '1990-07-22',
-   'ID-002-SK', '88 Oak Ave',       'London',  'GB', '10.0.0.12',     72000.00, 'silver',   1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
-  (10003, 'Luca Rossi',   'luca.rossi@example.com',   '+39-06-5550', DATE '1978-11-05',
-   'ID-003-LR', 'Via Roma 3',       'Rome',    'IT', '172.16.0.5',   110000.00, 'platinum', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
-  (10004, 'Amira Nasser', 'amira.nasser@example.com', '+20-2-5550',  DATE '1995-01-30',
-   'ID-004-AN', '45 Nile Corniche', 'Cairo',   'EG', '10.10.10.10',   48000.00, 'standard', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00'),
-  (10005, 'Wei Zhang',    'wei.zhang@example.com',    '+86-10-5550', DATE '1988-09-17',
-   'ID-005-WZ', '8 Jingshan Rd',    'Beijing', 'CN', '192.168.1.100',130000.00, 'platinum', 1, TIMESTAMP '2026-01-01 00:00:00', TIMESTAMP '2026-01-01 00:00:00')
-""")
+from pyspark.sql import Row
+from spark_iceberg_utils import IcebergTableBuilder
+import datetime
+
+builder = IcebergTableBuilder(spark, running_user="dave")
+
+rows = [
+    Row(customer_id=10001, full_name='John Miller',  email='john.miller@example.com',  phone_number='+1-555-0101', date_of_birth=datetime.date(1985,3,14),  national_id='ID-001-JM', street_address='12 Maple St',      city='Toronto', country_code='CA', ip_address='192.168.10.1',  salary=95000.00,  customer_tier='gold',     is_active=1, created_at=datetime.datetime(2026,1,1), updated_at=datetime.datetime(2026,1,1)),
+    Row(customer_id=10002, full_name='Sara Khan',    email='sara.khan@example.com',    phone_number='+1-555-0102', date_of_birth=datetime.date(1990,7,22),  national_id='ID-002-SK', street_address='88 Oak Ave',       city='London',  country_code='GB', ip_address='10.0.0.12',     salary=72000.00,  customer_tier='silver',   is_active=1, created_at=datetime.datetime(2026,1,1), updated_at=datetime.datetime(2026,1,1)),
+    Row(customer_id=10003, full_name='Luca Rossi',   email='luca.rossi@example.com',   phone_number='+39-06-5550', date_of_birth=datetime.date(1978,11,5),  national_id='ID-003-LR', street_address='Via Roma 3',       city='Rome',    country_code='IT', ip_address='172.16.0.5',    salary=110000.00, customer_tier='platinum', is_active=1, created_at=datetime.datetime(2026,1,1), updated_at=datetime.datetime(2026,1,1)),
+    Row(customer_id=10004, full_name='Amira Nasser', email='amira.nasser@example.com', phone_number='+20-2-5550',  date_of_birth=datetime.date(1995,1,30),  national_id='ID-004-AN', street_address='45 Nile Corniche', city='Cairo',   country_code='EG', ip_address='10.10.10.10',   salary=48000.00,  customer_tier='standard', is_active=1, created_at=datetime.datetime(2026,1,1), updated_at=datetime.datetime(2026,1,1)),
+    Row(customer_id=10005, full_name='Wei Zhang',    email='wei.zhang@example.com',    phone_number='+86-10-5550', date_of_birth=datetime.date(1988,9,17),  national_id='ID-005-WZ', street_address='8 Jingshan Rd',    city='Beijing', country_code='CN', ip_address='192.168.1.100', salary=130000.00, customer_tier='platinum', is_active=1, created_at=datetime.datetime(2026,1,1), updated_at=datetime.datetime(2026,1,1)),
+]
+
+df = spark.createDataFrame(rows)
+
+# write_append injects snap_id and snap_timestamp automatically
+builder.write_append(df, catalog="polaris", namespace="demo", table="customers")
 
 # Confirm
 spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()

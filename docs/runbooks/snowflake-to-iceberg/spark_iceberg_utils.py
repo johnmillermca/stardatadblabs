@@ -1,7 +1,7 @@
 """
 spark_iceberg_utils.py
 ======================
-Global Spark Iceberg table-creation wrapper.
+Global Spark Iceberg table-creation and write wrapper.
 
 Rules enforced for EVERY Iceberg table created through this module:
 
@@ -10,10 +10,10 @@ Rules enforced for EVERY Iceberg table created through this module:
                                Produces a 64-bit integer unique and monotonically
                                increasing across all rows and partitions in a
                                batch write.  Every row gets a distinct value.
-  2. snap_timestamp TIMESTAMP – DEFAULT CURRENT_TIMESTAMP (systimestamp).
-                               Set to the wall-clock at write time for every
-                               row in the batch; callers do NOT need to supply
-                               this value.
+  2. snap_timestamp TIMESTAMP – wall-clock at write time, same for all rows in
+                               the batch (marks when the batch was written).
+                               Callers do NOT supply this value — it is injected
+                               automatically by write_append().
   3. Global partition spec:   hours(snap_timestamp) + bucket(4, snap_id).
                                Applied to ALL tables so every table is partitioned
                                by write-hour and 4 hash buckets within each hour.
@@ -23,6 +23,14 @@ Rules enforced for EVERY Iceberg table created through this module:
 
 All four defaults propagate to future tables automatically — no per-table
 boilerplate required.
+
+Write path
+----------
+Always use IcebergTableBuilder.write_append(df, fqn) to append rows.
+This is the ONLY authorised write path on this platform.  It injects
+snap_id and snap_timestamp automatically before calling .writeTo().append().
+Raw DataFrame.writeTo() and spark.sql("INSERT INTO … VALUES …") will fail
+with CANNOT_FIND_DATA unless snap columns are supplied manually.
 
 RBAC gate
 ---------
@@ -61,7 +69,8 @@ import logging
 import os
 from typing import Any
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import current_timestamp, monotonically_increasing_id
 from pyspark.sql.types import (
     LongType,
     StructField,
@@ -76,11 +85,26 @@ logger = logging.getLogger(__name__)
 DEFAULT_TARGET_FILE_SIZE_BYTES: int = 256 * 1024 * 1024   # 268_435_456
 
 # ── Snap-column definitions ───────────────────────────────────────────────────
-# snap_id:        BIGINT  — epoch-ms at write time (monotone identity surrogate)
-# snap_timestamp: TIMESTAMP — systimestamp at row-write time (DEFAULT CURRENT_TIMESTAMP)
+# snap_id:        BIGINT  — unique row identity, injected at write time via
+#                           monotonically_increasing_id() (unique 64-bit int per row).
+# snap_timestamp: TIMESTAMP — write-time wall clock, injected at write time via
+#                           current_timestamp() (same instant for all rows in a batch).
 #
-# These two columns are ALWAYS appended.  If the caller accidentally includes
-# them in the schema they are silently deduplicated (not duplicated).
+# IMPORTANT — why there is no DDL DEFAULT here:
+#   Iceberg column defaults (IEP-7, v1.6+) only support *literal* values such as
+#   NULL, 0, or a fixed timestamp string.  Function calls such as
+#   monotonically_increasing_id() and current_timestamp() are Spark execution-time
+#   expressions, not Iceberg-level literals.  Putting them in a DDL DEFAULT clause
+#   causes a parse error at table creation time.
+#
+#   Instead, snap columns are injected by IcebergTableBuilder.write_append() —
+#   the single authorised write path for all Iceberg tables on this platform.
+#   Any write that goes through write_append() gets snap_id and snap_timestamp
+#   filled automatically; raw DataFrame.writeTo() or spark.sql INSERT will fail
+#   with CANNOT_FIND_DATA unless snap columns are supplied explicitly.
+#
+# These two columns are ALWAYS appended to every table schema.  If the caller
+# accidentally includes them in their schema they are silently deduplicated.
 _SNAP_FIELDS: list[StructField] = [
     StructField("snap_id",        LongType(),      nullable=True),
     StructField("snap_timestamp", TimestampType(), nullable=True),
@@ -239,6 +263,41 @@ class IcebergTableBuilder:
             f"CREATE NAMESPACE IF NOT EXISTS `{catalog}`.`{namespace}`"
         )
         logger.info("Namespace `%s`.`%s` ready.", catalog, namespace)
+
+    def write_append(
+        self,
+        df:      DataFrame,
+        catalog: str,
+        namespace: str,
+        table:   str,
+    ) -> int:
+        """
+        Inject snap_id + snap_timestamp then append df to the Iceberg table.
+
+        This is the ONLY authorised write path for all Iceberg tables on this
+        platform.  Always call this instead of df.writeTo(...).append() or
+        spark.sql("INSERT INTO ... VALUES ...").
+
+        snap_id        — monotonically_increasing_id() cast to BIGINT: unique
+                         64-bit integer per row, increasing across all
+                         partitions in the batch.
+        snap_timestamp — current_timestamp(): wall-clock at write time, same
+                         for every row in the batch.
+
+        Returns the number of rows written.
+        """
+        fqn = f"{catalog}.{namespace}.{table}"
+        n   = df.count()
+        (
+            df
+            .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+            .withColumn("snap_timestamp", current_timestamp())
+            .writeTo(fqn)
+            .option("mergeSchema", "true")
+            .append()
+        )
+        logger.info("[%s] write_append → %s: %d rows", self._user, fqn, n)
+        return n
 
     def drop_table(self, catalog: str, namespace: str, table: str) -> None:
         fqn = f"`{catalog}`.`{namespace}`.`{table}`"
