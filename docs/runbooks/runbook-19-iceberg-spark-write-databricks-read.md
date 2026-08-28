@@ -30,18 +30,20 @@ Three steps every time:
 JupyterHub notebook (http://192.168.1.50:30888)
   PySpark → INSERT / UPDATE / DELETE
          │
-         ▼ Iceberg REST (Polaris)
+         ▼ Iceberg REST (Polaris — catalog alias: databricks, warehouse: star_lakehouse)
   New snapshot written to S3
-  s3://stardata-databricks/iceberg/warehouse/demo/customers/
+  s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customers/
          │
          ▼ Terminal — HMS re-register (updates metadata_location pointer)
   hive-metastore.prod.svc.cluster.local:9083
          │
          ▼ Databricks FOREIGN catalog reads updated pointer
-  SELECT * FROM star_lakehouse.demo.customers   ← sees new data
+  SELECT * FROM star_lakehouse.lakehouse_db.customers   ← sees new data
 ```
 
 > **Why the HMS step?** Databricks reads the `metadata_location` pointer stored in HMS. After every Spark write, that pointer must be updated to the new `.metadata.json` so Databricks sees the latest snapshot.
+
+> **Catalog naming:** In the notebook the catalog is named `databricks` — this is a Spark catalog alias that points at the same Polaris REST endpoint with warehouse `star_lakehouse`. The namespace inside it is `lakehouse_db`. Full table reference from the notebook: `databricks.lakehouse_db.customers`.
 
 ---
 
@@ -116,28 +118,28 @@ spark = SparkSession.builder \
     .config("spark.pyspark.driver.python", "python3.11") \
     .config("spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-    .config("spark.sql.catalog.polaris",
+    .config("spark.sql.catalog.databricks",
             "org.apache.iceberg.spark.SparkCatalog") \
-    .config("spark.sql.catalog.polaris.type",        "rest") \
-    .config("spark.sql.catalog.polaris.uri",
+    .config("spark.sql.catalog.databricks.type",        "rest") \
+    .config("spark.sql.catalog.databricks.uri",
             "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog") \
-    .config("spark.sql.catalog.polaris.oauth2-server-uri",
+    .config("spark.sql.catalog.databricks.oauth2-server-uri",
             "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog/v1/oauth/tokens") \
-    .config("spark.sql.defaultCatalog",              "polaris") \
+    .config("spark.sql.defaultCatalog",                 "databricks") \
     .config("spark.hadoop.fs.s3a.impl",
             "org.apache.hadoop.fs.s3a.S3AFileSystem") \
     .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
     .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
     .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
     .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-    .config("spark.sql.catalog.polaris.credential",  f"{POLARIS_ID}:{POLARIS_SECRET}") \
-    .config("spark.sql.catalog.polaris.scope",       "PRINCIPAL_ROLE:ALL") \
-    .config("spark.sql.catalog.polaris.warehouse",   "star_lakehouse") \
-    .config("spark.sql.catalog.polaris.s3.access-key-id",     S3_KEY) \
-    .config("spark.sql.catalog.polaris.s3.secret-access-key", S3_SECRET) \
-    .config("spark.sql.catalog.polaris.s3.endpoint",          S3_ENDPOINT) \
-    .config("spark.sql.catalog.polaris.s3.path-style-access", "true") \
-    .config("spark.sql.catalog.polaris.client.region",        "us-east-2") \
+    .config("spark.sql.catalog.databricks.credential",  f"{POLARIS_ID}:{POLARIS_SECRET}") \
+    .config("spark.sql.catalog.databricks.scope",       "PRINCIPAL_ROLE:ALL") \
+    .config("spark.sql.catalog.databricks.warehouse",   "star_lakehouse") \
+    .config("spark.sql.catalog.databricks.s3.access-key-id",     S3_KEY) \
+    .config("spark.sql.catalog.databricks.s3.secret-access-key", S3_SECRET) \
+    .config("spark.sql.catalog.databricks.s3.endpoint",          S3_ENDPOINT) \
+    .config("spark.sql.catalog.databricks.s3.path-style-access", "true") \
+    .config("spark.sql.catalog.databricks.client.region",        "us-east-2") \
     .config("spark.plugins",                             "org.apache.gluten.GlutenPlugin") \
     .config("spark.gluten.sql.columnar.backend.lib",     "velox") \
     .config("spark.memory.offHeap.enabled",              "true") \
@@ -148,13 +150,17 @@ spark.sparkContext.setLogLevel("WARN")
 print("✅ Spark", spark.version, "connected —", DRIVER_IP)
 ```
 
-### Cell 3 — Check current state
+### Cell 3 — Ensure namespace exists and check current state
+
+> Run this once per session. `CREATE NAMESPACE IF NOT EXISTS` is a no-op if `lakehouse_db` already exists.
 
 ```python
-spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
+spark.sql("CREATE NAMESPACE IF NOT EXISTS databricks.lakehouse_db")
+
+spark.sql("SELECT COUNT(*) AS total FROM databricks.lakehouse_db.customers").show()
 spark.sql("""
     SELECT customer_id, full_name, email, customer_tier
-    FROM polaris.demo.customers
+    FROM databricks.lakehouse_db.customers
     LIMIT 5
 """).show(truncate=False)
 ```
@@ -189,10 +195,10 @@ rows = [
 df = spark.createDataFrame(rows)
 
 # write_append injects snap_id and snap_timestamp automatically
-builder.write_append(df, catalog="polaris", namespace="demo", table="customers")
+builder.write_append(df, catalog="databricks", namespace="lakehouse_db", table="customers")
 
 # Confirm
-spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
+spark.sql("SELECT COUNT(*) AS total FROM databricks.lakehouse_db.customers").show()
 # Expected: 10005
 ```
 
@@ -201,31 +207,31 @@ spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
 ```python
 # Promote a customer tier
 spark.sql("""
-    UPDATE polaris.demo.customers
+    UPDATE databricks.lakehouse_db.customers
     SET customer_tier = 'platinum'
     WHERE customer_id = 10002
 """)
 
 # Deactivate customers in a city
 spark.sql("""
-    UPDATE polaris.demo.customers
+    UPDATE databricks.lakehouse_db.customers
     SET is_active = 0
     WHERE city = 'Cairo'
 """)
 
-spark.sql("SELECT customer_id, full_name, customer_tier, is_active FROM polaris.demo.customers WHERE customer_id IN (10002, 10004)").show()
+spark.sql("SELECT customer_id, full_name, customer_tier, is_active FROM databricks.lakehouse_db.customers WHERE customer_id IN (10002, 10004)").show()
 ```
 
 ### DELETE rows
 
 ```python
 # Delete a specific customer
-spark.sql("DELETE FROM polaris.demo.customers WHERE customer_id = 10004")
+spark.sql("DELETE FROM databricks.lakehouse_db.customers WHERE customer_id = 10004")
 
 # Delete by condition
-spark.sql("DELETE FROM polaris.demo.customers WHERE is_active = 0")
+spark.sql("DELETE FROM databricks.lakehouse_db.customers WHERE is_active = 0")
 
-spark.sql("SELECT COUNT(*) AS total FROM polaris.demo.customers").show()
+spark.sql("SELECT COUNT(*) AS total FROM databricks.lakehouse_db.customers").show()
 ```
 
 ---
@@ -252,7 +258,7 @@ import sys, boto3
 s3 = boto3.client('s3', region_name='us-east-2',
     aws_access_key_id=sys.argv[1], aws_secret_access_key=sys.argv[2])
 r = s3.list_objects_v2(Bucket='stardata-databricks',
-    Prefix='iceberg/warehouse/demo/customers/metadata/')
+    Prefix='iceberg/warehouse/lakehouse_db/customers/metadata/')
 objects = [o for o in r.get('Contents', []) if o['Key'].endswith('.metadata.json')]
 objects.sort(key=lambda x: x['LastModified'], reverse=True)
 print(f"s3://stardata-databricks/{objects[0]['Key']}")
@@ -278,12 +284,12 @@ t = TTransport.TBufferedTransport(
 c = ThriftHiveMetastore.Client(TBinaryProtocol.TBinaryProtocol(t))
 t.open()
 
-if TABLE_NAME in c.get_all_tables("demo"):
-    c.drop_table("demo", TABLE_NAME, deleteData=False)
+if TABLE_NAME in c.get_all_tables("lakehouse_db"):
+    c.drop_table("lakehouse_db", TABLE_NAME, deleteData=False)
 
 ts = int(time.time())
 c.create_table(Table(
-    dbName="demo", tableName=TABLE_NAME, owner=getpass.getuser(),
+    dbName="lakehouse_db", tableName=TABLE_NAME, owner=getpass.getuser(),
     createTime=ts, lastAccessTime=ts, tableType="EXTERNAL_TABLE",
     sd=StorageDescriptor(
         cols=[], location=TABLE_LOCATION,
@@ -295,12 +301,12 @@ c.create_table(Table(
             parameters={}),
         parameters={}),
     parameters={"table_type":"ICEBERG","metadata_location":METADATA_FILE,"EXTERNAL":"TRUE"}))
-print(f"✅ HMS updated: demo.{TABLE_NAME} → {METADATA_FILE}")
+print(f"✅ HMS updated: lakehouse_db.{TABLE_NAME} → {METADATA_FILE}")
 t.close()
 PYEOF
 ```
 
-✅ **Pass:** `HMS updated: demo.customers → s3://...metadata.json`
+✅ **Pass:** `HMS updated: lakehouse_db.customers → s3://...metadata.json`
 
 ---
 
@@ -311,22 +317,22 @@ Open **`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`**, select **S
 ```sql
 -- Row count — should reflect your inserts/deletes
 SELECT COUNT(*) AS total_rows
-FROM star_lakehouse.demo.customers;
+FROM star_lakehouse.lakehouse_db.customers;
 
 -- Check specific rows you inserted
 SELECT customer_id, full_name, email, customer_tier
-FROM star_lakehouse.demo.customers
+FROM star_lakehouse.lakehouse_db.customers
 WHERE customer_id >= 10001
 ORDER BY customer_id;
 
 -- Check an update took effect
 SELECT customer_id, full_name, customer_tier
-FROM star_lakehouse.demo.customers
+FROM star_lakehouse.lakehouse_db.customers
 WHERE customer_id = 10002;
 
 -- Tier distribution after changes
 SELECT customer_tier, COUNT(*) AS cnt
-FROM star_lakehouse.demo.customers
+FROM star_lakehouse.lakehouse_db.customers
 GROUP BY customer_tier
 ORDER BY customer_tier;
 ```
@@ -395,29 +401,29 @@ kubectl exec -n prod jupyter-admin -- \
 # Expected: hadoop-aws-3.3.4.jar  aws-java-sdk-bundle-1.12.262.jar
 ```
 
-### `AnalysisException: REQUIRES_SINGLE_PART_NAMESPACE` on `polaris.demo.*`
+### `AnalysisException: REQUIRES_SINGLE_PART_NAMESPACE` on `databricks.lakehouse_db.*`
 
-**Symptom:** `spark_catalog requires a single-part namespace, but got polaris.demo`.
+**Symptom:** `spark_catalog requires a single-part namespace, but got databricks.lakehouse_db`.
 
-**Cause:** `.getOrCreate()` returned a stale `SparkSession` from a previous run. None of the Cell 2 `.config(...)` calls took effect, so Spark has no `polaris` catalog registered and mis-routes the query through `spark_catalog` (the built-in Hive catalog), which rejects a two-part namespace.
+**Cause:** `.getOrCreate()` returned a stale `SparkSession` from a previous run. None of the Cell 2 `.config(...)` calls took effect, so Spark has no `databricks` catalog registered and mis-routes the query through `spark_catalog` (the built-in Hive catalog), which rejects a two-part namespace.
 
 **Fix — pick one:**
 - **Recommended:** Cell 2 now contains a session stop guard at the top. Re-run Cell 2 — the guard stops the stale session and `.getOrCreate()` builds a fresh one with all catalog configs applied.
 - **Quick fix:** Restart the kernel (Kernel → Restart Kernel), then re-run Cell 1 and Cell 2 from scratch.
 
-### `CatalogNotFoundException: spark.sql.catalog.polaris is not defined`
+### `CatalogNotFoundException: spark.sql.catalog.databricks is not defined`
 
-**Symptom:** `Catalog 'polaris' plugin class not found: spark.sql.catalog.polaris is not defined`.
+**Symptom:** `Catalog 'databricks' plugin class not found: spark.sql.catalog.databricks is not defined`.
 
-**Cause:** The `jupyter-spark` pod is running an **old image** built before `SPARK_CONF_DIR` was set in the Dockerfile. Without that env var, PySpark never loads `/usr/local/spark/conf/spark-defaults.conf`, so the `polaris` catalog class registration (`org.apache.iceberg.spark.SparkCatalog`) is never seen by the JVM. Cell 2's `.config()` calls alone cannot register a catalog class — that must come from `spark-defaults.conf`.
+**Cause:** The `jupyter-spark` pod is running an **old image** built before `SPARK_CONF_DIR` was set in the Dockerfile. Without that env var, PySpark never loads `/usr/local/spark/conf/spark-defaults.conf`, so the `databricks` catalog class registration (`org.apache.iceberg.spark.SparkCatalog`) is never seen by the JVM. Cell 2's `.config()` calls alone cannot register a catalog class — that must come from `spark-defaults.conf`.
 
 **Fix — rebuild the image and respawn the pod:**
 
 ```bash
 # 1. Rebuild and push the jupyter-spark image
 cd /home/star_master/k8s-platform
-docker build -t 192.168.1.50:30500/jupyter-spark:latest docker/jupyter-spark/
-docker push 192.168.1.50:30500/jupyter-spark:latest
+podman build --format docker -t 192.168.1.50:30500/jupyter-spark:latest docker/jupyter-spark/
+podman push --tls-verify=false 192.168.1.50:30500/jupyter-spark:latest
 
 # 2. Delete the singleuser pod — JupyterHub respawns it with the new image
 kubectl delete pod jupyter-admin -n prod
@@ -427,9 +433,9 @@ kubectl delete pod jupyter-admin -n prod
 kubectl exec -n prod jupyter-admin -- printenv SPARK_CONF_DIR
 # Expected: /usr/local/spark/conf
 
-# 4. Verify spark-defaults.conf is loaded (polaris catalog must appear)
-kubectl exec -n prod jupyter-admin -- cat /usr/local/spark/conf/spark-defaults.conf | grep polaris
-# Expected: spark.sql.catalog.polaris   org.apache.iceberg.spark.SparkCatalog
+# 4. Verify spark-defaults.conf is loaded (databricks catalog must appear)
+kubectl exec -n prod jupyter-admin -- cat /usr/local/spark/conf/spark-defaults.conf | grep databricks
+# Expected: spark.sql.catalog.databricks   org.apache.iceberg.spark.SparkCatalog
 ```
 
 After the pod is up, re-run Cell 1 and Cell 2 from scratch.
@@ -524,14 +530,16 @@ Gluten/Velox allocates its native memory **off-heap** via `spark.memory.offHeap.
 | JupyterHub | `http://192.168.1.50:30888` |
 | Spark master (in-cluster) | `spark://spark-master-internal.prod.svc.cluster.local:17077` |
 | Polaris in-cluster URI | `http://polaris-rest.prod.svc.cluster.local:8181/api/catalog` |
-| Iceberg catalog name (in notebook) | `polaris` |
-| Iceberg table (in notebook) | `polaris.demo.customers` |
-| S3 Iceberg warehouse | `s3://stardata-databricks/iceberg/warehouse/demo/` |
+| Iceberg catalog name (in notebook) | `databricks` |
+| Iceberg namespace (in notebook) | `lakehouse_db` |
+| Iceberg table (in notebook) | `databricks.lakehouse_db.customers` |
+| S3 Iceberg warehouse | `s3://stardata-databricks/iceberg/warehouse/lakehouse_db/` |
 | HMS Thrift (in-cluster) | `hive-metastore.prod.svc.cluster.local:9083` |
 | HMS Thrift (NodePort) | `192.168.1.50:30983` |
 | Databricks SQL editor | `https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor` |
 | Databricks SQL warehouse | `942026cf5e55f3c3` (Serverless Starter) |
 | Databricks FOREIGN catalog | `star_lakehouse` (connection: `hms_star_lakehouse`) |
+| Databricks table (SQL editor) | `star_lakehouse.lakehouse_db.customers` |
 | OpenBao Polaris creds | `secret/platform/polaris` → `spark_svc_id`, `spark_svc_secret` |
 | OpenBao S3 creds | `secret/platform/s3` → `access_key`, `secret_key`, `endpoint` |
 | OpenBao Databricks PAT | `secret/databricks/pat` → `token`, `workspace` |
