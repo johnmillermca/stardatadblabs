@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / databricks |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-08-30 |
+| **Last Updated** | 2026-09-01 |
 
 ---
 
@@ -18,6 +18,8 @@ This runbook covers two ways to read it:
 - **Section 2** — Read from **JupyterHub** using PySpark (query via Iceberg catalog)
 - **Section 3** — Read and verify from the **Databricks SQL console** (via `read_files()` and a persistent view)
 - **Section 5** — **Insert 100 more rows** from JupyterHub and see them live in Databricks (end-to-end walk-through)
+- **Section 8** — **Unified multi-table notebook** — single script reads all S3 folders, resolves the latest JSON per table, refreshes all views and Delta tables in one pass
+- **Section 9** — **DML test steps** — SQL queries to verify the latest data in Databricks
 
 ```
 Spark Gluten (k8s)           S3: stardata-databricks
@@ -843,3 +845,284 @@ Harmless — Hadoop looks for an optional metrics file that does not exist. Igno
 | Databricks reader script | [`docker/spark-gluten-velox/scripts/databricks_customer_parquet_reader.py`](../../docker/spark-gluten-velox/scripts/databricks_customer_parquet_reader.py) |
 | OpenBao S3 creds | `secret/platform/s3` → `access_key`, `secret_key`, `endpoint` |
 | OpenBao Polaris creds | `secret/platform/polaris` → `spark_svc_id`, `spark_svc_secret` |
+
+---
+
+## 8. Unified multi-table auto-reader notebook
+
+**Notebook:** [`docker/databricks-notebooks/nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)
+
+This **single notebook** replaces the two previous per-table scripts.
+It loops over every entry in `TABLE_CONFIGS` and, for each S3 folder:
+
+1. Finds the latest `*.metadata.json` by `modificationTime`
+2. Parses it to resolve the parquet `data/` path for that snapshot
+3. `CREATE OR REPLACE VIEW` pointing at that snapshot
+4. `INSERT OVERWRITE` a Delta audit table with `snap_file`, `snap_file_size`, and `refreshed_at` columns
+
+**To add a new S3 table:** add one entry to `TABLE_CONFIGS` in Cell 1 — nothing else changes.
+
+Upload to Databricks at `https://dbc-11a1dbc5-061a.cloud.databricks.com` and attach to a cluster with Unity Catalog enabled.
+
+---
+
+### Cell map
+
+| Cell | Action |
+|---|---|
+| **Cell 1** | `TABLE_CONFIGS` dict — one entry per S3 Iceberg table. Edit here to add/remove tables. |
+| **Cell 2** | `resolve_latest_snapshot()` helper — lists `metadata/`, sorts by `modificationTime`, parses the JSON, returns `data_path` and diagnostic fields |
+| **Cell 3** | Loop: calls the helper for every configured table; builds `SNAPSHOTS` dict; skips tables with errors and continues |
+| **Cell 4** | Loop: `CREATE OR REPLACE VIEW` for every resolved table using `read_files(data_path)` |
+| **Cell 5** | Loop: atomic `INSERT OVERWRITE` into each table's Delta audit table; adds `snap_file`, `snap_file_size`, `refreshed_at`, `source_table` columns |
+| **Cell 6** | Summary report — one row per table showing object name, row count, and snapshot timestamp |
+| **Cell 7** | Optional `OPTIMIZE` on all audit tables |
+
+---
+
+### Configured tables (current)
+
+| Logical name | S3 metadata path | View | Delta audit table |
+|---|---|---|---|
+| `customer` | `…/customer/metadata/` | `vw_customer_latest` | `customer_snapshot_audit` |
+| `customer_orders` | `…/customer_orders/metadata/` | `vw_customer_orders_latest` | `customer_orders_snapshot_audit` |
+
+---
+
+### How to run
+
+**First time (or after new tables are added):**
+1. Run **Cell 1** — review `TABLE_CONFIGS`
+2. Run **Cell 2** — defines the helper (no output)
+3. Run **Cell 3** — resolves all snapshots; prints one block per table
+4. Run **Cell 4** — creates/replaces all views
+5. Run **Cell 5** — refreshes all Delta audit tables
+6. Run **Cell 6** — summary report
+
+**Every subsequent refresh (after any Spark write):**
+- Re-run **Cells 3 → 5** in order (Cell 2 only needs to run once per session)
+
+> **No manual path edits.** The notebook always picks the newest `*.metadata.json` from each table's `metadata/` prefix automatically.
+
+---
+
+### Expected Cell 3 output (two tables resolved)
+
+```
+────────────────────────────────────────────────────────────
+Resolving latest Iceberg snapshots …
+────────────────────────────────────────────────────────────
+  [customer] 2 snapshot(s) found
+    Latest file  : 00001-....metadata.json
+    Snapshot ID  : 3778523514688560751
+    Last updated : 2026-09-01 12:34:56 UTC
+    Data path    : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
+
+  [customer_orders] 1 snapshot(s) found
+    Latest file  : 00000-....metadata.json
+    Snapshot ID  : 7123456789012345678
+    Last updated : 2026-09-01 13:00:00 UTC
+    Data path    : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/
+
+────────────────────────────────────────────────────────────
+✅ All 2 table(s) resolved successfully
+```
+
+### Expected Cell 6 summary report
+
+```
+══════════════════════════════════════════════════════════════════════
+  REFRESH SUMMARY
+══════════════════════════════════════════════════════════════════════
+  TABLE                  OBJECT            ROWS  SNAPSHOT UPDATED
+──────────────────────────────────────────────────────────────────────
+  customer               view             1,100  2026-09-01 12:34:56 UTC
+                         delta table      1,100
+  customer_orders        view             5,000  2026-09-01 13:00:00 UTC
+                         delta table      5,000
+══════════════════════════════════════════════════════════════════════
+  Re-run Cells 3–5 any time new data lands in S3.
+══════════════════════════════════════════════════════════════════════
+```
+
+### Audit columns on every Delta table
+
+| Column | Type | Description |
+|---|---|---|
+| `snap_file` | STRING | S3 path of the parquet file the row came from |
+| `snap_file_size` | BIGINT | Size of that parquet file in bytes |
+| `refreshed_at` | TIMESTAMP | UTC timestamp when this batch was loaded |
+| `source_table` | STRING | Logical table name (`customer`, `customer_orders`, …) |
+
+---
+
+## 9. DML test steps — verify latest data in Databricks
+
+**File:** [`docker/databricks-notebooks/dml_test_steps.sql`](../../docker/databricks-notebooks/dml_test_steps.sql)
+
+Open the Databricks SQL console at `https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`.
+Select warehouse: **Serverless Starter Warehouse**.
+Run the blocks below in order. Expected results are shown after each query.
+
+---
+
+### 9-1 — Confirm schema and objects exist
+
+```sql
+SHOW SCHEMAS IN lakehouse;
+-- ✅ lakehouse_db listed
+
+SHOW TABLES IN lakehouse.lakehouse_db;
+-- ✅ Both views (vw_customer_latest, vw_customer_orders_latest) and both
+--    Delta tables (customer_snapshot_audit, customer_orders_snapshot_audit) listed
+```
+
+---
+
+### 9-2 — Row counts: view and Delta table must agree (per table)
+
+```sql
+-- customer
+SELECT
+    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.vw_customer_latest)           AS customer_view_rows,
+    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.customer_snapshot_audit)      AS customer_table_rows;
+
+-- customer_orders
+SELECT
+    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.vw_customer_orders_latest)        AS orders_view_rows,
+    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.customer_orders_snapshot_audit)   AS orders_table_rows;
+```
+
+✅ Expected: each pair of columns must be equal after the notebook refresh.
+
+---
+
+### 9-3 — Spot-check: first 10 and last 10 rows (customer view)
+
+```sql
+-- First 10
+SELECT customer_id, full_name, city, customer_tier, ROUND(salary,2) AS salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+ORDER  BY customer_id LIMIT 10;
+
+-- Last 10
+SELECT customer_id, full_name, city, customer_tier, ROUND(salary,2) AS salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+ORDER  BY customer_id DESC LIMIT 10;
+```
+
+✅ Last 10: highest IDs are `1100` after the 100-row insert (seed=99 names and cities).
+
+---
+
+### 9-4 — Confirm new rows are visible (after 100-row insert into customer)
+
+```sql
+SELECT customer_id, full_name, city, customer_tier, ROUND(salary,2) AS salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id BETWEEN 1095 AND 1100
+ORDER  BY customer_id;
+```
+
+✅ Expected: 6 rows with IDs 1095–1100.
+
+---
+
+### 9-5 — Batch audit: prove both insert batches are in the customer view
+
+```sql
+SELECT
+    DATE(created_at)   AS insert_date,
+    MIN(customer_id)   AS first_id,
+    MAX(customer_id)   AS last_id,
+    COUNT(*)           AS row_count
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY DATE(created_at)
+ORDER  BY insert_date;
+```
+
+✅ Expected:
+| insert_date | first_id | last_id | row_count |
+|---|---|---|---|
+| 2026-01-xx | 1 | 1000 | 1000 |
+| 2026-09-xx | 1001 | 1100 | 100 |
+
+---
+
+### 9-6 — Tier distribution (view vs. Delta table must match)
+
+```sql
+-- View
+SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary),2) AS avg_salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY customer_tier ORDER BY cnt DESC;
+
+-- Delta table (run after notebook refresh)
+SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary),2) AS avg_salary
+FROM   lakehouse.lakehouse_db.customer_snapshot_audit
+GROUP  BY customer_tier ORDER BY cnt DESC;
+```
+
+---
+
+### 9-7 — Last refresh timestamp (Delta tables)
+
+```sql
+-- customer
+SELECT MAX(refreshed_at) AS last_refresh_utc
+FROM   lakehouse.lakehouse_db.customer_snapshot_audit;
+
+-- customer_orders
+SELECT MAX(refreshed_at) AS last_refresh_utc
+FROM   lakehouse.lakehouse_db.customer_orders_snapshot_audit;
+```
+
+✅ Expected: recent UTC timestamps matching when Cells 3–5 of the unified notebook last ran.
+
+---
+
+### 9-8 — Data quality checks (customer)
+
+```sql
+-- No duplicate customer_ids
+SELECT customer_id, COUNT(*) AS dup_count
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY customer_id HAVING COUNT(*) > 1;
+-- ✅ Expected: 0 rows
+
+-- No NULL customer_ids
+SELECT COUNT(*) AS null_ids
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id IS NULL;
+-- ✅ Expected: 0
+
+-- All tiers are valid
+SELECT COUNT(*) AS invalid_tier_rows
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_tier NOT IN ('standard','silver','gold','platinum');
+-- ✅ Expected: 0
+
+-- Salary in range [30000, 200000]
+SELECT COUNT(*) AS out_of_range
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  salary < 30000 OR salary > 200000;
+-- ✅ Expected: 0
+```
+
+---
+
+### 9-9 — Delta table transaction history
+
+```sql
+-- customer audit table history
+DESCRIBE HISTORY lakehouse.lakehouse_db.customer_snapshot_audit;
+
+-- customer_orders audit table history
+DESCRIBE HISTORY lakehouse.lakehouse_db.customer_orders_snapshot_audit;
+```
+
+✅ Expected: one `WRITE` row per notebook refresh run, `numOutputRows` in `operationMetrics`.
+
+---
+
+> **Full DML file:** [`docker/databricks-notebooks/dml_test_steps.sql`](../../docker/databricks-notebooks/dml_test_steps.sql)
