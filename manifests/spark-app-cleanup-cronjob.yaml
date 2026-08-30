@@ -100,11 +100,15 @@ spec:
               image: bitnami/kubectl:latest
               env:
                 # ── Idle threshold: kill RUNNING apps whose last completed job
-                # was more than 5 minutes ago (or never ran any job).
-                # Safe for real jobs — a real pipeline completes a Spark job
-                # every few seconds. An idle JupyterHub kernel has none.
+                # was more than 30 minutes ago (or never ran any job at all).
+                # 30 min gives enough headroom for:
+                #   - executor cold-start (30–90 s)
+                #   - large S3 reads / Iceberg scans (several minutes)
+                #   - batch jobs that pause between commits
+                # An idle JupyterHub kernel that never ran any cell stays below
+                # this only if the user is actively working.
                 - name: IDLE_SINCE_SECONDS
-                  value: "300"
+                  value: "1800"
                 # ── Orphan: RUNNING with 0 cores (lost all executors) after 2 min
                 - name: ORPHAN_RUNNING_SECONDS
                   value: "120"

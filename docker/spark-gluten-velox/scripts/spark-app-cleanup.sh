@@ -68,7 +68,7 @@
 set -eu
 
 SPARK_MASTER_UI="${SPARK_MASTER_UI:-http://localhost:8080}"
-IDLE_SINCE_SECONDS="${IDLE_SINCE_SECONDS:-300}"
+IDLE_SINCE_SECONDS="${IDLE_SINCE_SECONDS:-1800}"
 ORPHAN_RUNNING_SECONDS="${ORPHAN_RUNNING_SECONDS:-120}"
 ORPHAN_WAITING_SECONDS="${ORPHAN_WAITING_SECONDS:-600}"
 
@@ -172,7 +172,11 @@ echo "$ACTIVE" | while IFS=' ' read -r APP_ID STATE CORES START_MS DRIVER_URL NA
     KILL_REASON=""
 
     # ── Rule A: dead driver ────────────────────────────────────────────────────
-    if [ "$STATE" = "RUNNING" ] && [ "$CORES" -gt 0 ]; then
+    # Only probe after ORPHAN_RUNNING_SECONDS (120 s) — a brand-new session's
+    # driver UI takes a few seconds to start; probing too early gives a false
+    # "unreachable" and kills a healthy starting job.
+    if [ "$STATE" = "RUNNING" ] && [ "$CORES" -gt 0 ] \
+       && [ "$AGE_S" -gt "$ORPHAN_RUNNING_SECONDS" ]; then
         REACH=$(curl -sf --max-time 5 "${DRIVER_URL}" -o /dev/null -w "%{http_code}" 2>/dev/null) || REACH="0"
         if [ "$REACH" = "0" ] || [ "$REACH" = "000" ]; then
             KILL_REASON="dead-driver (UI unreachable at ${DRIVER_URL}) age=${AGE_S}s"
@@ -192,6 +196,10 @@ echo "$ACTIVE" | while IFS=' ' read -r APP_ID STATE CORES START_MS DRIVER_URL NA
     fi
 
     # ── Rule D: idle session — only for old RUNNING apps with cores ───────────
+    # Pre-check active stages BEFORE calling driver_metrics — if there are
+    # active stages right now the app is definitely working; skip entirely.
+    # This covers executor cold-start (tasks queued but not yet completed)
+    # and long S3 reads where no job has completed yet.
     if [ -z "$KILL_REASON" ] && [ "$STATE" = "RUNNING" ] \
        && [ "$CORES" -gt 0 ] && [ "$AGE_S" -gt "$IDLE_SINCE_SECONDS" ]; then
 
