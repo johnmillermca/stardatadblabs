@@ -278,7 +278,317 @@ SELECT COUNT(*) FROM read_files(
 
 ---
 
-## 8. Refresh after a new Spark write
+## 8. Connect from JupyterHub notebook and read the customer table
+
+Open **`http://192.168.1.50:30888`**, log in, create a new notebook, and run the cells below in order.
+
+> **Pre-condition:** The seed script (Step 1) must have already run.
+> The Spark cluster must be up: `kubectl get pods -n prod -l app=spark`.
+
+---
+
+### Cell 1 — Fetch credentials from OpenBao
+
+Get the root token from your terminal first:
+
+```bash
+kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d && echo
+```
+
+Paste it into the cell below:
+
+```python
+import urllib.request, json, os
+
+OPENBAO_ADDR  = "http://openbao.prod.svc.cluster.local:8200"
+OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxxxxxxxxxxx"   # ← paste token here
+
+def bao(path, field):
+    req = urllib.request.Request(
+        f"{OPENBAO_ADDR}/v1/{path}",
+        headers={"X-Vault-Token": OPENBAO_TOKEN}
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())["data"]["data"][field]
+
+S3_KEY    = bao("secret/data/platform/s3", "access_key")
+S3_SECRET = bao("secret/data/platform/s3", "secret_key")
+S3_ENDPOINT = bao("secret/data/platform/s3", "endpoint")
+print("✅ Credentials loaded")
+```
+
+---
+
+### Cell 2 — Resolve the latest metadata JSON automatically
+
+```python
+import boto3, json as _json
+
+BUCKET      = "stardata-databricks"
+META_PREFIX = "iceberg/warehouse/lakehouse_db/customer/metadata/"
+
+s3 = boto3.client("s3", region_name="us-east-2",
+    aws_access_key_id=S3_KEY, aws_secret_access_key=S3_SECRET)
+
+pag  = s3.get_paginator("list_objects_v2")
+objs = []
+for page in pag.paginate(Bucket=BUCKET, Prefix=META_PREFIX):
+    for o in page.get("Contents", []):
+        if o["Key"].endswith(".metadata.json"):
+            objs.append(o)
+
+objs.sort(key=lambda o: o["LastModified"], reverse=True)
+latest_key = objs[0]["Key"]
+print(f"✅ Latest metadata ({len(objs)} snapshots): s3://{BUCKET}/{latest_key}")
+print(f"   LastModified: {objs[0]['LastModified']}")
+
+meta      = _json.loads(s3.get_object(Bucket=BUCKET, Key=latest_key)["Body"].read())
+DATA_PATH = meta["location"].rstrip("/") + "/data/"
+print(f"✅ Data path: {DATA_PATH}")
+```
+
+✅ Expected output:
+```
+✅ Latest metadata (2 snapshots): s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/00001-....metadata.json
+✅ Data path: s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
+```
+
+---
+
+### Cell 3 — Build the Spark session
+
+```python
+from pyspark.sql import SparkSession
+
+_s = SparkSession.getActiveSession()
+if _s:
+    _s.stop()
+
+DRIVER_IP = os.environ["SPARK_LOCAL_IP"]
+
+spark = SparkSession.builder \
+    .master("spark://spark-master-internal.prod.svc.cluster.local:17077") \
+    .appName("jupyter-customer-reader") \
+    .config("spark.driver.host",        DRIVER_IP) \
+    .config("spark.driver.bindAddress", DRIVER_IP) \
+    .config("spark.executor.memory",    "2g") \
+    .config("spark.driver.memory",      "2g") \
+    .config("spark.pyspark.python",        "python3.11") \
+    .config("spark.pyspark.driver.python", "python3.11") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.hadoop.fs.s3a.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
+    .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
+    .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
+    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
+    .config("spark.plugins",                         "org.apache.gluten.GlutenPlugin") \
+    .config("spark.gluten.sql.columnar.backend.lib", "velox") \
+    .config("spark.memory.offHeap.enabled",          "true") \
+    .config("spark.memory.offHeap.size",             "2g") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("WARN")
+print("✅ Spark", spark.version, "connected —", DRIVER_IP)
+```
+
+✅ Expected: `✅ Spark 3.5.1 connected — 10.244.x.x`
+
+---
+
+### Cell 4 — Read the customer Parquet files
+
+```python
+df_customer = (
+    spark.read
+    .option("mergeSchema", "true")
+    .parquet(DATA_PATH)
+)
+
+print(f"✅ Loaded {df_customer.count():,} rows from {DATA_PATH}")
+df_customer.printSchema()
+df_customer.show(10, truncate=False)
+```
+
+✅ Expected: `✅ Loaded 1,000 rows`
+
+---
+
+### Cell 5 — Query the customer table using Spark SQL
+
+```python
+# Register as a temporary view for SQL queries in this session
+df_customer.createOrReplaceTempView("customer_latest")
+
+# Row count
+spark.sql("SELECT COUNT(*) AS total_rows FROM customer_latest").show()
+
+# Sample rows
+spark.sql("""
+    SELECT customer_id, full_name, city, customer_tier, salary
+    FROM   customer_latest
+    ORDER  BY customer_id
+    LIMIT  10
+""").show(truncate=False)
+
+# Tier distribution
+spark.sql("""
+    SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary), 2) AS avg_salary
+    FROM   customer_latest
+    GROUP  BY customer_tier
+    ORDER  BY cnt DESC
+""").show()
+```
+
+✅ Expected output:
+```
++-----------+
+|total_rows |
++-----------+
+|       1000|
++-----------+
+
++-----------+-----------------+-----------+-------------+---------+
+|customer_id|full_name        |city       |customer_tier|salary   |
++-----------+-----------------+-----------+-------------+---------+
+|1          |Wei Brown        |Toronto    |standard     |53721.45 |
+|2          |Karen Smith      |Mexico City|platinum     |149225.25|
+...
+
++-------------+---+----------+
+|customer_tier|cnt|avg_salary|
++-------------+---+----------+
+|silver       |270|115908.02 |
+|platinum     |249|116659.31 |
+|gold         |248|115645.87 |
+|standard     |233|115137.04 |
++-------------+---+----------+
+```
+
+---
+
+### Cell 6 — Always call spark.stop() when done
+
+```python
+# IMPORTANT: always stop the session when finished.
+# Leaving it open holds all cluster cores and blocks other jobs.
+spark.stop()
+print("✅ Spark session stopped — cluster cores released")
+```
+
+> ⚠️ **If you close the browser without running this cell**, the cleanup CronJob
+> (`spark-app-cleanup`) will automatically kill the idle session after **5 minutes**
+> of inactivity. See [`manifests/spark-app-cleanup-cronjob.yaml`](../../manifests/spark-app-cleanup-cronjob.yaml).
+
+---
+
+## 9. Check the view from the Databricks console
+
+Open **`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`**
+Select warehouse: **Serverless Starter Warehouse**
+
+> The warehouse cold-starts automatically. First query takes 30–90 seconds.
+
+---
+
+### Check 1 — Confirm the view exists
+
+```sql
+SHOW VIEWS IN lakehouse.lakehouse_db;
+```
+
+✅ Expected: `vw_customer_latest` listed under `lakehouse.lakehouse_db`
+
+---
+
+### Check 2 — Row count
+
+```sql
+SELECT COUNT(*) AS total_rows
+FROM lakehouse.lakehouse_db.vw_customer_latest;
+```
+
+✅ Expected: `1000`
+
+---
+
+### Check 3 — Sample rows
+
+```sql
+SELECT customer_id, full_name, email, city, customer_tier, salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+ORDER  BY customer_id
+LIMIT  10;
+```
+
+✅ Expected: rows 1–10 with `customer_id`, names, cities, tiers and salaries
+
+---
+
+### Check 4 — Tier distribution
+
+```sql
+SELECT customer_tier,
+       COUNT(*)              AS cnt,
+       ROUND(AVG(salary), 2) AS avg_salary,
+       ROUND(MIN(salary), 2) AS min_salary,
+       ROUND(MAX(salary), 2) AS max_salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY customer_tier
+ORDER  BY cnt DESC;
+```
+
+✅ Expected:
+
+| customer_tier | cnt | avg_salary | min_salary | max_salary |
+|---|---|---|---|---|
+| silver | 270 | 115908.02 | … | … |
+| platinum | 249 | 116659.31 | … | … |
+| gold | 248 | 115645.87 | … | … |
+| standard | 233 | 115137.04 | … | … |
+
+---
+
+### Check 5 — Snap audit columns (confirm Iceberg provenance)
+
+```sql
+SELECT customer_id, snap_id, snap_timestamp
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+ORDER  BY customer_id
+LIMIT  5;
+```
+
+✅ Expected: `snap_id` (bigint), `snap_timestamp` (timestamp) populated for every row
+
+---
+
+### Check 6 — View definition (confirm it points at the correct S3 path)
+
+```sql
+DESCRIBE EXTENDED lakehouse.lakehouse_db.vw_customer_latest;
+```
+
+Look for the `View Text` row — it should contain:
+```
+read_files('s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/', ...)
+```
+
+---
+
+### Databricks console navigation
+
+You can also browse the view in the **Catalog Explorer** (no SQL needed):
+
+1. Go to **`https://dbc-11a1dbc5-061a.cloud.databricks.com/explore/data`**
+2. Expand **`lakehouse`** → **`lakehouse_db`**
+3. Click **`vw_customer_latest`**
+4. Click **Sample Data** tab → shows the first 1 000 rows live
+
+---
+
+## 10. Refresh after a new Spark write
 
 Every time new rows are written by Spark, run Steps 3 + 4 to re-point the view:
 
@@ -317,7 +627,7 @@ print('✅' if d.get('status',{}).get('state')=='SUCCEEDED' else d)
 
 ---
 
-## 9. Key paths reference
+## 11. Key paths reference
 
 | Resource | Value |
 |---|---|
