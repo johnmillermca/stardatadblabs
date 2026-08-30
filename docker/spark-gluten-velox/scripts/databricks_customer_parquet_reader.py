@@ -11,8 +11,9 @@
 # (e) Creates/replaces a persistent Unity Catalog view:
 #     lakehouse.lakehouse_db.vw_customer_latest
 #
-# S3 access: IAM role via external location `stardata_databricks_iceberg`
-#   (s3://stardata-databricks/) — no secrets required in the notebook.
+# S3 access: IAM role via Unity Catalog external location `stardata_databricks_iceberg`
+#   (covers s3://stardata-databricks/) — no secret scope needed.
+#   dbutils.fs.ls() and spark.read.text() both use the external location credential.
 #
 # Run order: Cell 1 → Cell 2 → Cell 3 → Cell 4
 # =============================================================================
@@ -22,40 +23,38 @@
 
 # COMMAND ----------
 
-import boto3, json
+import json
 
-# S3 access uses the Unity Catalog external location credential (IAM role).
-# boto3 is used only to list metadata files — Spark reads via the IAM role directly.
-AWS_KEY    = dbutils.secrets.get(scope="stardata_platform", key="aws_access_key")
-AWS_SECRET = dbutils.secrets.get(scope="stardata_platform", key="aws_secret_key")
+# ── Resolve latest metadata JSON via dbutils.fs (uses external location IAM) ──
+# No secret scope is required — the Unity Catalog external location
+# `stardata_databricks_iceberg` (s3://stardata-databricks/) provides
+# access transparently through the bound IAM role.
 
-BUCKET = "stardata-databricks"
-META_PREFIX = "iceberg/warehouse/lakehouse_db/customer/metadata/"
+META_PATH = "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/"
 
-s3 = boto3.client("s3", region_name="us-east-2",
-    aws_access_key_id=AWS_KEY, aws_secret_access_key=AWS_SECRET)
+# List all files under the metadata prefix; filter *.metadata.json
+all_files = dbutils.fs.ls(META_PATH)
+meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
 
-# List all *.metadata.json files, sort by LastModified — pick the newest
-pag = s3.get_paginator("list_objects_v2")
-objs = []
-for page in pag.paginate(Bucket=BUCKET, Prefix=META_PREFIX):
-    for o in page.get("Contents", []):
-        if o["Key"].endswith(".metadata.json"):
-            objs.append(o)
-
-if not objs:
+if not meta_files:
     raise FileNotFoundError(
-        f"No .metadata.json files found under s3://{BUCKET}/{META_PREFIX}\n"
+        f"No .metadata.json files found under {META_PATH}\n"
         "Run databricks_customer_seed.py on the Spark cluster first."
     )
 
-objs.sort(key=lambda o: o["LastModified"], reverse=True)
-latest_key = objs[0]["Key"]
-print(f"✅ Latest metadata ({len(objs)} snapshots): s3://{BUCKET}/{latest_key}")
-print(f"   LastModified: {objs[0]['LastModified']}")
+# Sort by modification time descending — pick the newest
+meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
+latest = meta_files[0]
+print(f"✅ Latest metadata ({len(meta_files)} snapshots): {latest.path}")
+print(f"   Modified (ms epoch): {latest.modificationTime}")
 
-# Extract table location from the metadata JSON
-meta      = json.loads(s3.get_object(Bucket=BUCKET, Key=latest_key)["Body"].read())
+# Read the metadata JSON content via Spark (IAM external location)
+meta_json = (
+    spark.read.text(latest.path, wholetext=True)
+    .collect()[0][0]
+)
+meta = json.loads(meta_json)
+
 DATA_PATH = meta["location"].rstrip("/") + "/data/"
 print(f"✅ Data path: {DATA_PATH}")
 

@@ -25,6 +25,7 @@ This directory contains detailed operational runbooks for every application depl
 | [13](runbook-13-user-groups-and-access-testing.md) | **User Groups, Role Binding & Access Testing** | Kerberos onboarding, `platform_admin` / `data_engineer` / `account_admin` user groups, end-to-end access tests, negative test (no KDC principal) | 30850, 88 |
 | [16](runbook-16-data-governance-masking.md) | **Data Governance & Automatic Column Masking** | Star Knowledge Catalog — data classifications, business glossary, masking algorithms, auto column tagging, Doris masked views, role-aware query routing, performance validation | 30860, 30090 |
 | [17](runbook-17-star-catalog-e2e-testing.md) | **Star Knowledge Catalog: End-to-End Testing** | 52 ordered tests across 16 phases — infrastructure checks, auth, CRUD, auto-classify, masked view apply, role-routing, negative tests, performance, idempotency, and smoke-test one-liner | 30860, 30090, 30850 |
+| [20](runbook-20-databricks-customer-parquet-view.md) | **Databricks customer Table — Iceberg Write & Parquet View** | Spark Gluten (k8s) → Iceberg `databricks.lakehouse_db.customer` on S3 `stardata-databricks` → Databricks Unity Catalog view `lakehouse.lakehouse_db.vw_customer_latest`; 1 000-row seed, latest-snapshot auto-resolve, idle-session CronJob | 30888 (JupyterHub), 30707 (Spark UI) |
 
 ---
 

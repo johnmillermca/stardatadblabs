@@ -29,34 +29,26 @@ data:
     CREATE DATABASE kestra;
     CREATE DATABASE sqlmesh_state;
     CREATE DATABASE polaris;
-    CREATE DATABASE hive_metastore;
   02-create-users.sh: |
     #!/bin/bash
     # Reads service-user passwords from Kubernetes secrets mounted as env vars.
-    # The StatefulSet injects KESTRA_DB_PASS, SQLMESH_DB_PASS,
-    # POLARIS_DB_PASS, HIVE_DB_PASS from the respective Kubernetes secrets.
+    # The StatefulSet injects KESTRA_DB_PASS, SQLMESH_DB_PASS, POLARIS_DB_PASS
+    # from the respective Kubernetes secrets.
     # Falls back to 'changeme' only if the env var is absent (should never happen).
     set -e
     psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
       CREATE USER kestra   WITH PASSWORD '${KESTRA_DB_PASS:-changeme}';
       CREATE USER sqlmesh  WITH PASSWORD '${SQLMESH_DB_PASS:-changeme}';
       CREATE USER polaris  WITH PASSWORD '${POLARIS_DB_PASS:-changeme}';
-      CREATE USER hive     WITH PASSWORD '${HIVE_DB_PASS:-changeme}';
       GRANT ALL PRIVILEGES ON DATABASE kestra          TO kestra;
       GRANT ALL PRIVILEGES ON DATABASE sqlmesh_state   TO sqlmesh;
       GRANT ALL PRIVILEGES ON DATABASE polaris         TO polaris;
-      GRANT ALL PRIVILEGES ON DATABASE hive_metastore  TO hive;
     EOSQL
   03-polaris-grants.sql: |
     -- Grant full schema ownership to polaris so it can manage its own DDL.
     \c polaris
     GRANT ALL ON SCHEMA public TO polaris;
     ALTER SCHEMA public OWNER TO polaris;
-  04-hive-grants.sql: |
-    -- Grant full schema ownership to hive so HMS can create its own DDL.
-    \c hive_metastore
-    GRANT ALL ON SCHEMA public TO hive;
-    ALTER SCHEMA public OWNER TO hive;
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -118,11 +110,6 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: sqlmesh-credentials
-                  key: db-password
-            - name: HIVE_DB_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: hive-metastore-credentials
                   key: db-password
           volumeMounts:
             - name: postgresql-storage

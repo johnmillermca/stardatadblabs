@@ -80,13 +80,6 @@ singleuser:
               matchLabels:
                 app: spark
       - ports:
-          - port: 9083
-            protocol: TCP
-        to:
-          - podSelector:
-              matchLabels:
-                app: hive-metastore
-      - ports:
           - port: 8181
             protocol: TCP
         to:

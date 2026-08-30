@@ -342,37 +342,31 @@ read_files('s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/dat
 
 ## 4. Refresh the view after a new Spark write
 
-Every time new rows are inserted by Spark, re-run these cells in JupyterHub to pick up the new snapshot and push the updated path to Databricks.
+Every time new rows are inserted by Spark, re-run the two cells below in a **Databricks notebook** to pick up the new snapshot and update the view.
 
-### JupyterHub — Cell A: resolve latest data path
+### Databricks notebook — Cell A: resolve latest data path
+
+> Run this in the **Databricks** notebook (uses `dbutils.fs` and `spark` — no secret scope needed).
 
 ```python
-import boto3, json as _json
+import json
 
-BUCKET      = "stardata-databricks"
-META_PREFIX = "iceberg/warehouse/lakehouse_db/customer/metadata/"
+META_PATH = "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/"
 
-s3   = boto3.client("s3", region_name="us-east-2",
-         aws_access_key_id=S3_KEY, aws_secret_access_key=S3_SECRET)
-pag  = s3.get_paginator("list_objects_v2")
-objs = []
-for page in pag.paginate(Bucket=BUCKET, Prefix=META_PREFIX):
-    for o in page.get("Contents", []):
-        if o["Key"].endswith(".metadata.json"):
-            objs.append(o)
+all_files  = dbutils.fs.ls(META_PATH)
+meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
+meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
 
-objs.sort(key=lambda o: o["LastModified"], reverse=True)
-meta      = _json.loads(s3.get_object(Bucket=BUCKET, Key=objs[0]["Key"])["Body"].read())
+latest = meta_files[0]
+print(f"✅ Latest metadata ({len(meta_files)} snapshots): {latest.path}")
+
+meta_json = spark.read.text(latest.path, wholetext=True).collect()[0][0]
+meta      = json.loads(meta_json)
 DATA_PATH = meta["location"].rstrip("/") + "/data/"
-DATA_PATH_S3A = DATA_PATH.replace("s3://", "s3a://")
-
-print(f"✅ Latest snapshot  : s3://stardata-databricks/{objs[0]['Key']}")
-print(f"   Modified         : {objs[0]['LastModified']}")
-print(f"   Total snapshots  : {len(objs)}")
-print(f"   DATA_PATH_S3A    : {DATA_PATH_S3A}")
+print(f"✅ Data path: {DATA_PATH}")
 ```
 
-### JupyterHub — Cell B: recreate Databricks view pointing at new snapshot
+### Databricks notebook — Cell B: recreate view pointing at new snapshot
 
 ```python
 spark.sql("CREATE SCHEMA IF NOT EXISTS lakehouse.lakehouse_db")
