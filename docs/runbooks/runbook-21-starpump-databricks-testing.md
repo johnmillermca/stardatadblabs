@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / starpump / databricks |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-08-31 |
+| **Last Updated** | 2026-08-31 (added Section 10: insert data in Databricks → run starpump) |
 
 ---
 
@@ -629,7 +629,130 @@ print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
 
 ---
 
-## 10. Troubleshooting
+## 10. Insert data in Databricks then run starpump (end-to-end smoke test)
+
+This is the simplest way to prove the full round-trip: insert rows directly in
+Databricks, run `starpump databricks`, then confirm the rows arrived in Iceberg.
+
+### Step 1 — Insert test rows in the Databricks SQL console
+
+Open **`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`**,
+select **Serverless Starter Warehouse**, and run:
+
+```sql
+INSERT INTO lakehouse.lakehouse_db.customer
+  (customer_id, full_name, email, phone_number, date_of_birth,
+   national_id, street_address, city, country_code, ip_address,
+   salary, customer_tier, is_active, created_at, updated_at,
+   snap_id, snap_timestamp)
+VALUES
+  (2001, 'Alice Test',  'alice.test@example.com',  '+1-555-0001', DATE'1985-03-12', 'ID-02001-TEST', '1 Test St',   'Toronto', 'CA', '10.0.0.1', 95000.00,  'gold',     1, NOW(), NOW(), NULL, NOW()),
+  (2002, 'Bob Test',    'bob.test@example.com',    '+1-555-0002', DATE'1990-07-22', 'ID-02002-TEST', '2 Test Ave',  'London',  'GB', '10.0.0.2', 72000.00,  'silver',   1, NOW(), NOW(), NULL, NOW()),
+  (2003, 'Carol Test',  'carol.test@example.com',  '+1-555-0003', DATE'1978-11-05', 'ID-02003-TEST', '3 Test Blvd', 'Berlin',  'DE', '10.0.0.3', 130000.00, 'platinum', 1, NOW(), NOW(), NULL, NOW()),
+  (2004, 'Dave Test',   'dave.test@example.com',   '+1-555-0004', DATE'1995-01-30', 'ID-02004-TEST', '4 Test Rd',   'Tokyo',   'JP', '10.0.0.4', 55000.00,  'standard', 1, NOW(), NOW(), NULL, NOW()),
+  (2005, 'Eve Test',    'eve.test@example.com',    '+1-555-0005', DATE'1988-09-14', 'ID-02005-TEST', '5 Test Lane', 'Sydney',  'AU', '10.0.0.5', 115000.00, 'gold',     1, NOW(), NOW(), NULL, NOW());
+```
+
+Confirm the rows landed:
+```sql
+SELECT customer_id, full_name, city, customer_tier
+FROM   lakehouse.lakehouse_db.customer
+WHERE  customer_id BETWEEN 2001 AND 2005
+ORDER  BY customer_id;
+```
+✅ Expected: 5 rows returned with the names and tiers above.
+
+---
+
+### Step 2 — Common setup (terminal)
+
+```bash
+MASTER=$(kubectl get pod -n prod -l app=spark-master \
+  -o jsonpath='{.items[0].metadata.name}')
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+echo "Master: $MASTER  Token: ${TOKEN:0:10}..."
+```
+
+---
+
+### Step 3 — Run starpump databricks
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  starpump databricks
+```
+
+✅ Key lines to look for:
+```
+Discovered 1 tables in lakehouse.lakehouse_db: ['customer']
+[customer] batch offset=0 rows=XXXX total=XXXX
+[customer] DONE — XXXX rows written (total incl. prior runs).
+Completed in X.Xs — 1/1 copied | 0 skipped | 0 failed | XXXX rows written
+```
+
+> The row count `XXXX` will be the previous total **plus the 5 new rows** you just inserted.
+
+---
+
+### Step 4 — Verify the new rows landed in Iceberg (from the Spark cluster)
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf(app_name="verify")).getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
+
+# Total rows — should be previous count + 5
+spark.sql("SELECT COUNT(*) AS total FROM databricks.lakehouse_db.customer").show()
+
+# Confirm the 5 test rows are present with snap_id + snap_timestamp injected by starpump
+spark.sql("""
+    SELECT customer_id, full_name, city, customer_tier, snap_id, snap_timestamp
+    FROM   databricks.lakehouse_db.customer
+    WHERE  customer_id BETWEEN 2001 AND 2005
+    ORDER  BY customer_id
+""").show(truncate=False)
+
+spark.stop()
+EOF
+```
+
+✅ Expected: rows 2001–2005 are present, `snap_id` is a non-null BIGINT and
+`snap_timestamp` is a non-null TIMESTAMP — both injected by starpump automatically.
+
+---
+
+### Step 5 — Verify in the Databricks SQL console
+
+```sql
+-- Row count in the Iceberg-backed view (should include your 5 new rows)
+SELECT COUNT(*) AS total_rows
+FROM   lakehouse.lakehouse_db.vw_customer_latest;
+
+-- Confirm your test rows are visible through the view
+SELECT customer_id, full_name, city, snap_id, snap_timestamp
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id BETWEEN 2001 AND 2005
+ORDER  BY customer_id;
+```
+
+✅ If `snap_id` and `snap_timestamp` are populated, the full round-trip is confirmed:
+
+```
+Databricks (source) → starpump JDBC read → Iceberg on S3 (Polaris) → Databricks view
+```
+
+---
+
+## 11. Troubleshooting
 
 ### `ClassNotFoundException: com.databricks.client.jdbc.Driver`
 
@@ -703,7 +826,7 @@ kubectl exec -n prod $MASTER -c spark-master -- spark-app-cleanup
 
 ---
 
-## 11. Key files reference
+## 12. Key files reference
 
 | File | Purpose |
 |---|---|
