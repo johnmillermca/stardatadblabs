@@ -9,14 +9,14 @@
 
 ## Before You Start — Common Setup
 
-> **After any image rebuild or pod rollout**, re-run the "Common Setup" block below to refresh `$MASTER` — the pod name changes after every restart and the old variable points to a pod that no longer exists. The scripts (`bao_spark_init.py`, `spark_iceberg_utils.py`, `snowflake_to_iceberg.py`) are baked into the image at `/opt/spark/work-dir/` and do **not** need to be copied manually.
+> **After any image rebuild or pod rollout**, re-run the "Common Setup" block below to refresh `$MASTER` — the pod name changes after every restart and the old variable points to a pod that no longer exists. The scripts (`bao_spark_init.py`, `spark_iceberg_utils.py`, `starpump.py`) are baked into the image at `/opt/spark/work-dir/` and do **not** need to be copied manually.
 >
 > The pipeline is invoked via the `starpump` CLI command available directly on `PATH`:
 > ```bash
 > starpump snowflake              # copy from Snowflake (default 8 threads)
 > starpump snowflake --threads 16 # use 16 parallel threads
 > starpump snowflake --threads 32 # use 32 parallel threads
-> # equivalent to: python3 /opt/spark/work-dir/snowflake_to_iceberg.py snowflake
+> # equivalent to: python3 /opt/spark/work-dir/starpump.py snowflake
 > ```
 > The first argument (`snowflake`) selects the source database driver.
 > Additional sources (e.g. `oracle`, `postgres`) can be added to the pipeline
@@ -240,7 +240,7 @@ Watch for the first few batch lines:
 ```bash
 # Find the python3 PID inside the pod
 kubectl exec -n prod $MASTER -c spark-master -- \
-  pgrep -f snowflake_to_iceberg.py
+  pgrep -f starpump.py
 
 # Kill it (replace <PID>)
 kubectl exec -n prod $MASTER -c spark-master -- kill -9 <PID>

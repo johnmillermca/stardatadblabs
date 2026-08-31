@@ -41,7 +41,7 @@ from that SCN.
 | Accurate across restart/retry | ✅ Same semantics on re-run | ❌ Drifts between retries |
 | Maps to Oracle SCN? | ✅ `TIMESTAMP_TO_SCN(T)` | ❌ Oracle SCN is independent |
 
-`capture_sf_extraction_ts()` in [`snowflake_to_iceberg.py`](../snowflake-to-iceberg/snowflake_to_iceberg.py) runs:
+`capture_sf_extraction_ts()` in [`starpump.py`](../snowflake-to-iceberg/starpump.py) runs:
 
 ```sql
 SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::VARCHAR AS ts
@@ -260,7 +260,7 @@ ORDER BY source_db, table_name;
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Spark bulk-copy job  (snowflake_to_iceberg.py)                     │
+│  Spark bulk-copy job  (starpump.py)                     │
 │                                                                     │
 │  for each table:                                                    │
 │    1. ts = Snowflake CURRENT_TIMESTAMP()  ← CDC sync point         │

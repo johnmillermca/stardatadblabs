@@ -49,6 +49,7 @@ _PATH_DORIS          = "secret/data/platform/doris"
 _PATH_ORACLE         = "secret/data/platform/oracle"
 _PATH_KAFKA          = "secret/data/platform/kafka"
 _PATH_PIPELINE_DB    = "secret/data/platform/pipeline_db"
+_PATH_DATABRICKS     = "secret/data/platform/databricks"
 # JARs baked into the spark-gluten-velox:3.5.1 image
 _ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
 _ICEBERG_JAR_PATH    = f"/opt/spark/jars/{_ICEBERG_JAR_NAME}"
@@ -56,6 +57,8 @@ _SNOWFLAKE_JAR_NAME  = "spark-snowflake_2.12-3.2.1-spark_3.5.jar"
 _SNOWFLAKE_JAR_PATH  = f"/opt/spark/jars/{_SNOWFLAKE_JAR_NAME}"
 # spark-snowflake 3.2.1 requires JDBC 4.x (internal API package restructure)
 _SNOWFLAKE_JDBC_JAR  = "/opt/spark/jars/snowflake-jdbc-4.0.2.jar"
+# Databricks JDBC driver (Simba) — baked into image
+_DATABRICKS_JDBC_JAR = "/opt/spark/jars/databricks-jdbc-2.6.36.1070.jar"
 
 _POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
 # In-cluster drivers connect directly on port 17077 (bypasses krb-spark-guard sidecar).
@@ -171,6 +174,56 @@ class BaoSparkInit:
         authoritative CDC sync-point tables that Debezium reads without Spark.
         """
         return self._read_secret(_PATH_PIPELINE_DB)
+
+    def databricks_creds(self) -> dict[str, str]:
+        """
+        Return Databricks JDBC credentials from OpenBao.
+        Expected keys in secret/data/platform/databricks:
+          host          e.g. dbc-11a1dbc5-061a.cloud.databricks.com
+          http_path     e.g. /sql/1.0/warehouses/942026cf5e55f3c3
+          token         Personal Access Token or OAuth M2M token
+          catalog       e.g. lakehouse   (Unity Catalog catalog name)
+          schema        e.g. lakehouse_db
+        """
+        return self._read_secret(_PATH_DATABRICKS)
+
+    def databricks_jdbc_options(
+        self,
+        catalog: str | None = None,
+        schema:  str | None = None,
+    ) -> dict[str, str]:
+        """
+        Return a dict of JDBC options for
+        spark.read.format("jdbc").options(**opts).
+
+        Uses the Databricks Simba JDBC driver baked into the image at
+        /opt/spark/jars/databricks-jdbc-2.6.36.1070.jar.
+
+        Args:
+            catalog: Unity Catalog catalog name (overrides secret default).
+            schema:  Schema / database name    (overrides secret default).
+        """
+        db = self.databricks_creds()
+        host      = db["host"]
+        http_path = db["http_path"]
+        token     = db["token"]
+        _catalog  = catalog or db.get("catalog", "lakehouse")
+        _schema   = schema  or db.get("schema",  "lakehouse_db")
+
+        jdbc_url = (
+            f"jdbc:databricks://{host}:443"
+            f";httpPath={http_path}"
+            f";AuthMech=3"
+            f";UID=token"
+            f";PWD={token}"
+            f";ConnCatalog={_catalog}"
+            f";ConnSchema={_schema}"
+            f";SSL=1"
+        )
+        return {
+            "url":    jdbc_url,
+            "driver": "com.databricks.client.jdbc.Driver",
+        }
 
     # ── SparkConf builder ──────────────────────────────────────────────────────
     def spark_conf(
@@ -324,6 +377,28 @@ class BaoSparkInit:
         conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
         conf.set("spark.kryo.registrationRequired", "false")
 
+        # ── Databricks catalog → Polaris REST (warehouse: star_lakehouse) ────
+        # Registered here so every starpump run with SOURCE=databricks has the
+        # catalog available without per-script setup.
+        conf.set("spark.sql.catalog.databricks",
+                 "org.apache.iceberg.spark.SparkCatalog")
+        conf.set("spark.sql.catalog.databricks.type",             "rest")
+        conf.set("spark.sql.catalog.databricks.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.databricks.oauth2-server-uri",
+                 f"{_POLARIS_URI}/v1/oauth/tokens")
+        conf.set("spark.sql.catalog.databricks.credential",
+                 f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
+        conf.set("spark.sql.catalog.databricks.scope",            "PRINCIPAL_ROLE:ALL")
+        conf.set("spark.sql.catalog.databricks.warehouse",        "star_lakehouse")
+        conf.set("spark.sql.catalog.databricks.rest.auth.type",   "oauth2")
+        # Iceberg S3FileIO for databricks catalog
+        s3 = self.s3_creds()
+        conf.set("spark.sql.catalog.databricks.s3.access-key-id",     s3["access_key"])
+        conf.set("spark.sql.catalog.databricks.s3.secret-access-key", s3["secret_key"])
+        conf.set("spark.sql.catalog.databricks.s3.endpoint",          s3["endpoint"])
+        conf.set("spark.sql.catalog.databricks.s3.path-style-access", "true")
+        conf.set("spark.sql.catalog.databricks.client.region",        s3["region"])
+
         # ── JARs (baked into image — list for explicitness) ───────────────────
         conf.set("spark.jars", ",".join([
             _ICEBERG_JAR_PATH,
@@ -333,6 +408,7 @@ class BaoSparkInit:
             "/opt/spark/jars/hadoop-aws-3.3.4.jar",
             "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
             "/opt/spark/jars/postgresql-42.7.4.jar",
+            _DATABRICKS_JDBC_JAR,
         ]))
 
         if extra_conf:

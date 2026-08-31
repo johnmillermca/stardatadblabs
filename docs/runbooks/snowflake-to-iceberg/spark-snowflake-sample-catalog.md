@@ -14,7 +14,7 @@ starpump snowflake           ← "snowflake" selects the _sf_* source connector
   ├─ bao_spark_init.py       ← builds SparkConf, registers snowflake catalog
   │    spark.sql.catalog.snowflake  (hadoop type, warehouse=SNOWFLAKE_SAMPLE_DATA)
   │
-  └─ snowflake_to_iceberg.py ← reads tables via:
+  └─ starpump.py ← reads tables via:
        spark.read.format("net.snowflake.spark.snowflake")
          .options(sfUrl, sfUser, sfPassword, sfDatabase, sfSchema, ...)
          .option("query", f"SELECT * FROM {table} LIMIT ...")
@@ -127,7 +127,7 @@ When `starpump snowflake` starts, `BaoSparkInit.spark_conf()` is called. It:
 2. Adds `spark.sql.catalog.snowflake` entries to `SparkConf`
 3. Sets `sfUrl`, `sfUser`, `sfPassword`, `sfWarehouse` as Snowflake connector options (used later by `snowflake_options()`)
 
-### Step 2 — `snowflake_to_iceberg.py` validates the namespace
+### Step 2 — `starpump.py` validates the namespace
 
 ```python
 # _sf_list_tables() — discovers tables in the source schema
@@ -164,7 +164,7 @@ df.writeTo(f"polaris.{ICEBERG_NAMESPACE}.{table}").append()
 
 `starpump` is designed to be source-agnostic. To add a new source (e.g. `postgres`, `mysql`):
 
-**1. Register a new `_SourceConnector` in `snowflake_to_iceberg.py`:**
+**1. Register a new `_SourceConnector` in `starpump.py`:**
 
 ```python
 _CONNECTORS: dict[str, _SourceConnector] = {
@@ -257,7 +257,7 @@ DRY RUN — no tables copied.
 
 ## Rebuilding the image after changes
 
-If you change `bao_spark_init.py` or `snowflake_to_iceberg.py`:
+If you change `bao_spark_init.py` or `starpump.py`:
 
 ```bash
 # 1. Sync changes to docker scripts directory (both copies must stay identical)

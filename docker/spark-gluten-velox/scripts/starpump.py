@@ -11,8 +11,15 @@ CLI
              credentials block in OpenBao and determines which reader is
              invoked.  Currently supported:
 
-               snowflake   Copy from a Snowflake database using the
+              snowflake    Copy from a Snowflake database using the
                            Snowflake Spark connector.
+
+              databricks   Copy from a Databricks SQL Warehouse via JDBC
+                           (Simba JDBC driver).  Tables are read from the
+                           Unity Catalog and written to the Polaris Iceberg
+                           catalog as databricks.<schema>.<table>.
+                           If the target Iceberg table does not exist it is
+                           created automatically before the first batch copy.
 
   --threads N   Override the default 8 parallel copy threads.
                 Examples: --threads 16, --threads 32.
@@ -68,9 +75,9 @@ Environment variables
   USER                Pipeline run user            (default: dave)
   ADDR                OpenBao address              (default: http://openbao.prod.svc.cluster.local:8200)
   TOKEN               OpenBao root/bootstrap token override (dev only)
-  DATABASE            Source database name         (default: SNOWFLAKE_SAMPLE_DATA)
-  SCHEMAS             Source schema name           (default: TPCDS_SF10TCL)
-  ICEBERG_CATALOG     Target Iceberg catalog name  (default: polaris)
+  DATABASE            Source database / catalog    (default: SNOWFLAKE_SAMPLE_DATA; for databricks: lakehouse)
+  SCHEMAS             Source schema name           (default: TPCDS_SF10TCL; for databricks: lakehouse_db)
+  ICEBERG_CATALOG     Target Iceberg catalog name  (default: polaris; for databricks: databricks)
   S3_BUCKET           Override S3 bucket from OpenBao   (optional)
   INCLUDE_TABLES      Comma-separated explicit include list  (optional)
   EXCLUDE_TABLES      Comma-separated tables to always skip  (optional)
@@ -86,6 +93,15 @@ Usage
 -----
   # Copy all Snowflake tables ≤ 3 GB (default 8 threads):
   starpump snowflake
+
+  # Copy all Databricks tables from lakehouse.lakehouse_db → Iceberg:
+  starpump databricks
+
+  # Copy specific Databricks tables:
+  DATABASE=lakehouse SCHEMAS=lakehouse_db starpump databricks INCLUDE_TABLES=customer,orders
+
+  # Dry-run (DDL only, no data copy):
+  starpump databricks DRY_RUN=1
 
   # Use 16 parallel threads:
   starpump snowflake --threads 16
@@ -203,9 +219,15 @@ _ARGS = _parse_args()
 
 # ── Configuration from environment ────────────────────────────────────────────
 USER            = os.environ.get("USER",      "dave")
-DATABASE        = os.environ.get("DATABASE",  "SNOWFLAKE_SAMPLE_DATA")
-SCHEMAS         = os.environ.get("SCHEMAS",   "TPCDS_SF10TCL")
-ICEBERG_CATALOG = os.environ.get("ICEBERG_CATALOG", "polaris")
+# Databricks source defaults differ from Snowflake — resolve after SOURCE is known.
+# DATABASE / SCHEMAS / ICEBERG_CATALOG env vars override both.
+_SOURCE_RESOLVED = _ARGS.source.lower()
+_DB_DEFAULT_DATABASE = "lakehouse"    if _SOURCE_RESOLVED == "databricks" else "SNOWFLAKE_SAMPLE_DATA"
+_DB_DEFAULT_SCHEMAS  = "lakehouse_db" if _SOURCE_RESOLVED == "databricks" else "TPCDS_SF10TCL"
+_DB_DEFAULT_CATALOG  = "databricks"   if _SOURCE_RESOLVED == "databricks" else "polaris"
+DATABASE        = os.environ.get("DATABASE",       _DB_DEFAULT_DATABASE)
+SCHEMAS         = os.environ.get("SCHEMAS",        _DB_DEFAULT_SCHEMAS)
+ICEBERG_CATALOG = os.environ.get("ICEBERG_CATALOG", _DB_DEFAULT_CATALOG)
 S3_BUCKET_OVERRIDE = os.environ.get("S3_BUCKET")
 DRY_RUN         = os.environ.get("DRY_RUN", "0") == "1"
 BATCH_SIZE      = int(os.environ.get("BATCH_SIZE",   "100000"))
@@ -591,6 +613,119 @@ def _sf_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
     return {}
 
 
+# ── Databricks → Spark/Iceberg type mapping ────────────────────────────────────
+# JDBC getColumnType() returns java.sql.Types integers; Databricks Simba driver
+# also exposes type names as strings in ResultSetMetaData.getColumnTypeName().
+# We map by type name string (upper-cased) identical to the Snowflake pattern.
+_DB_TYPE_MAP: dict[str, Any] = {
+    "STRING":    StringType(),   "VARCHAR":   StringType(),   "CHAR":      StringType(),
+    "TEXT":      StringType(),   "BINARY":    StringType(),   "VARIANT":   StringType(),
+    "ARRAY":     StringType(),   "MAP":       StringType(),   "STRUCT":    StringType(),
+    "TINYINT":   ByteType(),     "SMALLINT":  ShortType(),    "INT":       IntegerType(),
+    "INTEGER":   IntegerType(),  "BIGINT":    LongType(),     "LONG":      LongType(),
+    "FLOAT":     FloatType(),    "REAL":      FloatType(),    "DOUBLE":    DoubleType(),
+    "DECIMAL":   DecimalType(38, 10),         "NUMERIC":     DecimalType(38, 10),
+    "BOOLEAN":   BooleanType(),  "DATE":      DateType(),
+    "TIMESTAMP": TimestampType(),             "TIMESTAMP_NTZ": TimestampType(),
+    "TIMESTAMP_LTZ": TimestampType(),
+}
+
+
+def _db_to_spark(db_type: str) -> Any:
+    """Map a Databricks JDBC column type string to a Spark DataType."""
+    upper = db_type.upper().strip().split("(")[0].strip()
+    if upper in ("DECIMAL", "NUMERIC") and "(" in db_type.upper():
+        inner = db_type.upper()[db_type.upper().index("(") + 1 : db_type.upper().index(")")]
+        parts = inner.split(",")
+        p = int(parts[0].strip())
+        s = int(parts[1].strip()) if len(parts) > 1 else 0
+        return DecimalType(p, s)
+    return _DB_TYPE_MAP.get(upper, StringType())
+
+
+# ── Databricks connector implementation ────────────────────────────────────────
+
+def _db_build_opts(bao: "BaoSparkInit") -> dict:
+    """Return JDBC options for the Databricks SQL Warehouse."""
+    return bao.databricks_jdbc_options(catalog=DATABASE, schema=SCHEMAS)
+
+
+def _db_list_tables(spark: SparkSession, opts: dict) -> list[str]:
+    """List all base tables in the Databricks schema via JDBC SHOW TABLES."""
+    df: DataFrame = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", f"SHOW TABLES IN `{DATABASE}`.`{SCHEMAS}`")
+        .load()
+    )
+    # SHOW TABLES returns columns: namespace, tableName, isTemporary
+    names = sorted(
+        row["tableName"].lower()
+        for row in df.collect()
+        if not row["isTemporary"]
+    )
+    logger.info(
+        "Discovered %d tables in %s.%s: %s", len(names), DATABASE, SCHEMAS, names
+    )
+    return names
+
+
+def _db_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
+    """
+    Read one row from the Databricks table via JDBC to get the schema.
+    Map Databricks types → Spark types using _db_to_spark().
+    """
+    raw_schema = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("dbtable", f"`{DATABASE}`.`{SCHEMAS}`.`{table}`")
+        .option("numPartitions", "1")
+        .option("fetchsize", "1")
+        .load()
+        .limit(1)
+    ).schema
+
+    mapped_fields = []
+    for f in raw_schema.fields:
+        # f.dataType is already resolved by the JDBC source via JDBC metadata.
+        # Convert back through our map for normalisation (e.g. DecimalType precision).
+        mapped_fields.append(
+            StructField(f.name.lower(), _db_to_spark(f.dataType.simpleString()), True)
+        )
+    return StructType(mapped_fields)
+
+
+def _db_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
+    """
+    Estimate table sizes in Databricks via DESCRIBE DETAIL.
+    Returns {lower_table_name: size_in_gb}.
+    Falls back to 0 GB per table if size data is unavailable.
+    """
+    sizes: dict[str, float] = {}
+    _gb = 1024 ** 3
+    tables = _db_list_tables(spark, opts)
+    for table in tables:
+        try:
+            df = (
+                spark.read.format("jdbc")
+                .options(**opts)
+                .option("query", f"DESCRIBE DETAIL `{DATABASE}`.`{SCHEMAS}`.`{table}`")
+                .load()
+            )
+            row = df.collect()
+            if row and "sizeInBytes" in df.columns:
+                sizes[table] = (row[0]["sizeInBytes"] or 0) / _gb
+            else:
+                sizes[table] = 0.0
+        except Exception as exc:
+            logger.warning(
+                "Could not get size for %s.%s.%s: %s — treating as 0 GB.",
+                DATABASE, SCHEMAS, table, exc,
+            )
+            sizes[table] = 0.0
+    return sizes
+
+
 # ── Connector registry — add new sources here ─────────────────────────────────
 # To register a new source (e.g. "oracle"):
 #   1. Implement _oracle_build_opts, _oracle_list_tables,
@@ -603,6 +738,13 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         list_tables  = _sf_list_tables,
         table_schema = _sf_table_schema,
         table_sizes  = _sf_table_sizes,
+    ),
+    "databricks": _SourceConnector(
+        spark_format = "jdbc",
+        build_opts   = _db_build_opts,
+        list_tables  = _db_list_tables,
+        table_schema = _db_table_schema,
+        table_sizes  = _db_table_sizes,
     ),
     # "oracle":   _SourceConnector(...),   ← add future sources here
     # "postgres": _SourceConnector(...),
@@ -779,20 +921,28 @@ def _copy_table(
 
     try:
         logger.info("[%s] START: %.1f GB | discovering schema …", table, size_gb)
-        sf_raw_schema = connector.table_schema(spark, conn_opts, table)
+        raw_schema = connector.table_schema(spark, conn_opts, table)
 
-        # Map SF types → Spark/Iceberg types (builder injects snap cols)
-        iceberg_schema = StructType([
-            StructField(f.name, _sf_to_spark(f.dataType.simpleString()), True)
-            for f in sf_raw_schema.fields
-        ])
+        # Map source types → Spark/Iceberg types (builder injects snap cols).
+        # For Databricks JDBC, _db_table_schema() already returns mapped types;
+        # for Snowflake, _sf_table_schema() returns raw SF types that need mapping.
+        if SOURCE == "databricks":
+            iceberg_schema = raw_schema   # already normalised by _db_table_schema()
+        else:
+            iceberg_schema = StructType([
+                StructField(f.name, _sf_to_spark(f.dataType.simpleString()), True)
+                for f in raw_schema.fields
+            ])
 
         partition_spec = _auto_partition_spec(iceberg_schema)
 
         # Location must be under the Polaris catalog's allowedLocations.
-        # IcebergCatalog is configured with s3://xdatatoiceberg1/tpcds — use
-        # s3:// (not s3a://) and the correct prefix so Polaris accepts the path.
-        s3_location = f"s3://{s3_bucket}/tpcds/{ICEBERG_NAMESPACE}/{table}"
+        # Databricks tables go to stardata-databricks/iceberg/warehouse/<ns>/<tbl>.
+        # Snowflake tables go to xdatatoiceberg1/tpcds/<ns>/<tbl>.
+        if SOURCE == "databricks":
+            s3_location = f"s3://{s3_bucket}/iceberg/warehouse/{ICEBERG_NAMESPACE}/{table}"
+        else:
+            s3_location = f"s3://{s3_bucket}/tpcds/{ICEBERG_NAMESPACE}/{table}"
 
         fqn = builder.create_table(
             catalog        = ICEBERG_CATALOG,
@@ -906,17 +1056,32 @@ def _copy_table(
             rows_total = already_written
 
             while True:
-                query = (
-                    f'SELECT * FROM "{table.upper()}" '
-                    f"ORDER BY 1 "
-                    f"LIMIT {BATCH_SIZE} OFFSET {offset}"
-                )
-                batch: DataFrame = (
-                    spark.read.format(connector.spark_format)
-                    .options(**conn_opts)
-                    .option("query", query)
-                    .load()
-                )
+                # Databricks JDBC uses backtick quoting and 3-part names;
+                # Snowflake connector uses double-quote + UPPER-cased name.
+                if SOURCE == "databricks":
+                    query = (
+                        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` "
+                        f"ORDER BY 1 "
+                        f"LIMIT {BATCH_SIZE} OFFSET {offset}"
+                    )
+                    batch: DataFrame = (
+                        spark.read.format("jdbc")
+                        .options(**conn_opts)
+                        .option("query", query)
+                        .load()
+                    )
+                else:
+                    query = (
+                        f'SELECT * FROM "{table.upper()}" '
+                        f"ORDER BY 1 "
+                        f"LIMIT {BATCH_SIZE} OFFSET {offset}"
+                    )
+                    batch: DataFrame = (
+                        spark.read.format(connector.spark_format)
+                        .options(**conn_opts)
+                        .option("query", query)
+                        .load()
+                    )
                 n = batch.count()
                 if n == 0:
                     break

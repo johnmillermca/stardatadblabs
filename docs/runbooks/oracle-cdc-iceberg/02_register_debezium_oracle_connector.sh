@@ -121,7 +121,7 @@ for tbl in "${CDC_TABLES[@]}"; do
 done
 if [ ${#MISSING[@]} -gt 0 ]; then
   echo "[ERROR] Missing watermarks for: ${MISSING[*]}"
-  echo "[ERROR] Run snowflake_to_iceberg.py first."
+  echo "[ERROR] Run starpump.py first."
   exit 1
 fi
 

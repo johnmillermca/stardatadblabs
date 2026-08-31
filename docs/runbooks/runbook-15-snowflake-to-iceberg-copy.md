@@ -39,7 +39,7 @@ SNOWFLAKE_SAMPLE_DATA  ──►   starpump snowflake         ──► s3://xda
 | `bao_spark_init.py` | Reads ALL credentials from OpenBao at runtime; builds `SparkConf` |
 | `spark_iceberg_utils.py` | Global `IcebergTableBuilder` — injects `snap_timestamp` + `snap_id` into every table |
 | `spark-defaults-configmap.yaml` | K8s ConfigMap delivering `spark-defaults.conf` to spark pods |
-| `snowflake_to_iceberg.py` | `starpump` entry point — dynamic source routing, N-thread copy with resume |
+| `starpump.py` | `starpump` entry point — dynamic source routing, N-thread copy with resume |
 
 ### 2.2 Security model
 
@@ -630,7 +630,7 @@ ALTER TABLE `polaris`.`tpcds_sf10tcl`.`<table>`
 | `docs/runbooks/snowflake-to-iceberg/spark_iceberg_utils.py` | Global Iceberg table builder — auto-injects snap columns |
 | `docs/runbooks/snowflake-to-iceberg/bao_spark_init.py` | OpenBao credential loader + SparkConf builder |
 | `docs/runbooks/snowflake-to-iceberg/spark-defaults-configmap.yaml` | K8s ConfigMap for `spark-defaults.conf` + Deployment patches |
-| `docs/runbooks/snowflake-to-iceberg/snowflake_to_iceberg.py` | `starpump` entry point — dynamic source routing, N-thread copy |
+| `docs/runbooks/snowflake-to-iceberg/starpump.py` | `starpump` entry point — dynamic source routing, N-thread copy |
 | `rbac-plane/docs/iceberg-spark-setup/README.md` | Iceberg lakehouse runbook (initial setup) |
 | `rbac-plane/docs/iceberg-spark-setup/01_create_iceberg_table.py` | Initial Iceberg table creation script |
 | `rbac-plane/docs/iceberg-spark-setup/06_snowflake_iceberg_setup_and_refresh.sql` | Snowflake OBJECT_STORE table + task SQL |
