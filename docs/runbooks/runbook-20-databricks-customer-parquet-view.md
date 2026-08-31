@@ -852,13 +852,7 @@ Harmless — Hadoop looks for an optional metrics file that does not exist. Igno
 
 **Notebook:** [`docker/databricks-notebooks/nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)
 
-This **single notebook** replaces the two previous per-table scripts.
-It loops over every entry in `TABLE_CONFIGS` and, for each S3 folder:
-
-1. Finds the latest `*.metadata.json` by `modificationTime`
-2. Parses it to resolve the parquet `data/` path for that snapshot
-3. `CREATE OR REPLACE VIEW` pointing at that snapshot
-4. `INSERT OVERWRITE` a Delta audit table with `snap_file`, `snap_file_size`, and `refreshed_at` columns
+This **single notebook** handles every S3 Iceberg folder in one pass with a **zero-downtime** design — no user query against either the view or the Delta table is ever interrupted during a refresh.
 
 **To add a new S3 table:** add one entry to `TABLE_CONFIGS` in Cell 1 — nothing else changes.
 
@@ -866,45 +860,88 @@ Upload to Databricks at `https://dbc-11a1dbc5-061a.cloud.databricks.com` and att
 
 ---
 
+### Zero-downtime design
+
+There are two objects users query and each is handled differently:
+
+#### Views (`vw_customer_latest`, `vw_customer_orders_latest`)
+
+| What | How |
+|---|---|
+| **View points at the `data/` directory, not a snapshot file** | `read_files('s3://.../customer/data/', ...)` — Iceberg always appends new `.parquet` files into this same directory, so every user query automatically reads the newest files without any DDL change |
+| **`CREATE VIEW IF NOT EXISTS` (not `CREATE OR REPLACE`)** | The view is created **once** on the first notebook run and **never replaced again**. The `IF NOT EXISTS` clause makes every subsequent run a no-op for the view — no DDL lock, no interruption |
+| **New data visible immediately** | After Spark writes a new Iceberg snapshot, the next user `SELECT` against the view picks up the new parquet files automatically — **no notebook re-run is needed for the view** |
+
+> To update the view definition (e.g. add a column), use `ALTER VIEW lakehouse.lakehouse_db.vw_customer_latest AS SELECT ...` — this is a metadata-only operation with a sub-millisecond lock.
+
+#### Delta audit tables (`customer_snapshot_audit`, `customer_orders_snapshot_audit`)
+
+| What | How |
+|---|---|
+| **Atomic `INSERT OVERWRITE`** | Cell 5 replaces the whole table in a single Delta transaction |
+| **Delta MVCC (snapshot isolation)** | Queries running during the overwrite continue reading the old version until the transaction commits, then instantly see the new data — there is no window where the table is empty or partially written |
+
+---
+
 ### Cell map
 
-| Cell | Action |
-|---|---|
-| **Cell 1** | `TABLE_CONFIGS` dict — one entry per S3 Iceberg table. Edit here to add/remove tables. |
-| **Cell 2** | `resolve_latest_snapshot()` helper — lists `metadata/`, sorts by `modificationTime`, parses the JSON, returns `data_path` and diagnostic fields |
-| **Cell 3** | Loop: calls the helper for every configured table; builds `SNAPSHOTS` dict; skips tables with errors and continues |
-| **Cell 4** | Loop: `CREATE OR REPLACE VIEW` for every resolved table using `read_files(data_path)` |
-| **Cell 5** | Loop: atomic `INSERT OVERWRITE` into each table's Delta audit table; adds `snap_file`, `snap_file_size`, `refreshed_at`, `source_table` columns |
-| **Cell 6** | Summary report — one row per table showing object name, row count, and snapshot timestamp |
-| **Cell 7** | Optional `OPTIMIZE` on all audit tables |
+| Cell | Action | Runs on refresh? |
+|---|---|---|
+| **Cell 1** | `TABLE_CONFIGS` dict — one entry per S3 table. Edit here only. | Once per session |
+| **Cell 2** | `resolve_latest_snapshot()` helper defined | Once per session |
+| **Cell 3** | Resolves latest `*.metadata.json` per table (diagnostics + audit table source path) | ✅ Every refresh |
+| **Cell 4** | `CREATE VIEW IF NOT EXISTS` — no-op if view exists; zero-downtime | First run only |
+| **Cell 5** | Atomic `INSERT OVERWRITE` Delta audit table — zero-downtime via Delta MVCC | ✅ Every refresh |
+| **Cell 6** | Summary report | Optional |
+| **Cell 7** | Optional `OPTIMIZE` on audit tables | Optional |
 
 ---
 
 ### Configured tables (current)
 
-| Logical name | S3 metadata path | View | Delta audit table |
-|---|---|---|---|
-| `customer` | `…/customer/metadata/` | `vw_customer_latest` | `customer_snapshot_audit` |
-| `customer_orders` | `…/customer_orders/metadata/` | `vw_customer_orders_latest` | `customer_orders_snapshot_audit` |
+| Logical name | `data_path` (view target) | `meta_path` (audit table source) |
+|---|---|---|
+| `customer` | `…/customer/data/` | `…/customer/metadata/` |
+| `customer_orders` | `…/customer_orders/data/` | `…/customer_orders/metadata/` |
 
 ---
 
 ### How to run
 
-**First time (or after new tables are added):**
-1. Run **Cell 1** — review `TABLE_CONFIGS`
-2. Run **Cell 2** — defines the helper (no output)
-3. Run **Cell 3** — resolves all snapshots; prints one block per table
-4. Run **Cell 4** — creates/replaces all views
-5. Run **Cell 5** — refreshes all Delta audit tables
-6. Run **Cell 6** — summary report
+**First time:**
+1. Run **Cells 1 → 6** in order — views are created, audit tables populated
 
 **Every subsequent refresh (after any Spark write):**
-- Re-run **Cells 3 → 5** in order (Cell 2 only needs to run once per session)
+- Re-run **Cells 3 and 5** only
+- Cell 4 will print `EXISTS (no DDL change — zero downtime preserved)` and do nothing
 
-> **No manual path edits.** The notebook always picks the newest `*.metadata.json` from each table's `metadata/` prefix automatically.
+> The view **does not need to be re-run** at all for new data to appear. New parquet files written by Spark become visible to the next SQL query against the view immediately.
 
 ---
+
+### Expected Cell 4 output (first run)
+
+```
+Ensuring views exist (zero-downtime, CREATE IF NOT EXISTS) …
+────────────────────────────────────────────────────────────
+  ✅ lakehouse.lakehouse_db.vw_customer_latest
+     status=CREATED
+     rows=1,000  src=s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
+
+  ✅ lakehouse.lakehouse_db.vw_customer_orders_latest
+     status=CREATED
+     rows=5,000  src=s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/
+```
+
+### Expected Cell 4 output (every subsequent run)
+
+```
+  ✅ lakehouse.lakehouse_db.vw_customer_latest
+     status=EXISTS (no DDL change — zero downtime preserved)
+     rows=1,100  src=s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
+```
+
+> `rows=1,100` after the 100-row insert — the new rows are already visible in the view **without any DDL change**.
 
 ### Expected Cell 3 output (two tables resolved)
 
@@ -941,7 +978,7 @@ Resolving latest Iceberg snapshots …
   customer_orders        view             5,000  2026-09-01 13:00:00 UTC
                          delta table      5,000
 ══════════════════════════════════════════════════════════════════════
-  Re-run Cells 3–5 any time new data lands in S3.
+  Re-run Cells 3 + 5 any time new data lands in S3.
 ══════════════════════════════════════════════════════════════════════
 ```
 

@@ -4,13 +4,22 @@
 # PURPOSE  : Single automated notebook that reads parquet data from ANY number
 #            of Iceberg S3 folders.  For each configured table it:
 #              1. Lists the metadata/ prefix and picks the newest *.metadata.json
-#              2. Parses the JSON to resolve the data/ path for that snapshot
-#              3. CREATE OR REPLACE VIEW  <catalog>.<schema>.vw_<table>_latest
-#              4. CREATE TABLE IF NOT EXISTS + INSERT OVERWRITE into a Delta
-#                 audit table  <catalog>.<schema>.<table>_snapshot_audit
+#              2. Parses the JSON to confirm the active snapshot (diagnostic only)
+#              3. Creates the view ONCE via CREATE VIEW IF NOT EXISTS — never
+#                 replaced again, so in-flight user queries are never interrupted
+#              4. Atomically overwrites the Delta audit table (INSERT OVERWRITE)
+#                 so users querying the Delta table see no gap (Delta MVCC)
 #
-#            Re-run this notebook after any Spark/Iceberg write — it handles
-#            all tables in one pass, no manual path edits ever required.
+# ZERO-DOWNTIME DESIGN
+# ─────────────────────
+# The view points at the whole  data/  directory, not at a specific snapshot
+# file.  Iceberg always appends new *.parquet files into that same directory,
+# so read_files() automatically includes them on the next query — no DDL
+# change to the view is ever needed after the initial creation.
+#
+# CREATE VIEW IF NOT EXISTS  (Cell 4) → only fires on first run per table.
+# INSERT OVERWRITE Delta      (Cell 5) → single atomic transaction; concurrent
+#   reads see the old data until the commit, then instantly see the new data.
 #
 # TO ADD A NEW TABLE: add one entry to TABLE_CONFIGS below, nothing else.
 #
@@ -24,29 +33,40 @@
 # =============================================================================
 # Each entry is:
 #   "logical_name": {
-#       "meta_path" : S3 URI of the metadata/ directory (trailing slash required),
-#       "view"      : fully-qualified Databricks view name to create/replace,
-#       "audit_tbl" : fully-qualified Delta table name to materialise,
+#       "meta_path"  : S3 URI of the metadata/ directory (trailing slash required).
+#                      Used to resolve the latest snapshot for diagnostics and for
+#                      refreshing the Delta audit table.
+#       "data_path"  : S3 URI of the data/ directory (stable, never changes).
+#                      The VIEW is permanently pointed here — read_files() on a
+#                      directory glob picks up every new *.parquet file on each
+#                      query without any DDL change to the view.
+#       "view"       : fully-qualified Databricks view name (created once, never
+#                      replaced — zero downtime for concurrent users).
+#       "audit_tbl"  : fully-qualified Delta table name (overwritten atomically
+#                      on every refresh — no read gap due to Delta MVCC).
 #   }
 #
 # Add or remove entries here to control which tables are refreshed.
 
 TABLE_CONFIGS = {
     "customer": {
-        "meta_path" : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/",
-        "view"      : "lakehouse.lakehouse_db.vw_customer_latest",
-        "audit_tbl" : "lakehouse.lakehouse_db.customer_snapshot_audit",
+        "meta_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/",
+        "data_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/",
+        "view"       : "lakehouse.lakehouse_db.vw_customer_latest",
+        "audit_tbl"  : "lakehouse.lakehouse_db.customer_snapshot_audit",
     },
     "customer_orders": {
-        "meta_path" : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/metadata/",
-        "view"      : "lakehouse.lakehouse_db.vw_customer_orders_latest",
-        "audit_tbl" : "lakehouse.lakehouse_db.customer_orders_snapshot_audit",
+        "meta_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/metadata/",
+        "data_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/",
+        "view"       : "lakehouse.lakehouse_db.vw_customer_orders_latest",
+        "audit_tbl"  : "lakehouse.lakehouse_db.customer_orders_snapshot_audit",
     },
     # ── add more tables below ──────────────────────────────────────────────
     # "product": {
-    #     "meta_path" : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/product/metadata/",
-    #     "view"      : "lakehouse.lakehouse_db.vw_product_latest",
-    #     "audit_tbl" : "lakehouse.lakehouse_db.product_snapshot_audit",
+    #     "meta_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/product/metadata/",
+    #     "data_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/product/data/",
+    #     "view"       : "lakehouse.lakehouse_db.vw_product_latest",
+    #     "audit_tbl"  : "lakehouse.lakehouse_db.product_snapshot_audit",
     # },
 }
 
@@ -148,43 +168,83 @@ else:
 # COMMAND ----------
 
 # =============================================================================
-# Cell 4 — Create / replace views for all resolved tables
+# Cell 4 — Create views (once only, zero-downtime)
 # =============================================================================
-# For each table that resolved successfully, runs:
-#   CREATE OR REPLACE VIEW <view> AS SELECT * FROM read_files('<data_path>', ...)
+# ZERO-DOWNTIME STRATEGY
+# ──────────────────────
+# The view is pointed at the entire  data/  directory (TABLE_CONFIGS data_path),
+# NOT at a specific snapshot sub-path.  Iceberg always writes new parquet files
+# into that same directory, so read_files() automatically includes them on
+# every fresh query — no DDL change to the view is ever needed.
 #
-# The view always reflects the snapshot found in Cell 3.  Every subsequent
-# query against the view sees that snapshot's data with no further action.
+# We use  CREATE VIEW IF NOT EXISTS  so:
+#   • First run  → view is created.
+#   • Every subsequent run  → the IF NOT EXISTS clause makes this a no-op;
+#     the view is never replaced and in-flight user queries are never interrupted.
+#
+# The Delta audit table (Cell 5) is what gets refreshed on every run.
+# If you genuinely need to update the view definition (e.g. add a column),
+# run the  ALTER VIEW  block at the bottom of this cell.
 
-print("Creating / replacing views …")
+print("Ensuring views exist (zero-downtime, CREATE IF NOT EXISTS) …")
 print("─" * 60)
 
 for tbl, snap in SNAPSHOTS.items():
     view      = snap["view"]
-    data_path = snap["data_path"]
+    data_path = snap["data_path"]          # stable directory — never changes
 
-    spark.sql(f"""
-        CREATE OR REPLACE VIEW {view}
-        COMMENT 'Latest Iceberg snapshot of {tbl} — auto-refreshed via nb_multi_table_auto_reader'
-        AS
-        SELECT
-            *,
-            _metadata.file_path AS snap_file,
-            _metadata.file_size AS snap_file_size
-        FROM read_files(
-            '{data_path}',
-            format      => 'parquet',
-            mergeSchema => true
-        )
-    """)
+    # Check whether the view already exists
+    view_parts   = view.split(".")         # ["lakehouse", "lakehouse_db", "vw_..."]
+    catalog, schema, view_name = view_parts
+    existing = spark.sql(
+        f"SHOW VIEWS IN {catalog}.{schema} LIKE '{view_name}'"
+    ).count()
+
+    if existing == 0:
+        # First-time creation only
+        spark.sql(f"""
+            CREATE VIEW IF NOT EXISTS {view}
+            COMMENT 'Iceberg parquet for {tbl} — directory-glob view, never needs DDL refresh'
+            AS
+            SELECT
+                *,
+                _metadata.file_path AS snap_file,
+                _metadata.file_size AS snap_file_size
+            FROM read_files(
+                '{data_path}',
+                format      => 'parquet',
+                mergeSchema => true
+            )
+        """)
+        action = "CREATED"
+    else:
+        # View already exists and points at the right directory — nothing to do.
+        # New parquet files Iceberg appended since last run are picked up
+        # automatically by read_files() on the next user query.
+        action = "EXISTS (no DDL change — zero downtime preserved)"
 
     row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {view}").collect()[0]["n"]
     print(f"  ✅ {view}")
-    print(f"     rows={row_count:,}  snapshot={snap['snapshot_id']}  src={data_path}")
+    print(f"     status={action}")
+    print(f"     rows={row_count:,}  src={data_path}")
     print()
 
 print("─" * 60)
-print(f"✅ {len(SNAPSHOTS)} view(s) refreshed")
+print(f"✅ {len(SNAPSHOTS)} view(s) verified")
+print()
+print("  ┌─ HOW NEW DATA BECOMES VISIBLE ──────────────────────────────┐")
+print("  │  The view uses read_files() on the data/ directory.         │")
+print("  │  When Spark appends a new Iceberg snapshot, it writes new   │")
+print("  │  *.parquet files into that same directory.  The next query  │")
+print("  │  against the view picks them up automatically — no notebook │")
+print("  │  re-run and no DDL change is ever required for the view.    │")
+print("  │                                                             │")
+print("  │  Run Cell 5 to refresh the Delta audit table (zero-downtime │")
+print("  │  atomic overwrite via Delta MVCC).                          │")
+print("  └─────────────────────────────────────────────────────────────┘")
+print()
+print("  ALTER VIEW (only if you need to change the view definition):")
+print("  spark.sql('ALTER VIEW <view> AS SELECT ...')")
 
 # COMMAND ----------
 
