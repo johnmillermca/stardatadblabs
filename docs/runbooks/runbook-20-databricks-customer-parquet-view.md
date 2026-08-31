@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / databricks |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-03 |
+| **Last Updated** | 2026-08-31 (fix: snap_id / snap_timestamp columns added to Section 5-D) |
 
 ---
 
@@ -481,13 +481,23 @@ spark.sql(
 
 ### 5-D — Generate and insert 100 new rows (JupyterHub)
 
+> **Fix applied 2026-08-31** — The original code omitted `snap_id` and `snap_timestamp`
+> from `CUSTOMER_SCHEMA` and `Row(...)`, causing:
+> ```
+> AnalysisException: [INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA]
+> Cannot find data for the output column `snap_id`.
+> ```
+> Both columns are now included. `snap_id` defaults to `None` (the Iceberg REST
+> catalog populates it during the write); `snap_timestamp` is set to the row's
+> `created_at` value so the audit column is always populated.
+
 The new rows use IDs 1 001 – 1 100 and a different random seed (`seed=99`) so the names and cities are distinct from the original batch.
 
 ```python
 import datetime, hashlib, random
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    DateType, DoubleType, IntegerType, StringType,
+    DateType, DoubleType, IntegerType, LongType, StringType,
     StructField, StructType, TimestampType,
 )
 
@@ -508,6 +518,8 @@ CUSTOMER_SCHEMA = StructType([
     StructField("is_active",      IntegerType(),   nullable=True),
     StructField("created_at",     TimestampType(), nullable=True),
     StructField("updated_at",     TimestampType(), nullable=True),
+    StructField("snap_id",        LongType(),      nullable=True),      # ← fix
+    StructField("snap_timestamp", TimestampType(), nullable=True),      # ← fix
 ])
 
 _FIRST = ["James","Mary","John","Patricia","Robert","Jennifer","Michael","Linda",
@@ -541,6 +553,7 @@ for i in range(1001, 1101):                          # IDs 1 001 – 1 100
     city, cc = rng.choice(_CITIES)
     dob  = datetime.date(rng.randint(1960,2000), rng.randint(1,12), rng.randint(1,28))
     tag  = hashlib.md5(f"{first}{last}{i}".encode()).hexdigest()[:6]
+    row_created_at = base_dt + datetime.timedelta(days=rng.randint(0,90))
     rows.append(Row(
         customer_id   = i,
         full_name     = f"{first} {last}",
@@ -555,8 +568,10 @@ for i in range(1001, 1101):                          # IDs 1 001 – 1 100
         salary        = round(rng.uniform(30_000, 200_000), 2),
         customer_tier = rng.choice(_TIERS),
         is_active     = 1,
-        created_at    = base_dt + datetime.timedelta(days=rng.randint(0,90)),
+        created_at    = row_created_at,
         updated_at    = base_dt + datetime.timedelta(days=rng.randint(0,120)),
+        snap_id       = None,           # ← fix: populated by Iceberg on commit
+        snap_timestamp= row_created_at, # ← fix: audit timestamp mirrors created_at
     ))
 
 df_new = spark.createDataFrame(rows, schema=CUSTOMER_SCHEMA)
