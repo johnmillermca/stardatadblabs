@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / databricks |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-08-31 (fix: snap_id / snap_timestamp columns added to Section 5-D) |
+| **Last Updated** | 2026-08-31 (fix: snap_id / snap_timestamp columns; SHOW VIEWS replaced with spark.catalog.tableExists()) |
 
 ---
 
@@ -258,10 +258,14 @@ SHOW SCHEMAS IN lakehouse;
 ```
 ✅ `lakehouse_db` listed
 
-```sql
-SHOW VIEWS IN lakehouse.lakehouse_db;
+> **Note:** `SHOW VIEWS IN lakehouse.lakehouse_db` does not support cross-catalog
+> 3-part schema references on Serverless compute. Use the Python check below instead.
+
+```python
+# Run in a Databricks notebook attached to the same cluster / SQL warehouse
+print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
 ```
-✅ `vw_customer_latest` listed
+✅ Expected: `True`
 
 ---
 
@@ -961,9 +965,19 @@ Run the blocks below in order. Expected results are shown after each query.
 ```sql
 SHOW SCHEMAS IN lakehouse;
 -- ✅ lakehouse_db listed
+```
 
-SHOW VIEWS IN lakehouse.lakehouse_db;
--- ✅ vw_customer_latest and vw_customer_orders_latest listed
+> **Note:** `SHOW VIEWS IN lakehouse.lakehouse_db` does not support cross-catalog
+> 3-part schema references on Serverless compute. Use `spark.catalog.tableExists()`
+> with the fully-qualified 3-part name instead:
+
+```python
+# Run in a Databricks notebook
+print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
+# ✅ True
+
+print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_orders_latest"))
+# ✅ True
 ```
 
 ---
@@ -1226,8 +1240,13 @@ CACHE SELECT * FROM lakehouse.lakehouse_db.vw_customer_latest;
 
 -- Evict cache for a specific view
 UNCACHE TABLE IF EXISTS lakehouse.lakehouse_db.vw_customer_latest;
+```
 
--- Check what is currently cached (Unity Catalog clusters)
-SHOW VIEWS IN lakehouse.lakehouse_db;
--- Then inspect query profiles to confirm cache hits
+> **Note:** `SHOW VIEWS IN lakehouse.lakehouse_db` does not work on Serverless compute
+> (cross-catalog 3-part schema reference not supported). To confirm a view exists, use:
+
+```python
+# Run in a Databricks notebook
+print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
+# ✅ True — then inspect query profiles to confirm cache hits
 ```
