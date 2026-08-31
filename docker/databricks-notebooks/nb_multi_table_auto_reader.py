@@ -241,13 +241,12 @@ for tbl, snap in SNAPSHOTS.items():
     view      = snap["view"]
     data_path = snap["data_path"]          # stable directory — never changes
 
-    catalog, schema, view_name = view.split(".")
+    # spark.catalog.tableExists() accepts a fully-qualified 3-part name and
+    # works on Serverless compute.  SHOW VIEWS IN {catalog}.{schema} raises
+    # CROSS_CATALOG_SCHEMA_REFERENCE_NOT_SUPPORTED on Serverless and was removed.
+    view_exists = spark.catalog.tableExists(view)
 
-    existing = spark.sql(
-        f"SHOW VIEWS IN {catalog}.{schema} LIKE '{view_name}'"
-    ).count()
-
-    if existing == 0:
+    if not view_exists:
         spark.sql(f"""
             CREATE VIEW IF NOT EXISTS {view}
             COMMENT 'Iceberg parquet for {tbl} — directory-glob view, never needs DDL refresh'
