@@ -379,3 +379,76 @@ print(f"✅ NVMe cache refreshed for {VIEW_TO_RECACHE}")
 #     spark.sql(f"CACHE SELECT * FROM {snap['view']}")
 #     print(f"  ✅ Done")
 # print("✅ All views re-warmed")
+
+# COMMAND ----------
+
+# =============================================================================
+# Cell 9 — Sample: manually create the view for ONE new table on first refresh
+# =============================================================================
+# USE THIS WHEN:
+#   • You just created a new Iceberg table in Spark (e.g. analytics_db.product)
+#   • You want the Databricks view to exist immediately — without waiting for
+#     the next full notebook run (Cells 1 → 6).
+#
+# HOW IT WORKS:
+#   1. Set NEW_TABLE_KEY  to "<db_name>.<table_name>"  (matches the S3 folder names)
+#   2. Run this cell — it creates the schema if missing, then creates the view
+#      using CREATE VIEW IF NOT EXISTS (safe to re-run; no-op if already exists).
+#   3. Subsequent full notebook runs (Cells 2 + 4) detect the view via
+#      spark.catalog.tableExists() and skip DDL — zero downtime preserved.
+#
+# AFTER THIS CELL:
+#   • The view is live in Unity Catalog immediately.
+#   • New parquet files appended by future Spark writes are picked up
+#     automatically by read_files() — no further DDL is ever needed.
+#
+# NOTE: This cell is intentionally standalone. You do NOT need to run
+#       Cells 1–8 first. Just set the two variables below and run.
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+NEW_TABLE_KEY      = "analytics_db.product"          # "<db_name>.<table_name>"
+WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"  # same as Cell 1
+DATABRICKS_CATALOG = "lakehouse"                     # same as Cell 1
+# ──────────────────────────────────────────────────────────────────────────────
+
+db_name, table_name = NEW_TABLE_KEY.split(".", 1)
+
+data_path  = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{table_name}/data/"
+view       = f"{DATABRICKS_CATALOG}.{db_name}.vw_{table_name}_latest"
+
+print(f"New table  : {NEW_TABLE_KEY}")
+print(f"Data path  : {data_path}")
+print(f"Target view: {view}")
+print()
+
+# Step 1 — ensure the schema exists in Unity Catalog
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{db_name}")
+print(f"✅ Schema {DATABRICKS_CATALOG}.{db_name} ready")
+
+# Step 2 — create the view (only fires if it does not already exist)
+if spark.catalog.tableExists(view):
+    row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {view}").collect()[0]["n"]
+    print(f"✅ View already exists — skipping DDL (zero downtime preserved)")
+    print(f"   rows={row_count:,}  src={data_path}")
+else:
+    spark.sql(f"""
+        CREATE VIEW IF NOT EXISTS {view}
+        COMMENT 'Iceberg parquet for {NEW_TABLE_KEY} — directory-glob view, never needs DDL refresh'
+        AS
+        SELECT
+            *,
+            _metadata.file_path AS snap_file,
+            _metadata.file_size AS snap_file_size
+        FROM read_files(
+            '{data_path}',
+            format      => 'parquet',
+            mergeSchema => true
+        )
+    """)
+    row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {view}").collect()[0]["n"]
+    print(f"✅ View CREATED")
+    print(f"   rows={row_count:,}  src={data_path}")
+
+print()
+print("  The view is now live. Future Spark appends to this table are")
+print("  visible automatically on the next query — no DDL change needed.")
