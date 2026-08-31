@@ -1,10 +1,11 @@
 # Databricks notebook source
 # nb_multi_table_auto_reader.py
 #
-# PURPOSE  : Single automated notebook that reads parquet data from ANY number
-#            of Iceberg S3 folders.  For each configured table it:
-#              1. Lists the metadata/ prefix and picks the newest *.metadata.json
-#              2. Parses the JSON to confirm the active snapshot (diagnostic only)
+# PURPOSE  : Single automated notebook that discovers every Iceberg table under
+#            a given S3 warehouse prefix and, for each one:
+#              1. Auto-discovers all table folders under the warehouse prefix
+#                 via dbutils.fs.ls() — no table names need to be hardcoded
+#              2. Picks the newest *.metadata.json in each table's metadata/ dir
 #              3. Creates the view ONCE via CREATE VIEW IF NOT EXISTS — never
 #                 replaced again, so in-flight user queries are never interrupted
 #              4. Atomically overwrites the Delta audit table (INSERT OVERWRITE)
@@ -21,59 +22,116 @@
 # INSERT OVERWRITE Delta      (Cell 5) → single atomic transaction; concurrent
 #   reads see the old data until the commit, then instantly see the new data.
 #
-# TO ADD A NEW TABLE: add one entry to TABLE_CONFIGS below, nothing else.
+# TO ADD A NEW TABLE: just create the Iceberg table with Spark — the next
+#   notebook run discovers it automatically.  No code changes required.
 #
 # CATALOG  : lakehouse  (Unity Catalog)
-# SCHEMA   : lakehouse.lakehouse_db
+# SCHEMA   : derived from the database folder name under the warehouse prefix
 
 # COMMAND ----------
 
 # =============================================================================
-# Cell 1 — Configuration: all Iceberg tables to refresh
+# Cell 1 — Configuration: warehouse root only
 # =============================================================================
-# Each entry is:
-#   "logical_name": {
-#       "meta_path"  : S3 URI of the metadata/ directory (trailing slash required).
-#                      Used to resolve the latest snapshot for diagnostics and for
-#                      refreshing the Delta audit table.
-#       "data_path"  : S3 URI of the data/ directory (stable, never changes).
-#                      The VIEW is permanently pointed here — read_files() on a
-#                      directory glob picks up every new *.parquet file on each
-#                      query without any DDL change to the view.
-#       "view"       : fully-qualified Databricks view name (created once, never
-#                      replaced — zero downtime for concurrent users).
-#       "audit_tbl"  : fully-qualified Delta table name (overwritten atomically
-#                      on every refresh — no read gap due to Delta MVCC).
-#   }
+# Set the two values below.  Everything else is auto-discovered by scanning
+# the S3 directory tree — no table names ever need to be hardcoded.
 #
-# Add or remove entries here to control which tables are refreshed.
+# WAREHOUSE_ROOT  : S3 URI that contains one sub-folder per database.
+#                   Each database folder contains one sub-folder per table.
+#                   Structure expected:
+#                     <WAREHOUSE_ROOT>/
+#                       <db_name>/          ← one folder per Iceberg database
+#                         <table_name>/     ← one folder per Iceberg table
+#                           metadata/       ← *.metadata.json files
+#                           data/           ← *.parquet files
+#
+# DATABRICKS_CATALOG : Unity Catalog catalog name where views and Delta audit
+#                      tables will be created.
+#
+# SKIP_TABLES : set of "<db>.<table>" names to exclude from auto-discovery
+#               (e.g. system tables, staging tables you don't want views for).
 
-TABLE_CONFIGS = {
-    "customer": {
-        "meta_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/",
-        "data_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/",
-        "view"       : "lakehouse.lakehouse_db.vw_customer_latest",
-        "audit_tbl"  : "lakehouse.lakehouse_db.customer_snapshot_audit",
-    },
-    "customer_orders": {
-        "meta_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/metadata/",
-        "data_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/",
-        "view"       : "lakehouse.lakehouse_db.vw_customer_orders_latest",
-        "audit_tbl"  : "lakehouse.lakehouse_db.customer_orders_snapshot_audit",
-    },
-    # ── add more tables below ──────────────────────────────────────────────
-    # "product": {
-    #     "meta_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/product/metadata/",
-    #     "data_path"  : "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/product/data/",
-    #     "view"       : "lakehouse.lakehouse_db.vw_product_latest",
-    #     "audit_tbl"  : "lakehouse.lakehouse_db.product_snapshot_audit",
-    # },
-}
+WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
+DATABRICKS_CATALOG = "lakehouse"
+SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
 
-CATALOG_SCHEMA = "lakehouse.lakehouse_db"
+print(f"Warehouse root     : {WAREHOUSE_ROOT}")
+print(f"Databricks catalog : {DATABRICKS_CATALOG}")
 
-print(f"Tables configured : {list(TABLE_CONFIGS.keys())}")
-print(f"Target schema     : {CATALOG_SCHEMA}")
+# COMMAND ----------
+
+# =============================================================================
+# Cell 2 — Auto-discover all Iceberg tables under the warehouse root
+# =============================================================================
+# Walks two levels deep:
+#   Level 1 → database folders  (e.g. lakehouse_db/, analytics_db/)
+#   Level 2 → table folders     (e.g. customer/, customer_orders/, product/)
+#
+# A folder is treated as a valid Iceberg table only when it contains a
+# metadata/ sub-directory.  Folders without metadata/ are silently skipped
+# (e.g. _delta_log/, _checkpoints/, or any non-Iceberg folder).
+#
+# Result: TABLE_CONFIGS dict with the same shape as before, built entirely
+# from S3 directory listings — no hardcoding required.
+
+TABLE_CONFIGS = {}
+discovery_skipped = []
+
+db_entries = dbutils.fs.ls(WAREHOUSE_ROOT)
+
+for db_entry in db_entries:
+    if not db_entry.isDir():
+        continue                              # skip stray files at root level
+
+    db_name = db_entry.name.rstrip("/")       # e.g. "lakehouse_db"
+
+    try:
+        table_entries = dbutils.fs.ls(db_entry.path)
+    except Exception:
+        continue                              # no permission / empty prefix
+
+    for tbl_entry in table_entries:
+        if not tbl_entry.isDir():
+            continue
+
+        tbl_name = tbl_entry.name.rstrip("/") # e.g. "customer"
+        key      = f"{db_name}.{tbl_name}"    # e.g. "lakehouse_db.customer"
+
+        if key in SKIP_TABLES:
+            discovery_skipped.append(key)
+            continue
+
+        meta_path = tbl_entry.path.rstrip("/") + "/metadata/"
+        data_path = tbl_entry.path.rstrip("/") + "/data/"
+
+        # Confirm metadata/ exists before including this folder
+        try:
+            ls_check = dbutils.fs.ls(meta_path)
+            has_meta = any(f.name.endswith(".metadata.json") for f in ls_check)
+        except Exception:
+            has_meta = False
+
+        if not has_meta:
+            continue                          # not an Iceberg table — skip
+
+        TABLE_CONFIGS[key] = {
+            "db_name"    : db_name,
+            "table_name" : tbl_name,
+            "meta_path"  : meta_path,
+            "data_path"  : data_path,
+            # view name:      vw_<table>_latest
+            # audit tbl name: <table>_snapshot_audit
+            "view"       : f"{DATABRICKS_CATALOG}.{db_name}.vw_{tbl_name}_latest",
+            "audit_tbl"  : f"{DATABRICKS_CATALOG}.{db_name}.{tbl_name}_snapshot_audit",
+        }
+
+print("─" * 60)
+print(f"Auto-discovered {len(TABLE_CONFIGS)} Iceberg table(s):")
+for key, cfg in TABLE_CONFIGS.items():
+    print(f"  {key:<35}  view → {cfg['view'].split('.')[-1]}")
+if discovery_skipped:
+    print(f"\nSkipped (SKIP_TABLES): {discovery_skipped}")
+print("─" * 60)
 
 # COMMAND ----------
 
@@ -134,17 +192,22 @@ print("✅ Helper function defined")
 # COMMAND ----------
 
 # =============================================================================
-# Cell 3 — Resolve latest snapshot for every configured table
+# Cell 4 — Resolve latest snapshot for every discovered table
 # =============================================================================
-# Loops over TABLE_CONFIGS and calls resolve_latest_snapshot() for each.
-# Results are collected into SNAPSHOTS so later cells can use them without
-# re-reading S3.
+# Loops over TABLE_CONFIGS (built by Cell 2) and calls resolve_latest_snapshot()
+# for each table.  Results are collected into SNAPSHOTS so later cells can use
+# them without re-reading S3.
+#
+# Also ensures each database schema exists in the Databricks catalog so that
+# subsequent CREATE VIEW and saveAsTable calls don't fail on a missing schema.
 
 print("─" * 60)
 print("Resolving latest Iceberg snapshots …")
 print("─" * 60)
 
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG_SCHEMA}")
+# Create every schema discovered (one CREATE SCHEMA per unique db_name)
+for db_name in {cfg["db_name"] for cfg in TABLE_CONFIGS.values()}:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{db_name}")
 
 SNAPSHOTS = {}
 errors    = []
@@ -168,7 +231,7 @@ else:
 # COMMAND ----------
 
 # =============================================================================
-# Cell 4 — Create views (once only, zero-downtime)
+# Cell 5 — Create views (once only, zero-downtime)
 # =============================================================================
 # ZERO-DOWNTIME STRATEGY
 # ──────────────────────
@@ -249,7 +312,7 @@ print("  spark.sql('ALTER VIEW <view> AS SELECT ...')")
 # COMMAND ----------
 
 # =============================================================================
-# Cell 5 — Refresh Delta audit tables for all resolved tables
+# Cell 6 — Refresh Delta audit tables for all resolved tables
 # =============================================================================
 # For each table:
 #   a) CREATE TABLE IF NOT EXISTS  <audit_tbl>  USING DELTA  (schema inferred
@@ -305,7 +368,7 @@ print(f"✅ {len(SNAPSHOTS)} audit table(s) refreshed")
 # COMMAND ----------
 
 # =============================================================================
-# Cell 6 — Summary report
+# Cell 7 — Summary report
 # =============================================================================
 # Prints a consolidated table showing every object that was updated, its
 # row count, and the snapshot timestamp.  Run after Cells 3–5.
@@ -333,7 +396,7 @@ print("═" * 70)
 # COMMAND ----------
 
 # =============================================================================
-# Cell 7 — Optional: OPTIMIZE all audit tables
+# Cell 8 — Optional: OPTIMIZE all audit tables
 # =============================================================================
 # Compacts small Delta files for faster SQL queries.
 # Run after a large refresh or when query times increase.
