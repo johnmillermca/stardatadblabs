@@ -55,6 +55,18 @@ data:
     spark.sql.catalog.snowflake.warehouse    SNOWFLAKE_SAMPLE_DATA
     spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
 
+    # ── Databricks catalog → Polaris REST (warehouse: star_lakehouse) ────────
+    # Credentials (credential, oauth2-server-uri, s3.*) injected at runtime
+    # by bao_spark_init.spark_conf().  Stanza here registers the catalog name
+    # so it is available on every pod without a per-job SparkSession call.
+    spark.sql.catalog.databricks                       org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.databricks.type                  rest
+    spark.sql.catalog.databricks.uri                   http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+    spark.sql.catalog.databricks.warehouse             star_lakehouse
+    spark.sql.catalog.databricks.scope                 PRINCIPAL_ROLE:ALL
+    spark.sql.catalog.databricks.rest.auth.type        oauth2
+    spark.sql.catalog.databricks.default-namespace     lakehouse_db
+
     # ── S3A defaults (credentials injected at runtime) ────────────────────────
     spark.hadoop.fs.s3a.impl                        org.apache.hadoop.fs.s3a.S3AFileSystem
     spark.hadoop.fs.s3a.endpoint                    https://s3.us-east-2.amazonaws.com

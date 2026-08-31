@@ -81,6 +81,12 @@ COPY jars/iceberg-aws-bundle-1.9.2.jar \
 COPY jars/postgresql-42.7.4.jar \
      /opt/spark/jars/postgresql-42.7.4.jar
 
+# Databricks Simba JDBC driver — required by starpump databricks connector.
+# Download from: https://www.databricks.com/spark/jdbc-drivers-download
+# Place the jar in docker/spark-gluten-velox/jars/ before building.
+COPY jars/databricks-jdbc-2.6.36.1070.jar \
+     /opt/spark/jars/databricks-jdbc-2.6.36.1070.jar
+
 # ── Python packages — split into layers to avoid pip botocore conflict ────────
 # Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
 RUN pip3 install --no-cache-dir \
@@ -133,9 +139,10 @@ RUN echo 'export SPARK_JAVA_OPTS="-Dlog4j.configurationFile=/opt/spark/conf/log4
 # into docker/spark-gluten-velox/scripts/ so they are part of the build context.
 # Update scripts/ whenever the source files change, then rebuild the image.
 RUN mkdir -p /opt/spark/work-dir
-COPY scripts/bao_spark_init.py        /opt/spark/work-dir/bao_spark_init.py
-COPY scripts/spark_iceberg_utils.py   /opt/spark/work-dir/spark_iceberg_utils.py
-COPY scripts/starpump.py              /opt/spark/work-dir/starpump.py
+COPY scripts/bao_spark_init.py           /opt/spark/work-dir/bao_spark_init.py
+COPY scripts/spark_iceberg_utils.py      /opt/spark/work-dir/spark_iceberg_utils.py
+COPY scripts/starpump.py                 /opt/spark/work-dir/starpump.py
+COPY scripts/databricks_customer_seed.py /opt/spark/work-dir/databricks_customer_seed.py
 RUN chmod 644 /opt/spark/work-dir/*.py
 
 # ── CLI entry-points ──────────────────────────────────────────────────────────
@@ -184,6 +191,17 @@ spark.sql.catalog.snowflake                   org.apache.iceberg.spark.SparkCata
 spark.sql.catalog.snowflake.type              hadoop
 spark.sql.catalog.snowflake.warehouse         SNOWFLAKE_SAMPLE_DATA
 spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
+
+# ── Databricks catalog → Polaris REST (warehouse: star_lakehouse) ─────────────
+# Credentials (credential, oauth2-server-uri, s3 keys) injected at runtime
+# by bao_spark_init.spark_conf().  This stanza declares the catalog so pods
+# have it available without a per-job SparkSession.builder call.
+spark.sql.catalog.databricks                            org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.databricks.type                       rest
+spark.sql.catalog.databricks.uri                        http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+spark.sql.catalog.databricks.warehouse                  star_lakehouse
+spark.sql.catalog.databricks.scope                      PRINCIPAL_ROLE:ALL
+spark.sql.catalog.databricks.rest.auth.type             oauth2
 
 # ── Global Iceberg write defaults (256 MB file size) ─────────────────────────
 spark.sql.iceberg.write.format.default               parquet
