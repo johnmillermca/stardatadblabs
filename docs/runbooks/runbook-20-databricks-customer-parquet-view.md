@@ -885,7 +885,6 @@ For every folder that contains at least one `*.metadata.json` the notebook deriv
 | Field | Derived value (example) |
 |---|---|
 | `view` | `lakehouse.lakehouse_db.vw_customer_latest` |
-| `audit_tbl` | `lakehouse.lakehouse_db.customer_snapshot_audit` |
 | `data_path` | `s3://.../lakehouse_db/customer/data/` |
 | `meta_path` | `s3://.../lakehouse_db/customer/metadata/` |
 
@@ -1044,28 +1043,25 @@ Run the blocks below in order. Expected results are shown after each query.
 SHOW SCHEMAS IN lakehouse;
 -- ✅ lakehouse_db listed
 
-SHOW TABLES IN lakehouse.lakehouse_db;
--- ✅ Both views (vw_customer_latest, vw_customer_orders_latest) and both
---    Delta tables (customer_snapshot_audit, customer_orders_snapshot_audit) listed
+SHOW VIEWS IN lakehouse.lakehouse_db;
+-- ✅ vw_customer_latest and vw_customer_orders_latest listed
 ```
 
 ---
 
-### 9-2 — Row counts: view and Delta table must agree (per table)
+### 9-2 — Row counts
 
 ```sql
 -- customer
-SELECT
-    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.vw_customer_latest)           AS customer_view_rows,
-    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.customer_snapshot_audit)      AS customer_table_rows;
+SELECT COUNT(*) AS customer_rows
+FROM   lakehouse.lakehouse_db.vw_customer_latest;
 
 -- customer_orders
-SELECT
-    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.vw_customer_orders_latest)        AS orders_view_rows,
-    (SELECT COUNT(*) FROM lakehouse.lakehouse_db.customer_orders_snapshot_audit)   AS orders_table_rows;
+SELECT COUNT(*) AS orders_rows
+FROM   lakehouse.lakehouse_db.vw_customer_orders_latest;
 ```
 
-✅ Expected: each pair of columns must be equal after the notebook refresh.
+✅ Expected: `customer_rows` = 1000 (or 1100 after the 100-row insert); `orders_rows` reflects the latest snapshot.
 
 ---
 
@@ -1121,39 +1117,17 @@ ORDER  BY insert_date;
 
 ---
 
-### 9-6 — Tier distribution (view vs. Delta table must match)
+### 9-6 — Tier distribution (customer view)
 
 ```sql
--- View
 SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary),2) AS avg_salary
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 GROUP  BY customer_tier ORDER BY cnt DESC;
-
--- Delta table (run after notebook refresh)
-SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary),2) AS avg_salary
-FROM   lakehouse.lakehouse_db.customer_snapshot_audit
-GROUP  BY customer_tier ORDER BY cnt DESC;
 ```
 
 ---
 
-### 9-7 — Last refresh timestamp (Delta tables)
-
-```sql
--- customer
-SELECT MAX(refreshed_at) AS last_refresh_utc
-FROM   lakehouse.lakehouse_db.customer_snapshot_audit;
-
--- customer_orders
-SELECT MAX(refreshed_at) AS last_refresh_utc
-FROM   lakehouse.lakehouse_db.customer_orders_snapshot_audit;
-```
-
-✅ Expected: recent UTC timestamps matching when Cells 3–5 of the unified notebook last ran.
-
----
-
-### 9-8 — Data quality checks (customer)
+### 9-7 — Data quality checks (customer)
 
 ```sql
 -- No duplicate customer_ids
@@ -1180,20 +1154,6 @@ FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  salary < 30000 OR salary > 200000;
 -- ✅ Expected: 0
 ```
-
----
-
-### 9-9 — Delta table transaction history
-
-```sql
--- customer audit table history
-DESCRIBE HISTORY lakehouse.lakehouse_db.customer_snapshot_audit;
-
--- customer_orders audit table history
-DESCRIBE HISTORY lakehouse.lakehouse_db.customer_orders_snapshot_audit;
-```
-
-✅ Expected: one `WRITE` row per notebook refresh run, `numOutputRows` in `operationMetrics`.
 
 ---
 
