@@ -346,56 +346,13 @@ read_files('s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/dat
 
 ## 4. Refresh the view after a new Spark write
 
-Every time new rows are inserted by Spark, re-run the two cells below in a **Databricks notebook** to pick up the new snapshot and update the view.
-
-### Databricks notebook — Cell A: resolve latest data path
-
-> Run this in the **Databricks** notebook (uses `dbutils.fs` and `spark` — no secret scope needed).
-
-```python
-import json
-
-META_PATH = "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/"
-
-all_files  = dbutils.fs.ls(META_PATH)
-meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
-meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
-
-latest = meta_files[0]
-print(f"✅ Latest metadata ({len(meta_files)} snapshots): {latest.path}")
-
-meta_json = spark.read.text(latest.path, wholetext=True).collect()[0][0]
-meta      = json.loads(meta_json)
-DATA_PATH = meta["location"].rstrip("/") + "/data/"
-print(f"✅ Data path: {DATA_PATH}")
-```
-
-### Databricks notebook — Cell B: recreate view pointing at new snapshot
-
-```python
-spark.sql("CREATE SCHEMA IF NOT EXISTS lakehouse.lakehouse_db")
-
-spark.sql(f"""
-    CREATE OR REPLACE VIEW lakehouse.lakehouse_db.vw_customer_latest
-    COMMENT 'Latest Iceberg snapshot of customer — re-run after each Spark write'
-    AS
-    SELECT
-        customer_id, full_name, email, phone_number, date_of_birth,
-        national_id, street_address, city, country_code, ip_address,
-        salary, customer_tier, is_active, created_at, updated_at,
-        snap_id, snap_timestamp
-    FROM read_files(
-        '{DATA_PATH}',
-        format      => 'parquet',
-        mergeSchema => true
-    )
-""")
-
-print(f"✅ View refreshed: lakehouse.lakehouse_db.vw_customer_latest")
-print(f"   Backed by: {DATA_PATH}")
-```
-
-> Then go to the **Databricks SQL console** and rerun Check 2 — the count will reflect the new rows.
+> **This section is superseded by Section 8.**
+> The auto-discovery notebook ([`nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)) scans the entire S3 warehouse root and refreshes **all** tables in one pass — no per-table code required.
+>
+> **To refresh after any Spark write:** re-run **Cells 2 and 4** of the notebook.
+> The views point at the `data/` directory and pick up new parquet files automatically on the next query — no notebook re-run is needed for the view itself.
+>
+> See **[Section 8 → How to run](#8-auto-discovery-notebook--all-tables-from-s3-in-one-pass)** for full steps.
 
 ---
 
@@ -659,63 +616,10 @@ print("✅ Session stopped — cluster cores released")
 
 ### 5-G — Refresh the Databricks view (Databricks notebook)
 
-Open a **Databricks notebook** at `https://dbc-11a1dbc5-061a.cloud.databricks.com`.
-Run these two cells in order to point the view at the new Iceberg snapshot.
-
-**Cell G-1 — Resolve the latest metadata JSON**
-
-```python
-import json
-
-META_PATH = "s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/"
-
-all_files  = dbutils.fs.ls(META_PATH)
-meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
-meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
-
-latest = meta_files[0]
-print(f"✅ Latest metadata ({len(meta_files)} snapshots): {latest.path}")
-
-meta_json = spark.read.text(latest.path, wholetext=True).collect()[0][0]
-meta      = json.loads(meta_json)
-DATA_PATH = meta["location"].rstrip("/") + "/data/"
-print(f"✅ Data path: {DATA_PATH}")
-```
-
-✅ Expected:
-```
-✅ Latest metadata (3 snapshots): s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/00002-....metadata.json
-✅ Data path: s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
-```
-
-> The snapshot count increases by 1 with every `append` write. After inserting the original
-> 1 000 rows and now the 100 more rows, you will see **2 or more** snapshots listed.
-
-**Cell G-2 — Replace the view to use the new snapshot**
-
-```python
-spark.sql("CREATE SCHEMA IF NOT EXISTS lakehouse.lakehouse_db")
-
-spark.sql(f"""
-    CREATE OR REPLACE VIEW lakehouse.lakehouse_db.vw_customer_latest
-    COMMENT 'Latest Iceberg snapshot of customer — re-run after each Spark write'
-    AS
-    SELECT
-        customer_id, full_name, email, phone_number, date_of_birth,
-        national_id, street_address, city, country_code, ip_address,
-        salary, customer_tier, is_active, created_at, updated_at,
-        snap_id, snap_timestamp
-    FROM read_files(
-        '{DATA_PATH}',
-        format      => 'parquet',
-        mergeSchema => true
-    )
-""")
-
-print(f"✅ View refreshed → {DATA_PATH}")
-```
-
-✅ Expected: `✅ View refreshed → s3://stardata-databricks/.../customer/data/`
+> **Superseded by Section 8.** The auto-discovery notebook refreshes **all** tables from the entire S3 warehouse root in one pass.
+>
+> Open [`nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py) in Databricks and re-run **Cells 2 and 4**.
+> The view (`vw_customer_latest`) already points at the `data/` directory — new parquet files written by the 100-row insert are visible on the next SQL query automatically, without any notebook re-run.
 
 ---
 
