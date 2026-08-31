@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / databricks |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-01 |
+| **Last Updated** | 2026-09-03 |
 
 ---
 
@@ -18,8 +18,9 @@ This runbook covers two ways to read it:
 - **Section 2** — Read from **JupyterHub** using PySpark (query via Iceberg catalog)
 - **Section 3** — Read and verify from the **Databricks SQL console** (via `read_files()` and a persistent view)
 - **Section 5** — **Insert 100 more rows** from JupyterHub and see them live in Databricks (end-to-end walk-through)
-- **Section 8** — **Unified multi-table notebook** — single script reads all S3 folders, resolves the latest JSON per table, refreshes all views and Delta tables in one pass
+- **Section 8** — **Auto-discovery notebook** — scans the entire S3 warehouse root, discovers every Iceberg table automatically (no table names hardcoded), creates views once with zero-downtime
 - **Section 9** — **DML test steps** — SQL queries to verify the latest data in Databricks
+- **Section 10** — **NVMe disk cache** — how to cache views into local NVMe storage to eliminate S3 round-trips
 
 ```
 Spark Gluten (k8s)           S3: stardata-databricks
@@ -848,122 +849,156 @@ Harmless — Hadoop looks for an optional metrics file that does not exist. Igno
 
 ---
 
-## 8. Unified multi-table auto-reader notebook
+## 8. Auto-discovery notebook — all tables from S3 in one pass
 
 **Notebook:** [`docker/databricks-notebooks/nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)
 
-This **single notebook** handles every S3 Iceberg folder in one pass with a **zero-downtime** design — no user query against either the view or the Delta table is ever interrupted during a refresh.
-
-**To add a new S3 table:** add one entry to `TABLE_CONFIGS` in Cell 1 — nothing else changes.
+This **single notebook** scans the entire S3 warehouse root, discovers every Iceberg table automatically, and — for each one — creates a view and refreshes a Delta audit table. **No table names are ever hardcoded.** Adding a new Iceberg table requires no code change; the next notebook run picks it up automatically.
 
 Upload to Databricks at `https://dbc-11a1dbc5-061a.cloud.databricks.com` and attach to a cluster with Unity Catalog enabled.
 
 ---
 
-### Zero-downtime design
+### How auto-discovery works
 
-There are two objects users query and each is handled differently:
+The notebook walks two directory levels under `WAREHOUSE_ROOT`:
 
-#### Views (`vw_customer_latest`, `vw_customer_orders_latest`)
+```
+s3://stardata-databricks/iceberg/warehouse/          ← WAREHOUSE_ROOT (Cell 1)
+│
+├── lakehouse_db/                                     ← Level 1: database folder
+│   ├── customer/                                     ← Level 2: table folder
+│   │   ├── metadata/  *.metadata.json  ✅ included
+│   │   └── data/      *.parquet
+│   ├── customer_orders/                              ← also included
+│   ├── product/                                      ← new table → auto-picked up
+│   └── _staging/      no metadata.json  ⛔ skipped
+│
+└── analytics_db/                                     ← second database, also scanned
+    └── sales/
+        ├── metadata/  ✅ included
+        └── data/
+```
 
-| What | How |
+For every folder that contains at least one `*.metadata.json` the notebook derives:
+
+| Field | Derived value (example) |
 |---|---|
-| **View points at the `data/` directory, not a snapshot file** | `read_files('s3://.../customer/data/', ...)` — Iceberg always appends new `.parquet` files into this same directory, so every user query automatically reads the newest files without any DDL change |
-| **`CREATE VIEW IF NOT EXISTS` (not `CREATE OR REPLACE`)** | The view is created **once** on the first notebook run and **never replaced again**. The `IF NOT EXISTS` clause makes every subsequent run a no-op for the view — no DDL lock, no interruption |
-| **New data visible immediately** | After Spark writes a new Iceberg snapshot, the next user `SELECT` against the view picks up the new parquet files automatically — **no notebook re-run is needed for the view** |
+| `view` | `lakehouse.lakehouse_db.vw_customer_latest` |
+| `audit_tbl` | `lakehouse.lakehouse_db.customer_snapshot_audit` |
+| `data_path` | `s3://.../lakehouse_db/customer/data/` |
+| `meta_path` | `s3://.../lakehouse_db/customer/metadata/` |
 
-> To update the view definition (e.g. add a column), use `ALTER VIEW lakehouse.lakehouse_db.vw_customer_latest AS SELECT ...` — this is a metadata-only operation with a sub-millisecond lock.
-
-#### Delta audit tables (`customer_snapshot_audit`, `customer_orders_snapshot_audit`)
-
-| What | How |
-|---|---|
-| **Atomic `INSERT OVERWRITE`** | Cell 5 replaces the whole table in a single Delta transaction |
-| **Delta MVCC (snapshot isolation)** | Queries running during the overwrite continue reading the old version until the transaction commits, then instantly see the new data — there is no window where the table is empty or partially written |
+Folders that have **no** `*.metadata.json` (staging folders, Delta tables, checkpoints) are silently skipped.
 
 ---
+
+### Zero-downtime design
+
+Two objects are created per table and each has its own refresh strategy:
+
+#### Views — `vw_<table>_latest`
+
+| Principle | Detail |
+|---|---|
+| **Points at `data/` directory, not a snapshot path** | `read_files('s3://.../customer/data/', format=>'parquet')` — every query reads whatever `.parquet` files exist at that moment; new Iceberg snapshots add files to the same directory |
+| **`CREATE VIEW IF NOT EXISTS` — created once, never replaced** | First run creates the view. Every subsequent run detects it exists and skips — no DDL lock, no interruption to in-flight queries |
+| **New data visible automatically** | After Spark appends a new Iceberg snapshot the next `SELECT` against the view returns the new rows — no notebook re-run, no DDL change |
+
+> To change the view definition (e.g. add a column): `ALTER VIEW lakehouse.lakehouse_db.vw_customer_latest AS SELECT ...`
 
 ### Cell map
 
-| Cell | Action | Runs on refresh? |
+| Cell | What it does | Run on refresh? |
 |---|---|---|
-| **Cell 1** | `TABLE_CONFIGS` dict — one entry per S3 table. Edit here only. | Once per session |
-| **Cell 2** | `resolve_latest_snapshot()` helper defined | Once per session |
-| **Cell 3** | Resolves latest `*.metadata.json` per table (diagnostics + audit table source path) | ✅ Every refresh |
-| **Cell 4** | `CREATE VIEW IF NOT EXISTS` — no-op if view exists; zero-downtime | First run only |
-| **Cell 5** | Atomic `INSERT OVERWRITE` Delta audit table — zero-downtime via Delta MVCC | ✅ Every refresh |
-| **Cell 6** | Summary report | Optional |
-| **Cell 7** | Optional `OPTIMIZE` on audit tables | Optional |
+| **Cell 1** | Set `WAREHOUSE_ROOT`, `DATABRICKS_CATALOG`, and `SKIP_TABLES` — the only three settings | Once per session |
+| **Cell 2** | S3 directory scan: walks `WAREHOUSE_ROOT/<db>/<table>/`, confirms `metadata/*.metadata.json` exists, builds `TABLE_CONFIGS` | ✅ Every refresh |
+| **Cell 3** | `resolve_latest_snapshot()` helper defined | Once per session |
+| **Cell 4** | Loops: picks latest `*.metadata.json` per table for diagnostics, ensures each schema exists | ✅ Every refresh |
+| **Cell 5** | Loops: `CREATE VIEW IF NOT EXISTS` — first run creates; all subsequent runs are a no-op | First run only (per table) |
+| **Cell 6** | Summary report — row counts and snapshot timestamps for every view | Optional |
+| **Cell 7** | Optional: `CACHE SELECT` to warm a view into NVMe disk cache | Optional |
+| **Cell 8** | Optional: `UNCACHE` + `CACHE SELECT` to re-warm NVMe cache after a new snapshot | Optional |
 
 ---
 
-### Configured tables (current)
+### Configuration (Cell 1) — the only editable block
 
-| Logical name | `data_path` (view target) | `meta_path` (audit table source) |
-|---|---|---|
-| `customer` | `…/customer/data/` | `…/customer/metadata/` |
-| `customer_orders` | `…/customer_orders/data/` | `…/customer_orders/metadata/` |
+```python
+WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
+DATABRICKS_CATALOG = "lakehouse"
+SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
+```
+
+`SKIP_TABLES` is the only reason you would ever edit the notebook after initial setup — use it to exclude staging or system folders that exist in S3 but should not get views.
+
+**To add a new Iceberg table:** create the table with Spark in the usual way. The next notebook run discovers the new `metadata/` folder and creates the view automatically.
 
 ---
 
 ### How to run
 
 **First time:**
-1. Run **Cells 1 → 6** in order — views are created, audit tables populated
+1. Run **Cells 1 → 6** in order — views are created
 
-**Every subsequent refresh (after any Spark write):**
-- Re-run **Cells 3 and 5** only
-- Cell 4 will print `EXISTS (no DDL change — zero downtime preserved)` and do nothing
+**Every subsequent refresh (after any Spark write to any table):**
+- Re-run **Cells 2 and 4** only (discovery + snapshot diagnostics)
+- Cell 5 prints `EXISTS (no DDL change — zero downtime preserved)` for every view and does nothing
 
-> The view **does not need to be re-run** at all for new data to appear. New parquet files written by Spark become visible to the next SQL query against the view immediately.
+> Views **never need re-running** for new data to appear — they pick up new parquet files automatically on the next user query.
 
 ---
 
-### Expected Cell 4 output (first run)
+### Expected Cell 2 output (warehouse with two databases, three tables)
 
 ```
-Ensuring views exist (zero-downtime, CREATE IF NOT EXISTS) …
 ────────────────────────────────────────────────────────────
-  ✅ lakehouse.lakehouse_db.vw_customer_latest
-     status=CREATED
-     rows=1,000  src=s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
-
-  ✅ lakehouse.lakehouse_db.vw_customer_orders_latest
-     status=CREATED
-     rows=5,000  src=s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/
+Auto-discovered 3 Iceberg table(s):
+  lakehouse_db.customer               view → vw_customer_latest
+  lakehouse_db.customer_orders        view → vw_customer_orders_latest
+  analytics_db.sales                  view → vw_sales_latest
+────────────────────────────────────────────────────────────
 ```
 
-### Expected Cell 4 output (every subsequent run)
-
-```
-  ✅ lakehouse.lakehouse_db.vw_customer_latest
-     status=EXISTS (no DDL change — zero downtime preserved)
-     rows=1,100  src=s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
-```
-
-> `rows=1,100` after the 100-row insert — the new rows are already visible in the view **without any DDL change**.
-
-### Expected Cell 3 output (two tables resolved)
+### Expected Cell 4 output (snapshot resolution)
 
 ```
 ────────────────────────────────────────────────────────────
 Resolving latest Iceberg snapshots …
 ────────────────────────────────────────────────────────────
-  [customer] 2 snapshot(s) found
+  [lakehouse_db.customer] 2 snapshot(s) found
     Latest file  : 00001-....metadata.json
     Snapshot ID  : 3778523514688560751
-    Last updated : 2026-09-01 12:34:56 UTC
+    Last updated : 2026-09-02 12:34:56 UTC
     Data path    : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
 
-  [customer_orders] 1 snapshot(s) found
+  [lakehouse_db.customer_orders] 1 snapshot(s) found
     Latest file  : 00000-....metadata.json
     Snapshot ID  : 7123456789012345678
-    Last updated : 2026-09-01 13:00:00 UTC
+    Last updated : 2026-09-02 13:00:00 UTC
     Data path    : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/
 
 ────────────────────────────────────────────────────────────
-✅ All 2 table(s) resolved successfully
+✅ All 3 table(s) resolved successfully
 ```
+
+### Expected Cell 5 output — first run
+
+```
+  ✅ lakehouse.lakehouse_db.vw_customer_latest
+     status=CREATED
+     rows=1,000  src=s3://.../lakehouse_db/customer/data/
+```
+
+### Expected Cell 5 output — every subsequent run
+
+```
+  ✅ lakehouse.lakehouse_db.vw_customer_latest
+     status=EXISTS (no DDL change — zero downtime preserved)
+     rows=1,100  src=s3://.../lakehouse_db/customer/data/
+```
+
+> `rows=1,100` reflects the 100-row insert — already visible without any DDL change to the view.
 
 ### Expected Cell 6 summary report
 
@@ -971,25 +1006,25 @@ Resolving latest Iceberg snapshots …
 ══════════════════════════════════════════════════════════════════════
   REFRESH SUMMARY
 ══════════════════════════════════════════════════════════════════════
-  TABLE                  OBJECT            ROWS  SNAPSHOT UPDATED
+  TABLE                                ROWS  SNAPSHOT UPDATED
 ──────────────────────────────────────────────────────────────────────
-  customer               view             1,100  2026-09-01 12:34:56 UTC
-                         delta table      1,100
-  customer_orders        view             5,000  2026-09-01 13:00:00 UTC
-                         delta table      5,000
+  lakehouse_db.customer               1,100  2026-09-03 12:34:56 UTC
+  lakehouse_db.customer_orders        5,000  2026-09-03 13:00:00 UTC
 ══════════════════════════════════════════════════════════════════════
-  Re-run Cells 3 + 5 any time new data lands in S3.
+  Re-run Cells 2 + 4 any time new data lands in S3.
+  (Views auto-reflect new parquet files — no Cell 5 re-run needed.)
 ══════════════════════════════════════════════════════════════════════
 ```
 
-### Audit columns on every Delta table
+### View columns
 
-| Column | Type | Description |
+Every auto-created view selects all parquet columns plus two added by the view definition:
+
+| Column | Type | Source |
 |---|---|---|
-| `snap_file` | STRING | S3 path of the parquet file the row came from |
-| `snap_file_size` | BIGINT | Size of that parquet file in bytes |
-| `refreshed_at` | TIMESTAMP | UTC timestamp when this batch was loaded |
-| `source_table` | STRING | Logical table name (`customer`, `customer_orders`, …) |
+| *(all source columns)* | (as in parquet) | read from `data/*.parquet` |
+| `snap_file` | STRING | `_metadata.file_path` — S3 path of the parquet file |
+| `snap_file_size` | BIGINT | `_metadata.file_size` — parquet file size in bytes |
 
 ---
 
@@ -1163,3 +1198,157 @@ DESCRIBE HISTORY lakehouse.lakehouse_db.customer_orders_snapshot_audit;
 ---
 
 > **Full DML file:** [`docker/databricks-notebooks/dml_test_steps.sql`](../../docker/databricks-notebooks/dml_test_steps.sql)
+
+---
+
+## 10. NVMe disk cache — cache a view to eliminate S3 round-trips
+
+By default every query against a `read_files()` view goes to S3 on every execution. On a **Photon-enabled cluster** (Standard tier or higher) Databricks maintains a local NVMe-backed disk cache on each executor node. Caching a view into this local storage eliminates the S3 round-trip for all subsequent queries until the cluster restarts or the cache is explicitly invalidated.
+
+> **Requirement:** The cluster must be Photon-enabled with the local disk cache feature turned on. Serverless SQL warehouses manage this automatically. For interactive clusters, verify in the cluster config that **"Enable disk cache"** is checked.
+
+---
+
+### When to cache
+
+| Situation | Cache? |
+|---|---|
+| Dashboard or BI tool queries the same view every few minutes | ✅ Yes — cache pays off immediately |
+| One-off exploratory query | ❌ No — cache-fill cost exceeds the benefit |
+| View has < 100 MB of data | ❌ No — S3 latency is already negligible at this size |
+| Cluster restarts frequently (< 30 min) | ❌ No — cache is lost on restart anyway |
+| After a new Iceberg snapshot (new parquet files landed) | ✅ Re-warm the cache — see step 3 below |
+
+---
+
+### Step 1 — Check NVMe cache configuration
+
+Run this in a Databricks notebook or the SQL console:
+
+```python
+# Check whether disk cache is enabled on the current cluster
+print(spark.conf.get("spark.databricks.io.cache.enabled", "false"))
+
+# Check how much NVMe space is allocated for the cache
+print(spark.conf.get("spark.databricks.io.cache.maxDiskUsage", "not set"))
+
+# Check how much memory is reserved for the cache
+print(spark.conf.get("spark.databricks.io.cache.maxMetaDataCache", "not set"))
+```
+
+✅ Expected: `spark.databricks.io.cache.enabled = true` on a Photon cluster with disk cache enabled.
+
+---
+
+### Step 2 — Warm the cache for one view
+
+Run in a **Databricks notebook** (uses `spark`):
+
+```python
+VIEW = "lakehouse.lakehouse_db.vw_customer_latest"
+
+print(f"Warming NVMe cache for {VIEW} …")
+spark.sql(f"CACHE SELECT * FROM {VIEW}")
+print(f"✅ Cache warm — subsequent queries skip S3")
+```
+
+Or in the **Databricks SQL console:**
+
+```sql
+CACHE SELECT * FROM lakehouse.lakehouse_db.vw_customer_latest;
+-- ✅ Scans all parquet files once and writes decompressed columnar data to NVMe
+```
+
+> `CACHE SELECT` is synchronous — it completes only after every file has been read and cached. For a 1,000-row table this takes seconds. For a large table allow proportionally longer.
+
+---
+
+### Step 3 — Re-warm the cache after a new Iceberg snapshot
+
+When Spark appends a new snapshot, new `.parquet` files land in the `data/` directory. The NVMe cache still holds the old decompressed data from the previous set of files. Run the following to evict the stale entries and re-warm:
+
+```python
+VIEW = "lakehouse.lakehouse_db.vw_customer_latest"
+
+# Step A: evict stale cached data
+spark.sql(f"UNCACHE TABLE IF EXISTS {VIEW}")
+print(f"Evicted stale cache for {VIEW}")
+
+# Step B: re-scan and re-warm with the new parquet files
+spark.sql(f"CACHE SELECT * FROM {VIEW}")
+print(f"✅ NVMe cache re-warmed — {VIEW} now reflects the latest snapshot")
+```
+
+> `UNCACHE TABLE IF EXISTS` is safe to run even if the view was never cached — the `IF EXISTS` prevents errors.
+
+---
+
+### Step 4 — Cache all auto-discovered views at once (notebook Cell 7)
+
+[`docker/databricks-notebooks/nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py) — **Cell 7** caches one view by name. To cache every auto-discovered view in a single loop, uncomment the block in Cell 7:
+
+```python
+# Cache ALL discovered views
+print("Caching all discovered views into NVMe disk cache …")
+for tbl, snap in SNAPSHOTS.items():
+    print(f"  Caching {snap['view']} …")
+    spark.sql(f"CACHE SELECT * FROM {snap['view']}")
+    print(f"  ✅ Done")
+print("✅ All views cached")
+```
+
+And **Cell 8** handles the re-warm after a new snapshot — uncomment the loop version to re-warm all views:
+
+```python
+# Re-warm ALL views after new snapshots
+for tbl, snap in SNAPSHOTS.items():
+    spark.sql(f"UNCACHE TABLE IF EXISTS {snap['view']}")
+    spark.sql(f"CACHE SELECT * FROM {snap['view']}")
+print("✅ All views re-warmed")
+```
+
+---
+
+### Step 5 — Verify cache hits in the SQL console
+
+After warming the cache, run a query and check the query profile:
+
+```sql
+-- This query should now be served from NVMe, not S3
+SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary),2) AS avg_salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY customer_tier
+ORDER  BY cnt DESC;
+```
+
+In the **Query Profile** tab (Databricks SQL console → History → click the query → Profile):
+- Look for `Scan Parquet` nodes — the **"Rows from cache"** metric should equal the total row count
+- **"Bytes read from disk cache"** should be > 0 and **"Bytes read from S3"** should be 0
+
+---
+
+### Cache lifetime and eviction rules
+
+| Event | Effect on cache |
+|---|---|
+| Cluster restart | ❌ Cache is fully evicted — re-warm after restart |
+| New parquet files written by Spark | ⚠️ Old files still cached; run `UNCACHE` + `CACHE SELECT` to refresh |
+| `UNCACHE TABLE <view>` | ✅ Explicitly evicts all cached data for that view |
+| `CACHE SELECT * FROM <view>` | ✅ Warms the cache for the current set of files |
+| Cluster scales down (auto-scaling removes a node) | ⚠️ Data cached on removed nodes is lost; remaining nodes still serve their cached partitions |
+
+---
+
+### SQL console shortcut — `CACHE` and `UNCACHE`
+
+```sql
+-- Warm cache for a specific view
+CACHE SELECT * FROM lakehouse.lakehouse_db.vw_customer_latest;
+
+-- Evict cache for a specific view
+UNCACHE TABLE IF EXISTS lakehouse.lakehouse_db.vw_customer_latest;
+
+-- Check what is currently cached (Unity Catalog clusters)
+SHOW VIEWS IN lakehouse.lakehouse_db;
+-- Then inspect query profiles to confirm cache hits
+```
