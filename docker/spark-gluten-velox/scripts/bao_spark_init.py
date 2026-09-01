@@ -225,6 +225,38 @@ class BaoSparkInit:
             "driver": "com.databricks.client.jdbc.Driver",
         }
 
+    def catalog_credential(self, catalog: str, conf: "SparkConf") -> str:
+        """
+        Return the Polaris OAuth2 service-account ID wired for *catalog* in *conf*.
+
+        The credential is the ``spark_svc_id`` portion of the
+        ``spark.sql.catalog.<catalog>.credential`` property set by
+        :meth:`spark_conf`.  If the property is absent the catalog was never
+        registered as a Spark external catalog, and starpump must not proceed.
+
+        Raises:
+            ValueError: if ``spark.sql.catalog.<catalog>`` has no credential
+                        configured in *conf* (catalog not registered).
+        """
+        key = f"spark.sql.catalog.{catalog}.credential"
+        credential = conf.get(key)
+        if not credential:
+            registered = sorted(
+                name.split(".")[3]
+                for name, _ in conf.getAll()
+                if name.startswith("spark.sql.catalog.")
+                and len(name.split(".")) == 4
+            )
+            raise ValueError(
+                f"No Spark external catalog registered for '{catalog}'. "
+                f"starpump cannot write to a catalog that has no wired credential. "
+                f"Registered catalogs in spark_conf: {registered}. "
+                f"Add a 'spark.sql.catalog.{catalog}.*' block to BaoSparkInit.spark_conf() "
+                f"before running starpump against this target."
+            )
+        # Return only the client-id half (everything before the first colon).
+        return credential.split(":")[0]
+
     # ── SparkConf builder ──────────────────────────────────────────────────────
     def spark_conf(
         self,
@@ -234,9 +266,14 @@ class BaoSparkInit:
         """
         Build a SparkConf pre-wired with:
           - Polaris REST catalog  (catalog name: polaris)
-          - Snowflake catalog     (catalog name: snowflake)
+          - Databricks catalog    (catalog name: databricks)
+          - Snowflake catalog     (catalog name: snowflake, hadoop-type placeholder)
           - S3 credentials (AWS SDK v2 style)
           - Parquet + Iceberg defaults
+
+        Only catalogs wired here may be used as starpump copy targets.
+        starpump validates this via :meth:`catalog_credential` before opening
+        a Spark session.
         """
         s3  = self.s3_creds()
         sf  = self.snowflake_creds()

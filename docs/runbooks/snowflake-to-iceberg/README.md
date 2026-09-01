@@ -37,6 +37,7 @@ Every table gets:
 | USER | Must be `dave` (has `can_admin_catalog=true`, `can_write_iceberg=true`) |
 | OpenBao token | `TOKEN` env-var or K8s SA JWT with role `platform-secrets-read` |
 | Polaris namespace | `tpcds_sf10tcl` already exists (created on first run) |
+| Registered Iceberg catalog | `ICEBERG_CATALOG` must be wired in `BaoSparkInit.spark_conf()` — starpump refuses to run if not (see catalog pre-flight below) |
 
 ---
 
@@ -66,12 +67,12 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 | Variable | Default | Description |
 |---|---|---|
-| `USER` | `dave` | Running user — must have Iceberg write permissions |
+| `USER` | _(required)_ | Running user — must be `dave` or `bob` (`can_admin_catalog=true`, `can_write_iceberg=true`) |
 | `ADDR` | `http://openbao.prod.svc.cluster.local:8200` | OpenBao address |
 | `TOKEN` | _(K8s SA JWT)_ | Token override for dev/bootstrap |
 | `DATABASE` | `SNOWFLAKE_SAMPLE_DATA` | Source database name |
 | `SCHEMAS` | `TPCDS_SF10TCL` | Source schema name |
-| `ICEBERG_CATALOG` | `polaris` | Target Spark/Iceberg catalog name |
+| `ICEBERG_CATALOG` | `polaris` | Target Spark/Iceberg catalog name. **Must be wired in `BaoSparkInit.spark_conf()`** — starpump exits before starting if the catalog has no registered credential. |
 | `S3_BUCKET` | _(from OpenBao)_ | Override S3 bucket |
 | **`INCLUDE_TABLES`** | _(all)_ | Comma-separated allowlist — only these tables are copied |
 | **`EXCLUDE_TABLES`** | _(none)_ | Comma-separated denylist — always skipped |
@@ -80,6 +81,31 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 | `DRY_RUN` | `0` | Set `1` to create Iceberg DDL without copying data |
 | `BATCH_SIZE` | `100000` | Rows per Snowflake batch / Iceberg commit |
 | `MAX_THREADS` | `8` | Parallel copy threads — overridden by `--threads N` on the CLI |
+
+### Catalog pre-flight
+
+Before opening a Spark session starpump calls `BaoSparkInit.catalog_credential(ICEBERG_CATALOG, conf)`
+to verify the target catalog is wired with a Polaris OAuth2 credential. The check succeeds for the two
+catalogs registered in `spark_conf()`:
+
+| `ICEBERG_CATALOG` value | Polaris warehouse | Status |
+|---|---|---|
+| `polaris` | `IcebergCatalog` | ✅ registered |
+| `databricks` | `star_lakehouse` | ✅ registered |
+| anything else | — | ❌ starpump exits |
+
+On success the following log line appears before table discovery:
+```
+[catalog-check] 'polaris' is registered (svc_id=<spark_svc_id>). Proceeding.
+```
+
+On failure:
+```
+ERROR: No Spark external catalog registered for '<name>'.
+  starpump requires a Spark external catalog to be wired in BaoSparkInit.spark_conf()
+  before data can be copied.
+  Registered catalogs in spark_conf: ['databricks', 'polaris']
+```
 
 ---
 

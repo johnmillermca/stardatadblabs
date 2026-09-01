@@ -36,10 +36,10 @@ SNOWFLAKE_SAMPLE_DATA  ──►   starpump snowflake         ──► s3://xda
 
 | Component | Role |
 |---|---|
-| `bao_spark_init.py` | Reads ALL credentials from OpenBao at runtime; builds `SparkConf` |
+| `bao_spark_init.py` | Reads ALL credentials from OpenBao at runtime; builds `SparkConf`; exposes `catalog_credential()` |
 | `spark_iceberg_utils.py` | Global `IcebergTableBuilder` — injects `snap_timestamp` + `snap_id` into every table |
 | `spark-defaults-configmap.yaml` | K8s ConfigMap delivering `spark-defaults.conf` to spark pods |
-| `starpump.py` | `starpump` entry point — dynamic source routing, N-thread copy with resume |
+| `starpump.py` | `starpump` entry point — catalog pre-flight guard, dynamic source routing, N-thread copy with resume |
 
 ### 2.2 Security model
 
@@ -55,6 +55,11 @@ SNOWFLAKE_SAMPLE_DATA  ──►   starpump snowflake         ──► s3://xda
   `TOKEN` env-var for local / bootstrap use only.
 - **RBAC**: only users `bob` and `dave` (`can_admin_catalog=true`,
   `can_write_iceberg=true`) may run the copy job.
+- **Catalog pre-flight**: starpump verifies that the target `ICEBERG_CATALOG` (default: `polaris`)
+  has a Polaris OAuth2 credential registered in `BaoSparkInit.spark_conf()` before opening a Spark
+  session. The same service-account (`spark_svc_id`) that created the external catalog entry is the
+  one used for data copy writes. If the catalog is not wired, starpump exits before allocating any
+  cluster resources.
 
 ### 2.3 Iceberg table layout
 
@@ -201,6 +206,25 @@ kubectl exec -n prod deploy/spark-master -- \
 
 Expected output includes `spark.sql.catalog.polaris` and
 `spark.sql.catalog.snowflake`.
+
+### 4.4 Verify catalog pre-flight passes
+
+On a valid setup the `[catalog-check]` line appears before any table discovery:
+
+```
+[catalog-check] 'polaris' is registered (svc_id=<spark_svc_id>). Proceeding.
+```
+
+If the catalog is missing from `spark_conf()` starpump exits before opening a Spark session:
+
+```
+ERROR: No Spark external catalog registered for 'polaris'.
+  starpump requires a Spark external catalog to be wired in BaoSparkInit.spark_conf()
+  before data can be copied.
+  Registered catalogs in spark_conf: ['databricks', 'polaris']
+  Add a 'spark.sql.catalog.polaris.*' block to BaoSparkInit.spark_conf()
+  before running starpump against this target.
+```
 
 ---
 
@@ -546,7 +570,34 @@ kubectl edit cm spark-rbac-allowlist -n prod
 
 ## 12. Troubleshooting
 
-### T1 — `RuntimeError: Spark catalog 'snowflake' not found`
+### T1 — `ValueError: No Spark external catalog registered for '...'`
+
+`ICEBERG_CATALOG` is set to a catalog name that has no `spark.sql.catalog.<name>.credential`
+block in `BaoSparkInit.spark_conf()`.
+
+```bash
+# Verify which catalogs are currently wired
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+  python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark import SparkConf
+bao  = BaoSparkInit()
+conf = bao.spark_conf()
+cats = sorted(set(
+    k.split('.')[3] for k, _ in conf.getAll()
+    if k.startswith('spark.sql.catalog.') and len(k.split('.')) == 4
+))
+print('Registered catalogs:', cats)
+"
+```
+
+**Fix:** Either use `ICEBERG_CATALOG=polaris` (the default) or add a new catalog block to
+`docker/spark-gluten-velox/scripts/bao_spark_init.py` and rebuild the image.
+
+---
+
+### T2 — `RuntimeError: Spark catalog 'snowflake' not found`
 
 The `spark-defaults.conf` ConfigMap is not mounted or the pods have not
 restarted since the ConfigMap was applied.
@@ -558,7 +609,7 @@ kubectl exec -n prod deploy/spark-master -- \
   grep snowflake /opt/spark/conf/spark-defaults.conf
 ```
 
-### T2 — `PermissionError: RBAC check failed: user ''`
+### T3 — `PermissionError: RBAC check failed: user ''`
 
 `USER` env-var not set.
 
@@ -568,7 +619,7 @@ kubectl exec -n prod $SPARK_POD -c spark-master -- \
   starpump snowflake
 ```
 
-### T3 — Snowflake connector `ClassNotFoundException`
+### T4 — Snowflake connector `ClassNotFoundException`
 
 The `net.snowflake:spark-snowflake_2.12:2.15.0-spark_3.5` JAR has not been
 downloaded. The first run fetches it from Maven Central; ensure internet access
@@ -580,7 +631,7 @@ kubectl exec -n prod deploy/spark-master -- \
 # Expected: 200
 ```
 
-### T4 — OpenBao `Cannot authenticate` error
+### T5 — OpenBao `Cannot authenticate` error
 
 ```bash
 # Check if K8s auth is enabled
@@ -594,11 +645,11 @@ kubectl exec -n prod $SPARK_POD -c spark-master -- \
   starpump snowflake
 ```
 
-### T5 — `NoSuchTableException` on Polaris
+### T6 — `NoSuchTableException` on Polaris
 
 The namespace `tpcds_sf10tcl` doesn't exist yet. Run Step 5.2.
 
-### T6 — S3 `AccessDenied`
+### T7 — S3 `AccessDenied`
 
 Verify the HMAC credentials are stored correctly in OpenBao:
 
@@ -609,7 +660,7 @@ curl -s -H "X-Vault-Token: $TOKEN" \
 
 Confirm the bucket `xdatatoiceberg1` exists in region `us-east-2`.
 
-### T7 — Iceberg table missing snap audit columns
+### T8 — Iceberg table missing snap audit columns
 
 If a table was created outside of `IcebergTableBuilder`, the snap columns may
 be absent. Fix by adding them:

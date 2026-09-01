@@ -49,6 +49,13 @@ Design
 • 256 MB target file size enforced via IcebergTableBuilder.
 • Running user: dave (can_admin_catalog=true, can_write_iceberg=true).
 • All credentials fetched from OpenBao via bao_spark_init.BaoSparkInit.
+• Catalog pre-flight guard: starpump verifies that the target ICEBERG_CATALOG
+  has a Polaris OAuth2 service-account credential registered in
+  BaoSparkInit.spark_conf() before opening a Spark session.  If the catalog
+  is not wired there, starpump exits with an explicit error — there is no
+  authenticated write path and no data will be copied.  This ensures the same
+  service-account identity used to create the external catalog is also the
+  identity used for every subsequent data copy to that catalog.
 
 Table filtering (applied in this order)
 -----------------------------------------
@@ -1416,6 +1423,29 @@ def main() -> None:
     conn_opts  = connector.build_opts(bao)
 
     conf  = bao.spark_conf(app_name=f"starpump-{SOURCE}")
+
+    # ── 1b. Catalog pre-flight: target catalog must have a wired credential ───
+    # starpump writes exclusively through the Polaris service-account credential
+    # that was registered for ICEBERG_CATALOG in spark_conf().  If no such entry
+    # exists the catalog was never set up and starpump must not proceed — there is
+    # no authenticated write path for that catalog name.
+    try:
+        catalog_svc_id = bao.catalog_credential(ICEBERG_CATALOG, conf)
+        logger.info(
+            "[catalog-check] '%s' is registered (svc_id=%s). Proceeding.",
+            ICEBERG_CATALOG, catalog_svc_id,
+        )
+    except ValueError as _cred_err:
+        logger.error(
+            "ERROR: %s\n"
+            "  starpump requires a Spark external catalog to be wired in "
+            "BaoSparkInit.spark_conf() before data can be copied.\n"
+            "  Target catalog: %s\n"
+            "  To fix: add a 'spark.sql.catalog.%s.*' block to "
+            "docker/spark-gluten-velox/scripts/bao_spark_init.py",
+            _cred_err, ICEBERG_CATALOG, ICEBERG_CATALOG,
+        )
+        sys.exit(1)
 
     # ── 2. Spark session ──────────────────────────────────────────────────────
     spark = SparkSession.builder.config(conf=conf).getOrCreate()

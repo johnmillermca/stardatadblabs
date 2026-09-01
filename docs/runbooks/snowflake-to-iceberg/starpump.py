@@ -35,6 +35,13 @@ Design
 • 256 MB target file size enforced via IcebergTableBuilder.
 • Running user: dave (can_admin_catalog=true, can_write_iceberg=true).
 • All credentials fetched from OpenBao via bao_spark_init.BaoSparkInit.
+• Catalog pre-flight guard: starpump verifies that the target ICEBERG_CATALOG
+  has a Polaris OAuth2 service-account credential registered in
+  BaoSparkInit.spark_conf() before opening a Spark session.  If the catalog
+  is not wired there, starpump exits with an explicit error — there is no
+  authenticated write path and no data will be copied.  This ensures the same
+  service-account identity used to create the external catalog is also the
+  identity used for every subsequent data copy to that catalog.
 
 Table filtering (applied in this order)
 -----------------------------------------
@@ -65,12 +72,15 @@ treated as 0 bytes and always included.
 
 Environment variables
 ---------------------
-  USER                Pipeline run user            (default: dave)
+  USER                Pipeline run user            (REQUIRED — no default; must be dave or bob)
   ADDR                OpenBao address              (default: http://openbao.prod.svc.cluster.local:8200)
   TOKEN               OpenBao root/bootstrap token override (dev only)
   DATABASE            Source database name         (default: SNOWFLAKE_SAMPLE_DATA)
   SCHEMAS             Source schema name           (default: TPCDS_SF10TCL)
   ICEBERG_CATALOG     Target Iceberg catalog name  (default: polaris)
+                      Must be registered in BaoSparkInit.spark_conf().
+                      Registered catalogs: polaris, databricks.
+                      starpump exits before opening a Spark session if not wired.
   S3_BUCKET           Override S3 bucket from OpenBao   (optional)
   INCLUDE_TABLES      Comma-separated explicit include list  (optional)
   EXCLUDE_TABLES      Comma-separated tables to always skip  (optional)

@@ -27,11 +27,12 @@ using the **`product`** table as the reference dataset.
 ```
 Databricks SQL Warehouse              Spark-Gluten cluster (k8s)
 ────────────────────────              ──────────────────────────────────────────
-lakehouse.lakehouse_db                 starpump databricks
-  product  (500 rows)   ──JDBC──►  _db_list_tables()
+lakehouse.lakehouse_db                 starpump databricks (USER=dave)
+  product  (500 rows)   ──JDBC──►  [catalog-check] 'databricks' registered? ──► EXIT if not wired
+                                    _db_list_tables()
                                     _db_table_schema()
                                     _db_table_sizes()
-                                    _copy_table()  ──► IcebergTableBuilder
+                                    _copy_table()  ──► IcebergTableBuilder (svc_id from polaris secret)
                                                           │
                                                           ▼
                                   Polaris REST catalog (star_lakehouse)
@@ -40,6 +41,12 @@ lakehouse.lakehouse_db                 starpump databricks
                                             ▼
                                   s3://stardata-databricks/iceberg/warehouse/
 ```
+
+> **Catalog pre-flight rule:** starpump verifies that `ICEBERG_CATALOG=databricks` has a Polaris
+> OAuth2 service-account credential registered in `BaoSparkInit.spark_conf()` before opening a
+> Spark session. The same service-account identity (`spark_svc_id`) used to register that external
+> catalog is the one used for every subsequent data copy. If the catalog is not wired, starpump
+> exits immediately with a clear error — no Spark session is opened and no data is copied.
 
 ### Key paths
 
@@ -391,6 +398,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 ✅ Expected:
 ```
 === starpump databricks | run_id=... user=dave db=lakehouse schema=lakehouse_db catalog=databricks threads=8 ===
+[catalog-check] 'databricks' is registered (svc_id=<spark_svc_id>). Proceeding.
+=== Filters: include=all  exclude=none  max_size=3.0 GB ===
 Discovered 1 tables in lakehouse.lakehouse_db: ['product']
 [size-report] product   →   0.0 GB  (COPY)
 [product] START: 0.0 GB | discovering schema …
@@ -413,6 +422,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 ✅ Expected (key lines):
 ```
 === starpump databricks | run_id=... user=dave db=lakehouse schema=lakehouse_db catalog=databricks threads=8 ===
+[catalog-check] 'databricks' is registered (svc_id=<spark_svc_id>). Proceeding.
 === Filters: include=all  exclude=none  max_size=3.0 GB ===
 Discovered 1 tables in lakehouse.lakehouse_db: ['product']
 Namespace `databricks`.`lakehouse_db` ready.
@@ -775,6 +785,26 @@ The namespace was not created before the table was accessed.
 
 ---
 
+### `ValueError: No Spark external catalog registered for '...'`
+
+starpump ran with an `ICEBERG_CATALOG` value that has no entry wired in `BaoSparkInit.spark_conf()`.
+
+```
+ERROR: No Spark external catalog registered for 'my_catalog'.
+  starpump requires a Spark external catalog to be wired in BaoSparkInit.spark_conf()
+  before data can be copied.
+  Target catalog: my_catalog
+  To fix: add a 'spark.sql.catalog.my_catalog.*' block to
+  docker/spark-gluten-velox/scripts/bao_spark_init.py
+```
+
+**Fix:** Either correct `ICEBERG_CATALOG` to one of the registered catalogs (`polaris`,
+`databricks`), or add a new `spark.sql.catalog.<name>.*` block to
+[`bao_spark_init.py`](../../docker/spark-gluten-velox/scripts/bao_spark_init.py)
+and rebuild the image.
+
+---
+
 ### Job hangs at `[Stage N:>` for > 2 minutes
 
 Another Spark app is holding all cores. Check the Spark master UI at `http://192.168.1.50:30707`.
@@ -789,8 +819,8 @@ kubectl exec -n prod $MASTER -c spark-master -- spark-app-cleanup
 
 | File | Purpose |
 |---|---|
-| [`docker/spark-gluten-velox/scripts/starpump.py`](../../docker/spark-gluten-velox/scripts/starpump.py) | starpump entry point — databricks connector at `_CONNECTORS["databricks"]` |
-| [`docker/spark-gluten-velox/scripts/bao_spark_init.py`](../../docker/spark-gluten-velox/scripts/bao_spark_init.py) | `databricks_creds()`, `databricks_jdbc_options()`, `databricks` catalog in `spark_conf()` |
+| [`docker/spark-gluten-velox/scripts/starpump.py`](../../docker/spark-gluten-velox/scripts/starpump.py) | starpump entry point — catalog pre-flight guard + databricks connector at `_CONNECTORS["databricks"]` |
+| [`docker/spark-gluten-velox/scripts/bao_spark_init.py`](../../docker/spark-gluten-velox/scripts/bao_spark_init.py) | `databricks_creds()`, `databricks_jdbc_options()`, `catalog_credential()`, `databricks` catalog in `spark_conf()` |
 | [`docker/spark-gluten-velox/scripts/spark_iceberg_utils.py`](../../docker/spark-gluten-velox/scripts/spark_iceberg_utils.py) | `IcebergTableBuilder` — auto-creates table + injects `snap_id`/`snap_timestamp` |
 | [`docker/spark-gluten-velox/scripts/databricks_product_seed.py`](../../docker/spark-gluten-velox/scripts/databricks_product_seed.py) | Seed script: creates `lakehouse.lakehouse_db.product` and inserts 500 rows |
 | [`docker/spark-gluten-velox/Dockerfile`](../../docker/spark-gluten-velox/Dockerfile) | Adds `databricks-jdbc-2.6.36.1070.jar` + all scripts to the image |

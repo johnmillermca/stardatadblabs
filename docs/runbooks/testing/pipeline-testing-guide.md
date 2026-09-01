@@ -103,6 +103,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 **What to look for in the logs:**
 
 ```
+=== starpump snowflake | run_id=... user=dave db=SNOWFLAKE_SAMPLE_DATA schema=TPCDS_SF10TCL catalog=polaris threads=8 ===
+[catalog-check] 'polaris' is registered (svc_id=<spark_svc_id>). Proceeding.
 [size-report] promotion   →    0.0 GB  (COPY)      ← only this table listed
 Copying 1/24 table(s) with 8 threads …
 [promotion] sf_extraction_ts=2026-…Z (CDC sync point)
