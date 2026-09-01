@@ -151,7 +151,7 @@ kubectl rollout status  deployment spark-worker -n prod --timeout=120s
 
 ```bash
 # Capture the master pod name — changes after every restart
-MASTER=$(kubectl get pod -n prod -l app=spark-master \
+MASTER=$(kubectl get pod -n prod -l component=master \
   -o jsonpath='{.items[0].metadata.name}')
 echo "Master pod: $MASTER"
 
@@ -625,7 +625,7 @@ ORDER  BY product_id;
 ### Step 2 — Common setup (terminal)
 
 ```bash
-MASTER=$(kubectl get pod -n prod -l app=spark-master \
+MASTER=$(kubectl get pod -n prod -l component=master \
   -o jsonpath='{.items[0].metadata.name}')
 TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
   -o jsonpath='{.data.root-token}' | base64 -d)
