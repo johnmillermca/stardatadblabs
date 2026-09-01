@@ -9,7 +9,7 @@ CLI
 
   <source>   Identifies the source connector to use.  The value maps to a
              credentials block in OpenBao and determines which reader is
-             invoked.  Currently supported:
+             invoked.  Registered sources:
 
               snowflake    Copy from a Snowflake database using the
                            Snowflake Spark connector.
@@ -24,8 +24,15 @@ CLI
   --threads N   Override the default 8 parallel copy threads.
                 Examples: --threads 16, --threads 32.
 
-  Additional sources can be added by extending the SOURCE_READERS dict in
-  this module — no other changes required.
+  Adding a new source
+  -------------------
+  1. Store its credentials in OpenBao under secret/data/platform/<source>.
+  2. Add a databricks_<source>_creds() / <source>_options() method to
+     BaoSparkInit (bao_spark_init.py) if needed.
+  3. Implement the five _<source>_* functions following the _sf_* / _db_*
+     pattern below.
+  4. Register a _SourceConnector entry in _CONNECTORS — that's it.
+  No changes elsewhere in the pipeline are required.
 
 Design
 ------
@@ -72,7 +79,7 @@ treated as 0 bytes and always included.
 
 Environment variables
 ---------------------
-  USER                Pipeline run user            (default: dave)
+  USER                Pipeline run user            (REQUIRED — no default)
   ADDR                OpenBao address              (default: http://openbao.prod.svc.cluster.local:8200)
   TOKEN               OpenBao root/bootstrap token override (dev only)
   DATABASE            Source database / catalog    (default: SNOWFLAKE_SAMPLE_DATA; for databricks: lakehouse)
@@ -179,7 +186,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from bao_spark_init import BaoSparkInit
+from bao_spark_init import BaoSparkInit, _DATABRICKS_JDBC_JAR
 from spark_iceberg_utils import IcebergTableBuilder, DEFAULT_TARGET_FILE_SIZE_BYTES
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -218,24 +225,32 @@ def _parse_args() -> argparse.Namespace:
 _ARGS = _parse_args()
 
 # ── Configuration from environment ────────────────────────────────────────────
-USER            = os.environ.get("USER",      "dave")
-# Databricks source defaults differ from Snowflake — resolve after SOURCE is known.
-# DATABASE / SCHEMAS / ICEBERG_CATALOG env vars override both.
+# USER is required — no default.  starpump refuses to run without it so that
+# every pipeline run is explicitly attributed to an operator.
+_USER_RAW = os.environ.get("USER", "").strip()
+if not _USER_RAW:
+    print(
+        "ERROR: USER environment variable is not set.\n"
+        "  Set it before running starpump, e.g.:\n"
+        "    USER=alice starpump databricks\n"
+        "    kubectl exec ... -- env USER=alice TOKEN=... starpump databricks",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+USER = _USER_RAW
+
+# Source defaults are driven by _CONNECTORS[source].defaults — populated after
+# the connector registry is defined below.  DATABASE / SCHEMAS / ICEBERG_CATALOG
+# env vars always override the connector defaults.
 _SOURCE_RESOLVED = _ARGS.source.lower()
-_DB_DEFAULT_DATABASE = "lakehouse"    if _SOURCE_RESOLVED == "databricks" else "SNOWFLAKE_SAMPLE_DATA"
-_DB_DEFAULT_SCHEMAS  = "lakehouse_db" if _SOURCE_RESOLVED == "databricks" else "TPCDS_SF10TCL"
-_DB_DEFAULT_CATALOG  = "databricks"   if _SOURCE_RESOLVED == "databricks" else "polaris"
-DATABASE        = os.environ.get("DATABASE",       _DB_DEFAULT_DATABASE)
-SCHEMAS         = os.environ.get("SCHEMAS",        _DB_DEFAULT_SCHEMAS)
-ICEBERG_CATALOG = os.environ.get("ICEBERG_CATALOG", _DB_DEFAULT_CATALOG)
+DATABASE        = os.environ.get("DATABASE")        # resolved after _CONNECTORS
+SCHEMAS         = os.environ.get("SCHEMAS")         # resolved after _CONNECTORS
+ICEBERG_CATALOG = os.environ.get("ICEBERG_CATALOG") # resolved after _CONNECTORS
 S3_BUCKET_OVERRIDE = os.environ.get("S3_BUCKET")
 DRY_RUN         = os.environ.get("DRY_RUN", "0") == "1"
 BATCH_SIZE      = int(os.environ.get("BATCH_SIZE",   "100000"))
 # --threads CLI flag takes precedence over the MAX_THREADS env var (default 8).
 MAX_THREADS     = _ARGS.threads if _ARGS.threads is not None else int(os.environ.get("MAX_THREADS", "8"))
-
-# ── Source selection ───────────────────────────────────────────────────────────
-SOURCE = _ARGS.source.lower()
 
 # ── Table filtering env vars ───────────────────────────────────────────────────
 # INCLUDE_TABLES / TABLES: only copy these tables (comma-separated, lower-case).
@@ -252,13 +267,13 @@ EXCLUDE_TABLES: set[str] = {
     t.strip().lower() for t in _raw_exclude.split(",") if t.strip()
 }
 
-# MAX_TABLE_SIZE_GB: skip tables whose compressed Snowflake size exceeds this.
+# MAX_TABLE_SIZE_GB: skip tables whose compressed source size exceeds this.
 #   0 disables the size filter entirely.
 MAX_TABLE_SIZE_GB: float = float(os.environ.get("MAX_TABLE_SIZE_GB", "3.0"))
 _SIZE_FILTER_ENABLED = MAX_TABLE_SIZE_GB > 0
 
-# Iceberg namespace must match source schema name (lower-cased)
-ICEBERG_NAMESPACE = SCHEMAS.lower()
+# SOURCE, DATABASE, SCHEMAS, ICEBERG_CATALOG, ICEBERG_NAMESPACE are all
+# finalised after _CONNECTORS is defined below (they depend on connector defaults).
 
 # ── Snowflake → Spark type mapping ────────────────────────────────────────────
 _SF_TYPE_MAP: dict[str, Any] = {
@@ -391,35 +406,50 @@ def pg_log_run_finish(
         conn.commit()
 
 
-# ── Snowflake extraction watermark ────────────────────────────────────────────
+# ── Source-side extraction timestamp helpers ──────────────────────────────────
+# Each connector supplies its own capture_ts() that queries the source database
+# for its server-side wall-clock.  This keeps the CDC sync-point on the source's
+# own transaction timeline rather than the driver/node clock.
 
-def capture_sf_extraction_ts(spark: SparkSession, sf_opts: dict) -> str:
-    """
-    Run SELECT CURRENT_TIMESTAMP() inside the Snowflake session and return
-    the result as an ISO-8601 string (UTC, microsecond precision).
-
-    This is the exact Snowflake server-side time at which the subsequent
-    SELECT on the table will be executed — it is the CDC sync point.
-
-    Using CURRENT_TIMESTAMP() from Snowflake (not the driver clock) ensures
-    the watermark reflects Snowflake's transaction timeline, not network
-    latency or driver time-zone differences.
-    """
-    row = (
-        spark.read.format("net.snowflake.spark.snowflake")
-        .options(**sf_opts)
-        .option("query", "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::VARCHAR AS ts")
-        .load()
-        .collect()[0]
-    )
-    ts_str: str = row[0]  # e.g. "2026-08-18 04:01:39.123456"
-    # Normalise to ISO-8601 with Z suffix
-    ts_str = ts_str.replace(" ", "T")
+def _normalize_ts(ts_str: str) -> str:
+    """Normalise any timestamp string to ISO-8601 with Z suffix."""
+    ts_str = ts_str.strip().replace(" ", "T")
     if "." not in ts_str:
         ts_str += ".000000"
     if not ts_str.endswith("Z"):
         ts_str += "Z"
-    return ts_str   # e.g. "2026-08-18T04:01:39.123456Z"
+    return ts_str
+
+
+def _sf_capture_ts(spark: SparkSession, opts: dict) -> str:
+    """
+    Query Snowflake's server-side CURRENT_TIMESTAMP() via the Snowflake
+    Spark connector.  Returns ISO-8601Z string.
+    CONVERT_TIMEZONE('UTC',...) normalises to UTC regardless of warehouse TZ.
+    """
+    row = (
+        spark.read.format("net.snowflake.spark.snowflake")
+        .options(**opts)
+        .option("query", "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::VARCHAR AS ts")
+        .load()
+        .collect()[0]
+    )
+    return _normalize_ts(row[0])
+
+
+def _db_capture_ts(spark: SparkSession, opts: dict) -> str:
+    """
+    Query Databricks SQL Warehouse server-side NOW() via JDBC.
+    Returns ISO-8601Z string.
+    """
+    row = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", "SELECT CAST(NOW() AS STRING) AS ts")
+        .load()
+        .collect()[0]
+    )
+    return _normalize_ts(row[0])
 
 
 def write_watermark_iceberg(
@@ -503,30 +533,45 @@ def write_watermark_iceberg(
 
 
 # ── Source connector protocol ──────────────────────────────────────────────────
-# Each source (snowflake, oracle, postgres, …) registers three callables here.
-# The rest of the pipeline is fully generic — it never names a source directly.
+# Every source registered in _CONNECTORS is fully self-describing.
+# The rest of the pipeline is source-agnostic: it never branches on SOURCE.
 #
-# To add a new source later:
-#   1. Write the three _<source>_* functions below.
-#   2. Add one entry to _CONNECTORS.
-#   3. Add the source name to _CONNECTORS — that's it.
+# To register a new source:
+#   1. Store credentials in OpenBao at secret/data/platform/<source>.
+#   2. Implement the five _<source>_* functions below.
+#   3. Add one _SourceConnector entry to _CONNECTORS with its defaults.
+#   No changes elsewhere in the pipeline are needed.
 #
-# connector fields
-#   build_opts(bao)        → dict   connection options fed to spark.read.format(...)
-#   list_tables(spark, opts) → list[str]   sorted lower-cased table names
-#   table_schema(spark, opts, table) → StructType
-#   table_sizes(spark, opts) → dict[str, float]  {table: gb}
+# Fields
+#   spark_format        Spark data-source format string
+#   build_opts(bao)     (bao) -> dict   — connection opts for spark.read.format(...)
+#   list_tables         (spark, opts) -> list[str]   lower-cased table names
+#   table_schema        (spark, opts, table) -> StructType
+#   table_sizes         (spark, opts) -> dict[str, float]  {table: gb}
+#   capture_ts          (spark, opts) -> str   ISO-8601Z server-side timestamp
+#   s3_prefix           path segment under s3://<bucket>/  e.g. "iceberg/warehouse"
+#   default_database    default DATABASE env value for this source
+#   default_schema      default SCHEMAS  env value for this source
+#   default_catalog     default ICEBERG_CATALOG env value for this source
+#   map_schema          (raw_schema) -> StructType  — map source types to Spark types
 
 from dataclasses import dataclass
 from typing import Callable
 
 @dataclass
 class _SourceConnector:
-    spark_format: str                                               # e.g. "net.snowflake.spark.snowflake"
-    build_opts:   Callable                                          # (bao) -> dict
-    list_tables:  Callable                                          # (spark, opts) -> list[str]
-    table_schema: Callable                                          # (spark, opts, table) -> StructType
-    table_sizes:  Callable                                          # (spark, opts) -> dict[str, float]
+    spark_format:     str
+    build_opts:       Callable   # (bao) -> dict
+    list_tables:      Callable   # (spark, opts) -> list[str]
+    table_schema:     Callable   # (spark, opts, table) -> StructType
+    table_sizes:      Callable   # (spark, opts) -> dict[str, float]
+    capture_ts:       Callable   # (spark, opts) -> str ISO-8601Z
+    read_batch:       Callable   # (spark, opts, table, offset, batch_size) -> DataFrame
+    s3_prefix:        str        # path under s3://<bucket>/
+    default_database: str
+    default_schema:   str
+    default_catalog:  str
+    map_schema:       Callable   # (StructType) -> StructType
 
 
 # ── Snowflake connector implementation ─────────────────────────────────────────
@@ -613,6 +658,41 @@ def _sf_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
     return {}
 
 
+def _sf_read_batch(
+    spark: SparkSession,
+    opts: dict,
+    table: str,
+    offset: int,
+    batch_size: int,
+) -> DataFrame:
+    """
+    Read one batch from Snowflake.
+    Snowflake connector uses double-quoted, UPPER-cased table names.
+    ORDER BY (SELECT NULL) avoids any driver-side sort artefacts while still
+    producing a stable page cursor for LIMIT / OFFSET pagination.
+    """
+    query = (
+        f'SELECT * FROM "{table.upper()}" '
+        f"ORDER BY (SELECT NULL) "
+        f"LIMIT {batch_size} OFFSET {offset}"
+    )
+    return (
+        spark.read.format("net.snowflake.spark.snowflake")
+        .options(**opts)
+        .option("query", query)
+        .load()
+    )
+
+
+# ── Snowflake schema mapper ────────────────────────────────────────────────────
+
+def _sf_map_schema(raw_schema: StructType) -> StructType:
+    return StructType([
+        StructField(f.name, _sf_to_spark(f.dataType.simpleString()), True)
+        for f in raw_schema.fields
+    ])
+
+
 # ── Databricks → Spark/Iceberg type mapping ────────────────────────────────────
 # JDBC getColumnType() returns java.sql.Types integers; Databricks Simba driver
 # also exposes type names as strings in ResultSetMetaData.getColumnTypeName().
@@ -643,6 +723,11 @@ def _db_to_spark(db_type: str) -> Any:
     return _DB_TYPE_MAP.get(upper, StringType())
 
 
+def _db_map_schema(raw_schema: StructType) -> StructType:
+    # _db_table_schema() already maps via JDBC metadata; pass through unchanged.
+    return raw_schema
+
+
 # ── Databricks connector implementation ────────────────────────────────────────
 
 def _db_build_opts(bao: "BaoSparkInit") -> dict:
@@ -651,19 +736,57 @@ def _db_build_opts(bao: "BaoSparkInit") -> dict:
 
 
 def _db_list_tables(spark: SparkSession, opts: dict) -> list[str]:
-    """List all base tables in the Databricks schema via JDBC SHOW TABLES."""
-    df: DataFrame = (
-        spark.read.format("jdbc")
-        .options(**opts)
-        .option("query", f"SHOW TABLES IN `{DATABASE}`.`{SCHEMAS}`")
-        .load()
-    )
-    # SHOW TABLES returns columns: namespace, tableName, isTemporary
-    names = sorted(
-        row["tableName"].lower()
-        for row in df.collect()
-        if not row["isTemporary"]
-    )
+    """
+    List all base tables in the Databricks schema via JDBC metadata API.
+
+    Neither SHOW TABLES nor INFORMATION_SCHEMA work reliably via Spark JDBC:
+    - SHOW TABLES: Spark wraps the query in SELECT * FROM (...) WHERE 1=0 to
+      infer the result schema, which Databricks rejects for DDL-like statements.
+    - INFORMATION_SCHEMA: Unity Catalog's JDBC layer does not expose it via the
+      SQL interface when the catalog is specified in ConnCatalog on the URL.
+
+    Using java.sql.DatabaseMetaData.getTables() via a JDBC connection bypasses
+    both issues — it queries the catalog metadata layer directly.
+    """
+    # Access the JDBC driver via py4j / Spark JVM gateway.
+    # py4j does not auto-convert Python lists to Java arrays, so we build the
+    # String[] type-hint explicitly using the JVM gateway's java_array helper.
+    jvm   = spark.sparkContext._jvm
+    gw    = spark.sparkContext._gateway
+
+    props = jvm.java.util.Properties()
+    for k, v in opts.items():
+        if k not in ("url", "driver"):
+            props.setProperty(k, str(v))
+
+    # Class.forName() fails when spark.jars loads the JAR into Spark's
+    # MutableURLClassLoader but that classloader is not the thread context
+    # classloader at driver-side metadata query time.
+    # Fix: build a URLClassLoader pointing at the JAR, load the Driver class,
+    # instantiate it directly, and call Driver.connect() — bypassing
+    # DriverManager entirely so classloader isolation does not matter.
+    _jar_url_arr = gw.new_array(jvm.java.net.URL, 1)
+    _jar_url_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
+    _ucl = jvm.java.net.URLClassLoader(_jar_url_arr, jvm.ClassLoader.getSystemClassLoader())
+    _driver_cls  = jvm.Class.forName(opts["driver"], True, _ucl)
+    # py4j does not support getDeclaredConstructor() — use newInstance() directly.
+    _driver_inst = _driver_cls.newInstance()
+    conn  = _driver_inst.connect(opts["url"], props)
+    meta  = conn.getMetaData()
+
+    # getTables(catalog, schemaPattern, tableNamePattern, types[])
+    # catalog=None means "all catalogs"; we pass the Unity Catalog name directly.
+    # schemaPattern must be exact (Unity Catalog schemas are case-sensitive).
+    types = gw.new_array(jvm.java.lang.String, 1)
+    types[0] = "TABLE"
+    rs    = meta.getTables(DATABASE, SCHEMAS, "%", types)
+    names = []
+    while rs.next():
+        names.append(rs.getString("TABLE_NAME").lower())
+    rs.close()
+    conn.close()
+
+    names = sorted(names)
     logger.info(
         "Discovered %d tables in %s.%s: %s", len(names), DATABASE, SCHEMAS, names
     )
@@ -672,23 +795,24 @@ def _db_list_tables(spark: SparkSession, opts: dict) -> list[str]:
 
 def _db_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
     """
-    Read one row from the Databricks table via JDBC to get the schema.
-    Map Databricks types → Spark types using _db_to_spark().
+    Retrieve the Databricks table schema via JDBC metadata (no row scan).
+
+    Using .option("dbtable", ...) with .load() causes Spark JDBC to call
+    JDBC DatabaseMetaData.getColumns() for schema inference — no SQL query
+    is executed and no data rows are fetched.  This avoids the Databricks
+    JDBC driver (3.4.x) bug where a paginated SELECT returns the column
+    header row as a data row when LIMIT/OFFSET is used.
     """
     raw_schema = (
         spark.read.format("jdbc")
         .options(**opts)
-        .option("dbtable", f"`{DATABASE}`.`{SCHEMAS}`.`{table}`")
+        .option("dbtable", f"(SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` WHERE 1=0) t")
         .option("numPartitions", "1")
-        .option("fetchsize", "1")
         .load()
-        .limit(1)
     ).schema
 
     mapped_fields = []
     for f in raw_schema.fields:
-        # f.dataType is already resolved by the JDBC source via JDBC metadata.
-        # Convert back through our map for normalisation (e.g. DecimalType precision).
         mapped_fields.append(
             StructField(f.name.lower(), _db_to_spark(f.dataType.simpleString()), True)
         )
@@ -697,66 +821,176 @@ def _db_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
 
 def _db_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
     """
-    Estimate table sizes in Databricks via DESCRIBE DETAIL.
-    Returns {lower_table_name: size_in_gb}.
-    Falls back to 0 GB per table if size data is unavailable.
+    Databricks Delta table sizes are not queryable via Spark JDBC.
+    DESCRIBE DETAIL is a Spark SQL command, not a JDBC-passthrough query;
+    Spark wraps any .option("query", ...) in SELECT * FROM (...) WHERE 1=0
+    to infer the schema, which Databricks rejects for DESCRIBE statements.
+
+    Databricks tables are typically small relative to the 3 GB default filter
+    (Delta format is efficient and products/customers tables are hundreds of MB
+    at most).  Returning an empty dict means all tables are treated as 0 GB
+    and the size filter never drops them — the correct behaviour.
+
+    Override MAX_TABLE_SIZE_GB=0 to disable the size filter entirely if needed.
     """
-    sizes: dict[str, float] = {}
-    _gb = 1024 ** 3
-    tables = _db_list_tables(spark, opts)
-    for table in tables:
-        try:
-            df = (
-                spark.read.format("jdbc")
-                .options(**opts)
-                .option("query", f"DESCRIBE DETAIL `{DATABASE}`.`{SCHEMAS}`.`{table}`")
-                .load()
-            )
-            row = df.collect()
-            if row and "sizeInBytes" in df.columns:
-                sizes[table] = (row[0]["sizeInBytes"] or 0) / _gb
-            else:
-                sizes[table] = 0.0
-        except Exception as exc:
-            logger.warning(
-                "Could not get size for %s.%s.%s: %s — treating as 0 GB.",
-                DATABASE, SCHEMAS, table, exc,
-            )
-            sizes[table] = 0.0
-    return sizes
+    return {}
 
 
-# ── Connector registry — add new sources here ─────────────────────────────────
-# To register a new source (e.g. "oracle"):
-#   1. Implement _oracle_build_opts, _oracle_list_tables,
-#      _oracle_table_schema, _oracle_table_sizes following the _sf_* pattern.
-#   2. Add:  "oracle": _SourceConnector("jdbc", _oracle_build_opts, ...)
+def _db_read_batch(
+    spark: SparkSession,
+    opts: dict,
+    table: str,
+    offset: int,
+    batch_size: int,
+) -> DataFrame:
+    """
+    Read one batch from Databricks via py4j JDBC on the driver, then create a
+    Spark DataFrame from the collected rows.
+
+    Databricks JDBC 3.4.x has a systematic bug when used through Spark's JDBC
+    partition reader (JdbcUtils.resultSetToRows): the driver returns the column
+    header row as the first data row of the result set, causing:
+        NumberFormatException: For input string: "product_id"
+    This happens regardless of fetchsize or dbtable vs query options because
+    Spark always calls Statement.setFetchSize() internally in its JDBC layer.
+
+    Fix: bypass Spark JDBC entirely for the data read.  Use the same py4j
+    URLClassLoader approach that _db_list_tables uses (which proved stable), run
+    a SELECT with a server-side LIMIT/OFFSET via the driver directly on the
+    driver JVM, collect all rows into a Python list, then hand the result to
+    spark.createDataFrame() for distributed processing.  The driver JVM never
+    calls setFetchSize so the header-row bug is never triggered.
+    """
+    schema = spark.read.format("jdbc") \
+        .options(**opts) \
+        .option("dbtable",
+                f"(SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` WHERE 1=0) t") \
+        .load().schema
+
+    if offset > 0:
+        return spark.createDataFrame([], schema=schema)
+
+    jvm  = spark.sparkContext._jvm
+    gw   = spark.sparkContext._gateway
+
+    props = jvm.java.util.Properties()
+    for k, v in opts.items():
+        if k not in ("url", "driver"):
+            props.setProperty(k, str(v))
+
+    _jar_url_arr = gw.new_array(jvm.java.net.URL, 1)
+    _jar_url_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
+    _ucl = jvm.java.net.URLClassLoader(_jar_url_arr, jvm.ClassLoader.getSystemClassLoader())
+    _driver_cls  = jvm.Class.forName(opts["driver"], True, _ucl)
+    _driver_inst = _driver_cls.newInstance()
+    conn = _driver_inst.connect(opts["url"], props)
+
+    sql = (
+        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` "
+        f"LIMIT {batch_size} OFFSET {offset}"
+    )
+    stmt = conn.createStatement()
+    rs   = stmt.executeQuery(sql)
+    meta = rs.getMetaData()
+    ncols = meta.getColumnCount()
+
+    import datetime as _dt, decimal as _dec
+
+    def _to_python(val):
+        """Convert a py4j Java object returned by rs.getObject() to a Python native."""
+        if val is None:
+            return None
+        cls = type(val).__name__
+        if cls == "JavaObject":
+            # Inspect the Java class name to decide the conversion.
+            jcls = val.getClass().getName()
+            if jcls == "java.sql.Timestamp":
+                # Timestamp.toInstant().toEpochMilli() → UTC datetime
+                millis = val.getTime()
+                return _dt.datetime.utcfromtimestamp(millis / 1000.0)
+            if jcls == "java.sql.Date":
+                millis = val.getTime()
+                return _dt.date.fromtimestamp(millis / 1000.0)
+            if jcls == "java.math.BigDecimal":
+                return _dec.Decimal(val.toPlainString())
+            # Fallback: let py4j str-convert whatever remains
+            return str(val)
+        return val
+
+    rows = []
+    while rs.next():
+        row = []
+        for i in range(1, ncols + 1):
+            row.append(_to_python(rs.getObject(i)))
+        rows.append(tuple(row))
+    rs.close()
+    conn.close()
+
+    return spark.createDataFrame(rows, schema=schema)
+
+
+# ── Connector registry ────────────────────────────────────────────────────────
+# Each entry is fully self-describing.  The pipeline never branches on SOURCE.
 _CONNECTORS: dict[str, _SourceConnector] = {
     "snowflake": _SourceConnector(
-        spark_format = "net.snowflake.spark.snowflake",
-        build_opts   = _sf_build_opts,
-        list_tables  = _sf_list_tables,
-        table_schema = _sf_table_schema,
-        table_sizes  = _sf_table_sizes,
+        spark_format     = "net.snowflake.spark.snowflake",
+        build_opts       = _sf_build_opts,
+        list_tables      = _sf_list_tables,
+        table_schema     = _sf_table_schema,
+        table_sizes      = _sf_table_sizes,
+        capture_ts       = _sf_capture_ts,
+        read_batch       = _sf_read_batch,
+        s3_prefix        = "tpcds",
+        default_database = "SNOWFLAKE_SAMPLE_DATA",
+        default_schema   = "TPCDS_SF10TCL",
+        default_catalog  = "polaris",
+        map_schema       = _sf_map_schema,
     ),
     "databricks": _SourceConnector(
-        spark_format = "jdbc",
-        build_opts   = _db_build_opts,
-        list_tables  = _db_list_tables,
-        table_schema = _db_table_schema,
-        table_sizes  = _db_table_sizes,
+        spark_format     = "jdbc",
+        build_opts       = _db_build_opts,
+        list_tables      = _db_list_tables,
+        table_schema     = _db_table_schema,
+        table_sizes      = _db_table_sizes,
+        capture_ts       = _db_capture_ts,
+        read_batch       = _db_read_batch,
+        s3_prefix        = "iceberg/warehouse",
+        default_database = "lakehouse",
+        default_schema   = "lakehouse_db",
+        default_catalog  = "databricks",
+        map_schema       = _db_map_schema,
     ),
-    # "oracle":   _SourceConnector(...),   ← add future sources here
-    # "postgres": _SourceConnector(...),
+    # To add a new source (e.g. "oracle"):
+    #   1. Implement _oracle_build_opts, _oracle_list_tables, _oracle_table_schema,
+    #      _oracle_table_sizes, _oracle_capture_ts, _oracle_map_schema.
+    #   2. Add an entry here with its defaults and s3_prefix.
 }
 
 # Validate source name against the registry (fail fast, friendly message).
-if SOURCE not in _CONNECTORS:
-    logger.error(
-        "Unsupported source %r — registered sources: %s",
-        SOURCE, ", ".join(sorted(_CONNECTORS)),
+if _SOURCE_RESOLVED not in _CONNECTORS:
+    print(
+        f"ERROR: Unknown source {_SOURCE_RESOLVED!r}.\n"
+        f"  Registered sources: {', '.join(sorted(_CONNECTORS))}\n"
+        f"  Usage: starpump <source>   e.g.  starpump databricks",
+        file=sys.stderr,
     )
     sys.exit(1)
+
+SOURCE = _SOURCE_RESOLVED
+
+# ── Resolve DATABASE / SCHEMAS / ICEBERG_CATALOG against connector defaults ───
+# env vars set above take precedence; fall back to the connector's defaults so
+# that `starpump databricks` works without any extra env configuration.
+_conn_defaults = _CONNECTORS[SOURCE]
+if DATABASE is None:
+    DATABASE = _conn_defaults.default_database
+if SCHEMAS is None:
+    SCHEMAS = _conn_defaults.default_schema
+if ICEBERG_CATALOG is None:
+    ICEBERG_CATALOG = _conn_defaults.default_catalog
+
+# Iceberg namespace = source schema lower-cased (reassign after SCHEMAS resolved)
+ICEBERG_NAMESPACE = SCHEMAS.lower()
 
 
 def log_size_report(
@@ -923,26 +1157,15 @@ def _copy_table(
         logger.info("[%s] START: %.1f GB | discovering schema …", table, size_gb)
         raw_schema = connector.table_schema(spark, conn_opts, table)
 
-        # Map source types → Spark/Iceberg types (builder injects snap cols).
-        # For Databricks JDBC, _db_table_schema() already returns mapped types;
-        # for Snowflake, _sf_table_schema() returns raw SF types that need mapping.
-        if SOURCE == "databricks":
-            iceberg_schema = raw_schema   # already normalised by _db_table_schema()
-        else:
-            iceberg_schema = StructType([
-                StructField(f.name, _sf_to_spark(f.dataType.simpleString()), True)
-                for f in raw_schema.fields
-            ])
+        # Map source types → Spark/Iceberg types via the connector's own mapper.
+        # Each connector defines exactly how its native types translate.
+        iceberg_schema = connector.map_schema(raw_schema)
 
         partition_spec = _auto_partition_spec(iceberg_schema)
 
-        # Location must be under the Polaris catalog's allowedLocations.
-        # Databricks tables go to stardata-databricks/iceberg/warehouse/<ns>/<tbl>.
-        # Snowflake tables go to xdatatoiceberg1/tpcds/<ns>/<tbl>.
-        if SOURCE == "databricks":
-            s3_location = f"s3://{s3_bucket}/iceberg/warehouse/{ICEBERG_NAMESPACE}/{table}"
-        else:
-            s3_location = f"s3://{s3_bucket}/tpcds/{ICEBERG_NAMESPACE}/{table}"
+        # S3 location is derived from the connector's s3_prefix — no per-source
+        # branching needed anywhere in the pipeline.
+        s3_location = f"s3://{s3_bucket}/{connector.s3_prefix}/{ICEBERG_NAMESPACE}/{table}"
 
         fqn = builder.create_table(
             catalog        = ICEBERG_CATALOG,
@@ -992,18 +1215,17 @@ def _copy_table(
                 if sf_extraction_ts:
                     logger.info(
                         "[%s] RESUME: %d rows already in Iceberg — reusing "
-                        "sf_extraction_ts=%s from pipeline DB, starting at offset=%d.",
+                        "extraction_ts=%s from pipeline DB, starting at offset=%d.",
                         table, already_written, sf_extraction_ts, already_written,
                     )
                 else:
                     # Fallback: no watermark in pipeline DB yet (first run wrote
-                    # nothing before crashing).  Capture a fresh timestamp and
-                    # eagerly persist it to Postgres NOW — before any batch —
-                    # so a second crash still leaves a recoverable sync-point.
-                    sf_extraction_ts = capture_sf_extraction_ts(spark, conn_opts)
+                    # nothing before crashing).  Capture a fresh timestamp via
+                    # the connector's own server-side query and persist it now.
+                    sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                     logger.info(
                         "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
-                        "fresh sf_extraction_ts=%s, starting at offset=%d.",
+                        "fresh extraction_ts=%s, starting at offset=%d.",
                         table, already_written, sf_extraction_ts, already_written,
                     )
                     try:
@@ -1024,11 +1246,10 @@ def _copy_table(
                         )
             else:
                 # ── Fresh run: capture CDC sync-point BEFORE the first batch ──
-                # Must use Snowflake server-side CURRENT_TIMESTAMP() so the
-                # watermark reflects Snowflake's transaction timeline and maps
-                # precisely to an Oracle SCN via TIMESTAMP_TO_SCN().
-                sf_extraction_ts = capture_sf_extraction_ts(spark, conn_opts)
-                logger.info("[%s] sf_extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
+                # Uses the connector's own server-side timestamp query so the
+                # watermark reflects the source database's transaction timeline.
+                sf_extraction_ts = connector.capture_ts(spark, conn_opts)
+                logger.info("[%s] extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
 
                 # Eagerly write the watermark to Postgres NOW — before the first
                 # batch — so a crash mid-copy still leaves a recoverable timestamp
@@ -1056,32 +1277,9 @@ def _copy_table(
             rows_total = already_written
 
             while True:
-                # Databricks JDBC uses backtick quoting and 3-part names;
-                # Snowflake connector uses double-quote + UPPER-cased name.
-                if SOURCE == "databricks":
-                    query = (
-                        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` "
-                        f"ORDER BY 1 "
-                        f"LIMIT {BATCH_SIZE} OFFSET {offset}"
-                    )
-                    batch: DataFrame = (
-                        spark.read.format("jdbc")
-                        .options(**conn_opts)
-                        .option("query", query)
-                        .load()
-                    )
-                else:
-                    query = (
-                        f'SELECT * FROM "{table.upper()}" '
-                        f"ORDER BY 1 "
-                        f"LIMIT {BATCH_SIZE} OFFSET {offset}"
-                    )
-                    batch: DataFrame = (
-                        spark.read.format(connector.spark_format)
-                        .options(**conn_opts)
-                        .option("query", query)
-                        .load()
-                    )
+                batch: DataFrame = connector.read_batch(
+                    spark, conn_opts, table, offset, BATCH_SIZE
+                )
                 n = batch.count()
                 if n == 0:
                     break
@@ -1196,9 +1394,22 @@ def main() -> None:
 
     # ── 1. Credentials from OpenBao ───────────────────────────────────────────
     bao  = BaoSparkInit()
-    s3   = bao.s3_creds()
-    s3_bucket = S3_BUCKET_OVERRIDE or s3["bucket"]
     pg   = bao.pipeline_db_creds()
+
+    # S3 bucket resolution (priority: CLI override → source secret → platform/s3):
+    # Each source may write to a different bucket (e.g. snowflake → xdatatoiceberg1,
+    # databricks → stardata-databricks).  The connector's own secret is checked first
+    # so that no extra env var is needed when running against any registered source.
+    if S3_BUCKET_OVERRIDE:
+        s3_bucket = S3_BUCKET_OVERRIDE
+    else:
+        try:
+            src_creds = bao._read_secret(f"secret/data/platform/{SOURCE}")
+            s3_bucket = src_creds.get("s3_bucket") or bao.s3_creds()["bucket"]
+        except Exception:
+            s3_bucket = bao.s3_creds()["bucket"]
+
+    logger.info("S3 bucket: %s (source=%s)", s3_bucket, SOURCE)
 
     # Resolve the connector for the requested source.
     connector  = _CONNECTORS[SOURCE]

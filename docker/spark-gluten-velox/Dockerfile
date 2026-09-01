@@ -7,6 +7,7 @@
 #   iceberg-aws-bundle-1.9.2.jar                                  (Iceberg S3FileIO — AWS SDK v2)
 #   spark-snowflake_2.12-3.2.1-spark_3.5.jar                     (Snowflake connector)
 #   snowflake-jdbc-4.0.2.jar                                      (Snowflake JDBC)
+#   databricks-jdbc-2.6.36.1070.jar                               (Databricks JDBC — binary 3.4.2)
 #   hadoop-aws-3.3.4.jar                                          (S3A filesystem)
 #   aws-java-sdk-bundle-1.12.262.jar                              (AWS SDK v1 — S3A)
 #   postgresql-42.7.4.jar                                         (Hive Metastore backend — PostgreSQL JDBC)
@@ -81,11 +82,13 @@ COPY jars/iceberg-aws-bundle-1.9.2.jar \
 COPY jars/postgresql-42.7.4.jar \
      /opt/spark/jars/postgresql-42.7.4.jar
 
-# Databricks Simba JDBC driver — required by starpump databricks connector.
-# Download from: https://www.databricks.com/spark/jdbc-drivers-download
-# Place the jar in docker/spark-gluten-velox/jars/ before building.
+# Databricks JDBC driver — required by starpump databricks connector.
+# Staged from: ~/Downloads/DatabricksJDBC-3.4.2/databricks-jdbc-3.4.2.jar
+# Stored in jars/ as databricks-jdbc-2.6.36.1070.jar (binary is 3.4.2;
+# driver class com.databricks.client.jdbc.Driver is stable across versions).
 COPY jars/databricks-jdbc-2.6.36.1070.jar \
      /opt/spark/jars/databricks-jdbc-2.6.36.1070.jar
+RUN chmod 644 /opt/spark/jars/databricks-jdbc-2.6.36.1070.jar
 
 # ── Python packages — split into layers to avoid pip botocore conflict ────────
 # Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
@@ -143,6 +146,7 @@ COPY scripts/bao_spark_init.py           /opt/spark/work-dir/bao_spark_init.py
 COPY scripts/spark_iceberg_utils.py      /opt/spark/work-dir/spark_iceberg_utils.py
 COPY scripts/starpump.py                 /opt/spark/work-dir/starpump.py
 COPY scripts/databricks_customer_seed.py /opt/spark/work-dir/databricks_customer_seed.py
+COPY scripts/databricks_product_seed.py  /opt/spark/work-dir/databricks_product_seed.py
 RUN chmod 644 /opt/spark/work-dir/*.py
 
 # ── CLI entry-points ──────────────────────────────────────────────────────────
