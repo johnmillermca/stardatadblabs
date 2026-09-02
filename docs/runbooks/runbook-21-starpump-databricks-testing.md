@@ -142,46 +142,88 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ---
 
-## Step 4 — Dynamic insert loop + starpump
+## Step 4 — Insert new rows in Databricks
 
-This step uses [`databricks_product_insert_loop.py`](../../docker/spark-gluten-velox/scripts/databricks_product_insert_loop.py) to continuously insert new timestamped product rows into Databricks and immediately trigger `starpump databricks` to copy them to Iceberg.
+Open **[`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`](https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor)**, select **Serverless Starter Warehouse**, and run the cells below. **Run each cell every time you want a new batch of rows**, then go to Step 5 to trigger starpump and copy them to Iceberg.
 
-**Install the connector** (once, on the machine running the script):
+---
+
+### Cell 1 — Check current row count (run any time)
+
+```sql
+SELECT COUNT(*) AS total_rows, MAX(product_id) AS max_id
+FROM lakehouse.lakehouse_db.product;
+```
+
+---
+
+### Cell 2 — Insert the next batch of 5 rows
+
+This cell always reads the current `MAX(product_id)` first so each run appends above whatever already exists. Copy it, run it once per cycle, and the `product_id` and `created_at` values advance automatically.
+
+```sql
+-- ── Dynamic insert: appends 5 rows above current MAX(product_id) ──────────
+-- Run this cell once per test cycle. Each run produces 5 new rows with
+-- created_at = NOW() so starpump picks them up as fresh data.
+
+DECLARE OR REPLACE max_id BIGINT DEFAULT (
+  SELECT COALESCE(MAX(product_id), 500) FROM lakehouse.lakehouse_db.product
+);
+
+INSERT INTO lakehouse.lakehouse_db.product
+  (product_id, product_name, category, sub_category, brand, sku,
+   unit_price, cost_price, stock_quantity, reorder_level,
+   weight_kg, is_active, created_at, updated_at, snap_id, snap_timestamp)
+VALUES
+  (max_id + 1, 'StarCore Tent Max',        'Sports',      'Outdoor',   'StarCore',   CONCAT('SKU-', LPAD(CAST(max_id + 1 AS STRING), 5, '0'), '-STAR'), 299.99, 120.00, 45,  10, 3.200, 1, NOW(), NOW(), NULL, NULL),
+  (max_id + 2, 'BrightLife Blender Pro',   'Home',        'Kitchen',   'BrightLife', CONCAT('SKU-', LPAD(CAST(max_id + 2 AS STRING), 5, '0'), '-BRGT'), 89.99,  35.00, 200, 30, 2.100, 1, NOW(), NOW(), NULL, NULL),
+  (max_id + 3, 'AeroFit Yoga Mat Elite',   'Sports',      'Fitness',   'AeroFit',    CONCAT('SKU-', LPAD(CAST(max_id + 3 AS STRING), 5, '0'), '-AERO'), 49.99,  18.00, 320, 50, 1.050, 1, NOW(), NOW(), NULL, NULL),
+  (max_id + 4, 'ZenFlow Watch Smart',      'Electronics', 'Wearables', 'ZenFlow',    CONCAT('SKU-', LPAD(CAST(max_id + 4 AS STRING), 5, '0'), '-ZENF'), 199.99, 80.00,  88, 20, 0.150, 1, NOW(), NOW(), NULL, NULL),
+  (max_id + 5, 'UrbanEdge Jacket Sport',   'Clothing',    'Sportswear','UrbanEdge',  CONCAT('SKU-', LPAD(CAST(max_id + 5 AS STRING), 5, '0'), '-URBN'), 129.99, 52.00, 150, 25, 0.850, 1, NOW(), NOW(), NULL, NULL);
+
+-- Confirm the rows landed
+SELECT product_id, product_name, category, unit_price, created_at
+FROM   lakehouse.lakehouse_db.product
+WHERE  product_id > max_id
+ORDER  BY product_id;
+```
+
+✅ Expected: 5 new rows returned, `created_at` = current timestamp, `snap_id` and `snap_timestamp` are NULL (starpump injects those on copy).
+
+---
+
+### Cell 3 — Verify total row count after insert
+
+```sql
+SELECT COUNT(*) AS total_rows, MAX(product_id) AS max_id, MAX(created_at) AS latest_insert
+FROM lakehouse.lakehouse_db.product;
+```
+
+---
+
+After each Cell 2 run, go to **Step 5** to trigger starpump and copy the new rows to Iceberg.
+
+---
+
+## Step 5 — Trigger starpump to copy new rows to Iceberg
+
+After inserting in Step 4, run this from your terminal to copy the new rows:
+
 ```bash
-pip install databricks-sql-connector
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  starpump databricks
 ```
 
-**Run the loop** (inserts a batch every `INTERVAL_SECONDS`, runs forever until Ctrl-C):
-```bash
-TOKEN=$TOKEN \
-INTERVAL_SECONDS=30 \
-BATCH_SIZE=5 \
-python3 docker/spark-gluten-velox/scripts/databricks_product_insert_loop.py
+✅ Key lines to look for:
+```
+[product] batch offset=0 rows=<N> total=<N>
+[product] DONE — <N> rows written (total incl. prior runs).
+Completed in X.Xs — 1/1 copied | 0 skipped | 0 failed | <N> rows written
 ```
 
-| Env var | Default | Description |
-|---|---|---|
-| `TOKEN` | *(required)* | OpenBao root/bootstrap token |
-| `INTERVAL_SECONDS` | `30` | Seconds between insert → starpump cycles |
-| `BATCH_SIZE` | `5` | New rows to insert per cycle |
-| `STARPUMP_NAMESPACE` | `prod` | Kubernetes namespace |
-
-Each cycle:
-1. Inserts `BATCH_SIZE` rows with `created_at = NOW()` and unique `product_id` values above the current max
-2. Runs `kubectl exec … starpump databricks` against the live cluster
-3. Prints a timestamped summary of rows inserted and the starpump exit code
-
-✅ Expected cycle output:
-```
-[2026-08-31T14:00:00] Cycle 1 — inserted 5 rows (product_id 501–505, created_at=2026-08-31T14:00:00)
-[2026-08-31T14:00:00] Running starpump databricks …
-[2026-08-31T14:00:08]   [product] batch offset=0 rows=505 total=505
-[2026-08-31T14:00:08]   [product] DONE — 505 rows written (total incl. prior runs).
-[2026-08-31T14:00:08] ✅ Cycle 1 complete — starpump exit=0. Next cycle in 30s.
-
-[2026-08-31T14:00:38] Cycle 2 — inserted 5 rows (product_id 506–510, created_at=2026-08-31T14:00:38)
-...
-```
+Then re-run Step 3 to confirm the row count in Iceberg matches Databricks.
 
 ---
 
