@@ -247,6 +247,146 @@ Then re-run Step 3 to confirm the row count in Iceberg matches Databricks.
 
 ---
 
+## Step 6 — Partial copy with QUERY_FILTER
+
+`QUERY_FILTER` lets you copy only the rows that match a predicate — without modifying any code.
+It is set as an environment variable alongside the starpump command.
+
+### Syntax
+
+```
+QUERY_FILTER="[table.]column<op>value"
+```
+
+- **Schema-level** — no table prefix: applies the predicate to **every** table in the schema.
+- **Table-level** — `table.column`: applies only to that one table.
+- Multiple predicates: comma-separated (commas inside parentheses are safe).
+
+| Operator | Example |
+|---|---|
+| `=` | `is_active=1` |
+| `!=` / `<>` | `category!='Books'` |
+| `>` / `>=` / `<` / `<=` | `unit_price>=100` |
+| `LIKE` | `product_name LIKE 'Star%'` |
+| `NOT LIKE` | `product_name NOT LIKE '%test%'` |
+| `IN (...)` | `category IN ('Electronics','Sports')` |
+| `NOT IN (...)` | `brand NOT IN ('ZenFlow','AeroFit')` |
+| `IS NULL` | `snap_id IS NULL` |
+| `IS NOT NULL` | `snap_id IS NOT NULL` |
+
+---
+
+### Example 1 — Copy only active products
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  QUERY_FILTER="is_active=1" \
+  starpump databricks
+```
+
+✅ Expected log:
+```
+[product] QUERY_FILTER active — WHERE (is_active=1)
+[product] batch offset=0 rows=<active_count> total=<active_count>
+```
+
+---
+
+### Example 2 — Copy only Electronics products (table-level)
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  QUERY_FILTER="product.category='Electronics'" \
+  starpump databricks
+```
+
+---
+
+### Example 3 — Copy high-value active products (combined predicates)
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  QUERY_FILTER="product.unit_price>=100,is_active=1" \
+  starpump databricks
+```
+
+✅ Expected log:
+```
+[query-filter] Parsed QUERY_FILTER → {'product': 'unit_price>=100', '<schema-level>': 'is_active=1'}
+[product] QUERY_FILTER active — WHERE (is_active=1) AND (unit_price>=100)
+```
+
+---
+
+### Example 4 — Copy rows inserted after a specific timestamp
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  QUERY_FILTER="product.created_at>='2026-09-01 00:00:00'" \
+  starpump databricks
+```
+
+---
+
+### Example 5 — Copy rows where snap_id is NULL (not yet copied)
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  DATABASE=lakehouse SCHEMAS=lakehouse_db \
+  QUERY_FILTER="product.snap_id IS NULL" \
+  starpump databricks
+```
+
+---
+
+### Verify the filtered rows landed in Iceberg
+
+After any filtered copy, adapt the verification query to match your filter:
+
+```bash
+cat > /tmp/verify_filter.py << 'PYEOF'
+import os
+os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf(app_name="verify-filter")).getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
+
+# Adjust WHERE clause to match your QUERY_FILTER
+spark.sql("""
+    SELECT COUNT(*) AS filtered_rows
+    FROM   databricks.lakehouse_db.product
+    WHERE  is_active = 1
+""").show()
+
+spark.sql("""
+    SELECT product_id, product_name, category, unit_price, snap_id, snap_timestamp
+    FROM   databricks.lakehouse_db.product
+    ORDER  BY snap_timestamp DESC
+    LIMIT  5
+""").show(truncate=False)
+
+spark.stop()
+PYEOF
+
+kubectl cp /tmp/verify_filter.py prod/$MASTER:/tmp/verify_filter.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 /tmp/verify_filter.py
+```
+
+---
+
 ## Troubleshooting
 
 ### `ClassNotFoundException: com.databricks.client.jdbc.Driver`

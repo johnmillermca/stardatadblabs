@@ -269,12 +269,78 @@ kubectl exec -n prod $SPARK_POD -c spark-master -- \
 
 ### 5.4 Partial / targeted copy
 
+#### By table name — `INCLUDE_TABLES`
+
 ```bash
 # Copy only customer and item tables
 kubectl exec -n prod $SPARK_POD -c spark-master -- \
   env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
       INCLUDE_TABLES=customer,item MAX_TABLE_SIZE_GB=0 \
   starpump snowflake
+```
+
+#### By row predicate — `QUERY_FILTER`
+
+`QUERY_FILTER` pushes a `WHERE` clause into the source SQL so only matching rows are read and copied.
+No code changes are needed — it works for every connector (Snowflake, Databricks, any future source).
+
+**Syntax:**
+
+```
+QUERY_FILTER="[table.]column<op>value"
+```
+
+- **Schema-level** (no table prefix) — applies to **every** table in the schema.
+- **Table-level** (`table.column`) — applies only to that named table.
+- Comma-separate multiple predicates (commas inside parentheses are safe).
+
+**Supported operators:** `=`  `!=`  `<>`  `>=`  `<=`  `>`  `<`  `LIKE`  `NOT LIKE`  `IN (...)`  `NOT IN (...)`  `IS NULL`  `IS NOT NULL`
+
+---
+
+**Example 1 — Copy only rows created after a date (schema-level):**
+
+```bash
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      QUERY_FILTER="d_year>=2020" \
+  starpump snowflake
+```
+
+**Example 2 — Copy a specific customer segment (table-level):**
+
+```bash
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      INCLUDE_TABLES=customer \
+      QUERY_FILTER="customer.c_preferred_cust_flag='Y'" \
+  starpump snowflake
+```
+
+**Example 3 — Copy only rows with non-null key (IS NOT NULL):**
+
+```bash
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      QUERY_FILTER="customer.c_customer_id IS NOT NULL" \
+  starpump snowflake
+```
+
+**Example 4 — Combined: table filter + date range + category filter:**
+
+```bash
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      INCLUDE_TABLES=item \
+      QUERY_FILTER="item.i_category IN ('Music','Books'),item.i_current_price>=10.0" \
+  starpump snowflake
+```
+
+✅ Expected log lines when `QUERY_FILTER` is active:
+```
+[query-filter] Parsed QUERY_FILTER → {'item': "i_category IN ('Music','Books') AND i_current_price>=10.0"}
+[item] QUERY_FILTER active — WHERE (i_category IN ('Music','Books') AND i_current_price>=10.0)
+[item] batch offset=0 rows=<N> total=<N>
 ```
 
 ### 5.5 Dry-run (create tables, no data)
@@ -715,6 +781,41 @@ kubectl exec -n prod $SPARK_POD -c spark-master -- \
 kubectl exec -n prod $SPARK_POD -c spark-master -- \
   env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" DRY_RUN=1 \
   starpump snowflake
+
+# ── QUERY_FILTER — partial / row-level copy ──────────────────────────────────
+
+# Schema-level: copy only rows where d_year >= 2020 (all tables)
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      QUERY_FILTER="d_year>=2020" \
+  starpump snowflake
+
+# Table-level: preferred customers only
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      INCLUDE_TABLES=customer \
+      QUERY_FILTER="customer.c_preferred_cust_flag='Y'" \
+  starpump snowflake
+
+# IN list: specific item categories
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      INCLUDE_TABLES=item \
+      QUERY_FILTER="item.i_category IN ('Music','Books')" \
+  starpump snowflake
+
+# IS NULL check
+kubectl exec -n prod $SPARK_POD -c spark-master -- \
+  env USER=bob TOKEN="$TOKEN" ADDR="$ADDR" \
+      QUERY_FILTER="customer.c_customer_id IS NOT NULL" \
+  starpump snowflake
+
+# Databricks: copy only active, high-value products
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN="$TOKEN" \
+      DATABASE=lakehouse SCHEMAS=lakehouse_db \
+      QUERY_FILTER="product.unit_price>=100,is_active=1" \
+  starpump databricks
 
 # Check Iceberg tables in Polaris (in Spark session)
 spark.sql("SHOW TABLES IN `polaris`.`tpcds_sf10tcl`").show(30)

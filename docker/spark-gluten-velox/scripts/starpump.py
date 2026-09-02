@@ -69,6 +69,47 @@ Table filtering (applied in this order)
 4. TABLES          — legacy alias for INCLUDE_TABLES.  If both are set,
                      INCLUDE_TABLES takes precedence.
 
+Row-level filtering — QUERY_FILTER
+------------------------------------
+QUERY_FILTER lets you copy only the rows that match one or more predicates.
+Filters are comma-separated; each filter is one of two forms:
+
+  Schema-level  (applies to EVERY table in the schema):
+    <column><op><value>
+
+  Table-level   (applies to one named table only):
+    <table>.<column><op><value>
+
+Supported operators:  =  !=  <>  >=  <=  >  <  LIKE  NOT LIKE  IN  NOT IN
+                       IS NULL  IS NOT NULL
+
+The value is passed verbatim into the WHERE clause so quote strings yourself.
+
+Examples:
+  # Copy only active products (schema-level — applied to every table):
+  QUERY_FILTER="is_active=1"                         starpump databricks
+
+  # Table-level: only product rows with unit_price > 50:
+  QUERY_FILTER="product.unit_price>50"               starpump databricks
+
+  # Multiple predicates on different tables:
+  QUERY_FILTER="product.unit_price>=100,orders.status='OPEN'"  starpump snowflake
+
+  # LIKE pattern (quote the value):
+  QUERY_FILTER="product.product_name LIKE 'Star%'"   starpump databricks
+
+  # IN list:
+  QUERY_FILTER="product.category IN ('Electronics','Sports')"  starpump databricks
+
+  # IS NULL / IS NOT NULL (no value needed):
+  QUERY_FILTER="product.snap_id IS NULL"             starpump databricks
+
+  # Combine table-level and schema-level:
+  QUERY_FILTER="product.unit_price>100,is_active=1"  starpump databricks
+
+  # Date range (Snowflake):
+  QUERY_FILTER="orders.created_at>='2026-01-01'"     starpump snowflake
+
 Source size discovery (Snowflake)
 ----------------------------------
 Before the copy loop starts, the pipeline queries
@@ -98,6 +139,9 @@ Environment variables
   TABLES              Legacy alias for INCLUDE_TABLES        (optional)
   MAX_TABLE_SIZE_GB   Skip tables larger than this many GB   (default: 3.0)
                       Set to 0 to disable the size filter entirely.
+  QUERY_FILTER        Row-level predicate filter (see "Row-level filtering" above).
+                      Comma-separated list of <[table.]column><op><value> expressions.
+                      Applied as a WHERE clause on the source query for every connector.
   DRY_RUN             1 = create Iceberg DDL but skip data copy
   BATCH_SIZE          Rows per batch                (default: 100000)
   MAX_THREADS         Parallel copy threads         (default: 8)
@@ -278,6 +322,10 @@ EXCLUDE_TABLES: set[str] = {
 #   0 disables the size filter entirely.
 MAX_TABLE_SIZE_GB: float = float(os.environ.get("MAX_TABLE_SIZE_GB", "3.0"))
 _SIZE_FILTER_ENABLED = MAX_TABLE_SIZE_GB > 0
+
+# ── QUERY_FILTER — row-level predicate pushed into the source SQL WHERE clause ─
+# Raw value is parsed by _parse_query_filters() after _CONNECTORS is defined.
+_RAW_QUERY_FILTER = os.environ.get("QUERY_FILTER", "").strip()
 
 # SOURCE, DATABASE, SCHEMAS, ICEBERG_CATALOG, ICEBERG_NAMESPACE are all
 # finalised after _CONNECTORS is defined below (they depend on connector defaults).
@@ -573,7 +621,7 @@ class _SourceConnector:
     table_schema:          Callable   # (spark, opts, table) -> StructType
     table_sizes:           Callable   # (spark, opts) -> dict[str, float]
     capture_ts:            Callable   # (spark, opts) -> str ISO-8601Z
-    read_batch:            Callable   # (spark, opts, table, offset, batch_size) -> DataFrame
+    read_batch:            Callable   # (spark, opts, table, offset, batch_size, where_clause="") -> DataFrame
     s3_prefix:             str        # path under s3://<bucket>/
     default_database:      str
     default_schema:        str
@@ -676,15 +724,19 @@ def _sf_read_batch(
     table: str,
     offset: int,
     batch_size: int,
+    where_clause: str = "",
 ) -> DataFrame:
     """
     Read one batch from Snowflake.
     Snowflake connector uses double-quoted, UPPER-cased table names.
     ORDER BY (SELECT NULL) avoids any driver-side sort artefacts while still
     producing a stable page cursor for LIMIT / OFFSET pagination.
+    where_clause is an optional SQL predicate fragment (without WHERE keyword)
+    injected from QUERY_FILTER to copy only matching rows.
     """
+    where = f" WHERE {where_clause}" if where_clause else ""
     query = (
-        f'SELECT * FROM "{table.upper()}" '
+        f'SELECT * FROM "{table.upper()}"{where} '
         f"ORDER BY (SELECT NULL) "
         f"LIMIT {batch_size} OFFSET {offset}"
     )
@@ -854,6 +906,7 @@ def _db_read_batch(
     table: str,
     offset: int,
     batch_size: int,
+    where_clause: str = "",
 ) -> DataFrame:
     """
     Read one batch from Databricks via py4j JDBC on the driver, then create a
@@ -880,6 +933,9 @@ def _db_read_batch(
     The offset argument is kept for API compatibility with the generic batch
     loop but is not used to skip rows — the loop breaks after the first
     (and only) non-empty batch.
+
+    where_clause is an optional SQL predicate fragment (without WHERE keyword)
+    injected from QUERY_FILTER to copy only matching rows.
     """
     schema = spark.read.format("jdbc") \
         .options(**opts) \
@@ -902,8 +958,9 @@ def _db_read_batch(
     _driver_inst = _driver_cls.newInstance()
     conn = _driver_inst.connect(opts["url"], props)
 
+    where = f" WHERE {where_clause}" if where_clause else ""
     sql = (
-        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` "
+        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}`{where} "
         f"LIMIT {batch_size} OFFSET {offset}"
     )
     stmt = conn.createStatement()
@@ -1010,6 +1067,158 @@ if ICEBERG_CATALOG is None:
 
 # Iceberg namespace = source schema lower-cased (reassign after SCHEMAS resolved)
 ICEBERG_NAMESPACE = SCHEMAS.lower()
+
+
+# ── QUERY_FILTER parser ────────────────────────────────────────────────────────
+import re as _re
+
+def _parse_query_filters(raw: str) -> dict[str, str]:
+    """
+    Parse the QUERY_FILTER env-var into a mapping of
+      { table_name_lower: "WHERE clause fragment" }
+
+    The special key "" (empty string) holds schema-level predicates that
+    apply to every table.  Table-level predicates are stored under their
+    lower-cased table name and override/extend the schema-level predicate
+    for that table (combined with AND).
+
+    Grammar for each comma-separated token (spaces around the comma are ignored):
+
+      Schema-level:
+        <column> <op> <value>
+        <column> IS [NOT] NULL
+
+      Table-level:
+        <table>.<column> <op> <value>
+        <table>.<column> IS [NOT] NULL
+
+    Supported operators:
+      =   !=   <>   >=   <=   >   <
+      LIKE   NOT LIKE
+      IN (...)   NOT IN (...)
+      IS NULL    IS NOT NULL
+
+    The value is taken verbatim — quote strings in the env-var value itself:
+      QUERY_FILTER="product.category IN ('Electronics','Sports')"
+
+    Returns {} when raw is empty (no filtering applied).
+    """
+    if not raw:
+        return {}
+
+    # Tokenise on commas that are NOT inside parentheses.
+    # e.g.  "product.category IN ('a','b'),is_active=1"
+    # should split into two tokens, not three.
+    tokens: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in raw:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            tokens.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        tokens.append("".join(cur).strip())
+
+    # Ordered list of (regex, template) pairs.
+    # Each regex must capture groups:
+    #   group 1 — optional "table." prefix (may be empty)
+    #   group 2 — column name
+    #   group 3 — full predicate fragment (op + value, or IS [NOT] NULL)
+    _OPS = (
+        # IS NOT NULL / IS NULL  (no value — must come before IN to avoid conflict)
+        (r"^([a-z0-9_]+\.)?([a-z0-9_]+)\s+(IS\s+NOT\s+NULL|IS\s+NULL)\s*$", None),
+        # NOT IN (...)
+        (r"^([a-z0-9_]+\.)?([a-z0-9_]+)\s+(NOT\s+IN\s*\(.*\))\s*$",          None),
+        # IN (...)
+        (r"^([a-z0-9_]+\.)?([a-z0-9_]+)\s+(IN\s*\(.*\))\s*$",                None),
+        # NOT LIKE
+        (r"^([a-z0-9_]+\.)?([a-z0-9_]+)\s+(NOT\s+LIKE\s+\S.*)\s*$",          None),
+        # LIKE
+        (r"^([a-z0-9_]+\.)?([a-z0-9_]+)\s+(LIKE\s+\S.*)\s*$",                None),
+        # Comparison operators  !=  <>  >=  <=  >  <  =
+        (r"^([a-z0-9_]+\.)?([a-z0-9_]+)\s*(!= |<> |>= |<= |> |< |= |!=|<>|>=|<=|>|<|=)(.*)\s*$", None),
+    )
+
+    # schema-level predicates accumulate here; table-level under their key
+    schema_parts: list[str] = []
+    table_parts:  dict[str, list[str]] = {}
+
+    for token in tokens:
+        token_ci = token.strip()   # keep original case for values/operators
+        token_lc = token_ci.lower()
+
+        matched = False
+        for pattern, _ in _OPS:
+            m = _re.match(pattern, token_lc, _re.IGNORECASE)
+            if m:
+                matched = True
+                table_prefix = m.group(1) or ""           # e.g. "product." or ""
+                col_name     = m.group(2)                 # lower-cased column
+                # Reconstruct predicate from original token to preserve value case.
+                # We strip only the optional "table." prefix from the front.
+                prefix_len   = len(table_prefix)
+                predicate    = token_ci[prefix_len:].strip()   # "column op value"
+                tbl          = table_prefix.rstrip(".").lower() if table_prefix else ""
+
+                if tbl:
+                    table_parts.setdefault(tbl, []).append(predicate)
+                else:
+                    schema_parts.append(predicate)
+                break
+
+        if not matched:
+            raise ValueError(
+                f"QUERY_FILTER token {token!r} could not be parsed.\n"
+                f"  Expected: [table.]column <op> value  OR  [table.]column IS [NOT] NULL\n"
+                f"  Supported operators: =  !=  <>  >=  <=  >  <  LIKE  NOT LIKE  "
+                f"IN (...)  NOT IN (...)  IS NULL  IS NOT NULL"
+            )
+
+    # Build the output dict.
+    # schema-level predicates are combined with AND into key "".
+    result: dict[str, str] = {}
+    if schema_parts:
+        result[""] = " AND ".join(schema_parts)
+
+    for tbl, parts in table_parts.items():
+        result[tbl] = " AND ".join(parts)
+
+    if result:
+        logger.info(
+            "[query-filter] Parsed QUERY_FILTER → %s",
+            {k or "<schema-level>": v for k, v in result.items()},
+        )
+    return result
+
+
+def _get_where_clause(table: str) -> str:
+    """
+    Return the WHERE clause fragment (without the word WHERE) for *table*.
+
+    Merges the schema-level predicate (key "") and the table-level predicate
+    (key table_name) from the global QUERY_FILTERS dict with AND.
+    Returns "" when no filter applies to this table.
+    """
+    parts: list[str] = []
+    schema_pred = QUERY_FILTERS.get("", "")
+    table_pred  = QUERY_FILTERS.get(table.lower(), "")
+    if schema_pred:
+        parts.append(f"({schema_pred})")
+    if table_pred:
+        parts.append(f"({table_pred})")
+    return " AND ".join(parts)
+
+
+# Resolve QUERY_FILTERS after connectors are defined (parser uses logger).
+QUERY_FILTERS: dict[str, str] = _parse_query_filters(_RAW_QUERY_FILTER)
 
 
 def log_size_report(
@@ -1282,13 +1491,17 @@ def _copy_table(
                     )
 
             # ── Batched sequential copy ────────────────────────────────────
-            iceberg_cols = [f.name for f in iceberg_schema.fields]
-            offset     = already_written
-            rows_total = already_written
+            iceberg_cols  = [f.name for f in iceberg_schema.fields]
+            offset        = already_written
+            rows_total    = already_written
+            where_clause  = _get_where_clause(table)
+            if where_clause:
+                logger.info("[%s] QUERY_FILTER active — WHERE %s", table, where_clause)
 
             while True:
                 batch: DataFrame = connector.read_batch(
-                    spark, conn_opts, table, offset, BATCH_SIZE
+                    spark, conn_opts, table, offset, BATCH_SIZE,
+                    where_clause=where_clause,
                 )
                 n = batch.count()
                 if n == 0:
