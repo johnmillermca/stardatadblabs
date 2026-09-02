@@ -1,6 +1,6 @@
 # =============================================================================
 # Apache Spark 3.5.1 — 1 master + 3 standard workers + 1 large worker (worker5)
-# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1
+# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1-5
 # Access   : http://192.168.1.5x:30707  (Master UI — no auth gate)
 #            spark://192.168.1.5x:30777 (RPC — via krb-spark-guard)
 #
@@ -192,7 +192,7 @@ spec:
         # Listens on 17077 — NOT exposed by the Service directly.
         # Only the krb-spark-guard sidecar (127.0.0.1:7077) forwards to it.
         - name: spark-master
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-5
           command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
           env:
             - name: SPARK_MASTER_HOST
@@ -286,7 +286,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-5
           command:
             - /opt/spark/bin/spark-class
             - org.apache.spark.deploy.worker.Worker
@@ -359,7 +359,7 @@ spec:
                       - worker5.local
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-5
           command:
             - /opt/spark/bin/spark-class
             - org.apache.spark.deploy.worker.Worker

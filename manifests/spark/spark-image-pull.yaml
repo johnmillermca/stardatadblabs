@@ -38,7 +38,7 @@ spec:
       restartPolicy: OnFailure
       initContainers:
         - name: pull-spark-gluten-velox
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-5
           # Always pull so the image is guaranteed to be cached in containerd
           # even if a partial/stale layer exists from a previous attempt.
           imagePullPolicy: Always
@@ -81,7 +81,7 @@ spec:
       restartPolicy: OnFailure
       initContainers:
         - name: pull-spark-gluten-velox
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-5
           imagePullPolicy: Always
           command: ["true"]
           resources:
