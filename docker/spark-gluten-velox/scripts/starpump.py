@@ -567,18 +567,23 @@ from typing import Callable
 
 @dataclass
 class _SourceConnector:
-    spark_format:     str
-    build_opts:       Callable   # (bao) -> dict
-    list_tables:      Callable   # (spark, opts) -> list[str]
-    table_schema:     Callable   # (spark, opts, table) -> StructType
-    table_sizes:      Callable   # (spark, opts) -> dict[str, float]
-    capture_ts:       Callable   # (spark, opts) -> str ISO-8601Z
-    read_batch:       Callable   # (spark, opts, table, offset, batch_size) -> DataFrame
-    s3_prefix:        str        # path under s3://<bucket>/
-    default_database: str
-    default_schema:   str
-    default_catalog:  str
-    map_schema:       Callable   # (StructType) -> StructType
+    spark_format:          str
+    build_opts:            Callable   # (bao) -> dict
+    list_tables:           Callable   # (spark, opts) -> list[str]
+    table_schema:          Callable   # (spark, opts, table) -> StructType
+    table_sizes:           Callable   # (spark, opts) -> dict[str, float]
+    capture_ts:            Callable   # (spark, opts) -> str ISO-8601Z
+    read_batch:            Callable   # (spark, opts, table, offset, batch_size) -> DataFrame
+    s3_prefix:             str        # path under s3://<bucket>/
+    default_database:      str
+    default_schema:        str
+    default_catalog:       str
+    map_schema:            Callable   # (StructType) -> StructType
+    supports_offset_resume: bool = True
+    # True  → source supports LIMIT/OFFSET pagination; partial copies can be
+    #         resumed from the last committed Iceberg row count.  (Snowflake)
+    # False → source must always be read in full from offset 0; LIMIT/OFFSET
+    #         is unreliable or unsupported.  (Databricks JDBC)
 
 
 # ── Snowflake connector implementation ─────────────────────────────────────────
@@ -867,15 +872,20 @@ def _db_read_batch(
     driver JVM, collect all rows into a Python list, then hand the result to
     spark.createDataFrame() for distributed processing.  The driver JVM never
     calls setFetchSize so the header-row bug is never triggered.
+
+    Note: Databricks SQL does not support reliable cursor-based pagination via
+    LIMIT/OFFSET on large result sets (results are unordered unless an ORDER BY
+    is present, and OFFSET scans from the start each time).  The connector
+    therefore always reads ALL rows in a single pass regardless of offset.
+    The offset argument is kept for API compatibility with the generic batch
+    loop but is not used to skip rows — the loop breaks after the first
+    (and only) non-empty batch.
     """
     schema = spark.read.format("jdbc") \
         .options(**opts) \
         .option("dbtable",
                 f"(SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}` WHERE 1=0) t") \
         .load().schema
-
-    if offset > 0:
-        return spark.createDataFrame([], schema=schema)
 
     jvm  = spark.sparkContext._jvm
     gw   = spark.sparkContext._gateway
@@ -940,32 +950,34 @@ def _db_read_batch(
 # Each entry is fully self-describing.  The pipeline never branches on SOURCE.
 _CONNECTORS: dict[str, _SourceConnector] = {
     "snowflake": _SourceConnector(
-        spark_format     = "net.snowflake.spark.snowflake",
-        build_opts       = _sf_build_opts,
-        list_tables      = _sf_list_tables,
-        table_schema     = _sf_table_schema,
-        table_sizes      = _sf_table_sizes,
-        capture_ts       = _sf_capture_ts,
-        read_batch       = _sf_read_batch,
-        s3_prefix        = "tpcds",
-        default_database = "SNOWFLAKE_SAMPLE_DATA",
-        default_schema   = "TPCDS_SF10TCL",
-        default_catalog  = "polaris",
-        map_schema       = _sf_map_schema,
+        spark_format           = "net.snowflake.spark.snowflake",
+        build_opts             = _sf_build_opts,
+        list_tables            = _sf_list_tables,
+        table_schema           = _sf_table_schema,
+        table_sizes            = _sf_table_sizes,
+        capture_ts             = _sf_capture_ts,
+        read_batch             = _sf_read_batch,
+        s3_prefix              = "tpcds",
+        default_database       = "SNOWFLAKE_SAMPLE_DATA",
+        default_schema         = "TPCDS_SF10TCL",
+        default_catalog        = "polaris",
+        map_schema             = _sf_map_schema,
+        supports_offset_resume = True,   # LIMIT/OFFSET ORDER BY is reliable
     ),
     "databricks": _SourceConnector(
-        spark_format     = "jdbc",
-        build_opts       = _db_build_opts,
-        list_tables      = _db_list_tables,
-        table_schema     = _db_table_schema,
-        table_sizes      = _db_table_sizes,
-        capture_ts       = _db_capture_ts,
-        read_batch       = _db_read_batch,
-        s3_prefix        = "iceberg/warehouse",
-        default_database = "lakehouse",
-        default_schema   = "lakehouse_db",
-        default_catalog  = "databricks",
-        map_schema       = _db_map_schema,
+        spark_format           = "jdbc",
+        build_opts             = _db_build_opts,
+        list_tables            = _db_list_tables,
+        table_schema           = _db_table_schema,
+        table_sizes            = _db_table_sizes,
+        capture_ts             = _db_capture_ts,
+        read_batch             = _db_read_batch,
+        s3_prefix              = "iceberg/warehouse",
+        default_database       = "lakehouse",
+        default_schema         = "lakehouse_db",
+        default_catalog        = "databricks",
+        map_schema             = _db_map_schema,
+        supports_offset_resume = False,  # full re-read every run
     ),
     # To add a new source (e.g. "oracle"):
     #   1. Implement _oracle_build_opts, _oracle_list_tables, _oracle_table_schema,
@@ -1188,24 +1200,21 @@ def _copy_table(
             logger.info("[%s] DRY_RUN — skipping data copy.", table)
             status = "dry_run"
         else:
-            # ── Resume detection ───────────────────────────────────────────
-            # Count rows already committed to Iceberg from a previous partial
-            # run so the batch loop can skip them (use as initial OFFSET).
-            try:
-                already_written = spark.table(fqn).count()
-            except Exception:
-                already_written = 0
+            # ── Resume detection (offset-capable sources only) ─────────────
+            # Snowflake supports reliable LIMIT/OFFSET pagination so a partial
+            # copy can be resumed from the last committed Iceberg row count.
+            # Databricks JDBC does not (no guaranteed order without ORDER BY),
+            # so it always reads from offset 0 regardless of prior runs.
+            already_written = 0
+            if connector.supports_offset_resume:
+                try:
+                    already_written = spark.table(fqn).count()
+                except Exception:
+                    already_written = 0
 
-            # Reuse the original sf_extraction_ts if it was stamped onto the
-            # table property in a prior run.  The property is only written on
-            # full success, so its presence means the table was fully copied
-            # before and this is a fresh re-run — capture a new timestamp.
-            # If the property is ABSENT and already_written > 0, the table is
-            # partially copied: reuse the watermark from the Postgres pipeline
-            # DB so the CDC sync-point stays consistent.
             if already_written > 0:
-                # Try to recover the original timestamp from the pipeline DB
-                # (written at the very start of the first run, before any batches).
+                # Partial resume: recover the original extraction_ts from
+                # the pipeline DB so the CDC sync-point stays consistent.
                 try:
                     with _pg_connect(pg_creds) as _conn:
                         with _conn.cursor() as _cur:
@@ -1226,9 +1235,7 @@ def _copy_table(
                         table, already_written, sf_extraction_ts, already_written,
                     )
                 else:
-                    # Fallback: no watermark in pipeline DB yet (first run wrote
-                    # nothing before crashing).  Capture a fresh timestamp via
-                    # the connector's own server-side query and persist it now.
+                    # No prior watermark (first run crashed before writing one).
                     sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                     logger.info(
                         "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
@@ -1252,15 +1259,11 @@ def _copy_table(
                             table, _pg_err,
                         )
             else:
-                # ── Fresh run: capture CDC sync-point BEFORE the first batch ──
-                # Uses the connector's own server-side timestamp query so the
-                # watermark reflects the source database's transaction timeline.
+                # Fresh run (or full re-read for non-resumable connectors):
+                # capture CDC sync-point from the source BEFORE the first batch.
                 sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                 logger.info("[%s] extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
 
-                # Eagerly write the watermark to Postgres NOW — before the first
-                # batch — so a crash mid-copy still leaves a recoverable timestamp
-                # for the next resume attempt.
                 try:
                     pg_upsert_watermark(
                         pg                = pg_creds,
@@ -1280,7 +1283,7 @@ def _copy_table(
 
             # ── Batched sequential copy ────────────────────────────────────
             iceberg_cols = [f.name for f in iceberg_schema.fields]
-            offset = already_written
+            offset     = already_written
             rows_total = already_written
 
             while True:
