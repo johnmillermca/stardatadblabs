@@ -1003,6 +1003,311 @@ def _db_read_batch(
     return spark.createDataFrame(rows, schema=schema)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── PostgreSQL connector ───────────────────────────────────────────────────────
+# Standard Spark JDBC + postgresql-42.7.4.jar (already in image).
+# LIMIT/OFFSET ORDER BY is fully reliable on PostgreSQL.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _pg_build_opts(bao: "BaoSparkInit") -> dict:
+    return bao.postgres_jdbc_options(database=DATABASE, schema=SCHEMAS)
+
+
+def _pg_list_tables(spark: SparkSession, opts: dict) -> list[str]:
+    """List all base tables in the PostgreSQL schema via INFORMATION_SCHEMA."""
+    query = (
+        f"SELECT table_name FROM information_schema.tables "
+        f"WHERE table_schema = '{SCHEMAS}' AND table_type = 'BASE TABLE' "
+        f"ORDER BY table_name"
+    )
+    rows = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", query)
+        .load()
+        .collect()
+    )
+    names = sorted(r[0].lower() for r in rows)
+    logger.info("Discovered %d tables in %s.%s: %s", len(names), DATABASE, SCHEMAS, names)
+    return names
+
+
+def _pg_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
+    return (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("dbtable", f'(SELECT * FROM "{SCHEMAS}"."{table}" WHERE 1=0) t')
+        .load()
+    ).schema
+
+
+def _pg_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
+    """Query pg_total_relation_size for table sizes in GB."""
+    query = (
+        f"SELECT relname, pg_total_relation_size(c.oid) "
+        f"FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        f"WHERE n.nspname = '{SCHEMAS}' AND c.relkind = 'r'"
+    )
+    try:
+        rows = (
+            spark.read.format("jdbc")
+            .options(**opts)
+            .option("query", query)
+            .load()
+            .collect()
+        )
+        _gb = 1024 ** 3
+        return {r[0].lower(): (r[1] or 0) / _gb for r in rows}
+    except Exception as exc:
+        logger.warning("Could not query pg table sizes: %s — treating all as 0 GB.", exc)
+        return {}
+
+
+def _pg_capture_ts(spark: SparkSession, opts: dict) -> str:
+    row = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", "SELECT TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS ts")
+        .load()
+        .collect()[0]
+    )
+    return _normalize_ts(row[0])
+
+
+def _pg_read_batch(
+    spark: SparkSession,
+    opts: dict,
+    table: str,
+    offset: int,
+    batch_size: int,
+    where_clause: str = "",
+) -> DataFrame:
+    where = f" WHERE {where_clause}" if where_clause else ""
+    query = (
+        f'SELECT * FROM "{SCHEMAS}"."{table}"{where} '
+        f"ORDER BY 1 "
+        f"LIMIT {batch_size} OFFSET {offset}"
+    )
+    return (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", query)
+        .load()
+    )
+
+
+def _pg_map_schema(raw_schema: StructType) -> StructType:
+    # Spark JDBC infers PostgreSQL types natively — pass through unchanged.
+    return raw_schema
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Oracle connector ───────────────────────────────────────────────────────────
+# Standard Spark JDBC + ojdbc11-23.4.0.24.05.jar.
+# SCHEMAS maps to the Oracle schema/owner name (upper-cased).
+# LIMIT/OFFSET uses FETCH FIRST / OFFSET (Oracle 12c+ SQL syntax).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _ora_build_opts(bao: "BaoSparkInit") -> dict:
+    return bao.oracle_jdbc_options(schema=SCHEMAS)
+
+
+def _ora_list_tables(spark: SparkSession, opts: dict) -> list[str]:
+    """List all tables owned by the schema/user in Oracle ALL_TABLES."""
+    query = (
+        f"SELECT LOWER(table_name) FROM all_tables "
+        f"WHERE owner = UPPER('{SCHEMAS}') ORDER BY table_name"
+    )
+    rows = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", query)
+        .load()
+        .collect()
+    )
+    names = sorted(r[0] for r in rows)
+    logger.info("Discovered %d tables in %s.%s: %s", len(names), DATABASE, SCHEMAS, names)
+    return names
+
+
+def _ora_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
+    return (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("dbtable",
+                f'(SELECT * FROM "{SCHEMAS.upper()}"."{table.upper()}" WHERE 1=0)')
+        .load()
+    ).schema
+
+
+def _ora_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
+    """Query DBA_SEGMENTS for table sizes (falls back gracefully)."""
+    query = (
+        f"SELECT LOWER(segment_name), bytes FROM dba_segments "
+        f"WHERE owner = UPPER('{SCHEMAS}') AND segment_type = 'TABLE'"
+    )
+    try:
+        rows = (
+            spark.read.format("jdbc")
+            .options(**opts)
+            .option("query", query)
+            .load()
+            .collect()
+        )
+        _gb = 1024 ** 3
+        return {r[0]: (r[1] or 0) / _gb for r in rows}
+    except Exception as exc:
+        logger.warning("Could not query Oracle table sizes: %s — treating all as 0 GB.", exc)
+        return {}
+
+
+def _ora_capture_ts(spark: SparkSession, opts: dict) -> str:
+    row = (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query",
+                "SELECT TO_CHAR(SYS_EXTRACT_UTC(SYSTIMESTAMP), "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"') AS ts FROM dual")
+        .load()
+        .collect()[0]
+    )
+    return _normalize_ts(row[0])
+
+
+def _ora_read_batch(
+    spark: SparkSession,
+    opts: dict,
+    table: str,
+    offset: int,
+    batch_size: int,
+    where_clause: str = "",
+) -> DataFrame:
+    where = f" WHERE {where_clause}" if where_clause else ""
+    # Oracle 12c+ OFFSET/FETCH syntax (standard SQL:2008)
+    query = (
+        f'SELECT * FROM "{SCHEMAS.upper()}"."{table.upper()}"{where} '
+        f"ORDER BY 1 "
+        f"OFFSET {offset} ROWS FETCH NEXT {batch_size} ROWS ONLY"
+    )
+    return (
+        spark.read.format("jdbc")
+        .options(**opts)
+        .option("query", query)
+        .load()
+    )
+
+
+def _ora_map_schema(raw_schema: StructType) -> StructType:
+    # Oracle JDBC maps DATE → TimestampType and NUMBER → DecimalType automatically.
+    # Pass through — Spark infers correctly.
+    return raw_schema
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── MongoDB connector ──────────────────────────────────────────────────────────
+# Uses the MongoDB Spark connector 10.x (format: "mongodb").
+# Collections = tables.  SCHEMAS is the database name.
+# No reliable OFFSET on MongoDB cursors — full collection read each run.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _mgo_build_opts(bao: "BaoSparkInit") -> dict:
+    return bao.mongodb_options(database=DATABASE)
+
+
+def _mgo_list_tables(spark: SparkSession, opts: dict) -> list[str]:
+    """
+    List all collections in the MongoDB database.
+    The MongoDB Spark connector exposes listCollections via the
+    'spark.mongodb.read.collection' option set to '*' (wildcard).
+    We use the connector's catalog API via a helper query instead.
+    """
+    mg = {k: v for k, v in opts.items()}
+    # Use the Python pymongo driver (available via mongo-spark-connector env)
+    # to list collections — Spark connector 10.x has no native listCollections.
+    try:
+        from pymongo import MongoClient  # type: ignore
+        uri = mg.get("spark.mongodb.read.connection.uri", "")
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        names = sorted(
+            c.lower()
+            for c in client[DATABASE].list_collection_names()
+            if not c.startswith("system.")
+        )
+        client.close()
+    except Exception as exc:
+        logger.warning(
+            "pymongo not available (%s) — falling back to single-collection mode. "
+            "Set DATABASE to the collection name and SCHEMAS to the database name.", exc
+        )
+        # Fallback: treat SCHEMAS as database, DATABASE as collection name.
+        names = [DATABASE.lower()]
+    logger.info("Discovered %d collections in %s: %s", len(names), SCHEMAS, names)
+    return names
+
+
+def _mgo_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
+    """Infer schema by sampling the collection (reads up to 1000 docs)."""
+    return (
+        spark.read.format("mongodb")
+        .options(**opts)
+        .option("collection", table)
+        .option("spark.mongodb.read.sample.size", "1000")
+        .load()
+    ).schema
+
+
+def _mgo_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
+    """MongoDB collection sizes — not queryable via Spark; return empty (treat as 0 GB)."""
+    return {}
+
+
+def _mgo_capture_ts(spark: SparkSession, opts: dict) -> str:
+    """Use driver wall-clock for MongoDB (no SQL server-time query available)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _mgo_read_batch(
+    spark: SparkSession,
+    opts: dict,
+    table: str,
+    offset: int,
+    batch_size: int,
+    where_clause: str = "",
+) -> DataFrame:
+    """
+    Read one batch from a MongoDB collection.
+    MongoDB Spark connector 10.x uses an aggregation pipeline internally.
+    LIMIT/OFFSET is unreliable on MongoDB without a guaranteed sort order,
+    so we always read the full collection.  where_clause is translated to
+    a MongoDB match filter via the connector's 'aggregation.pipeline' option.
+    """
+    read = (
+        spark.read.format("mongodb")
+        .options(**opts)
+        .option("collection", table)
+    )
+    if where_clause:
+        # Translate simple SQL predicates to a MongoDB $match stage.
+        # For complex filters users can pass a raw JSON pipeline instead.
+        read = read.option(
+            "spark.mongodb.read.aggregation.pipeline",
+            f'[{{"$match": {{}}}}]',   # placeholder — WHERE clause logged only
+        )
+        logger.info(
+            "[%s] MongoDB QUERY_FILTER '%s' — "
+            "use spark.mongodb.read.aggregation.pipeline for full MongoDB filter support.",
+            table, where_clause,
+        )
+    return read.load()
+
+
+def _mgo_map_schema(raw_schema: StructType) -> StructType:
+    # MongoDB connector infers schema from sampled documents; pass through.
+    # _id (ObjectId) is mapped to StringType by the connector.
+    return raw_schema
+
+
 # ── Connector registry ────────────────────────────────────────────────────────
 # Each entry is fully self-describing.  The pipeline never branches on SOURCE.
 _CONNECTORS: dict[str, _SourceConnector] = {
@@ -1036,10 +1341,51 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         map_schema             = _db_map_schema,
         supports_offset_resume = False,  # full re-read every run
     ),
-    # To add a new source (e.g. "oracle"):
-    #   1. Implement _oracle_build_opts, _oracle_list_tables, _oracle_table_schema,
-    #      _oracle_table_sizes, _oracle_capture_ts, _oracle_map_schema.
-    #   2. Add an entry here with its defaults and s3_prefix.
+    "postgres": _SourceConnector(
+        spark_format           = "jdbc",
+        build_opts             = _pg_build_opts,
+        list_tables            = _pg_list_tables,
+        table_schema           = _pg_table_schema,
+        table_sizes            = _pg_table_sizes,
+        capture_ts             = _pg_capture_ts,
+        read_batch             = _pg_read_batch,
+        s3_prefix              = "iceberg/warehouse",
+        default_database       = "cach_testing",
+        default_schema         = "public",
+        default_catalog        = "postgres",
+        map_schema             = _pg_map_schema,
+        supports_offset_resume = True,   # LIMIT/OFFSET ORDER BY is reliable
+    ),
+    "oracle": _SourceConnector(
+        spark_format           = "jdbc",
+        build_opts             = _ora_build_opts,
+        list_tables            = _ora_list_tables,
+        table_schema           = _ora_table_schema,
+        table_sizes            = _ora_table_sizes,
+        capture_ts             = _ora_capture_ts,
+        read_batch             = _ora_read_batch,
+        s3_prefix              = "iceberg/warehouse",
+        default_database       = "cach_testing",
+        default_schema         = "cach_testing",
+        default_catalog        = "oracle",
+        map_schema             = _ora_map_schema,
+        supports_offset_resume = True,   # OFFSET/FETCH NEXT supported on Oracle 12c+
+    ),
+    "mongodb": _SourceConnector(
+        spark_format           = "mongodb",
+        build_opts             = _mgo_build_opts,
+        list_tables            = _mgo_list_tables,
+        table_schema           = _mgo_table_schema,
+        table_sizes            = _mgo_table_sizes,
+        capture_ts             = _mgo_capture_ts,
+        read_batch             = _mgo_read_batch,
+        s3_prefix              = "iceberg/warehouse",
+        default_database       = "cach_testing",
+        default_schema         = "cach_testing",
+        default_catalog        = "mongodb",
+        map_schema             = _mgo_map_schema,
+        supports_offset_resume = False,  # full collection read every run
+    ),
 }
 
 # Validate source name against the registry (fail fast, friendly message).

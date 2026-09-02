@@ -50,7 +50,9 @@ _PATH_ORACLE         = "secret/data/platform/oracle"
 _PATH_KAFKA          = "secret/data/platform/kafka"
 _PATH_PIPELINE_DB    = "secret/data/platform/pipeline_db"
 _PATH_DATABRICKS     = "secret/data/platform/databricks"
-# JARs baked into the spark-gluten-velox:3.5.1 image
+_PATH_POSTGRES       = "secret/data/platform/postgres"
+_PATH_MONGODB        = "secret/data/platform/mongodb"
+# JARs baked into the spark-gluten-velox image
 _ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
 _ICEBERG_JAR_PATH    = f"/opt/spark/jars/{_ICEBERG_JAR_NAME}"
 _SNOWFLAKE_JAR_NAME  = "spark-snowflake_2.12-3.2.1-spark_3.5.jar"
@@ -59,6 +61,10 @@ _SNOWFLAKE_JAR_PATH  = f"/opt/spark/jars/{_SNOWFLAKE_JAR_NAME}"
 _SNOWFLAKE_JDBC_JAR  = "/opt/spark/jars/snowflake-jdbc-4.0.2.jar"
 # Databricks JDBC driver (Simba) — baked into image
 _DATABRICKS_JDBC_JAR = "/opt/spark/jars/databricks-jdbc-2.6.36.1070.jar"
+# Oracle JDBC thin driver (ojdbc11) — baked into image
+_ORACLE_JDBC_JAR     = "/opt/spark/jars/ojdbc11-23.4.0.24.05.jar"
+# MongoDB Spark connector uber-jar — baked into image
+_MONGODB_CONNECTOR_JAR = "/opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar"
 
 _POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
 # In-cluster drivers connect directly on port 17077 (bypasses krb-spark-guard sidecar).
@@ -186,6 +192,102 @@ class BaoSparkInit:
           schema        e.g. lakehouse_db
         """
         return self._read_secret(_PATH_DATABRICKS)
+
+    def postgres_creds(self) -> dict[str, str]:
+        """
+        Return PostgreSQL credentials from OpenBao.
+        Expected keys in secret/data/platform/postgres:
+          host        e.g. postgresql.prod.svc.cluster.local
+          port        e.g. 5432
+          database    e.g. cach_testing
+          user        e.g. spark_user
+          password
+          schema      e.g. public  (default schema to read from)
+        """
+        return self._read_secret(_PATH_POSTGRES)
+
+    def postgres_jdbc_options(
+        self,
+        database: str | None = None,
+        schema:   str | None = None,
+    ) -> dict[str, str]:
+        """
+        Return JDBC options for spark.read.format("jdbc") against PostgreSQL.
+        Uses the postgresql-42.7.4.jar already baked into the image.
+        """
+        pg = self.postgres_creds()
+        _db     = database or pg["database"]
+        _schema = schema   or pg.get("schema", "public")
+        jdbc_url = (
+            f"jdbc:postgresql://{pg['host']}:{pg.get('port','5432')}/{_db}"
+            f"?currentSchema={_schema}&ApplicationName=starpump"
+        )
+        return {
+            "url":      jdbc_url,
+            "driver":   "org.postgresql.Driver",
+            "user":     pg["user"],
+            "password": pg["password"],
+        }
+
+    def mongodb_creds(self) -> dict[str, str]:
+        """
+        Return MongoDB credentials from OpenBao.
+        Expected keys in secret/data/platform/mongodb:
+          host        e.g. mongodb.prod.svc.cluster.local
+          port        e.g. 27017
+          database    e.g. cach_testing
+          user        e.g. spark_user
+          password
+          auth_source e.g. admin  (authentication database, default: admin)
+        """
+        return self._read_secret(_PATH_MONGODB)
+
+    def mongodb_options(
+        self,
+        database: str | None = None,
+    ) -> dict[str, str]:
+        """
+        Return options for spark.read.format("mongodb") using the
+        MongoDB Spark connector 10.x (mongo-spark-connector_2.12-10.4.0).
+        """
+        mg = self.mongodb_creds()
+        _db        = database or mg["database"]
+        auth_src   = mg.get("auth_source", "admin")
+        uri = (
+            f"mongodb://{mg['user']}:{mg['password']}@"
+            f"{mg['host']}:{mg.get('port','27017')}/{_db}"
+            f"?authSource={auth_src}"
+        )
+        return {
+            "spark.mongodb.read.connection.uri": uri,
+            "database": _db,
+        }
+
+    def oracle_jdbc_options(
+        self,
+        schema: str | None = None,
+    ) -> dict[str, str]:
+        """
+        Return JDBC options for spark.read.format("jdbc") against Oracle.
+        Uses the ojdbc11-23.4.0.24.05.jar baked into the image.
+        oracle_creds() already exists and returns:
+          user, password, host, port, sid, jdbc_url
+        """
+        ora = self.oracle_creds()
+        # Use the pre-built jdbc_url from OpenBao if present; otherwise construct.
+        jdbc_url = ora.get("jdbc_url") or (
+            f"jdbc:oracle:thin:@{ora['host']}:{ora.get('port','1521')}:{ora['sid']}"
+        )
+        _schema = schema or ora.get("schema", ora["user"].upper())
+        return {
+            "url":             jdbc_url,
+            "driver":          "oracle.jdbc.OracleDriver",
+            "user":            ora["user"],
+            "password":        ora["password"],
+            "oracle.jdbc.mapDateToTimestamp": "false",
+            # currentSchema sets the default schema for unqualified object refs
+            "sessionInitStatement": f"ALTER SESSION SET CURRENT_SCHEMA = {_schema}",
+        }
 
     def databricks_jdbc_options(
         self,
@@ -436,6 +538,61 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.databricks.s3.path-style-access", "true")
         conf.set("spark.sql.catalog.databricks.client.region",        s3["region"])
 
+        # ── PostgreSQL catalog → Polaris REST (warehouse: pg_lakehouse) ──────
+        pg = self.postgres_creds()
+        conf.set("spark.sql.catalog.postgres",
+                 "org.apache.iceberg.spark.SparkCatalog")
+        conf.set("spark.sql.catalog.postgres.type",             "rest")
+        conf.set("spark.sql.catalog.postgres.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.postgres.oauth2-server-uri",
+                 f"{_POLARIS_URI}/v1/oauth/tokens")
+        conf.set("spark.sql.catalog.postgres.credential",
+                 f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
+        conf.set("spark.sql.catalog.postgres.scope",            "PRINCIPAL_ROLE:ALL")
+        conf.set("spark.sql.catalog.postgres.warehouse",        "pg_lakehouse")
+        conf.set("spark.sql.catalog.postgres.rest.auth.type",   "oauth2")
+        conf.set("spark.sql.catalog.postgres.s3.access-key-id",     s3["access_key"])
+        conf.set("spark.sql.catalog.postgres.s3.secret-access-key", s3["secret_key"])
+        conf.set("spark.sql.catalog.postgres.s3.endpoint",          s3["endpoint"])
+        conf.set("spark.sql.catalog.postgres.s3.path-style-access", "true")
+        conf.set("spark.sql.catalog.postgres.client.region",        s3["region"])
+
+        # ── Oracle catalog → Polaris REST (warehouse: ora_lakehouse) ─────────
+        conf.set("spark.sql.catalog.oracle",
+                 "org.apache.iceberg.spark.SparkCatalog")
+        conf.set("spark.sql.catalog.oracle.type",             "rest")
+        conf.set("spark.sql.catalog.oracle.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.oracle.oauth2-server-uri",
+                 f"{_POLARIS_URI}/v1/oauth/tokens")
+        conf.set("spark.sql.catalog.oracle.credential",
+                 f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
+        conf.set("spark.sql.catalog.oracle.scope",            "PRINCIPAL_ROLE:ALL")
+        conf.set("spark.sql.catalog.oracle.warehouse",        "ora_lakehouse")
+        conf.set("spark.sql.catalog.oracle.rest.auth.type",   "oauth2")
+        conf.set("spark.sql.catalog.oracle.s3.access-key-id",     s3["access_key"])
+        conf.set("spark.sql.catalog.oracle.s3.secret-access-key", s3["secret_key"])
+        conf.set("spark.sql.catalog.oracle.s3.endpoint",          s3["endpoint"])
+        conf.set("spark.sql.catalog.oracle.s3.path-style-access", "true")
+        conf.set("spark.sql.catalog.oracle.client.region",        s3["region"])
+
+        # ── MongoDB catalog → Polaris REST (warehouse: mgo_lakehouse) ────────
+        conf.set("spark.sql.catalog.mongodb",
+                 "org.apache.iceberg.spark.SparkCatalog")
+        conf.set("spark.sql.catalog.mongodb.type",             "rest")
+        conf.set("spark.sql.catalog.mongodb.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.mongodb.oauth2-server-uri",
+                 f"{_POLARIS_URI}/v1/oauth/tokens")
+        conf.set("spark.sql.catalog.mongodb.credential",
+                 f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
+        conf.set("spark.sql.catalog.mongodb.scope",            "PRINCIPAL_ROLE:ALL")
+        conf.set("spark.sql.catalog.mongodb.warehouse",        "mgo_lakehouse")
+        conf.set("spark.sql.catalog.mongodb.rest.auth.type",   "oauth2")
+        conf.set("spark.sql.catalog.mongodb.s3.access-key-id",     s3["access_key"])
+        conf.set("spark.sql.catalog.mongodb.s3.secret-access-key", s3["secret_key"])
+        conf.set("spark.sql.catalog.mongodb.s3.endpoint",          s3["endpoint"])
+        conf.set("spark.sql.catalog.mongodb.s3.path-style-access", "true")
+        conf.set("spark.sql.catalog.mongodb.client.region",        s3["region"])
+
         # ── JARs (baked into image — list for explicitness) ───────────────────
         conf.set("spark.jars", ",".join([
             _ICEBERG_JAR_PATH,
@@ -446,6 +603,8 @@ class BaoSparkInit:
             "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
             "/opt/spark/jars/postgresql-42.7.4.jar",
             _DATABRICKS_JDBC_JAR,
+            _ORACLE_JDBC_JAR,
+            _MONGODB_CONNECTOR_JAR,
         ]))
 
         if extra_conf:

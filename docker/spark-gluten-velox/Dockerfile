@@ -90,6 +90,20 @@ COPY jars/databricks-jdbc-2.6.36.1070.jar \
      /opt/spark/jars/databricks-jdbc-2.6.36.1070.jar
 RUN chmod 644 /opt/spark/jars/databricks-jdbc-2.6.36.1070.jar
 
+# Oracle JDBC driver — required by starpump oracle connector.
+# ojdbc11 is the thin JDBC 4.3 driver for Oracle 12c+/19c/21c/23ai.
+# Downloaded from Maven Central: com.oracle.database.jdbc:ojdbc11:23.4.0.24.05
+COPY jars/ojdbc11-23.4.0.24.05.jar \
+     /opt/spark/jars/ojdbc11-23.4.0.24.05.jar
+RUN chmod 644 /opt/spark/jars/ojdbc11-23.4.0.24.05.jar
+
+# MongoDB Spark connector (uber-jar, all dependencies included).
+# Supports MongoDB Atlas + self-hosted 4.0+.
+# Downloaded from Maven Central: org.mongodb.spark:mongo-spark-connector_2.12:10.4.0
+COPY jars/mongo-spark-connector_2.12-10.4.0-all.jar \
+     /opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar
+RUN chmod 644 /opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar
+
 # ── Python packages — split into layers to avoid pip botocore conflict ────────
 # Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
 RUN pip3 install --no-cache-dir \
@@ -106,7 +120,8 @@ RUN pip3 install --no-cache-dir \
         "pandas==2.2.3" \
         "pyiceberg==0.7.1" \
         "psycopg2-binary==2.9.10" \
-        "thrift==0.24.0"
+        "thrift==0.24.0" \
+        "pymongo==4.9.2"
 
 # ── Set HOME for Snowflake JDBC credential cache + log directory ──────────────
 # Done early (before COPY conf/) so /home/spark exists and is owned by spark
