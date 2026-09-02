@@ -165,27 +165,47 @@ This cell always reads the current `MAX(product_id)` first so each run appends a
 -- ── Dynamic insert: appends 5 rows above current MAX(product_id) ──────────
 -- Run this cell once per test cycle. Each run produces 5 new rows with
 -- created_at = NOW() so starpump picks them up as fresh data.
-
-DECLARE OR REPLACE max_id BIGINT DEFAULT (
-  SELECT COALESCE(MAX(product_id), 500) FROM lakehouse.lakehouse_db.product
-);
+-- Uses INSERT ... SELECT so no DECLARE variable is needed.
 
 INSERT INTO lakehouse.lakehouse_db.product
   (product_id, product_name, category, sub_category, brand, sku,
    unit_price, cost_price, stock_quantity, reorder_level,
    weight_kg, is_active, created_at, updated_at, snap_id, snap_timestamp)
-VALUES
-  (max_id + 1, 'StarCore Tent Max',        'Sports',      'Outdoor',   'StarCore',   CONCAT('SKU-', LPAD(CAST(max_id + 1 AS STRING), 5, '0'), '-STAR'), 299.99, 120.00, 45,  10, 3.200, 1, NOW(), NOW(), NULL, NULL),
-  (max_id + 2, 'BrightLife Blender Pro',   'Home',        'Kitchen',   'BrightLife', CONCAT('SKU-', LPAD(CAST(max_id + 2 AS STRING), 5, '0'), '-BRGT'), 89.99,  35.00, 200, 30, 2.100, 1, NOW(), NOW(), NULL, NULL),
-  (max_id + 3, 'AeroFit Yoga Mat Elite',   'Sports',      'Fitness',   'AeroFit',    CONCAT('SKU-', LPAD(CAST(max_id + 3 AS STRING), 5, '0'), '-AERO'), 49.99,  18.00, 320, 50, 1.050, 1, NOW(), NOW(), NULL, NULL),
-  (max_id + 4, 'ZenFlow Watch Smart',      'Electronics', 'Wearables', 'ZenFlow',    CONCAT('SKU-', LPAD(CAST(max_id + 4 AS STRING), 5, '0'), '-ZENF'), 199.99, 80.00,  88, 20, 0.150, 1, NOW(), NOW(), NULL, NULL),
-  (max_id + 5, 'UrbanEdge Jacket Sport',   'Clothing',    'Sportswear','UrbanEdge',  CONCAT('SKU-', LPAD(CAST(max_id + 5 AS STRING), 5, '0'), '-URBN'), 129.99, 52.00, 150, 25, 0.850, 1, NOW(), NOW(), NULL, NULL);
+SELECT
+  m + 1, 'StarCore Tent Max',      'Sports',      'Outdoor',    'StarCore',
+    CONCAT('SKU-', LPAD(CAST(m + 1 AS STRING), 5, '0'), '-STAR'),
+    299.99, 120.00, 45,  10, 3.200, 1, NOW(), NOW(), NULL, NULL
+FROM (SELECT COALESCE(MAX(product_id), 500) AS m FROM lakehouse.lakehouse_db.product)
+UNION ALL
+SELECT
+  m + 2, 'BrightLife Blender Pro', 'Home',        'Kitchen',    'BrightLife',
+    CONCAT('SKU-', LPAD(CAST(m + 2 AS STRING), 5, '0'), '-BRGT'),
+    89.99,  35.00, 200, 30, 2.100, 1, NOW(), NOW(), NULL, NULL
+FROM (SELECT COALESCE(MAX(product_id), 500) AS m FROM lakehouse.lakehouse_db.product)
+UNION ALL
+SELECT
+  m + 3, 'AeroFit Yoga Mat Elite', 'Sports',      'Fitness',    'AeroFit',
+    CONCAT('SKU-', LPAD(CAST(m + 3 AS STRING), 5, '0'), '-AERO'),
+    49.99,  18.00, 320, 50, 1.050, 1, NOW(), NOW(), NULL, NULL
+FROM (SELECT COALESCE(MAX(product_id), 500) AS m FROM lakehouse.lakehouse_db.product)
+UNION ALL
+SELECT
+  m + 4, 'ZenFlow Watch Smart',    'Electronics', 'Wearables',  'ZenFlow',
+    CONCAT('SKU-', LPAD(CAST(m + 4 AS STRING), 5, '0'), '-ZENF'),
+    199.99, 80.00,  88, 20, 0.150, 1, NOW(), NOW(), NULL, NULL
+FROM (SELECT COALESCE(MAX(product_id), 500) AS m FROM lakehouse.lakehouse_db.product)
+UNION ALL
+SELECT
+  m + 5, 'UrbanEdge Jacket Sport', 'Clothing',    'Sportswear', 'UrbanEdge',
+    CONCAT('SKU-', LPAD(CAST(m + 5 AS STRING), 5, '0'), '-URBN'),
+    129.99, 52.00, 150, 25, 0.850, 1, NOW(), NOW(), NULL, NULL
+FROM (SELECT COALESCE(MAX(product_id), 500) AS m FROM lakehouse.lakehouse_db.product);
 
 -- Confirm the rows landed
 SELECT product_id, product_name, category, unit_price, created_at
 FROM   lakehouse.lakehouse_db.product
-WHERE  product_id > max_id
-ORDER  BY product_id;
+ORDER  BY product_id DESC
+LIMIT  5;
 ```
 
 ✅ Expected: 5 new rows returned, `created_at` = current timestamp, `snap_id` and `snap_timestamp` are NULL (starpump injects those on copy).
