@@ -54,6 +54,133 @@ echo "Master: $MASTER   Token: ${TOKEN:0:10}..."
 
 ---
 
+## Step 1.5 — Smoke-test: JDBC connectivity to Databricks
+
+> **Why `kubectl cp` and not a heredoc?**
+> `kubectl exec … -- python3 - << 'EOF'` does **not** work — the shell consumes the
+> heredoc locally before `kubectl` sees it, so the Python process receives empty stdin
+> and exits silently. Always write the script to a local file, `kubectl cp` it into
+> the pod, then `kubectl exec python3 /tmp/file.py`.
+
+Run this before Step 2 whenever you want to verify that the Databricks JDBC URL,
+token, and driver are all wiring up correctly — without triggering a full copy.
+
+> **Important — `query` vs `dbtable` vs raw JDBC:** Databricks JDBC 3.4.x has a
+> known bug where `Statement.setFetchSize()` (called internally by Spark's JDBC
+> layer) causes the driver to return column headers as the first data row, producing
+> `NumberFormatException: For input string: "product_id"`. Additionally, `SHOW TABLES`
+> and `DESCRIBE` are DDL statements that Databricks rejects when Spark wraps them in
+> `SELECT * FROM (...) WHERE 1=0` for schema inference. The only reliable approach
+> is to bypass Spark JDBC entirely and use `java.sql.DatabaseMetaData` + direct
+> `Statement.executeQuery()` via py4j — which is exactly what starpump does internally.
+
+```bash
+# 1. Write the smoke-test script locally
+cat > /tmp/jdbc_test.py << 'PYEOF'
+import os
+os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+
+_DATABRICKS_JDBC_JAR = "/opt/spark/jars/databricks-jdbc-2.6.36.1070.jar"
+
+bao  = BaoSparkInit()
+conf = bao.spark_conf(app_name="jdbc-test")
+spark = SparkSession.builder.config(conf=conf).getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
+
+opts = bao.databricks_jdbc_options(catalog="lakehouse", schema="lakehouse_db")
+print(f"JDBC URL (masked): {opts['url'][:80]}...")
+print(f"Driver           : {opts['driver']}")
+
+# Open a raw JDBC connection via py4j / URLClassLoader, bypassing Spark's JDBC
+# layer to avoid the Databricks 3.4.x header-row bug (setFetchSize triggers
+# the driver to return column names as the first data row).
+jvm = spark.sparkContext._jvm
+gw  = spark.sparkContext._gateway
+
+props = jvm.java.util.Properties()
+for k, v in opts.items():
+    if k not in ("url", "driver"):
+        props.setProperty(k, str(v))
+
+jar_arr    = gw.new_array(jvm.java.net.URL, 1)
+jar_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
+ucl  = jvm.java.net.URLClassLoader(jar_arr, jvm.ClassLoader.getSystemClassLoader())
+drv  = jvm.Class.forName(opts["driver"], True, ucl).newInstance()
+conn = drv.connect(opts["url"], props)
+
+# Test 1: list tables via DatabaseMetaData (no SQL required, no setFetchSize)
+meta  = conn.getMetaData()
+types = gw.new_array(jvm.java.lang.String, 1)
+types[0] = "TABLE"
+rs = meta.getTables("lakehouse", "lakehouse_db", "%", types)
+tables = []
+while rs.next():
+    tables.append(rs.getString("TABLE_NAME"))
+rs.close()
+print(f"\n=== Tables discovered via DatabaseMetaData ===")
+print(f"  {tables}")
+
+# Test 2: row count via direct Statement.executeQuery() (no Spark JDBC involved)
+stmt = conn.createStatement()
+rs2  = stmt.executeQuery(
+    "SELECT COUNT(*) AS total FROM `lakehouse`.`lakehouse_db`.`product`"
+)
+rs2.next()
+total = rs2.getInt(1)
+rs2.close()
+stmt.close()
+conn.close()
+print(f"\n=== Row count via JDBC ===")
+print(f"  total = {total}")
+
+print("\n✅ JDBC connection test passed")
+spark.stop()
+PYEOF
+
+# 2. Copy into the pod and run
+kubectl cp /tmp/jdbc_test.py prod/$MASTER:/tmp/jdbc_test.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 /tmp/jdbc_test.py
+```
+
+✅ Expected output:
+```
+JDBC URL (masked): jdbc:databricks://dbc-11a1dbc5-061a.cloud.databricks.com:443;httpPath=/sql/1.0/w...
+Driver           : com.databricks.client.jdbc.Driver
+
+=== Tables discovered via DatabaseMetaData ===
+  ['product']
+
+=== Row count via JDBC ===
+  total = 530
+
+✅ JDBC connection test passed
+```
+
+❌ If you see **no output at all** (shell prompt returns immediately), you used the
+heredoc form (`kubectl exec … -- python3 - << 'EOF'`). Switch to the `kubectl cp`
+pattern above.
+
+❌ `ClassNotFoundException: com.databricks.client.jdbc.Driver` → see Troubleshooting.
+
+❌ `java.sql.SQLException: … Invalid token` → Databricks PAT expired — rotate in
+OpenBao (see Troubleshooting).
+
+❌ `[PARSE_SYNTAX_ERROR] Syntax error at or near 'IN'` → you used
+`.option("query", "SHOW TABLES IN ...")` instead of `DatabaseMetaData.getTables()`.
+Spark wraps `.option("query", ...)` in `SELECT * FROM (...) WHERE 1=0` for schema
+inference, and Databricks SQL rejects DDL inside a subquery.
+
+❌ `NumberFormatException: For input string: "product_id"` or column headers
+appearing as data rows → you used `spark.read.format("jdbc").option("dbtable", ...)`
+or `.option("query", ...)` without bypassing Spark's JDBC layer. Databricks JDBC
+3.4.x returns column names as the first data row when `setFetchSize()` is called
+(Spark always does this). Use the py4j `URLClassLoader` pattern above.
+
+---
+
 ## Step 2 — Run starpump (full copy)
 
 ```bash

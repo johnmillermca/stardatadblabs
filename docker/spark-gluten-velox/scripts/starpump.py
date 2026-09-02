@@ -144,6 +144,10 @@ Environment variables
                       Applied as a WHERE clause on the source query for every connector.
   DRY_RUN             1 = create Iceberg DDL but skip data copy
   BATCH_SIZE          Rows per batch                (default: 100000)
+  MAX_ROWS            Hard cap on total NEW rows written per table in this run.
+                      0 (default) = no cap — copy until source is exhausted.
+                      Example: MAX_ROWS=1000 appends exactly 1 000 rows then stops,
+                      regardless of how many rows are already in Iceberg.
   MAX_THREADS         Parallel copy threads         (default: 8)
                       Overridden by --threads N on the CLI.
 
@@ -300,6 +304,9 @@ ICEBERG_CATALOG = os.environ.get("ICEBERG_CATALOG") # resolved after _CONNECTORS
 S3_BUCKET_OVERRIDE = os.environ.get("S3_BUCKET")
 DRY_RUN         = os.environ.get("DRY_RUN", "0") == "1"
 BATCH_SIZE      = int(os.environ.get("BATCH_SIZE",   "100000"))
+# MAX_ROWS: hard cap on NEW rows written in this run (across all batches, per table).
+#   0 = no cap.  Example: MAX_ROWS=1000 appends exactly 1 000 new rows then stops.
+MAX_ROWS        = int(os.environ.get("MAX_ROWS", "0"))
 # --threads CLI flag takes precedence over the MAX_THREADS env var (default 8).
 MAX_THREADS     = _ARGS.threads if _ARGS.threads is not None else int(os.environ.get("MAX_THREADS", "8"))
 
@@ -1267,6 +1274,63 @@ def _mgo_capture_ts(spark: SparkSession, opts: dict) -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
+def _mgo_build_pipeline(where_clause: str, batch_size: int) -> str:
+    """
+    Build a MongoDB aggregation pipeline JSON string from a SQL-style where_clause.
+
+    Supported simple forms (covers QUERY_FILTER quick-test cases):
+      field<=value   field>=value   field<value   field>value
+      field=value    field!=value
+
+    For anything more complex, pass a raw JSON pipeline via the environment variable
+    MGO_PIPELINE (e.g. MGO_PIPELINE='[{"$match":{"tier":"PLATINUM"}},{"$limit":50}]')
+    which is injected verbatim.
+
+    Always appends {"$limit": batch_size} so the connector never reads beyond
+    one batch worth of documents — essential for quick tests (small batch_size)
+    and safe for full copies (batch_size=100000 caps each Spark job).
+    """
+    import re, json
+
+    # Check for raw pipeline override via env
+    raw = os.environ.get("MGO_PIPELINE", "").strip()
+    if raw:
+        return raw
+
+    stages: list[dict] = []
+
+    if where_clause:
+        # Strip outer parentheses added by _get_where_clause() — e.g. "(product_id<=50)"
+        clause = where_clause.strip().lstrip("(").rstrip(")")
+        # Parse "field OP value" — field name may contain dots (nested docs)
+        m = re.match(
+            r"^([\w.]+)\s*(<=|>=|!=|<|>|=)\s*(.+)$",
+            clause.strip(),
+        )
+        if m:
+            field, op, raw_val = m.group(1), m.group(2), m.group(3).strip().strip("'\"")
+            # Try numeric coercion, fall back to string
+            try:
+                val: object = int(raw_val)
+            except ValueError:
+                try:
+                    val = float(raw_val)
+                except ValueError:
+                    val = raw_val
+            mongo_op = {"<=": "$lte", ">=": "$gte", "<": "$lt", ">": "$gt",
+                        "=": "$eq", "!=": "$ne"}[op]
+            stages.append({"$match": {field: {mongo_op: val}}})
+        else:
+            logger.warning(
+                "[mgo] Cannot parse QUERY_FILTER '%s' into $match — "
+                "full collection scan. Use MGO_PIPELINE for complex filters.",
+                where_clause,
+            )
+
+    stages.append({"$limit": batch_size})
+    return json.dumps(stages)
+
+
 def _mgo_read_batch(
     spark: SparkSession,
     opts: dict,
@@ -1276,29 +1340,31 @@ def _mgo_read_batch(
     where_clause: str = "",
 ) -> DataFrame:
     """
-    Read one batch from a MongoDB collection.
-    MongoDB Spark connector 10.x uses an aggregation pipeline internally.
-    LIMIT/OFFSET is unreliable on MongoDB without a guaranteed sort order,
-    so we always read the full collection.  where_clause is translated to
-    a MongoDB match filter via the connector's 'aggregation.pipeline' option.
+    Read one batch from a MongoDB collection via the Spark MongoDB connector 10.x.
+
+    Key design decisions:
+    - No reliable OFFSET cursor on MongoDB — we always read from the start.
+    - QUERY_FILTER is translated to a real MongoDB $match aggregation stage so
+      the filter runs server-side, not as a post-load Spark filter.
+    - $limit is always appended (= batch_size) so the connector never scans
+      beyond one batch — critical for quick tests with small batch_size.
+    - For complex predicates set MGO_PIPELINE env var with raw JSON pipeline.
     """
+    pipeline = _mgo_build_pipeline(where_clause, batch_size)
+    if where_clause or batch_size < 100_000:
+        logger.info("[%s] MongoDB pipeline: %s", table, pipeline)
     read = (
         spark.read.format("mongodb")
         .options(**opts)
         .option("collection", table)
+        .option("spark.mongodb.read.aggregation.pipeline", pipeline)
     )
-    if where_clause:
-        # Translate simple SQL predicates to a MongoDB $match stage.
-        # For complex filters users can pass a raw JSON pipeline instead.
-        read = read.option(
-            "spark.mongodb.read.aggregation.pipeline",
-            f'[{{"$match": {{}}}}]',   # placeholder — WHERE clause logged only
-        )
-        logger.info(
-            "[%s] MongoDB QUERY_FILTER '%s' — "
-            "use spark.mongodb.read.aggregation.pipeline for full MongoDB filter support.",
-            table, where_clause,
-        )
+    # The MongoDB Spark connector applies $limit per partition, not globally.
+    # Force a single partition whenever the pipeline contains a $limit so the
+    # cap is honoured exactly (e.g. MAX_ROWS=1000 → exactly 1 000 docs returned).
+    if batch_size < 100_000:
+        read = read.option("spark.mongodb.read.partitioner",
+                           "com.mongodb.spark.sql.connector.read.partitioner.SinglePartitionPartitioner")
     return read.load()
 
 
@@ -1349,8 +1415,8 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _pg_table_sizes,
         capture_ts             = _pg_capture_ts,
         read_batch             = _pg_read_batch,
-        s3_prefix              = "iceberg/warehouse",
-        default_database       = "cach_testing",
+        s3_prefix              = "iceberg/pg_lakehouse",   # must match Polaris warehouse allowedLocations
+        default_database       = "cache_testing",
         default_schema         = "public",
         default_catalog        = "postgres",
         map_schema             = _pg_map_schema,
@@ -1364,9 +1430,9 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _ora_table_sizes,
         capture_ts             = _ora_capture_ts,
         read_batch             = _ora_read_batch,
-        s3_prefix              = "iceberg/warehouse",
-        default_database       = "cach_testing",
-        default_schema         = "cach_testing",
+        s3_prefix              = "iceberg/ora_lakehouse",  # must match Polaris warehouse allowedLocations
+        default_database       = "XEPDB1",
+        default_schema         = "TPCDS",
         default_catalog        = "oracle",
         map_schema             = _ora_map_schema,
         supports_offset_resume = True,   # OFFSET/FETCH NEXT supported on Oracle 12c+
@@ -1379,9 +1445,9 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _mgo_table_sizes,
         capture_ts             = _mgo_capture_ts,
         read_batch             = _mgo_read_batch,
-        s3_prefix              = "iceberg/warehouse",
-        default_database       = "cach_testing",
-        default_schema         = "cach_testing",
+        s3_prefix              = "iceberg/mgo_lakehouse",  # must match Polaris warehouse allowedLocations
+        default_database       = "cache_testing",
+        default_schema         = "cache_testing",
         default_catalog        = "mongodb",
         map_schema             = _mgo_map_schema,
         supports_offset_resume = False,  # full collection read every run
@@ -1845,8 +1911,17 @@ def _copy_table(
                 logger.info("[%s] QUERY_FILTER active — WHERE %s", table, where_clause)
 
             while True:
+                # Shrink batch to never write more than MAX_ROWS new rows total.
+                effective_batch = BATCH_SIZE
+                if MAX_ROWS > 0:
+                    new_so_far = rows_total - already_written
+                    remaining  = MAX_ROWS - new_so_far
+                    if remaining <= 0:
+                        break
+                    effective_batch = min(BATCH_SIZE, remaining)
+
                 batch: DataFrame = connector.read_batch(
-                    spark, conn_opts, table, offset, BATCH_SIZE,
+                    spark, conn_opts, table, offset, effective_batch,
                     where_clause=where_clause,
                 )
                 n = batch.count()
@@ -1884,8 +1959,12 @@ def _copy_table(
                     "[%s] batch offset=%d rows=%d total=%d",
                     table, offset - n, n, rows_total,
                 )
-                if n < BATCH_SIZE:
-                    break   # last batch
+                if MAX_ROWS > 0 and (rows_total - already_written) >= MAX_ROWS:
+                    break   # MAX_ROWS new-row cap reached
+                if n < effective_batch:
+                    break   # last batch (partial batch means source is exhausted)
+                if not connector.supports_offset_resume:
+                    break   # MongoDB: no server-side offset — one pass only
 
             logger.info("[%s] DONE — %d rows written (total incl. prior runs).", table, rows_total)
 

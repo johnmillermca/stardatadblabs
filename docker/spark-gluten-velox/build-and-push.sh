@@ -10,7 +10,7 @@ set -euo pipefail
 
 REGISTRY="192.168.1.50:30500"
 IMAGE_NAME="spark-gluten-velox"
-TAG="3.5.1"
+TAG="3.5.1-5"
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${TAG}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
