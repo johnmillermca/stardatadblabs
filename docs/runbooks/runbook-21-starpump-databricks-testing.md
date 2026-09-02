@@ -115,7 +115,8 @@ spark.stop()
 PYEOF
 
 kubectl cp /tmp/verify_copy.py prod/$MASTER:/tmp/verify_copy.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/verify_copy.py
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 /tmp/verify_copy.py
 ```
 
 ✅ Expected:
