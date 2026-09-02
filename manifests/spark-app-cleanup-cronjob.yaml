@@ -34,7 +34,7 @@
 #   SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
 #     --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 #   kubectl exec -n prod $SPARK_POD -c spark-master -- \
-#     /opt/spark/work-dir/spark-app-cleanup.sh
+#     /usr/local/bin/spark-app-cleanup
 #
 # Tune idle threshold
 # -------------------
@@ -126,7 +126,7 @@ spec:
                     -o custom-columns=NAME:.metadata.name | head -1)
                   echo "[cleanup-cron] Spark master pod: $MASTER"
                   kubectl exec -n prod "$MASTER" -c spark-master -- \
-                    /opt/spark/work-dir/spark-app-cleanup.sh
+                    /usr/local/bin/spark-app-cleanup
               resources:
                 requests:
                   cpu: 50m

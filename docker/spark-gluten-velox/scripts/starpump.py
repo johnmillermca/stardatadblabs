@@ -1253,12 +1253,22 @@ def _mgo_list_tables(spark: SparkSession, opts: dict) -> list[str]:
 
 
 def _mgo_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
-    """Infer schema by sampling the collection (reads up to 1000 docs)."""
+    """
+    Infer schema by sampling the collection.
+
+    Uses SinglePartitionPartitioner + a $limit:1000 aggregation pipeline so the
+    connector opens exactly one cursor and fetches at most 1 000 documents
+    server-side — instead of scanning the full collection to satisfy
+    sample.size client-side.
+    """
     return (
         spark.read.format("mongodb")
         .options(**opts)
         .option("collection", table)
         .option("spark.mongodb.read.sample.size", "1000")
+        .option("spark.mongodb.read.aggregation.pipeline", '[{"$limit": 1000}]')
+        .option("spark.mongodb.read.partitioner",
+                "com.mongodb.spark.sql.connector.read.partitioner.SinglePartitionPartitioner")
         .load()
     ).schema
 
@@ -1924,8 +1934,14 @@ def _copy_table(
                     spark, conn_opts, table, offset, effective_batch,
                     where_clause=where_clause,
                 )
+                # Cache before count() so the MongoDB cursor is opened only once.
+                # Without this, count() triggers one full connector read and
+                # writeTo().append() triggers a second — doubling network I/O and
+                # executor time for every batch.
+                batch.cache()
                 n = batch.count()
                 if n == 0:
+                    batch.unpersist()
                     break
 
                 # Align to Iceberg schema (add missing cols as NULL)
@@ -1952,6 +1968,7 @@ def _copy_table(
                 )
 
                 final.writeTo(fqn).option("mergeSchema", "true").append()
+                batch.unpersist()
 
                 rows_total += n
                 offset     += n
