@@ -88,6 +88,7 @@ USER       = os.environ.get("USER", "dave")
 # Polaris warehouse that backs the `databricks` catalog alias
 _POLARIS_WAREHOUSE = "star_lakehouse"
 _POLARIS_URI       = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+# Default fallback — overridden at runtime by pol['url'] from OpenBao if present.
 _SPARK_MASTER      = "spark://spark-master-internal.prod.svc.cluster.local:17077"
 
 # ── Customer schema (business columns only — snap_id/snap_timestamp injected) ─
@@ -203,6 +204,7 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     import socket as _socket
     s3  = bao.s3_creds()
     pol = bao.polaris_creds()
+    polaris_uri = pol.get("url") or _POLARIS_URI
 
     driver_ip = os.environ.get(
         "SPARK_LOCAL_IP",
@@ -235,9 +237,9 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
         .config("spark.sql.catalog.databricks",
                 "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.databricks.type",             "rest")
-        .config("spark.sql.catalog.databricks.uri",              _POLARIS_URI)
+        .config("spark.sql.catalog.databricks.uri",              polaris_uri)
         .config("spark.sql.catalog.databricks.oauth2-server-uri",
-                f"{_POLARIS_URI}/v1/oauth/tokens")
+                f"{polaris_uri}/v1/oauth/tokens")
         .config("spark.sql.catalog.databricks.credential",
                 f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         .config("spark.sql.catalog.databricks.scope",            "PRINCIPAL_ROLE:ALL")

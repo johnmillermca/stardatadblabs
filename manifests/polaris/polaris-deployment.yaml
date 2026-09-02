@@ -78,6 +78,20 @@ spec:
                 secretKeyRef:
                   name: polaris-db-credentials
                   key: db-password
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: access_key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: secret_key
+            - name: AWS_REGION
+              value: us-east-2
+            - name: AWS_DEFAULT_REGION
+              value: us-east-2
           volumeMounts:
             - name: polaris-config
               mountPath: /home/polaris/application.properties

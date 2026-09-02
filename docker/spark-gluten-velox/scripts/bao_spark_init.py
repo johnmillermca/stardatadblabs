@@ -67,6 +67,9 @@ _ORACLE_JDBC_JAR     = "/opt/spark/jars/ojdbc11-23.4.0.24.05.jar"
 _MONGODB_CONNECTOR_JAR = "/opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar"
 
 _POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+# Default URI — overridden at runtime by the 'url' key in secret/data/platform/polaris
+# if that key is present.  The constant is kept as a fallback for environments that
+# have not yet written the url key to OpenBao.
 # In-cluster drivers connect directly on port 17077 (bypasses krb-spark-guard sidecar).
 # External spark-submit should use spark-master-svc:7077 (guard-proxied NodePort).
 _SPARK_MASTER = "spark://spark-master-internal.prod.svc.cluster.local:17077"
@@ -381,6 +384,11 @@ class BaoSparkInit:
         sf  = self.snowflake_creds()
         pol = self.polaris_creds()
 
+        # Resolve the Polaris REST URI: prefer the 'url' key stored in OpenBao so
+        # the endpoint can be changed without rebuilding the image.  Fall back to
+        # the in-cluster default if the key is absent (older OpenBao deployments).
+        polaris_uri = pol.get("url") or _POLARIS_URI
+
         conf = SparkConf()
         conf.setAppName(app_name)
         conf.setMaster(_SPARK_MASTER)
@@ -455,7 +463,7 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.polaris",
                  "org.apache.iceberg.spark.SparkCatalog")
         conf.set("spark.sql.catalog.polaris.type", "rest")
-        conf.set("spark.sql.catalog.polaris.uri", _POLARIS_URI)
+        conf.set("spark.sql.catalog.polaris.uri", polaris_uri)
         conf.set("spark.sql.catalog.polaris.credential",
                  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         conf.set("spark.sql.catalog.polaris.scope", "PRINCIPAL_ROLE:ALL")
@@ -464,7 +472,7 @@ class BaoSparkInit:
         # and "missing OAuth2 server URI" fallback warning from Iceberg REST client.
         conf.set("spark.sql.catalog.polaris.rest.auth.type", "oauth2")
         conf.set("spark.sql.catalog.polaris.oauth2-server-uri",
-                 f"{_POLARIS_URI}/v1/oauth/tokens")
+                 f"{polaris_uri}/v1/oauth/tokens")
 
         # ── Snowflake internal catalog (for reading source tables) ─────────────
         conf.set("spark.sql.catalog.snowflake",
@@ -522,9 +530,9 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.databricks",
                  "org.apache.iceberg.spark.SparkCatalog")
         conf.set("spark.sql.catalog.databricks.type",             "rest")
-        conf.set("spark.sql.catalog.databricks.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.databricks.uri",              polaris_uri)
         conf.set("spark.sql.catalog.databricks.oauth2-server-uri",
-                 f"{_POLARIS_URI}/v1/oauth/tokens")
+                 f"{polaris_uri}/v1/oauth/tokens")
         conf.set("spark.sql.catalog.databricks.credential",
                  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         conf.set("spark.sql.catalog.databricks.scope",            "PRINCIPAL_ROLE:ALL")
@@ -543,9 +551,9 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.postgres",
                  "org.apache.iceberg.spark.SparkCatalog")
         conf.set("spark.sql.catalog.postgres.type",             "rest")
-        conf.set("spark.sql.catalog.postgres.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.postgres.uri",              polaris_uri)
         conf.set("spark.sql.catalog.postgres.oauth2-server-uri",
-                 f"{_POLARIS_URI}/v1/oauth/tokens")
+                 f"{polaris_uri}/v1/oauth/tokens")
         conf.set("spark.sql.catalog.postgres.credential",
                  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         conf.set("spark.sql.catalog.postgres.scope",            "PRINCIPAL_ROLE:ALL")
@@ -561,9 +569,9 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.oracle",
                  "org.apache.iceberg.spark.SparkCatalog")
         conf.set("spark.sql.catalog.oracle.type",             "rest")
-        conf.set("spark.sql.catalog.oracle.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.oracle.uri",              polaris_uri)
         conf.set("spark.sql.catalog.oracle.oauth2-server-uri",
-                 f"{_POLARIS_URI}/v1/oauth/tokens")
+                 f"{polaris_uri}/v1/oauth/tokens")
         conf.set("spark.sql.catalog.oracle.credential",
                  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         conf.set("spark.sql.catalog.oracle.scope",            "PRINCIPAL_ROLE:ALL")
@@ -579,9 +587,9 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.mongodb",
                  "org.apache.iceberg.spark.SparkCatalog")
         conf.set("spark.sql.catalog.mongodb.type",             "rest")
-        conf.set("spark.sql.catalog.mongodb.uri",              _POLARIS_URI)
+        conf.set("spark.sql.catalog.mongodb.uri",              polaris_uri)
         conf.set("spark.sql.catalog.mongodb.oauth2-server-uri",
-                 f"{_POLARIS_URI}/v1/oauth/tokens")
+                 f"{polaris_uri}/v1/oauth/tokens")
         conf.set("spark.sql.catalog.mongodb.credential",
                  f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
         conf.set("spark.sql.catalog.mongodb.scope",            "PRINCIPAL_ROLE:ALL")
