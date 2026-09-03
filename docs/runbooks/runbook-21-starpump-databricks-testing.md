@@ -34,7 +34,7 @@ lakehouse.lakehouse_db                     starpump databricks (USER=dave)
 | Iceberg catalog (Spark) | `databricks` |
 | Iceberg namespace | `lakehouse_db` |
 | S3 bucket | `stardata-databricks` |
-| Databricks workspace | `https://dbc-11a1dbc5-061a.cloud.databricks.com` |
+| Databricks workspace | `https://dbc-48ef5678-3df7.cloud.databricks.com` |
 | starpump CLI | `/usr/local/bin/starpump` |
 | Dynamic insert script | [`docker/spark-gluten-velox/scripts/databricks_product_insert_loop.py`](../../docker/spark-gluten-velox/scripts/databricks_product_insert_loop.py) |
 
@@ -147,7 +147,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ✅ Expected output:
 ```
-JDBC URL (masked): jdbc:databricks://dbc-11a1dbc5-061a.cloud.databricks.com:443;httpPath=/sql/1.0/w...
+JDBC URL (masked): jdbc:databricks://dbc-48ef5678-3df7.cloud.databricks.com:443;httpPath=/sql/1.0/w...
 Driver           : com.databricks.client.jdbc.Driver
 
 === Tables discovered via DatabaseMetaData ===
@@ -271,7 +271,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ## Step 4 — Insert new rows in Databricks
 
-Open **[`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`](https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor)**, select **Serverless Starter Warehouse**, and run the cells below. **Run each cell every time you want a new batch of rows**, then go to Step 5 to trigger starpump and copy them to Iceberg.
+Open **[`https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor`](https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor)**, select **Serverless Starter Warehouse**, and run the cells below. **Run each cell every time you want a new batch of rows**, then go to Step 5 to trigger starpump and copy them to Iceberg.
 
 ---
 
@@ -533,7 +533,7 @@ curl -s -X POST \
   -H "X-Vault-Token: $TOKEN" \
   -H "Content-Type: application/json" \
   http://192.168.1.50:30820/v1/secret/data/platform/databricks \
-  -d '{"data":{"token":"<new-token>","host":"dbc-11a1dbc5-061a.cloud.databricks.com","http_path":"/sql/1.0/warehouses/942026cf5e55f3c3","catalog":"lakehouse","schema":"lakehouse_db"}}'
+  -d '{"data":{"token":"<new-token>","host":"dbc-48ef5678-3df7.cloud.databricks.com","http_path":"/sql/1.0/warehouses/2c23ed9f013093c4","catalog":"lakehouse","schema":"lakehouse_db"}}'
 ```
 
 ---

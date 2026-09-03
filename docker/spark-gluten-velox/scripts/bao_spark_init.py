@@ -188,8 +188,8 @@ class BaoSparkInit:
         """
         Return Databricks JDBC credentials from OpenBao.
         Expected keys in secret/data/platform/databricks:
-          host          e.g. dbc-11a1dbc5-061a.cloud.databricks.com
-          http_path     e.g. /sql/1.0/warehouses/942026cf5e55f3c3
+          host          e.g. dbc-48ef5678-3df7.cloud.databricks.com
+          http_path     e.g. /sql/1.0/warehouses/2c23ed9f013093c4
           token         Personal Access Token or OAuth M2M token
           catalog       e.g. lakehouse   (Unity Catalog catalog name)
           schema        e.g. lakehouse_db

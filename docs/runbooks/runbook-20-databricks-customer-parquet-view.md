@@ -244,7 +244,7 @@ print("✅ Session stopped — cluster cores released")
 
 ## 3. Databricks SQL console — verify the view
 
-Open **`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`**  
+Open **`https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor`**  
 Select warehouse: **Serverless Starter Warehouse**
 
 > The warehouse cold-starts automatically on first query. Allow 30–90 seconds.
@@ -341,7 +341,7 @@ read_files('s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/dat
 
 ### Browse via Catalog Explorer (no SQL needed)
 
-1. Go to **`https://dbc-11a1dbc5-061a.cloud.databricks.com/explore/data`**
+1. Go to **`https://dbc-48ef5678-3df7.cloud.databricks.com/explore/data`**
 2. Expand **`lakehouse`** → **`lakehouse_db`**
 3. Click **`vw_customer_latest`**
 4. Click the **Sample Data** tab → live preview of the 1 000 rows
@@ -644,7 +644,7 @@ print("✅ Session stopped — cluster cores released")
 
 ### 5-H — Verify 1 100 rows in the Databricks SQL console
 
-Open **`https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`**
+Open **`https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor`**
 Select warehouse: **Serverless Starter Warehouse**
 
 **Query 1 — Total count (must now be 1 100)**
@@ -758,12 +758,12 @@ Harmless — Hadoop looks for an optional metrics file that does not exist. Igno
 | S3 bucket | `stardata-databricks` |
 | S3 data path | `s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/` |
 | S3 metadata path | `s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/metadata/` |
-| Databricks workspace | `https://dbc-11a1dbc5-061a.cloud.databricks.com` |
-| Databricks SQL editor | `https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor` |
+| Databricks workspace | `https://dbc-48ef5678-3df7.cloud.databricks.com` |
+| Databricks SQL editor | `https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor` |
 | Databricks catalog | `lakehouse` |
 | Databricks schema | `lakehouse.lakehouse_db` |
 | Databricks view | `lakehouse.lakehouse_db.vw_customer_latest` |
-| Databricks SQL warehouse | `942026cf5e55f3c3` (Serverless Starter) |
+| Databricks SQL warehouse | `2c23ed9f013093c4` (Serverless Starter) |
 | Unity Catalog external location | `stardata_databricks_iceberg` → `s3://stardata-databricks/` |
 | Spark seed script | [`docker/spark-gluten-velox/scripts/databricks_customer_seed.py`](../../docker/spark-gluten-velox/scripts/databricks_customer_seed.py) |
 | Databricks reader script | [`docker/spark-gluten-velox/scripts/databricks_customer_parquet_reader.py`](../../docker/spark-gluten-velox/scripts/databricks_customer_parquet_reader.py) |
@@ -778,7 +778,7 @@ Harmless — Hadoop looks for an optional metrics file that does not exist. Igno
 
 This **single notebook** scans the entire S3 warehouse root, discovers every Iceberg table automatically, and — for each one — creates a view and refreshes a Delta audit table. **No table names are ever hardcoded.** Adding a new Iceberg table requires no code change; the next notebook run picks it up automatically.
 
-Upload to Databricks at `https://dbc-11a1dbc5-061a.cloud.databricks.com` and attach to a cluster with Unity Catalog enabled.
+Upload to Databricks at `https://dbc-48ef5678-3df7.cloud.databricks.com` and attach to a cluster with Unity Catalog enabled.
 
 ---
 
@@ -954,7 +954,7 @@ Every auto-created view selects all parquet columns plus two added by the view d
 
 **File:** [`docker/databricks-notebooks/dml_test_steps.sql`](../../docker/databricks-notebooks/dml_test_steps.sql)
 
-Open the Databricks SQL console at `https://dbc-11a1dbc5-061a.cloud.databricks.com/sql/editor`.
+Open the Databricks SQL console at `https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor`.
 Select warehouse: **Serverless Starter Warehouse**.
 Run the blocks below in order. Expected results are shown after each query.
 

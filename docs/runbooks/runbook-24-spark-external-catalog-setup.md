@@ -587,7 +587,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 ```
 OpenBao                              Spark pod
 secret/data/platform/databricks      ┌──────────────────────────────────────────────────┐
-  host: dbc-11a1dbc5-061a...         │ bao_spark_init.databricks_jdbc_options()         │
+  host: dbc-48ef5678-3df7...         │ bao_spark_init.databricks_jdbc_options()         │
   http_path: /sql/1.0/warehouses/... │   → jdbc:databricks://host:443                   │
   token: <PAT>              ────────►│       ;httpPath=... ;AuthMech=3 ;UID=token        │
   catalog: lakehouse                 │       ;PWD=<PAT> ;ConnCatalog=... ;SSL=1          │
@@ -602,7 +602,7 @@ secret/data/platform/s3      ───────►│   type=rest / warehouse
                                                     │ Spark JDBC setFetchSize bug)
                                                     ▼
                                      Databricks SQL Warehouse (cloud)
-                                     dbc-11a1dbc5-061a.cloud.databricks.com
+                                     dbc-48ef5678-3df7.cloud.databricks.com
                                      Unity Catalog: lakehouse.lakehouse_db
                                                     │ Iceberg write
                                                     ▼
@@ -634,8 +634,8 @@ curl -s -X POST -H "X-Vault-Token: $TOKEN" -H "Content-Type: application/json" \
   http://192.168.1.50:30820/v1/secret/data/platform/databricks \
   -d '{
     "data": {
-      "host":      "dbc-11a1dbc5-061a.cloud.databricks.com",
-      "http_path": "/sql/1.0/warehouses/942026cf5e55f3c3",
+      "host":      "dbc-48ef5678-3df7.cloud.databricks.com",
+      "http_path": "/sql/1.0/warehouses/2c23ed9f013093c4",
       "token":     "<databricks_pat>",
       "catalog":   "lakehouse",
       "schema":    "lakehouse_db",
@@ -837,8 +837,8 @@ Databricks is a cloud service. Connect via HTTPS to the workspace URL.
 
 | Property | Value |
 |---|---|
-| Workspace URL | `https://dbc-11a1dbc5-061a.cloud.databricks.com` |
-| SQL Warehouse HTTP path | `/sql/1.0/warehouses/942026cf5e55f3c3` |
+| Workspace URL | `https://dbc-48ef5678-3df7.cloud.databricks.com` |
+| SQL Warehouse HTTP path | `/sql/1.0/warehouses/2c23ed9f013093c4` |
 | Auth | Personal Access Token (PAT) |
 | Client tool | Databricks web SQL editor, DBeaver, `databricks-sql-connector` |
 
@@ -852,8 +852,8 @@ DB_TOKEN=$(curl -sf -H "X-Vault-Token: $TOKEN" http://192.168.1.50:30820/v1/secr
 python3 -c "
 from databricks import sql
 conn = sql.connect(
-    server_hostname='dbc-11a1dbc5-061a.cloud.databricks.com',
-    http_path='/sql/1.0/warehouses/942026cf5e55f3c3',
+    server_hostname='dbc-48ef5678-3df7.cloud.databricks.com',
+    http_path='/sql/1.0/warehouses/2c23ed9f013093c4',
     access_token='${DB_TOKEN}'
 )
 cur = conn.cursor()
