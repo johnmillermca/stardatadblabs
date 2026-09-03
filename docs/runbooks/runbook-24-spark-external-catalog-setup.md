@@ -709,22 +709,53 @@ All five sources expose a NodePort on the master node (`192.168.1.50`).
 |---|---|
 | NodePort | `192.168.1.50:30521` |
 | JDBC URL | `jdbc:oracle:thin:@192.168.1.50:30521/XEPDB1` |
-| Client tool | `sqlplus`, SQL Developer, DBeaver |
+| Client tool | `sqlplus` (inside pod — see note), SQL Developer, DBeaver, Python oracledb |
+
+> **Note — sqlplus is not on `$PATH` by default in `gvenzl/oracle-xe:21-slim`.**
+> The binary lives at `/opt/oracle/product/21c/dbhomeXE/bin/sqlplus` and requires
+> `ORACLE_HOME` and `LD_LIBRARY_PATH` to be set. The simplest approach is to exec
+> into the Oracle pod directly. There are **two separate passwords**:
+> - `oracle-password` K8s secret → **SYS/SYSTEM** password
+> - `secret/data/platform/oracle` OpenBao → **tpcds** user password
 
 ```bash
-# Get password
-ORA_PASS=$(kubectl get secret oracle-credentials -n prod \
-  -o jsonpath='{.data.oracle-password}' | base64 -d)
+# Get tpcds password from OpenBao
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+ORA_PASS=$(curl -sf -H "X-Vault-Token: $TOKEN" \
+  http://192.168.1.50:30820/v1/secret/data/platform/oracle \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['data']['password'])")
 
-# SQLPlus from outside cluster
-sqlplus tpcds/"${ORA_PASS}"@//192.168.1.50:30521/XEPDB1
+ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe \
+  --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 
-# Python (cx_Oracle / oracledb)
+# Interactive sqlplus session
+kubectl exec -it -n prod $ORACLE_POD -- \
+  bash -c "ORACLE_HOME=/opt/oracle/product/21c/dbhomeXE \
+  LD_LIBRARY_PATH=/opt/oracle/product/21c/dbhomeXE/lib \
+  PATH=\$PATH:/opt/oracle/product/21c/dbhomeXE/bin \
+  sqlplus tpcds/${ORA_PASS}@//localhost:1521/XEPDB1"
+
+# Non-interactive — run a query and exit
+kubectl exec -n prod $ORACLE_POD -- \
+  bash -c "ORACLE_HOME=/opt/oracle/product/21c/dbhomeXE \
+  LD_LIBRARY_PATH=/opt/oracle/product/21c/dbhomeXE/lib \
+  PATH=\$PATH:/opt/oracle/product/21c/dbhomeXE/bin \
+  sqlplus -S tpcds/${ORA_PASS}@//localhost:1521/XEPDB1 << 'EOF'
+SELECT table_name, num_rows FROM all_tables ORDER BY num_rows DESC NULLS LAST;
+EXIT;
+EOF"
+
+# Python from the master node (no sqlplus install required)
+pip3 install oracledb 2>/dev/null
 python3 -c "
 import oracledb
 conn = oracledb.connect(user='tpcds', password='${ORA_PASS}',
                         dsn='192.168.1.50:30521/XEPDB1')
-print(conn.version)
+cur = conn.cursor()
+cur.execute('SELECT table_name, num_rows FROM all_tables ORDER BY num_rows DESC NULLS LAST')
+for row in cur: print(row)
+conn.close()
 "
 ```
 
