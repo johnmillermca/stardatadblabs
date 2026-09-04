@@ -442,6 +442,9 @@ spec:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/doris
+    directory:
+      recurse: true
+      exclude: "setup/*.sql"  # SQL DDL files are not K8s manifests — applied manually
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
@@ -449,7 +452,7 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── Apache Spark (HA: 1 master + 3 workers) ───────────────────────────────────
+# ── Apache Spark (HA: 1 master + 3 workers) ──────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -465,6 +468,29 @@ spec:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/spark
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── Spark App Cleanup CronJob ─────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-app-cleanup
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/spark-app-cleanup
   destination:
     server: https://kubernetes.default.svc
     namespace: prod

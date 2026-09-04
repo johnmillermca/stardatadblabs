@@ -1,8 +1,10 @@
 # ArgoCD Application — Apache Doris (raw manifests)
-# Namespace : analytics
+# Namespace : prod
 # Access    : http://192.168.1.50:30030 (FE HTTP/WebUI)
 #             jdbc:mysql://192.168.1.50:30090 (FE MySQL query)
 # Prereq    : secret doris-credentials must exist (run 12-seed-openbao-secrets.sh)
+# NOTE: recurse=true covers cache_manager/ subdir (doris-cache-manager Deployment)
+#       setup/*.sql files are excluded — they are not K8s manifests (apply manually)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -14,10 +16,13 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: k8s-platform/manifests/doris
+    path: manifests/doris
+    directory:
+      recurse: true
+      exclude: "setup/*.sql"
   destination:
     server: https://kubernetes.default.svc
-    namespace: analytics
+    namespace: prod
   syncPolicy:
     automated:
       prune: true
