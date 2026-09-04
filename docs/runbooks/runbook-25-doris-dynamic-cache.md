@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2025 |
+| **Last Updated** | 2026-09-04 |
 | **Related** | RB-05 (Doris & Analytics), RB-11 (Kerberos), RB-13 (RBAC) |
 
 ---
@@ -97,7 +97,12 @@ All credentials are read from OpenBao at runtime — nothing is hard-coded.
 | `secret/data/platform/polaris` | `spark_svc_id`, `spark_svc_secret` |
 
 The daemon authenticates via the `doris-cache-manager` ServiceAccount JWT bound to
-the `platform-secrets-read` OpenBao role — same role used by `bao_spark_init.py`.
+the **`doris-cache-manager`** OpenBao K8s auth role (policy: `platform-secrets-read`).
+
+> **Note:** The Doris root password is also injected as `DORIS_ADMIN_PASSWORD` from
+> the `rbac-plane-credentials` K8s secret. This is a startup fallback only — if
+> OpenBao JWT auth fails transiently (e.g. role just created), the daemon still
+> connects to Doris using the env var and continues normally.
 
 ### 2.3 Metadata Tables
 
@@ -153,8 +158,52 @@ Rules:
 - Doris FE and BE are running (`SHOW BACKENDS;` returns at least one alive backend).
 - Polaris REST catalog is reachable at `http://polaris-rest.prod.svc.cluster.local:8181`.
 - OpenBao has `secret/data/platform/doris` and `secret/data/platform/polaris` populated.
-- The `platform-secrets-read` OpenBao role is bound to the `prod` namespace
-  (used by `doris-cache-manager` ServiceAccount).
+- The `doris-cache-manager` OpenBao K8s auth role exists (see §3.0 below).
+- The `platform_meta` database and tracking tables exist in Doris (see §3.6).
+
+### 3.0 One-Time OpenBao K8s Auth Role Setup
+
+The daemon uses a dedicated K8s auth role. This only needs to be done **once**
+(already done on this cluster — included for reproductions / disaster recovery).
+
+```bash
+# Get the OpenBao root token
+kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d
+
+# Create the role (substitute your root token)
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao write auth/kubernetes/role/doris-cache-manager \
+    bound_service_account_names=doris-cache-manager \
+    bound_service_account_namespaces=prod \
+    policies=platform-secrets-read \
+    ttl=1h
+
+# Verify
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao read auth/kubernetes/role/doris-cache-manager
+# bound_service_account_names: [doris-cache-manager]
+# policies: [platform-secrets-read]
+```
+
+Also populate `secret/data/platform/doris` in OpenBao:
+
+```bash
+# The Doris root password lives in the rbac-plane-credentials k8s secret
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao kv put -mount=secret platform/doris admin_password="${DORIS_PASS}"
+
+# Verify
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao kv get -mount=secret platform/doris
+```
 
 ### 3.2 Get Doris Admin Password
 
@@ -230,19 +279,38 @@ SHOW TABLES FROM platform_meta;
 
 ### 3.7 Build the Cache Manager Container Image
 
+> ⚠️ **`docker` is not available on this cluster — use `podman` instead.**
+> The Dockerfile base image is `python:3.12-slim` pulled from docker.io
+> (not from the local registry — `python:3.12-slim` is not mirrored locally).
+
 ```bash
 cd manifests/doris/cache_manager
 
-docker build -t 192.168.1.50:30500/doris-cache-manager:1.0.0 .
-docker push 192.168.1.50:30500/doris-cache-manager:1.0.0
+podman build --platform linux/amd64 \
+  -t 192.168.1.50:30500/doris-cache-manager:1.0.0 .
+
+podman push --tls-verify=false \
+  192.168.1.50:30500/doris-cache-manager:1.0.0
+```
+
+Verify the image landed in the registry:
+
+```bash
+curl -sk https://192.168.1.50:30500/v2/doris-cache-manager/tags/list
+# {"name":"doris-cache-manager","tags":["1.0.0"]}
 ```
 
 ### 3.8 Deploy the Cache Manager
 
+> ⚠️ **Do not add `restartPolicy` to individual containers in a Deployment.**
+> `restartPolicy` is only valid at the Pod spec level (`Always` is the Deployment
+> default). Adding it at the container level causes:
+> `spec.template.spec.containers[0].restartPolicy: Forbidden`
+
 ```bash
 kubectl apply -f manifests/doris/cache_manager/doris-cache-manager-deployment.yaml
 
-kubectl rollout status deployment/doris-cache-manager -n prod
+kubectl rollout status deployment/doris-cache-manager -n prod --timeout=120s
 ```
 
 ---
@@ -252,31 +320,55 @@ kubectl rollout status deployment/doris-cache-manager -n prod
 ```bash
 # Check pod is running
 kubectl get pod -n prod -l app=doris-cache-manager
+# NAME                                   READY   STATUS    RESTARTS   AGE
+# doris-cache-manager-8476bf5569-xxxx    1/1     Running   0          30s
 
-# Watch logs (first cycle runs ~2 minutes after start)
+# Watch logs — first cycle runs immediately on startup
 kubectl logs -n prod -l app=doris-cache-manager -f
-
-# Expected log lines:
-#   Authenticated to OpenBao via K8s SA JWT (role=platform-secrets-read).
-#   Credentials loaded.
-#   Connected to Doris FE at doris-fe.prod.svc.cluster.local:9030.
-#   === Cache Manager cycle start: 2025-... ===
-#   Audit log scrape: found N distinct table/catalog pairs with SELECTs.
-#   === Cycle done. active_warmups=0 ===
 ```
 
-Check metadata tables after the first cycle:
+Expected healthy startup log (exact lines):
+
+```
+Doris Cache Manager starting up.
+Loading credentials from OpenBao (http://openbao.prod.svc.cluster.local:8200).
+Authenticated to OpenBao via K8s SA JWT (role=doris-cache-manager).
+Doris credentials loaded from OpenBao.
+Polaris credentials loaded from OpenBao.
+Credentials loaded.
+Cache Manager daemon running. scan_interval=3600s lru_evict=24h max_concurrent=32 warmup_stale=5min
+=== Cache Manager cycle start: 2026-09-04T04:01:59... ===
+Connected to Doris FE at doris-fe.prod.svc.cluster.local:9030.
+Audit log scrape: found 0 distinct table/catalog pairs with SELECTs.
+Warm-up evaluation: 0 eligible tables, 0 triggered.
+=== Cycle done. active_warmups=0 ===
+Sleeping 3600 seconds until next scan.
+```
+
+> `found 0 ...` is normal on first startup — the audit log is empty until
+> queries are executed against managed catalogs.
+
+Check metadata tables from Doris Web UI (`http://192.168.1.50:30030`) or MySQL:
 
 ```sql
-USE platform_meta;
+-- Web UI: run each statement separately (USE doesn't persist between statements)
+SHOW TABLES FROM platform_meta;
+-- Expected: cache_eviction_log, table_query_stats
 
 SELECT catalog_name, db_name, table_name, total_select_count,
        last_select_ts, select_interval_min, warm_interval_min, cache_state
-FROM table_query_stats
+FROM platform_meta.table_query_stats
 ORDER BY total_select_count DESC
 LIMIT 20;
 
-SELECT * FROM cache_eviction_log ORDER BY evicted_at DESC LIMIT 10;
+SELECT * FROM platform_meta.cache_eviction_log ORDER BY evicted_at DESC LIMIT 10;
+```
+
+Trigger cache population by running a query against a managed catalog:
+
+```sql
+-- This will appear in table_query_stats after the next hourly cycle
+SELECT COUNT(*) FROM iceberg_polaris.tpcds_sf10tcl.customer;
 ```
 
 ---
@@ -664,27 +756,63 @@ The following environment variables control daemon behaviour. Edit
 
 ## 7. Troubleshooting
 
-### 7.1 OpenBao Authentication Fails
+### 7.1 OpenBao Authentication Fails — `HTTP Error 400: Bad Request`
 
 ```
-RuntimeError: Cannot authenticate to OpenBao: no TOKEN env-var and no K8s SA JWT at ...
+urllib.error.HTTPError: HTTP Error 400: Bad Request
 ```
 
-**Check:** ServiceAccount `doris-cache-manager` exists and is bound to the
-`platform-secrets-read` OpenBao role.
+This is the most common startup failure. It means the K8s JWT was presented to
+OpenBao but the `auth/kubernetes/role/<role>` doesn't exist **or** the SA name
+isn't in `bound_service_account_names`.
+
+**Root cause encountered during initial deploy:**
+The deployment originally specified `BAO_ROLE=platform-secrets-read`. That value
+is an OpenBao **policy** name, not a **role** name. Only two K8s roles existed:
+`polaris-token-refresher` and `rbac-plane`. A new role `doris-cache-manager` was
+created and bound to the `platform-secrets-read` policy.
+
+**Diagnose:**
 
 ```bash
-kubectl get serviceaccount doris-cache-manager -n prod
-kubectl describe clusterrolebinding | grep doris-cache-manager
+# List all registered K8s auth roles
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+    -o jsonpath='{.data.root-token}' | base64 -d) \
+  bao list auth/kubernetes/role
+# Must include: doris-cache-manager
+
+# Check the role details
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao read auth/kubernetes/role/doris-cache-manager
+# bound_service_account_names: [doris-cache-manager]
+# bound_service_account_namespaces: [prod]
+# policies: [platform-secrets-read]
 ```
 
-Verify OpenBao auth binding:
+**Fix:** If the role is missing, re-run the setup in §3.0.
+
+### 7.1a OpenBao Secret `secret/data/platform/doris` Empty
+
+```
+KeyError: 'admin_password'
+```
+
+The daemon reads `admin_password` from `secret/data/platform/doris`. This path
+must be populated before deploying.
+
+**Check:**
 
 ```bash
-bao read auth/kubernetes/role/platform-secrets-read
-# bound_service_account_names should include doris-cache-manager
-# bound_service_account_namespaces should include prod
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao kv get -mount=secret platform/doris
+# Must show: admin_password    <value>
 ```
+
+**Fix:** See §3.0 — the Doris root password is in `rbac-plane-credentials` K8s
+secret under key `DORIS_ADMIN_PASSWORD`.
 
 ### 7.2 Doris Connection Fails
 
@@ -795,6 +923,155 @@ curl -s http://192.168.1.50:6066/v1/submissions/status/<submissionId> | jq .driv
 
 # If FAILED — check Spark worker logs:
 kubectl logs -n prod -l app=spark-worker | tail -100
+```
+
+---
+
+## 9. Known Issues & Deployment History
+
+### 9.1 Initial Deployment Issues (2026-09-04)
+
+The following issues were encountered and resolved during the first live deployment.
+Documented here so future re-deployments avoid the same pitfalls.
+
+---
+
+#### Issue 1 — `platform_meta` database did not exist
+
+**Symptom:** `SHOW DATABASES FROM internal` did not include `platform_meta`.
+
+**Cause:** The SQL in `03_create_metadata_tables.sql` had not been applied to the cluster.
+
+**Fix:** Applied manually via `kubectl exec` into the `doris-fe-0` pod:
+
+```bash
+kubectl exec -n prod doris-fe-0 -c doris-fe -- \
+  mysql -h 127.0.0.1 -P 9030 -u root --skip-password \
+  -e "$(cat manifests/doris/setup/03_create_metadata_tables.sql)"
+```
+
+> Going forward use the `mysql` approach from §3.6 directly.
+
+---
+
+#### Issue 2 — `python:3.12-slim` not in local registry
+
+**Symptom:**
+
+```
+Error: creating build container: unable to copy from source
+  docker://192.168.1.50:30500/python:3.12-slim: manifest unknown
+```
+
+**Cause:** The Dockerfile originally used `FROM 192.168.1.50:30500/python:3.12-slim`.
+That image does not exist in the local registry. The cluster registry only mirrors
+application images — Python base images are not mirrored.
+
+**Fix:** Changed `FROM` to use docker.io directly:
+
+```dockerfile
+FROM python:3.12-slim
+```
+
+Docker Hub is reachable from the cluster nodes. Also, `docker` is not installed —
+use `podman` for all image builds.
+
+---
+
+#### Issue 3 — `restartPolicy: Always` on a container (not pod)
+
+**Symptom:**
+
+```
+The Deployment "doris-cache-manager" is invalid:
+spec.template.spec.containers[0].restartPolicy:
+Forbidden: may not be set for non-init containers
+```
+
+**Cause:** The original manifest had `restartPolicy: Always` nested inside the
+container spec block. This field is only valid at the Pod spec level and is
+already the default for Deployments.
+
+**Fix:** Removed the `restartPolicy` field from the container block entirely.
+
+---
+
+#### Issue 4 — OpenBao `HTTP Error 400` on K8s JWT login
+
+**Symptom:**
+
+```
+2026-09-04T03:55:48 INFO  Loading credentials from OpenBao...
+urllib.error.HTTPError: HTTP Error 400: Bad Request
+```
+
+**Cause:** `BAO_ROLE=platform-secrets-read` was set in the deployment env vars.
+`platform-secrets-read` is a **policy** name, not a **K8s auth role** name. The
+only registered K8s auth roles were `polaris-token-refresher` and `rbac-plane` —
+there was no role for the `doris-cache-manager` SA.
+
+**Fix (two-part):**
+
+1. Created a new K8s auth role in OpenBao:
+
+```bash
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao write auth/kubernetes/role/doris-cache-manager \
+    bound_service_account_names=doris-cache-manager \
+    bound_service_account_namespaces=prod \
+    policies=platform-secrets-read \
+    ttl=1h
+```
+
+2. Updated deployment: `BAO_ROLE=doris-cache-manager`
+
+3. Added `DORIS_ADMIN_PASSWORD` env var from `rbac-plane-credentials` K8s secret
+   as a startup fallback so the daemon is resilient to transient OpenBao failures.
+
+4. Updated `doris_cache_manager.py` — wrapped `read_secret()` calls in try/except:
+   - If OpenBao unavailable: falls back to `DORIS_ADMIN_PASSWORD` env var
+   - If Polaris creds unavailable: logs warning, disables write-pushdown (no crash)
+
+---
+
+#### Issue 5 — `secret/data/platform/doris` path was empty
+
+**Symptom:** `[]` returned when reading the secret keys from OpenBao.
+
+**Cause:** The `secret/data/platform/doris` KV path had never been written.
+The daemon needed `admin_password` from this path.
+
+**Fix:** Wrote the secret using the root token:
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+kubectl exec -n prod openbao-0 -- \
+  env BAO_TOKEN=<root-token> \
+  bao kv put -mount=secret platform/doris \
+  admin_password="${DORIS_PASS}"
+```
+
+---
+
+#### Final successful startup log
+
+```
+2026-09-04T04:01:59 INFO  Doris Cache Manager starting up.
+2026-09-04T04:01:59 INFO  Loading credentials from OpenBao (http://openbao.prod.svc.cluster.local:8200).
+2026-09-04T04:01:59 INFO  Authenticated to OpenBao via K8s SA JWT (role=doris-cache-manager).
+2026-09-04T04:01:59 INFO  Doris credentials loaded from OpenBao.
+2026-09-04T04:01:59 INFO  Polaris credentials loaded from OpenBao.
+2026-09-04T04:01:59 INFO  Credentials loaded.
+2026-09-04T04:01:59 INFO  Cache Manager daemon running. scan_interval=3600s lru_evict=24h max_concurrent=32 warmup_stale=5min
+2026-09-04T04:01:59 INFO  === Cache Manager cycle start: 2026-09-04T04:01:59.257711+00:00 ===
+2026-09-04T04:01:59 INFO  Connected to Doris FE at doris-fe.prod.svc.cluster.local:9030.
+2026-09-04T04:01:59 INFO  Audit log scrape: found 0 distinct table/catalog pairs with SELECTs.
+2026-09-04T04:01:59 INFO  Warm-up evaluation: 0 eligible tables, 0 triggered.
+2026-09-04T04:01:59 INFO  === Cycle done. active_warmups=0 ===
+2026-09-04T04:01:59 INFO  Sleeping 3600 seconds until next scan.
 ```
 
 ---
