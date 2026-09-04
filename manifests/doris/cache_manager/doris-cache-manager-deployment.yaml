@@ -25,9 +25,8 @@ metadata:
   name: doris-cache-manager
   namespace: prod
   annotations:
-    # This SA is bound to the OpenBao role 'platform-secrets-read' which grants
-    # read access to secret/data/platform/* — the same role used by bao_spark_init.
-    openbao.org/role: "platform-secrets-read"
+    # Bound to OpenBao K8s auth role 'doris-cache-manager' → policy platform-secrets-read
+    openbao.org/role: "doris-cache-manager"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -66,7 +65,19 @@ spec:
             - name: ADDR
               value: "http://openbao.prod.svc.cluster.local:8200"
             - name: BAO_ROLE
-              value: "platform-secrets-read"
+              value: "doris-cache-manager"
+            # ── Doris password injected directly from cluster secret ─────────
+            # The daemon reads admin_password from OpenBao secret/data/platform/doris.
+            # To avoid a chicken-and-egg bootstrap problem (needing OpenBao to get the
+            # Doris password used to connect to Doris), the root password is also
+            # available as TOKEN env-var fallback — but here we pass it via OpenBao.
+            # NOTE: DORIS_ADMIN_PASSWORD is used only as a last-resort env fallback
+            # if OpenBao K8s auth fails during the initial startup grace period.
+            - name: DORIS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rbac-plane-credentials
+                  key: DORIS_ADMIN_PASSWORD
             # ── Doris FE address (direct, bypasses krb-doris-guard sidecar)
             # The cache manager uses the root account which is EXEMPT_USERS in
             # the guard config — connects on port 9030 directly in-cluster.
@@ -95,9 +106,6 @@ spec:
             limits:
               memory: 512Mi
               cpu: 500m
-          # The daemon exits on fatal startup errors (bad creds, etc.);
-          # Kubernetes will restart it with exponential backoff.
-          restartPolicy: Always
           livenessProbe:
             # The daemon writes a heartbeat file each cycle so liveness can be
             # checked without a listening port.

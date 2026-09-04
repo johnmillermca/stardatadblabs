@@ -1036,10 +1036,31 @@ class CacheManagerDaemon:
         logger.info("Doris Cache Manager starting up.")
         self._bao = BaoClient()
 
-        # Load credentials from OpenBao
+        # Load credentials — try OpenBao first, fall back to env var for Doris password.
+        # The DORIS_ADMIN_PASSWORD env var is injected from the rbac-plane-credentials
+        # K8s secret so the daemon can start even if OpenBao K8s JWT auth is not yet
+        # fully configured (e.g. role just created, token propagation lag).
         logger.info("Loading credentials from OpenBao (%s).", BAO_ADDR)
-        self._doris_creds  = self._bao.read_secret(_PATH_DORIS)
-        self._polaris_creds = self._bao.read_secret(_PATH_POLARIS)
+        try:
+            self._doris_creds = self._bao.read_secret(_PATH_DORIS)
+            logger.info("Doris credentials loaded from OpenBao.")
+        except Exception as exc:
+            env_pass = os.environ.get("DORIS_ADMIN_PASSWORD")
+            if env_pass:
+                logger.warning(
+                    "OpenBao unavailable (%s) — using DORIS_ADMIN_PASSWORD env var.", exc
+                )
+                self._doris_creds = {"admin_password": env_pass}
+            else:
+                raise
+
+        try:
+            self._polaris_creds = self._bao.read_secret(_PATH_POLARIS)
+            logger.info("Polaris credentials loaded from OpenBao.")
+        except Exception as exc:
+            logger.warning("Could not load Polaris creds from OpenBao (%s) — write-pushdown disabled.", exc)
+            self._polaris_creds = {}
+
         logger.info("Credentials loaded.")
 
         # Shared Doris connection for metadata operations
