@@ -1,0 +1,112 @@
+# =============================================================================
+# doris-cache-manager-deployment.yaml
+# Kubernetes Deployment for the Doris Dynamic Cache Manager daemon.
+#
+# Namespace : prod
+# Node      : worker1.local  (same as Doris — direct in-cluster MySQL access)
+#
+# Credentials (all from OpenBao at runtime — none hard-coded):
+#   secret/data/platform/doris   → admin_password
+#   secret/data/platform/polaris → spark_svc_id, spark_svc_secret
+#
+# The cache manager:
+#   • Scrapes the Doris audit log every hour (SCAN_INTERVAL_S=3600)
+#   • Warms up segments for hot tables (select_interval × 2/3 cadence)
+#   • Evicts cold tables after 24 h of inactivity
+#   • Runs up to 32 concurrent warm-up jobs
+#
+# Image: 192.168.1.50:30500/doris-cache-manager:1.0.0
+#   Built from manifests/doris/cache_manager/ — see runbook-25 for build steps.
+# =============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: doris-cache-manager
+  namespace: prod
+  annotations:
+    # This SA is bound to the OpenBao role 'platform-secrets-read' which grants
+    # read access to secret/data/platform/* — the same role used by bao_spark_init.
+    openbao.org/role: "platform-secrets-read"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-cache-manager
+  namespace: prod
+  labels:
+    app: doris-cache-manager
+    component: cache-daemon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-cache-manager
+  # Only one replica should run at a time. Recreate ensures no overlap during
+  # rollout — avoids two daemons issuing warm-up jobs simultaneously.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: doris-cache-manager
+        component: cache-daemon
+    spec:
+      serviceAccountName: doris-cache-manager
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: cache-manager
+          image: 192.168.1.50:30500/doris-cache-manager:1.0.0
+          imagePullPolicy: Always
+          command: ["python", "/app/doris_cache_manager.py"]
+          env:
+            # ── OpenBao address (in-cluster) ────────────────────────────────
+            - name: ADDR
+              value: "http://openbao.prod.svc.cluster.local:8200"
+            - name: BAO_ROLE
+              value: "platform-secrets-read"
+            # ── Doris FE address (direct, bypasses krb-doris-guard sidecar)
+            # The cache manager uses the root account which is EXEMPT_USERS in
+            # the guard config — connects on port 9030 directly in-cluster.
+            - name: DORIS_HOST
+              value: "doris-fe.prod.svc.cluster.local"
+            - name: DORIS_PORT
+              value: "9030"
+            # ── Tuning ─────────────────────────────────────────────────────
+            - name: SCAN_INTERVAL_S
+              value: "3600"
+            - name: LRU_EVICT_HOURS
+              value: "24"
+            - name: MAX_CONCURRENT
+              value: "32"
+            - name: WARMUP_STALE_MIN
+              value: "5"
+            # ── Spark REST URL for write-pushdown ───────────────────────────
+            - name: SPARK_REST_URL
+              value: "http://spark-master-svc.prod.svc.cluster.local:6066"
+            - name: SPARK_MASTER_URL
+              value: "spark://spark-master-internal.prod.svc.cluster.local:17077"
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          # The daemon exits on fatal startup errors (bad creds, etc.);
+          # Kubernetes will restart it with exponential backoff.
+          restartPolicy: Always
+          livenessProbe:
+            # The daemon writes a heartbeat file each cycle so liveness can be
+            # checked without a listening port.
+            exec:
+              command:
+                - sh
+                - -c
+                - "test -f /tmp/cache_manager_alive && test $(( $(date +%s) - $(stat -c %Y /tmp/cache_manager_alive) )) -lt 7200"
+            initialDelaySeconds: 120
+            periodSeconds: 300
+            failureThreshold: 3
+      restartPolicy: Always
