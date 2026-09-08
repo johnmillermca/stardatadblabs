@@ -35,7 +35,24 @@ data:
     webserver_port = 8040
     heartbeat_service_port = 9050
     brpc_port = 8060
+
+    # ── Storage ─────────────────────────────────────────────────────────────────
+    # PVC doris-be-storage (400Gi) is mounted at /opt/apache-doris/be/storage.
+    # The storage root holds tablet data; the segment cache lives in a separate
+    # sub-directory on the same volume so it does not compete with tablet writes.
     storage_root_path = /opt/apache-doris/be/storage
+
+    # ── Segment (File) Cache — Doris 4.0 ────────────────────────────────────────
+    # enable_file_cache=true activates the local segment cache layer.
+    # file_cache_path   points to a JSON array of cache mount descriptors:
+    #   path    — directory on disk (created automatically by Doris BE on startup)
+    #   total_size — capacity in bytes (200 GB = 214748364800)
+    #   query_limit  — max bytes a single query may pin in cache (50 GB)
+    # The cache directory is placed under the storage mount so it lives on the
+    # same NVMe-backed LVM volume as tablet data (worker1.local /home → dm-2).
+    enable_file_cache = true
+    file_cache_path = [{"path":"/opt/apache-doris/be/storage/segment_cache","total_size":214748364800,"query_limit":53687091200}]
+
     JAVA_OPTS = "-Xmx1024m -DlogPath=$DORIS_HOME/log/jni.log"
 ---
 # Headless service required by StatefulSet for stable DNS (doris-be-0.doris-be-headless)
