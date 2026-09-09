@@ -277,23 +277,33 @@ doris-cache-manager-<hash>             Running   0
 
 ### T-09 — Startup log shows successful OpenBao authentication
 
+> The startup lines only appear once at pod start. Use `--tail=1` and scroll back
+> to the beginning, or fetch all logs from this pod run:
+
 ```bash
-kubectl logs -n prod -l app=doris-cache-manager --tail=50 \
-  | grep -E "OpenBao|Credentials|Cache Manager daemon running"
+# Fetch all logs from the current pod run (startup lines are near the top)
+POD=$(kubectl get pod -n prod -l app=doris-cache-manager \
+  --no-headers -o custom-columns=NAME:.metadata.name | head -1)
+
+kubectl logs -n prod $POD \
+  | grep -E "OpenBao|Credentials|Cache Manager daemon running|Authenticated"
 ```
 
-**Expected** (all four lines must appear):
+**Expected** (all six lines must appear):
 ```
 Loading credentials from OpenBao (http://openbao.prod.svc.cluster.local:8200).
 Authenticated to OpenBao via K8s SA JWT (role=doris-cache-manager).
 Doris credentials loaded from OpenBao.
 Polaris credentials loaded from OpenBao.
 Credentials loaded.
-Cache Manager daemon running. scan_interval=3600s lru_evict=24h max_concurrent=32 warmup_stale=5min
+Cache Manager daemon running. scan_interval=300s lru_evict=24h max_concurrent=32 warmup_stale=5min
 ```
 
-✅ Pass: all lines present with no `ERROR` between them.  
-❌ Fail: `HTTP Error 400` → OpenBao role missing (T-05). `KeyError: 'admin_password'` → secret empty (T-06).
+> **Note:** `scan_interval=300s` (5 minutes) — not `3600s`. If you see `3600s` the
+> `SCAN_INTERVAL_S` env var was not applied — redeploy with the current manifest.
+
+✅ Pass: all six lines present with no `ERROR` between them.
+❌ Fail: `HTTP Error 400` → OpenBao role missing (see §7.1). `KeyError: 'admin_password'` → secret empty (see §7.1a).
 
 ---
 
@@ -308,10 +318,10 @@ kubectl exec -n prod deployment/doris-cache-manager -- \
 ```
 age=<N>s
 ```
-where `N < 7200` (less than 2 hours old).
+where `N < 900` (less than 15 minutes old — matches the liveness probe threshold).
 
-✅ Pass: file exists and age is under 7200 s.  
-❌ Fail: `No such file or directory` — the daemon has not completed a cycle yet or is stuck.
+✅ Pass: file exists and age is under 900 s.
+❌ Fail: `No such file or directory` — the daemon has not completed a cycle yet (wait up to 5 min) or is stuck. Check `kubectl logs -n prod deployment/doris-cache-manager | tail -20` for errors.
 
 ---
 
