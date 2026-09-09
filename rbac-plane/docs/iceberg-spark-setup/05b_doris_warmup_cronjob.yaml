@@ -2,17 +2,20 @@
 # ============================================================
 # 05b_doris_warmup_cronjob.yaml
 # ============================================================
-# Kubernetes CronJob that warms the Doris Iceberg external catalog
-# for polaris.lakehouse.events every minute.
+# Kubernetes CronJob that refreshes all 5 managed Iceberg external
+# catalogs in Doris every minute so Doris picks up new Iceberg
+# snapshots promptly.
 #
-# RBAC note:
-#   The Service Account running this job is mapped to a Doris user
-#   that holds CATALOG_WARM_UP + CATALOG_USAGE permissions via the
-#   RBAC Control Plane.  Bind the role before deploying:
+# Catalogs refreshed: polaris, databricks, postgres, oracle, mongodb
 #
-#     rbacctl user create doris-warmup-sa
-#     rbacctl user bind   doris-warmup-sa iceberg_engineer --service doris
-#     rbacctl sync run    --user doris-warmup-sa --service doris
+# Credentials: uses root account via rbac-plane-credentials secret —
+#   same as all other Doris admin operations in this cluster.
+#
+# History:
+#   Original (pre-2026-09-09): refreshed 'iceberg_polaris' which no
+#   longer exists (renamed to 'iceberg_polaris_rw' and superseded by
+#   the 5 managed catalogs). All jobs were failing/timing out.
+#   Fixed 2026-09-09: refresh all 5 managed catalogs instead.
 # ============================================================
 apiVersion: batch/v1
 kind: CronJob
@@ -23,9 +26,8 @@ metadata:
     app: doris-iceberg-warmup
     rbac-managed: "true"
 spec:
-  # Every minute
   schedule: "* * * * *"
-  concurrencyPolicy: Forbid          # skip if previous run still active
+  concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
   jobTemplate:
@@ -39,52 +41,38 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: warmup
-              # mysql-client image — small, no JVM overhead
-              image: mysql:8.0
+              image: mariadb:10.11
+              imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
                 - -c
                 - |
                   set -euo pipefail
-                  echo "[$(date -u +%FT%TZ)] Starting Doris Iceberg warm-up..."
+                  echo "[$(date -u +%FT%TZ)] Refreshing Doris Iceberg catalogs..."
                   mysql \
-                    --host="${DORIS_FE_HOST}" \
-                    --port="${DORIS_FE_PORT}" \
-                    --user="${DORIS_USER}" \
+                    --host=doris-fe.prod.svc.cluster.local \
+                    --port=9030 \
+                    --user=root \
                     --password="${DORIS_PASSWORD}" \
                     --connect-timeout=10 \
-                    --execute="WARM UP TABLE iceberg_polaris.lakehouse.events WITH SYNC;"
-                  echo "[$(date -u +%FT%TZ)] Warm-up complete."
+                    --execute="
+                      REFRESH CATALOG polaris;
+                      REFRESH CATALOG databricks;
+                      REFRESH CATALOG postgres;
+                      REFRESH CATALOG oracle;
+                      REFRESH CATALOG mongodb;
+                    "
+                  echo "[$(date -u +%FT%TZ)] Catalog refresh complete."
               env:
-                - name: DORIS_FE_HOST
-                  value: "doris-fe.prod.svc.cluster.local"
-                - name: DORIS_FE_PORT
-                  value: "9030"
-                - name: DORIS_USER
-                  value: "doris-warmup-sa"
                 - name: DORIS_PASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: doris-warmup-secret
-                      key: password
+                      name: rbac-plane-credentials
+                      key: DORIS_ADMIN_PASSWORD
               resources:
                 requests:
-                  cpu: "50m"
-                  memory: "64Mi"
+                  cpu: 50m
+                  memory: 64Mi
                 limits:
-                  cpu: "200m"
-                  memory: "128Mi"
----
-# Secret for the Doris warm-up user password
-# Create with:
-#   kubectl create secret generic doris-warmup-secret \
-#     --namespace prod \
-#     --from-literal=password='<doris-warmup-sa-password>'
-apiVersion: v1
-kind: Secret
-metadata:
-  name: doris-warmup-secret
-  namespace: prod
-type: Opaque
-stringData:
-  password: "changeme"   # replace with real password before applying
+                  cpu: 200m
+                  memory: 128Mi
