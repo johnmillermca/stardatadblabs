@@ -15,7 +15,7 @@
 #   • Evicts cold tables after 24 h of inactivity
 #   • Runs up to 32 concurrent warm-up jobs
 #
-# Image: 192.168.1.50:30500/doris-cache-manager:1.2.0
+# Image: 192.168.1.50:30500/doris-cache-manager:1.3.0
 #   Built from manifests/doris/cache_manager/ — see runbook-25 for build steps.
 #   1.1.0 — fix audit_log catalog detection (use stmt LIKE, not catalog IN);
 #            make MANAGED_CATALOGS and CATALOG_WAREHOUSES env-var driven.
@@ -24,6 +24,15 @@
 #            enable_file_cache=true to populate the BE file cache.
 #            Remove COLD_DOWN SQL (also Cloud only); eviction now records to
 #            audit table only and relies on BE native LRU.
+#   1.3.0 — per-BE cache warm-up fan-out: daemon now discovers all alive BE
+#            nodes via SHOW BACKENDS + BE HTTP /api/show_config, then issues
+#            one warm-up SELECT per (table, BE) pair using
+#            SET_VAR(file_cache_base_path=<be_path>) to pin the scan fragment
+#            to each BE's local cache.  This ensures every BE in a multi-node
+#            cluster is warmed, not just the one the FE randomly assigns to.
+#            Also: ghost-row auto-deletion (table/db does not exist errors),
+#            per-thread meta DorisClient to fix concurrent update_last_warmed
+#            connection corruption, DORIS_USER and SPARK_VERSION env vars.
 # =============================================================================
 ---
 apiVersion: v1
@@ -64,7 +73,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: cache-manager
-          image: 192.168.1.50:30500/doris-cache-manager:1.2.0
+          image: 192.168.1.50:30500/doris-cache-manager:1.3.0
           imagePullPolicy: Always
           command: ["python", "/app/doris_cache_manager.py"]
           env:
@@ -106,11 +115,16 @@ spec:
               value: "polaris,databricks,postgres,oracle,mongodb"
             - name: CATALOG_WAREHOUSES
               value: "polaris:IcebergCatalog,databricks:star_lakehouse,postgres:pg_lakehouse,oracle:ora_lakehouse,mongodb:mgo_lakehouse"
+            # ── Doris user (default: root) ─────────────────────────────────
+            - name: DORIS_USER
+              value: "root"
             # ── Spark REST URL for write-pushdown ───────────────────────────
             - name: SPARK_REST_URL
               value: "http://spark-master-svc.prod.svc.cluster.local:6066"
             - name: SPARK_MASTER_URL
               value: "spark://spark-master-internal.prod.svc.cluster.local:17077"
+            - name: SPARK_VERSION
+              value: "3.5.1"
           resources:
             requests:
               memory: 128Mi

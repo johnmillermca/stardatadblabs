@@ -44,14 +44,16 @@ Environment variables (all optional — can override defaults)
   BAO_ROLE          OpenBao Kubernetes auth role (default: platform-secrets-read)
   SCAN_INTERVAL_S   Seconds between audit-log scans (default: 3600)
   LRU_EVICT_HOURS   Hours of inactivity before eviction (default: 24)
-  MAX_CONCURRENT    Max simultaneous WARM_UP jobs (default: 32)
+  MAX_CONCURRENT    Max simultaneous WARM_UP jobs across all (table, BE) pairs (default: 32)
   WARMUP_STALE_MIN  Minutes before a running warm-up is considered stale (default: 5)
   DORIS_HOST        Doris FE host (default: doris-fe.prod.svc.cluster.local)
   DORIS_PORT        Doris FE query port (default: 9030)
+  DORIS_USER        Doris user for warm-up and metadata queries (default: root)
   SPARK_REST_URL    Spark standalone REST submission URL
                     (default: http://spark-master-svc.prod.svc.cluster.local:6066)
   SPARK_MASTER_URL  spark:// master address passed to submitted jobs
                     (default: spark://spark-master-internal.prod.svc.cluster.local:17077)
+  SPARK_VERSION     Spark version string sent in REST submission payload (default: 3.5.1)
 """
 
 from __future__ import annotations
@@ -123,6 +125,7 @@ MAX_CONCURRENT   = int(os.environ.get("MAX_CONCURRENT",   "32"))
 WARMUP_STALE_MIN = int(os.environ.get("WARMUP_STALE_MIN", "5"))
 DORIS_HOST       = os.environ.get("DORIS_HOST", _DORIS_HOST_DEFAULT)
 DORIS_PORT       = int(os.environ.get("DORIS_PORT", str(_DORIS_PORT_DEFAULT)))
+DORIS_USER       = os.environ.get("DORIS_USER", "root")
 BAO_ROLE         = os.environ.get("BAO_ROLE", "platform-secrets-read")
 BAO_ADDR         = os.environ.get("ADDR") or os.environ.get("BAO_ADDR", _BAO_IN_CLUSTER)
 SPARK_REST_URL   = os.environ.get(
@@ -133,6 +136,7 @@ SPARK_MASTER_URL = os.environ.get(
     "SPARK_MASTER_URL",
     "spark://spark-master-internal.prod.svc.cluster.local:17077",
 )
+SPARK_VERSION    = os.environ.get("SPARK_VERSION", "3.5.1")
 # Path of the write-pushdown PySpark script baked into the image.
 _SPARK_WRITE_SCRIPT = "/app/spark_iceberg_write.py"
 # How frequently the write-interceptor background thread polls audit_log (seconds).
@@ -162,8 +166,24 @@ class TableKey:
 
 
 @dataclass
+class BeNode:
+    """A single alive Doris Backend node."""
+    backend_id: str
+    host: str
+    http_port: int
+    # The file_cache_base_path configured on this BE, fetched at discovery time.
+    # Passed to SET_VAR(file_cache_base_path=...) in warm-up queries so the FE
+    # routes the scan fragment to this specific BE and populates its local cache.
+    cache_path: str
+
+    def __str__(self) -> str:
+        return f"{self.host}:{self.http_port}"
+
+
+@dataclass
 class WarmupJob:
     key: TableKey
+    be: BeNode
     started_at: datetime
     thread: threading.Thread
     done: bool = False
@@ -278,6 +298,115 @@ class DorisClient:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.executemany(sql, rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BE node discovery
+# ─────────────────────────────────────────────────────────────────────────────
+class BeDiscovery:
+    """
+    Discovers alive Doris BE nodes via SHOW BACKENDS (SQL) and fetches each
+    BE's configured file_cache_path via its HTTP admin API.
+
+    Why per-BE cache paths matter
+    ------------------------------
+    Doris Community Edition stores the file cache in a BE-local directory
+    (file_cache_path in be.conf, default /opt/apache-doris/be/storage/
+    segment_cache).  The cache is NOT shared between BEs — each BE has its own
+    independent cache partition.
+
+    Doris FE distributes query fragments across BEs using its normal tablet
+    scheduling logic.  A warm-up SELECT COUNT(*) issued through the FE will
+    only warm whichever BE(s) the FE happens to assign that fragment to.
+    With multiple BEs, the other BEs remain cold.
+
+    The fix
+    -------
+    For each warm-up, we issue one SELECT per alive BE, each carrying a
+    SET_VAR(file_cache_base_path='<be_path>') hint.  This hint tells the FE
+    to route the scan fragment to the BE whose cache_path matches.  Every BE
+    therefore receives its own warm-up scan and populates its own cache.
+
+    Cache path discovery
+    --------------------
+    Each BE exposes its configuration via HTTP:
+        GET http://<be_host>:<be_http_port>/api/show_config?conf_item=file_cache_path
+    Response: [["file_cache_path","std::string","[{\"path\":\"/opt/...\"}]","false"]]
+    We parse the first path entry from the JSON array.
+
+    The discovered BE list is cached for one scan cycle and refreshed at the
+    start of each new cycle so newly added BEs are picked up automatically.
+    """
+
+    # How long to wait for the BE HTTP config endpoint (seconds).
+    _HTTP_TIMEOUT = 5
+
+    def discover(self, doris: DorisClient) -> list[BeNode]:
+        """
+        Return a list of alive BeNode objects.  Falls back to a single
+        synthetic BeNode using DORIS_HOST if SHOW BACKENDS fails or returns
+        nothing, so the daemon continues to work in single-BE setups.
+        """
+        try:
+            return self._do_discover(doris)
+        except Exception as exc:
+            logger.error("BE discovery failed: %s — falling back to single-BE mode.", exc)
+            return [BeNode(
+                backend_id="fallback",
+                host=DORIS_HOST,
+                http_port=8040,
+                cache_path="random",
+            )]
+
+    def _do_discover(self, doris: DorisClient) -> list[BeNode]:
+        rows = doris.execute("SHOW BACKENDS")
+        # SHOW BACKENDS columns (Doris 4.0):
+        # 0=BackendId 1=Host 2=HeartbeatPort 3=BePort 4=HttpPort 5=BrpcPort
+        # 6=ArrowFlightSqlPort 7=LastStartTime 8=LastHeartbeat 9=Alive ...
+        nodes: list[BeNode] = []
+        for row in rows:
+            backend_id = str(row[0])
+            host       = str(row[1])
+            http_port  = int(row[4])
+            alive      = str(row[9]).lower() == "true"
+            if not alive:
+                logger.debug("BE %s (%s) is not alive — skipping.", backend_id, host)
+                continue
+            cache_path = self._fetch_cache_path(host, http_port)
+            nodes.append(BeNode(
+                backend_id=backend_id,
+                host=host,
+                http_port=http_port,
+                cache_path=cache_path,
+            ))
+            logger.debug("Discovered BE %s (%s:%d) cache_path=%s.", backend_id, host, http_port, cache_path)
+
+        if not nodes:
+            raise RuntimeError("SHOW BACKENDS returned no alive nodes.")
+
+        logger.info("BE discovery: %d alive node(s) found.", len(nodes))
+        return nodes
+
+    def _fetch_cache_path(self, host: str, http_port: int) -> str:
+        """
+        Fetch the file_cache_path from this BE's HTTP admin endpoint.
+        Returns 'random' (Doris default) if unreachable or parse fails.
+        """
+        url = f"http://{host}:{http_port}/api/show_config?conf_item=file_cache_path"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=self._HTTP_TIMEOUT) as resp:
+                data = json.loads(resp.read())
+            # data = [["file_cache_path", "std::string", "[{\"path\":\"...\"}]", "false"]]
+            raw = data[0][2]
+            paths = json.loads(raw)
+            return paths[0]["path"]
+        except Exception as exc:
+            logger.warning(
+                "Could not fetch file_cache_path from BE %s:%d (%s) — using 'random'.",
+                host, http_port, exc,
+            )
+            return "random"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -521,8 +650,10 @@ class WarmupExecutor:
     def __init__(self, meta: MetaStore) -> None:
         self._meta = meta
         self._lock = threading.Lock()
-        # Active warm-up jobs: key → WarmupJob
-        self._active: dict[TableKey, WarmupJob] = {}
+        # Active warm-up jobs: (TableKey, be_backend_id) → WarmupJob.
+        # Keyed by (table, BE) pair so each BE gets its own independent slot —
+        # a single table can have N concurrent jobs, one per BE node.
+        self._active: dict[tuple[TableKey, str], WarmupJob] = {}
         self._eviction_counter = int(time.time())  # monotonic id seed
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -532,47 +663,66 @@ class WarmupExecutor:
             self._reap_done()
             return len(self._active)
 
-    def is_running(self, key: TableKey) -> bool:
+    def is_running(self, key: TableKey, be: BeNode) -> bool:
         with self._lock:
             self._reap_done()
-            return key in self._active
+            return (key, be.backend_id) in self._active
 
-    def is_stale(self, key: TableKey) -> bool:
+    def is_stale(self, key: TableKey, be: BeNode) -> bool:
         """True if a warm-up has been running for > WARMUP_STALE_MIN minutes."""
         with self._lock:
-            job = self._active.get(key)
+            job = self._active.get((key, be.backend_id))
             if job is None:
                 return False
             age = (datetime.now(timezone.utc) - job.started_at).total_seconds()
             return age > WARMUP_STALE_MIN * 60
 
     def submit(
-        self, key: TableKey, doris_creds: dict[str, str], meta_doris: DorisClient
+        self,
+        key: TableKey,
+        be: BeNode,
+        doris_creds: dict[str, str],
+        meta_doris: DorisClient,
     ) -> None:
-        """Launch a warm-up thread for *key* if slot is available."""
+        """Launch a warm-up thread for the (key, BE) pair if a slot is available.
+
+        Each (table, BE) pair gets its own thread so every alive BE node is
+        warmed independently.  The active-slot limit (MAX_CONCURRENT) is shared
+        across all in-flight (table, BE) pairs.
+        """
+        slot = (key, be.backend_id)
         with self._lock:
             self._reap_done()
             if len(self._active) >= MAX_CONCURRENT:
                 logger.warning(
-                    "WARM_UP skipped for %s — max concurrent (%d) reached.",
-                    key, MAX_CONCURRENT,
+                    "WARM_UP skipped for %s on BE %s — max concurrent (%d) reached.",
+                    key, be, MAX_CONCURRENT,
                 )
                 return
-            if key in self._active:
-                logger.debug("WARM_UP already running for %s — skipping.", key)
+            if slot in self._active:
+                logger.debug("WARM_UP already running for %s on BE %s — skipping.", key, be)
                 return
 
             started = datetime.now(timezone.utc)
+            # Each thread gets its own DorisClient so concurrent update_last_warmed
+            # calls never share a connection — sharing caused (2013) Lost Connection
+            # and "Packet sequence number wrong" errors under MAX_CONCURRENT load.
+            thread_meta_doris = DorisClient(
+                host=meta_doris._host,
+                port=meta_doris._port,
+                user=meta_doris._user,
+                password=meta_doris._password,
+            )
             t = threading.Thread(
                 target=self._run_warmup,
-                args=(key, doris_creds, meta_doris, started),
-                name=f"warmup-{key}",
+                args=(key, be, doris_creds, thread_meta_doris, started),
+                name=f"warmup-{key}-{be.backend_id}",
                 daemon=True,
             )
-            self._active[key] = WarmupJob(key=key, started_at=started, thread=t)
+            self._active[slot] = WarmupJob(key=key, be=be, started_at=started, thread=t)
 
         t.start()
-        logger.info("WARM_UP started for %s.", key)
+        logger.info("WARM_UP started for %s on BE %s (cache_path=%s).", key, be, be.cache_path)
 
     def evict(
         self, key: TableKey, doris: DorisClient, meta: MetaStore,
@@ -605,56 +755,96 @@ class WarmupExecutor:
         for k in done_keys:
             del self._active[k]
 
+    # Doris error codes / message fragments that mean the object simply does not
+    # exist in the catalog.  These are permanent failures — retrying is pointless
+    # and the ghost row should be removed from table_query_stats.
+    _GHOST_ERRORS = (
+        "does not exist",
+        "Unknown table",
+        "Table not found",
+        "database not found",
+    )
+
     def _run_warmup(
         self,
         key: TableKey,
+        be: BeNode,
         doris_creds: dict[str, str],
         meta_doris: DorisClient,
         started: datetime,
     ) -> None:
-        """Background thread: warm the file cache via a full-scan SELECT.
+        """Background thread: warm one BE's file cache via a pinned full-scan SELECT.
 
-        Doris 4.0 Community Edition does not support WARM UP CACHE … USING JOB.
-        Instead, issuing a full table scan with enable_file_cache=true causes
-        the BE to pull all remote data blocks into the local file_cache_path
-        as a side-effect, achieving the same result.
+        The SET_VAR(file_cache_base_path=...) hint pins the scan fragment to the
+        target BE so its local cache is populated regardless of which BE the FE
+        would otherwise choose.  One thread is launched per alive BE per table,
+        ensuring every BE in the cluster is warmed.
 
-        The scan is blocking — the thread waits for it to finish (up to
-        WARMUP_STALE_MIN minutes) and then marks the table WARM.
+        meta_doris is a dedicated DorisClient created per-thread by submit() so
+        concurrent update_last_warmed writes never share a connection.
         """
+        slot = (key, be.backend_id)
         try:
             warmup_conn = DorisClient(
                 host=DORIS_HOST,
                 port=DORIS_PORT,
-                user="root",
+                user=DORIS_USER,
                 password=doris_creds["admin_password"],
             )
-            # Enable file cache for this session so the scan populates it.
-            warmup_conn.execute("SET enable_file_cache = true")
 
+            # Pin the warm-up scan to this specific BE's cache path.
+            # SET_VAR hint is inlined in the query so it is scoped to this
+            # statement only — no session state leaks to other threads.
             warm_sql = (
-                f"SELECT COUNT(*) "
+                f"SELECT /*+ SET_VAR(enable_file_cache=true, "
+                f"file_cache_base_path='{be.cache_path}') */ "
+                f"COUNT(*) "
                 f"FROM `{key.catalog}`.`{key.db}`.`{key.table}`"
             )
-            logger.info("WARM_UP scan issued for %s.", key)
+            logger.info("WARM_UP scan issued for %s on BE %s.", key, be)
             warmup_conn.execute(warm_sql)
 
             finished_at = datetime.now(timezone.utc)
-            logger.info("WARM_UP scan completed for %s.", key)
+            logger.info("WARM_UP scan completed for %s on BE %s.", key, be)
 
+            # Only write last_warmed_ts once — when ALL BEs have finished for
+            # this table.  We do it on every completion; the last writer wins,
+            # which is fine because the timestamp just needs to be recent.
             try:
                 self._meta.update_last_warmed(
                     meta_doris, key, finished_at, "WARM"
                 )
             except Exception as meta_exc:
-                logger.error("Failed to update last_warmed for %s: %s", key, meta_exc)
+                logger.error(
+                    "Failed to update last_warmed for %s (BE %s): %s", key, be, meta_exc
+                )
 
         except Exception as exc:
-            logger.error("WARM_UP thread error for %s: %s", key, exc, exc_info=True)
+            err_str = str(exc)
+            # Permanent failure: the table/database no longer exists in the catalog.
+            # Delete the ghost row so the scheduler stops retrying it every cycle.
+            if any(ghost in err_str for ghost in self._GHOST_ERRORS):
+                logger.warning(
+                    "WARM_UP ghost row detected for %s (%s) — deleting from table_query_stats.",
+                    key, err_str,
+                )
+                try:
+                    meta_doris.execute(
+                        "DELETE FROM platform_meta.table_query_stats "
+                        "WHERE catalog_name = %s AND db_name = %s AND table_name = %s",
+                        (key.catalog, key.db, key.table),
+                    )
+                    logger.info("Ghost row deleted for %s.", key)
+                except Exception as del_exc:
+                    logger.error("Failed to delete ghost row for %s: %s", key, del_exc)
+            else:
+                logger.error(
+                    "WARM_UP thread error for %s on BE %s: %s", key, be, exc, exc_info=True
+                )
         finally:
             with self._lock:
-                if key in self._active:
-                    self._active[key].done = True
+                if slot in self._active:
+                    self._active[slot].done = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -681,6 +871,7 @@ class WarmupScheduler:
     def evaluate(
         self,
         stats: dict[TableKey, dict],
+        be_nodes: list[BeNode],
         doris_creds: dict[str, str],
         meta_doris: DorisClient,
         meta: MetaStore,
@@ -711,22 +902,24 @@ class WarmupScheduler:
                     )
                     continue
 
-            # Check if warm-up is already running
-            if self._executor.is_running(key):
-                if self._executor.is_stale(key):
-                    logger.warning(
-                        "%s: warm-up has been running > %d min (stale) — skip, retry next cycle.",
-                        key, WARMUP_STALE_MIN,
-                    )
-                else:
-                    logger.debug("%s: warm-up already running — skip.", key)
-                continue
-
-            self._executor.submit(key, doris_creds, meta_doris)
-            triggered += 1
+            # Fan out: submit one warm-up thread per alive BE node so every
+            # BE's file cache is populated independently.
+            for be in be_nodes:
+                if self._executor.is_running(key, be):
+                    if self._executor.is_stale(key, be):
+                        logger.warning(
+                            "%s on BE %s: warm-up stale (> %d min) — skip, retry next cycle.",
+                            key, be, WARMUP_STALE_MIN,
+                        )
+                    else:
+                        logger.debug("%s on BE %s: warm-up already running — skip.", key, be)
+                    continue
+                self._executor.submit(key, be, doris_creds, meta_doris)
+                triggered += 1
 
         logger.info(
-            "Warm-up evaluation: %d eligible tables, %d triggered.", eligible, triggered
+            "Warm-up evaluation: %d eligible tables, %d triggered across %d BE(s).",
+            eligible, triggered, len(be_nodes),
         )
 
 
@@ -954,7 +1147,7 @@ class WriteInterceptor:
                 # Pass OpenBao address so the job uses in-cluster address.
                 "ADDR": BAO_ADDR,
             },
-            "clientSparkVersion": "3.5.1",
+            "clientSparkVersion": SPARK_VERSION,
         }
 
         url = f"{SPARK_REST_URL}/v1/submissions/create"
@@ -1087,7 +1280,7 @@ class CacheManagerDaemon:
         self._meta_doris = DorisClient(
             host=DORIS_HOST,
             port=DORIS_PORT,
-            user="root",
+            user=DORIS_USER,
             password=self._doris_creds["admin_password"],
         )
 
@@ -1097,6 +1290,7 @@ class CacheManagerDaemon:
         self._scheduler         = WarmupScheduler(self._executor)
         self._lru               = LRUEvictionChecker()
         self._write_interceptor = WriteInterceptor()
+        self._be_discovery      = BeDiscovery()
 
     def run(self) -> None:
         logger.info(
@@ -1116,13 +1310,17 @@ class CacheManagerDaemon:
         now = datetime.now(timezone.utc)
         logger.info("=== Cache Manager cycle start: %s ===", now.isoformat())
 
-        # 1. Scrape audit log for SELECT counts
+        # 1. Discover alive BE nodes — refreshed every cycle so new BEs are
+        #    picked up automatically without restarting the daemon.
+        be_nodes = self._be_discovery.discover(self._meta_doris)
+
+        # 2. Scrape audit log for SELECT counts
         fresh_counts = self._scraper.scrape(self._meta_doris)
 
-        # 2. Load existing stats
+        # 3. Load existing stats
         existing_stats = self._meta.load_all_stats(self._meta_doris)
 
-        # 3. Merge: update stats for every table seen in this cycle
+        # 4. Merge: update stats for every table seen in this cycle
         updated_stats: dict[TableKey, dict] = dict(existing_stats)
 
         for key, new_hits in fresh_counts.items():
@@ -1167,15 +1365,15 @@ class CacheManagerDaemon:
                 "cache_state":         cache_state,
             }
 
-        # 4. LRU eviction — check all known tables (including those not queried this cycle)
+        # 5. LRU eviction — check all known tables (including those not queried this cycle)
         self._lru.check(updated_stats, self._meta_doris, self._executor, self._meta, now)
 
-        # 5. Warm-up scheduling — only tables with fresh activity
+        # 6. Warm-up scheduling — fan out across all alive BE nodes
         self._scheduler.evaluate(
-            updated_stats, self._doris_creds, self._meta_doris, self._meta, now
+            updated_stats, be_nodes, self._doris_creds, self._meta_doris, self._meta, now
         )
 
-        # 6. Write-pushdown — intercept DML writes against external catalogs
+        # 7. Write-pushdown — intercept DML writes against external catalogs
         #    and re-submit them to Spark.
         self._write_interceptor.scan_and_push(self._meta_doris, self._polaris_creds)
 
