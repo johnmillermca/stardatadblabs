@@ -639,7 +639,7 @@ Poll every 15 seconds until the job finishes (typically < 2 minutes for a small 
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SHOW WARM UP JOB WHERE TableName = 'store_sales';"
+  -e "SHOW WARM UP JOB WHERE TableName = 'inventory';"
 ```
 
 **Expected column values:**
@@ -687,11 +687,11 @@ Since the test environment runs on an accelerated cycle, simply force two daemon
 more than `warm_interval_min` apart:
 
 ```bash
-# Observe the warm_interval_min for store_sales
+# Observe the warm_interval_min for inventory
 doris-mysql -e "
   SELECT warm_interval_min
   FROM platform_meta.table_query_stats
-  WHERE catalog_name='polaris' AND table_name='store_sales';"
+  WHERE catalog_name='polaris' AND table_name='inventory';"
 
 # Force a cycle — wait at least warm_interval_min minutes — force another cycle
 kubectl rollout restart deployment/doris-cache-manager -n prod

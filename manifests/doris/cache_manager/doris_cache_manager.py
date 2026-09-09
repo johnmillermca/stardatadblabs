@@ -496,16 +496,26 @@ class MetaStore:
 # ─────────────────────────────────────────────────────────────────────────────
 class WarmupExecutor:
     """
-    Issues WARM_UP SQL to Doris for a given table in a background thread.
+    Warms the Doris file cache for a table by issuing a full-scan SELECT with
+    enable_file_cache=true in a background thread.
 
-    Doris segment cache warm-up syntax (Doris 2.1+):
-        WARM UP CACHE
-            ON TABLE catalog.db.table
-        USING JOB;
+    Doris 4.0 Community Edition does NOT support the Cloud-Edition-only
+    `WARM UP CACHE … USING JOB` / `SHOW WARM UP JOB` syntax — those commands
+    raise "errCode = 2 … no viable alternative at input 'WARM UP CACHE'".
 
-    The USING JOB form is non-blocking — Doris queues an async warm-up job
-    and returns immediately. We poll SHOW WARM UP JOB WHERE TableName = '...'
-    to detect completion.
+    The correct warm-up mechanism for Community Edition is a full table scan:
+        SET enable_file_cache = true;
+        SELECT COUNT(*) FROM catalog.db.table;
+
+    The BE pulls every data block from S3/remote storage into the local
+    file_cache_path directory as a side-effect of reading, so subsequent
+    queries find the data cached locally.  The scan itself is blocking —
+    the thread waits for it to finish, then marks the table WARM.
+
+    LRU eviction is managed natively by the BE (file_cache LRU).  There is no
+    programmatic COLD_DOWN command in Community Edition; the evict() method
+    records the eviction in the audit table only — the BE will expire the
+    blocks naturally when the cache fills.
     """
 
     def __init__(self, meta: MetaStore) -> None:
@@ -568,21 +578,16 @@ class WarmupExecutor:
         self, key: TableKey, doris: DorisClient, meta: MetaStore,
         last_select_ts: datetime | None
     ) -> None:
-        """Issue COLD_DOWN (cache eviction) for a table and record in audit log."""
-        now = datetime.now(timezone.utc)
-        try:
-            # Doris COLD_DOWN syntax removes cached segments for the table.
-            cold_sql = (
-                f"WARM UP CACHE "
-                f"ON TABLE `{key.catalog}`.`{key.db}`.`{key.table}` "
-                f"USING COLD_DOWN"
-            )
-            doris.execute(cold_sql)
-            logger.info("COLD_DOWN issued for %s (LRU 24h).", key)
-        except Exception as exc:
-            logger.error("COLD_DOWN failed for %s: %s", key, exc)
+        """Record a cache eviction event.
 
-        # Record eviction regardless of SQL success (prevents retry-spam)
+        Doris 4.0 Community Edition has no programmatic COLD_DOWN command.
+        The BE manages its file_cache LRU natively and will evict cold blocks
+        when the cache fills.  We record the eviction in the audit table so
+        the daemon stops re-issuing warm-up jobs for idle tables.
+        """
+        now = datetime.now(timezone.utc)
+        logger.info("LRU eviction recorded for %s (no COLD_DOWN in Community Edition).", key)
+
         with self._lock:
             self._eviction_counter += 1
             eid = self._eviction_counter
@@ -607,9 +612,16 @@ class WarmupExecutor:
         meta_doris: DorisClient,
         started: datetime,
     ) -> None:
-        """Background thread: issue WARM_UP and poll for completion."""
-        # Each warm-up thread opens its own short-lived Doris connection so
-        # they don't contend on the shared meta_doris connection.
+        """Background thread: warm the file cache via a full-scan SELECT.
+
+        Doris 4.0 Community Edition does not support WARM UP CACHE … USING JOB.
+        Instead, issuing a full table scan with enable_file_cache=true causes
+        the BE to pull all remote data blocks into the local file_cache_path
+        as a side-effect, achieving the same result.
+
+        The scan is blocking — the thread waits for it to finish (up to
+        WARMUP_STALE_MIN minutes) and then marks the table WARM.
+        """
         try:
             warmup_conn = DorisClient(
                 host=DORIS_HOST,
@@ -617,41 +629,22 @@ class WarmupExecutor:
                 user="root",
                 password=doris_creds["admin_password"],
             )
-            warm_sql = (
-                f"WARM UP CACHE "
-                f"ON TABLE `{key.catalog}`.`{key.db}`.`{key.table}` "
-                f"USING JOB"
-            )
-            warmup_conn.execute(warm_sql)
-            logger.info("WARM_UP SQL issued for %s.", key)
+            # Enable file cache for this session so the scan populates it.
+            warmup_conn.execute("SET enable_file_cache = true")
 
-            # Poll for job completion (up to WARMUP_STALE_MIN minutes)
-            deadline = started + timedelta(minutes=WARMUP_STALE_MIN)
-            job_done = False
-            while datetime.now(timezone.utc) < deadline:
-                time.sleep(15)
-                try:
-                    rows = warmup_conn.execute(
-                        f"SHOW WARM UP JOB WHERE TableName = '{key.table}'"
-                    )
-                    if rows:
-                        state = str(rows[-1][-1]).upper()  # last row, last col = state
-                        if state in ("FINISHED", "CANCELLED", "FAILED"):
-                            job_done = True
-                            logger.info(
-                                "WARM_UP job for %s reached state: %s.", key, state
-                            )
-                            break
-                except Exception as poll_exc:
-                    logger.debug("WARM_UP poll error for %s: %s", key, poll_exc)
+            warm_sql = (
+                f"SELECT COUNT(*) "
+                f"FROM `{key.catalog}`.`{key.db}`.`{key.table}`"
+            )
+            logger.info("WARM_UP scan issued for %s.", key)
+            warmup_conn.execute(warm_sql)
 
             finished_at = datetime.now(timezone.utc)
-            state_label = "WARM" if job_done else "WARMING"
+            logger.info("WARM_UP scan completed for %s.", key)
 
-            # Update metadata
             try:
                 self._meta.update_last_warmed(
-                    meta_doris, key, finished_at, state_label
+                    meta_doris, key, finished_at, "WARM"
                 )
             except Exception as meta_exc:
                 logger.error("Failed to update last_warmed for %s: %s", key, meta_exc)
@@ -659,7 +652,6 @@ class WarmupExecutor:
         except Exception as exc:
             logger.error("WARM_UP thread error for %s: %s", key, exc, exc_info=True)
         finally:
-            # Mark job done so _reap_done() will remove it
             with self._lock:
                 if key in self._active:
                     self._active[key].done = True

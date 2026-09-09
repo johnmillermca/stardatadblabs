@@ -1,0 +1,159 @@
+# =============================================================================
+# Doris Catalog & Table Refresh CronJobs
+# Namespace : prod
+#
+# Two separate jobs with different cadences:
+#
+#   doris-catalog-refresh  (every 6 hours)
+#     REFRESH CATALOG — re-syncs the full catalog metadata: namespace list,
+#     table list, and schema of every table.  Picks up new tables, dropped
+#     tables, and column changes added via Spark/Polaris.
+#
+#   doris-table-refresh  (every 5 minutes)
+#     REFRESH TABLE — re-syncs only the Iceberg data file manifest for each
+#     hot table tracked in platform_meta.table_query_stats.  Picks up new
+#     snapshots/partitions written by Spark so Doris queries see current data.
+#     Only the tables with the highest query counts are refreshed here; the
+#     full catalog refresh above covers all other tables every 6 h.
+#
+# Both jobs use mariadb:10.11 for its mysql CLI only — no MariaDB server runs.
+# Doris FE speaks the MySQL wire protocol on port 9030.
+# =============================================================================
+
+---
+# ── 1. Catalog-structure refresh — every 6 hours ─────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: doris-catalog-refresh
+  namespace: prod
+  labels:
+    app: doris-catalog-refresh
+    rbac-managed: "true"
+spec:
+  schedule: "0 */6 * * *"        # 00:00, 06:00, 12:00, 18:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: doris-catalog-refresh
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: refresh
+              image: mariadb:10.11
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              env:
+                - name: DORIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: rbac-plane-credentials
+                      key: DORIS_ADMIN_PASSWORD
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  echo "[$(date -u +%FT%TZ)] Refreshing Doris catalog metadata..."
+                  mysql \
+                    --host=doris-fe.prod.svc.cluster.local \
+                    --port=9030 \
+                    --user=root \
+                    --password="${DORIS_PASSWORD}" \
+                    --connect-timeout=10 \
+                    --execute="
+                      REFRESH CATALOG polaris;
+                      REFRESH CATALOG databricks;
+                      REFRESH CATALOG postgres;
+                      REFRESH CATALOG oracle;
+                      REFRESH CATALOG mongodb;
+                    "
+                  echo "[$(date -u +%FT%TZ)] Catalog refresh complete."
+
+---
+# ── 2. Hot-table data refresh — every 5 minutes ──────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: doris-table-refresh
+  namespace: prod
+  labels:
+    app: doris-table-refresh
+    rbac-managed: "true"
+spec:
+  schedule: "*/5 * * * *"        # every 5 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: doris-table-refresh
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: refresh
+              image: mariadb:10.11
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              env:
+                - name: DORIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: rbac-plane-credentials
+                      key: DORIS_ADMIN_PASSWORD
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  echo "[$(date -u +%FT%TZ)] Refreshing hot-table data manifests..."
+                  mysql \
+                    --host=doris-fe.prod.svc.cluster.local \
+                    --port=9030 \
+                    --user=root \
+                    --password="${DORIS_PASSWORD}" \
+                    --connect-timeout=10 \
+                    --execute="
+                      REFRESH TABLE polaris.tpcds_sf10tcl.store_sales;
+                      REFRESH TABLE polaris.tpcds_sf10tcl.inventory;
+                      REFRESH TABLE polaris.tpcds_sf10tcl.web_sales;
+                      REFRESH TABLE polaris.tpcds_sf10tcl.web_returns;
+                      REFRESH TABLE databricks.lakehouse_db.customers;
+                      REFRESH TABLE databricks.lakehouse_db.product;
+                      REFRESH TABLE postgres.public.customers;
+                      REFRESH TABLE postgres.public.products;
+                      REFRESH TABLE postgres.public.inventory_events;
+                      REFRESH TABLE postgres.public.orders;
+                      REFRESH TABLE postgres.public.product_reviews;
+                      REFRESH TABLE oracle.tpcds.warehouse;
+                      REFRESH TABLE oracle.tpcds.income_band;
+                      REFRESH TABLE mongodb.cache_testing.orders;
+                      REFRESH TABLE mongodb.cache_testing.products;
+                      REFRESH TABLE mongodb.cache_testing.product_reviews;
+                      REFRESH TABLE mongodb.cache_testing.order_items;
+                      REFRESH TABLE mongodb.cache_testing.inventory_events;
+                      REFRESH TABLE mongodb.cache_testing.customers;
+                    "
+                  echo "[$(date -u +%FT%TZ)] Table refresh complete."

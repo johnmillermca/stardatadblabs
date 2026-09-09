@@ -99,13 +99,8 @@ spec:
               memory: 256Mi
               cpu: 500m
           readinessProbe:
-            # exec probe: attempt a full MySQL handshake via mysqladmin ping.
-            # This is cleaner than tcpSocket which triggers a protocol error.
-            exec:
-              command:
-                - sh
-                - -c
-                - "exec 3<>/dev/tcp/127.0.0.1/9040 && echo -n '' >&3 && sleep 0.2 && exec 3>&-"
+            tcpSocket:
+              port: 9040
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
