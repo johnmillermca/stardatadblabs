@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-04 |
+| **Last Updated** | 2026-09-09 |
 | **Related** | RB-05 (Doris & Analytics), RB-11 (Kerberos), RB-13 (RBAC) |
 
 ---
@@ -74,6 +74,70 @@ Developer / BI tool
 ---
 
 ## 2. Architecture
+
+### 2.0 BE NVMe Segment Cache Configuration
+
+The daemon warm-up and eviction commands (`WARM UP CACHE` / `DROP FILE CACHE`)
+operate against the local file cache that is enabled on each Doris BE node.
+That cache **must** be configured before the daemon is deployed.
+
+**Manifest:** [`manifests/doris/doris-be-deployment.yaml`](../../../manifests/doris/doris-be-deployment.yaml)
+
+Relevant `be.conf` keys (in the `doris-be-config` ConfigMap):
+
+| Key | Value | Description |
+|---|---|---|
+| `enable_file_cache` | `true` | Activates the local segment cache layer |
+| `file_cache_path` | `[{"path":"/opt/apache-doris/be/storage/segment_cache","total_size":214748364800,"query_limit":53687091200}]` | Cache directory, 200 GB capacity, 50 GB per-query limit |
+| `storage_root_path` | `/opt/apache-doris/be/storage` | Tablet data root (same NVMe volume) |
+
+**Storage mapping (confirmed 2026-09-09):**
+
+```
+worker1.local
+  /home  →  /dev/mapper/rhel-home  (877 GB NVMe-backed LVM, 2% used)
+    └─ /home/local-path-provisioner/pvc-485b1e96-…_prod_doris-be-storage
+         │   (PVC: doris-be-storage, 400 Gi, StorageClass: local-path)
+         │
+         mounted inside pod at /opt/apache-doris/be/storage
+              ├── tablet data      (storage_root_path)
+              └── segment_cache/   (file_cache_path — 200 GB slice)
+                   └── version     ← auto-created by BE on startup; confirms cache init
+
+  /opt  →  /dev/mapper/rhel-root  (70 GB — OS root only, NOT used for Doris data)
+```
+
+All Doris data I/O (tablet writes and segment cache reads) lands on the
+877 GB `/home` NVMe volume. The container path `/opt/apache-doris/be/storage`
+is only a mount point — the backing device is `rhel-home`, not `rhel-root`.
+
+> **Verify the cache directory was initialized** (run after BE starts):
+> ```bash
+> # The 'version' file is written by Doris BE when it initialises the cache path.
+> kubectl exec -n prod doris-be-0 -- ls /opt/apache-doris/be/storage/segment_cache/
+> # Expected output: version
+> ```
+>
+> **Verify via BE HTTP API:**
+> ```bash
+> # Returns JSON with cache path, capacity, and usage counters.
+> kubectl exec -n prod doris-be-0 -- \
+>   curl -s http://localhost:8040/api/file_cache/stats
+> ```
+>
+> **Verify config is live inside the running pod:**
+> ```bash
+> kubectl exec -n prod doris-be-0 -- \
+>   grep -E 'enable_file_cache|file_cache_path' /opt/apache-doris/be/conf/be.conf
+> # Expected:
+> #   enable_file_cache = true
+> #   file_cache_path = [{"path":"/opt/apache-doris/be/storage/segment_cache",...}]
+> ```
+>
+> **Note:** `SHOW FILE CACHE` and `SHOW CACHE HOTSPOT` are **not valid** in
+> Doris 4.0 — both return a syntax error. Use the shell checks above instead.
+
+---
 
 ### 2.1 Components
 
@@ -927,7 +991,120 @@ kubectl logs -n prod -l app=spark-worker | tail -100
 
 ---
 
+### 7.8 Segment Cache Not Initializing
+
+**Symptom:** The `segment_cache/` directory is missing or empty after BE starts,
+or warm-up commands have no effect.
+
+**Check 1 — Is `enable_file_cache` actually in the running config?**
+
+```bash
+kubectl exec -n prod doris-be-0 -- \
+  grep -E 'enable_file_cache|file_cache_path' /opt/apache-doris/be/conf/be.conf
+```
+
+If no output: the init container did not copy the updated ConfigMap. The most
+likely cause is the ConfigMap was not yet updated when the pod started (e.g.
+ArgoCD had not synced yet).
+
+**Fix:**
+```bash
+# 1. Verify the live ConfigMap has the cache lines
+kubectl get configmap doris-be-config -n prod \
+  -o jsonpath='{.data.be\.conf}' | grep enable_file_cache
+
+# 2. If missing — push the manifest change to git and wait for ArgoCD to sync,
+#    then restart:
+kubectl rollout restart statefulset/doris-be -n prod
+kubectl rollout status statefulset/doris-be -n prod
+```
+
+**Check 2 — Does the cache directory exist?**
+
+```bash
+kubectl exec -n prod doris-be-0 -- \
+  ls /opt/apache-doris/be/storage/segment_cache/
+# Expected: version
+# If no 'version' file: BE did not initialise the cache — check BE logs.
+```
+
+**Check 3 — BE logs for cache init errors:**
+
+```bash
+kubectl logs -n prod doris-be-0 | grep -i 'file_cache\|segment_cache' | tail -30
+```
+
+---
+
+### 7.9 Ghost Backend Entry in `SHOW BACKENDS`
+
+A dead backend with `Alive: false` and a high `HeartbeatFailureCounter` may
+appear in `SHOW BACKENDS`. This is a stale registration from before the
+StatefulSet migration (old pod IP that no longer resolves).
+
+**Symptom:**
+
+```sql
+SHOW BACKENDS\G
+-- Row with Host: 10.244.26.90, Alive: false, HeartbeatFailureCounter: 85459+
+-- ErrMsg: java.net.SocketTimeoutException: Connect timed out
+```
+
+**Impact:** None on the live backend. Stale entries are inert but add noise to
+`SHOW BACKENDS` and monitoring queries.
+
+**Fix — drop the dead entry:**
+
+```bash
+kubectl exec -n prod doris-be-0 -- \
+  mysql -h doris-fe-0.doris-fe-headless.prod.svc.cluster.local \
+  -P9030 -uroot -e \
+  "ALTER SYSTEM DROP BACKEND \"10.244.26.90:9050\";"
+```
+
+> Verify the live backend is still `Alive: true` before dropping.
+
+---
+
 ## 9. Known Issues & Deployment History
+
+### 9.2 Segment Cache Rollout (2026-09-09)
+
+**Context:** `enable_file_cache` and `file_cache_path` were added to
+`manifests/doris/doris-be-deployment.yaml` but were never committed or pushed,
+so ArgoCD never synced them and the cache was never active.
+
+**Root cause:** The BE ConfigMap on the cluster still had the original config
+(no `enable_file_cache`). A direct `kubectl apply` earlier in the day appeared
+to succeed but ArgoCD reverted it on the next sync because the change was not
+in git.
+
+**Resolution:**
+1. Confirmed the live ConfigMap was missing `enable_file_cache` via
+   `kubectl get configmap doris-be-config -n prod`.
+2. Committed and pushed the manifest:
+   ```
+   git commit -m "feat(doris-be): enable NVMe segment cache (file_cache_path 200 GB)"
+   git push   # → b2fda4c
+   ```
+3. ArgoCD auto-synced the ConfigMap.
+4. Restarted the StatefulSet:
+   ```bash
+   kubectl rollout restart statefulset/doris-be -n prod
+   ```
+5. Verified `enable_file_cache = true` in the running pod's `be.conf`.
+6. Confirmed `segment_cache/version` was created by BE on startup.
+
+**Storage confirmed:** PVC `doris-be-storage` resolves to
+`/home/local-path-provisioner/pvc-485b1e96-…` on `worker1.local` — the
+877 GB `/home` NVMe volume (`rhel-home`). All cache I/O is on NVMe, not on
+the 70 GB OS root (`rhel-root`/`/opt`).
+
+**Outstanding:** Dead ghost backend `10.244.26.90:9050` remains in
+`SHOW BACKENDS` (`HeartbeatFailureCounter: 85459+`). Drop with
+`ALTER SYSTEM DROP BACKEND "10.244.26.90:9050";` when convenient (see §7.9).
+
+---
 
 ### 9.1 Initial Deployment Issues (2026-09-04)
 
