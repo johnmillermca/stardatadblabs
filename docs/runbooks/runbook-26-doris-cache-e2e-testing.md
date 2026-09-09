@@ -207,16 +207,47 @@ admin_password    <value>
 
 ### T-07 — Spark REST API is reachable
 
+The Spark standalone REST submission API runs on port `6066` (container).
+It is exposed externally on NodePort `30606` and in-cluster on `spark-master-svc:6066`.
+
 ```bash
+# External (from master node)
 curl -s --max-time 5 \
-  http://192.168.1.50:6066/v1/submissions/status \
-  | head -c 80
+  http://192.168.1.50:30606/v1/submissions/status
+
+# In-cluster (from any prod pod — matches what write-proxy and cache-manager use)
+kubectl exec -n prod deployment/doris-cache-manager -- python3 -c "
+import urllib.request, json
+r = urllib.request.urlopen('http://spark-master-svc.prod.svc.cluster.local:6066/v1/submissions/status', timeout=5)
+print(r.status, json.loads(r.read()).get('serverSparkVersion'))
+" 2>&1
 ```
 
-**Expected:** any JSON response (even an error payload) — the endpoint is reachable.
+**Expected** (both checks):
+```json
+{
+  "action" : "ErrorResponse",
+  "message" : "Submission ID is missing in status request.",
+  "serverSparkVersion" : "3.5.1"
+}
+```
 
-✅ Pass: HTTP 200 or well-formed JSON error response.  
-❌ Fail: `Connection refused` or timeout — check `kubectl get svc -n prod | grep spark`.
+The `400 / "Submission ID is missing"` response **is the correct pass state** — it proves the REST API is live. A real status call requires a valid `submissionId` parameter; the empty request intentionally triggers this diagnostic response.
+
+✅ Pass: JSON response containing `serverSparkVersion` is returned.
+❌ Fail: `Connection refused` or timeout:
+```bash
+# Verify the REST port is enabled and listening on the master pod
+MASTER=$(kubectl get pod -n prod -l app=spark,component=master --no-headers -o custom-columns=NAME:.metadata.name | head -1)
+kubectl exec -n prod $MASTER -c spark-master -- netstat -tlnp 2>/dev/null | grep 6066
+# Must show: tcp6  0  0  <ip>:6066  :::*  LISTEN
+
+# If missing: spark.master.rest.enabled is not set.
+# Verify SPARK_DAEMON_JAVA_OPTS contains -Dspark.master.rest.enabled=true
+kubectl get deployment spark-master -n prod \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="spark-master")].env}' \
+  | python3 -m json.tool | grep -A1 DAEMON
+```
 
 ---
 
