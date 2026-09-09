@@ -124,6 +124,8 @@ SPARK_MASTER_URL = os.environ.get(
 )
 # Path of the write-pushdown PySpark script baked into the image.
 _SPARK_WRITE_SCRIPT = "/app/spark_iceberg_write.py"
+# How frequently the write-interceptor background thread polls audit_log (seconds).
+WRITE_POLL_INTERVAL_S = int(os.environ.get("WRITE_POLL_INTERVAL_S", "10"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataclasses
@@ -1071,11 +1073,11 @@ class CacheManagerDaemon:
             password=self._doris_creds["admin_password"],
         )
 
-        self._meta         = MetaStore()
-        self._scraper      = AuditLogScraper()
-        self._executor     = WarmupExecutor(self._meta)
-        self._scheduler    = WarmupScheduler(self._executor)
-        self._lru          = LRUEvictionChecker()
+        self._meta              = MetaStore()
+        self._scraper           = AuditLogScraper()
+        self._executor          = WarmupExecutor(self._meta)
+        self._scheduler         = WarmupScheduler(self._executor)
+        self._lru               = LRUEvictionChecker()
         self._write_interceptor = WriteInterceptor()
 
     def run(self) -> None:

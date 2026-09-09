@@ -59,13 +59,14 @@ The test covers six phases in order:
 | T-23 | P-5 | Eviction | `cache_state` returns to `COLD` after eviction |
 | T-24 | P-5 | Eviction | `cache_eviction_log` records the eviction event |
 | T-25 | P-5 | Eviction | Daemon LRU check does not re-evict an already-COLD table |
-| T-26 | P-6 | Write | DML against external catalog returns expected Doris error |
-| T-27 | P-6 | Write | Audit log records the DML statement |
-| T-28 | P-6 | Write | Daemon `WriteInterceptor` detects the DML |
-| T-29 | P-6 | Write | Daemon submits Spark job (submissionId in logs) |
-| T-30 | P-6 | Write | Spark REST `status` endpoint shows job state |
-| T-31 | P-6 | Write | Duplicate DML is not re-submitted |
+| T-26 | P-6 | Write | Write proxy pod is running and listening |
+| T-27 | P-6 | Write | DML via proxy succeeds without error (Spark executes) |
+| T-28 | P-6 | Write | Proxy logs show interception and Spark submission |
+| T-29 | P-6 | Write | Spark REST confirms job FINISHED |
+| T-30 | P-6 | Write | Local Doris DML passes through proxy unchanged |
+| T-31 | P-6 | Write | SELECT via proxy works unchanged |
 | T-32 | P-6 | Write | Manual Spark REST submission executes successfully |
+| T-33 | P-6 | Write | Proxy does not intercept unknown catalog DML |
 
 ---
 
@@ -661,170 +662,149 @@ WHERE catalog_name = 'polaris'
 
 ---
 
-## Phase 6 — Write Pushdown
+## Phase 6 — Write Pushdown (via `doris-write-proxy`)
 
-> **Setup:** Confirm Polaris credentials are loaded in the daemon. If write pushdown was
-> disabled at startup (log line: `write-pushdown disabled`), ensure
-> `secret/data/platform/polaris` is populated with `spark_svc_id` and `spark_svc_secret`.
+Write pushdown uses the `doris-write-proxy` — a transparent MySQL protocol proxy.
+**Connect clients to port `30091` (not `30090`) for write operations.**
 
-### T-26 — DML against external catalog returns expected Doris error
-
-```sql
--- This MUST fail in Doris — that is the correct, expected behaviour.
--- The error triggers the pushdown path.
-INSERT INTO polaris.tpcds_sf10tcl.store_sales
-SELECT ss_sold_date_sk, ss_item_sk, ss_customer_sk, 0, 0, 0
-FROM polaris.tpcds_sf10tcl.store_sales
-WHERE 1=0;
-```
-
-**Expected error (Doris):**
-```
-ERROR 1105 (HY000): errCode = 2, detailMessage = ... external catalog not writable ...
-```
-(exact message may vary — any error indicating the write was rejected by Doris is correct)
-
-✅ Pass: Doris returns an error and the statement does not complete.  
-❌ Fail: query succeeds — Doris should not be able to write to external Iceberg catalogs.
+> **Setup:** Verify the proxy pod is running and the Spark REST endpoint is reachable.
+> ```bash
+> kubectl get pod -n prod -l app=doris-write-proxy
+> kubectl logs -n prod deployment/doris-write-proxy --tail=5
+> ```
 
 ---
 
-### T-27 — Audit log records the DML statement
-
-```sql
-SELECT query_id, catalog, db, LEFT(stmt, 80) AS stmt_preview, state
-FROM __internal_schema.audit_log
-WHERE
-    time >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-    AND catalog = 'polaris'
-    AND (LOWER(TRIM(stmt)) LIKE 'insert%'
-      OR LOWER(TRIM(stmt)) LIKE 'update%'
-      OR LOWER(TRIM(stmt)) LIKE 'delete%'
-      OR LOWER(TRIM(stmt)) LIKE 'merge%')
-LIMIT 5;
-```
-
-**Expected:** at least 1 row with `stmt_preview` starting with `INSERT INTO polaris`.
-
-✅ Pass: DML row present in the audit log.  
-❌ Fail: no row → audit log may not record failed statements on this Doris build. Check `SHOW VARIABLES LIKE 'audit%'`. As an alternative, issue an `UPDATE` statement which may log differently.
-
----
-
-### T-28 — Daemon `WriteInterceptor` detects the DML
-
-Force a daemon cycle then check logs:
+### T-26 — Write proxy is running and listening
 
 ```bash
-kubectl rollout restart deployment/doris-cache-manager -n prod
-kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+# Pod is Running
+kubectl get pod -n prod -l app=doris-write-proxy
 
-kubectl logs -n prod -l app=doris-cache-manager --tail=100 \
-  | grep "WriteInterceptor"
+# Proxy logs show startup banner
+kubectl logs -n prod deployment/doris-write-proxy | grep "Managed catalogs"
 ```
 
 **Expected:**
 ```
-WriteInterceptor: 1 new DML write(s) detected against external catalogs.
+Managed catalogs: polaris, databricks, postgres, oracle, mongodb
 ```
 
-✅ Pass: detection line present.  
-❌ Fail: no `WriteInterceptor` lines → audit log entry from T-27 is missing or statement pattern does not match. Check `kubectl logs ... | grep WriteInterceptor` for any error lines.
+✅ Pass: pod is `Running` and startup log shows all 5 catalogs.
+❌ Fail: `CrashLoopBackOff` → check `kubectl logs -n prod deployment/doris-write-proxy`.
 
 ---
 
-### T-29 — Daemon submits the Spark job (submissionId in logs)
+### T-27 — DML via proxy succeeds without error (write intercepted, Spark executes)
 
-Immediately after T-28, in the same log output:
+Connect to the **write proxy port** (`30091`), not the standard Doris port:
 
 ```bash
-kubectl logs -n prod -l app=doris-cache-manager --tail=100 \
-  | grep -E "WriteInterceptor.*pushed|submissionId"
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+# Connect via write proxy on port 30091
+mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
+  -e "INSERT INTO polaris.tpcds_sf10tcl.store_sales
+      SELECT ss_sold_date_sk, ss_item_sk, ss_customer_sk, 0, 0, 0
+      FROM polaris.tpcds_sf10tcl.store_sales
+      WHERE 1=0;"
+```
+
+**Expected:** command exits with code `0` — **no error message**.
+The proxy intercepts the DML, submits to Spark, waits for completion, and returns MySQL OK.
+
+✅ Pass: `echo $?` returns `0`, no error output.
+❌ Fail: MySQL error returned → check proxy logs (`T-28`) for Spark submission errors.
+
+---
+
+### T-28 — Proxy logs show interception and Spark submission
+
+```bash
+kubectl logs -n prod deployment/doris-write-proxy --tail=50 \
+  | grep -E "intercepted|submissionId|FINISHED|FAILED"
 ```
 
 **Expected:**
 ```
-WriteInterceptor: pushed polaris.tpcds_sf10tcl.store_sales (qid=<id>) → Spark submissionId=driver-<timestamp>-<hash>
+WriteProxy: intercepted polaris.tpcds_sf10tcl.store_sales DML from <ip>:<port> — routing to Spark.
+WriteProxy: polaris.tpcds_sf10tcl.store_sales → Spark submissionId=driver-<timestamp>-<hash>
+WriteProxy: polaris.tpcds_sf10tcl.store_sales FINISHED.
 ```
 
-Note the `submissionId` for use in T-30.
+Note the `submissionId` for T-29.
 
-✅ Pass: `submissionId` present and starts with `driver-`.  
-❌ Fail: `Spark submission failed` → check T-07 (Spark REST reachable). If Polaris creds are missing: `write-pushdown disabled` in startup logs.
+✅ Pass: all three log lines present.
+❌ Fail: `Spark submission failed` → check T-07 (Spark REST reachable). `Timed out` → Spark job ran but didn't finish within 300s — check Spark worker logs.
 
 ---
 
-### T-30 — Spark REST status shows the job state
-
-Using the `submissionId` captured in T-29:
+### T-29 — Spark REST confirms job FINISHED
 
 ```bash
-SUBMISSION_ID="driver-<timestamp>-<hash>"   # replace with actual value
+SUBMISSION_ID="driver-<from T-28>"   # replace with actual value
 
 curl -s http://192.168.1.50:6066/v1/submissions/status/${SUBMISSION_ID} \
-  | jq '{state: .driverState, workerHostPort: .workerHostPort, success: .success}'
+  | jq '{state: .driverState, success: .success}'
 ```
 
 **Expected:**
 ```json
-{
-  "state": "FINISHED",
-  "workerHostPort": "<worker-ip>:<port>",
-  "success": true
-}
+{ "state": "FINISHED", "success": true }
 ```
-(State may still be `RUNNING` if checked immediately — re-poll every 15 s.)
 
-✅ Pass: `state = FINISHED` and `success = true`.  
-❌ Fail: `state = FAILED` → retrieve driver logs:
+✅ Pass: `FINISHED` and `success = true`.
+❌ Fail: `FAILED` → check Spark worker logs:
 ```bash
 kubectl logs -n prod -l app=spark-worker | tail -100
 ```
 
 ---
 
-### T-31 — Duplicate DML is not re-submitted
-
-Re-run the same INSERT from T-26 (it will fail again in Doris), then force another daemon cycle:
+### T-30 — Local Doris DML still works via proxy (not intercepted)
 
 ```bash
-kubectl rollout restart deployment/doris-cache-manager -n prod
-kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
-
-kubectl logs -n prod -l app=doris-cache-manager --tail=100 \
-  | grep "WriteInterceptor"
+# Local internal table write — should pass through to Doris and succeed normally
+mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
+  -e "CREATE TABLE IF NOT EXISTS internal.test_proxy_passthrough
+      (id INT) ENGINE=OLAP DISTRIBUTED BY HASH(id) BUCKETS 1
+      PROPERTIES ('replication_num'='1');
+      INSERT INTO internal.test_proxy_passthrough VALUES (1);"
 ```
 
-**Expected:** the log shows `all N write(s) already submitted` — no new `submissionId` generated for the same `query_id`.
+**Expected:** executes successfully — Doris handles it natively, proxy passes through.
 
+✅ Pass: no error returned, Doris executes the INSERT.
+❌ Fail: local DML returns error → proxy is incorrectly intercepting non-catalog statements.
+
+---
+
+### T-31 — SELECT via proxy works unchanged
+
+```bash
+mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.store_sales;"
 ```
-WriteInterceptor: all 1 write(s) already submitted.
-```
 
-✅ Pass: deduplication line present and no new `pushed … submissionId` line for the same statement.  
-❌ Fail: a second submission is made → the `_submitted` set is not persisting across the pod restart. Deduplication is in-memory only; a fresh pod will re-submit. This is expected behaviour across restarts — not a failure.
+**Expected:** returns a row count — proxy forwards SELECT to Doris unchanged.
 
-> **Note:** In-memory deduplication is intentional. After a daemon restart, the daemon
-> will re-scan the lookback window and may re-submit writes that completed successfully.
-> This is acceptable because `spark_iceberg_write.py` is idempotent for INSERT operations
-> (Iceberg ACID merge semantics) but review MERGE/DELETE statements for idempotency
-> in production.
+✅ Pass: numeric result returned.
+❌ Fail: error or no result → proxy is incorrectly intercepting SELECTs.
 
 ---
 
 ### T-32 — Manual Spark REST submission executes successfully
 
-This test bypasses the daemon entirely and submits a write job directly to Spark,
-validating the full `spark_iceberg_write.py` path.
+This test bypasses the proxy entirely and submits a write job directly to Spark,
+validating the full `spark_iceberg_write.py` path end-to-end.
 
 ```bash
-JOB_ARGS=$(echo '{
-  "catalog":"polaris",
-  "warehouse":"IcebergCatalog",
-  "db":"tpcds_sf10tcl",
-  "table":"store_sales",
-  "stmt":"SELECT 1"
-}' | tr -d '\n')
+JOB_ARGS=$(python3 -c "import json; print(json.dumps({
+  'catalog':'polaris', 'warehouse':'IcebergCatalog',
+  'db':'tpcds_sf10tcl', 'table':'store_sales',
+  'stmt':'SELECT 1'
+}))")
 
 curl -s -X POST http://192.168.1.50:6066/v1/submissions/create \
   -H "Content-Type: application/json" \
@@ -845,7 +825,7 @@ curl -s -X POST http://192.168.1.50:6066/v1/submissions/create \
   }" | jq '{submissionId: .submissionId, success: .success}'
 ```
 
-Note the returned `submissionId` and poll for status:
+Poll for status:
 
 ```bash
 MANUAL_ID="<submissionId from above>"
@@ -856,8 +836,24 @@ curl -s http://192.168.1.50:6066/v1/submissions/status/${MANUAL_ID} \
 
 **Expected:** `state = FINISHED`, `success = true`.
 
-✅ Pass: job finishes successfully.  
-❌ Fail: `FAILED` → check Spark worker logs for Python errors in `spark_iceberg_write.py`. Most common causes: OpenBao unreachable from Spark worker, or Polaris OAuth2 token expired.
+✅ Pass: job finishes successfully.
+❌ Fail: `FAILED` → check Spark worker logs for errors in `spark_iceberg_write.py`. Most common: OpenBao unreachable from Spark worker, or Polaris OAuth2 token expired.
+
+---
+
+### T-33 — Write proxy correctly rejects bad catalog
+
+```bash
+# DML against a non-managed catalog — proxy must NOT intercept,
+# must forward to Doris and let Doris return its normal response.
+mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
+  -e "INSERT INTO unknown_catalog.db.table VALUES (1);" 2>&1 | head -3
+```
+
+**Expected:** Doris error about unknown catalog (not a Spark error).
+
+✅ Pass: error message comes from Doris (mentions `unknown catalog` or `catalog not found`).
+❌ Fail: Spark submission attempted for unknown catalog → `MANAGED_CATALOGS` check in proxy is broken.
 
 ---
 

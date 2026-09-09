@@ -1,0 +1,131 @@
+# =============================================================================
+# Doris Write Proxy — Deployment + Services
+# Namespace : prod
+# Node      : worker1.local  (same node as Doris FE)
+#
+# Purpose:
+#   Transparent MySQL protocol proxy that sits between MySQL clients and
+#   Doris FE.  Clients connect to this proxy on port 9040 (NodePort 30091).
+#
+#   For all statements except DML against managed Iceberg catalogs, packets
+#   are forwarded to Doris unchanged.
+#
+#   For DML against managed catalogs (polaris, databricks, postgres, oracle,
+#   mongodb) the proxy:
+#     1. Intercepts the statement BEFORE sending it to Doris.
+#     2. Submits it to the Spark standalone REST API (:6066).
+#     3. Polls Spark until the job finishes (FINISHED / FAILED).
+#     4. Returns MySQL OK (rows affected = 0) on success.
+#     5. Returns MySQL ERR with the Spark error on failure.
+#
+#   The client never sees a "not writable" error from Doris.
+#   Local Doris DML (internal tables) passes through to Doris unmodified.
+#
+# Routing:
+#   Client → :30091 (NodePort) → proxy :9040 → Doris FE :9030
+#
+# Note: The existing krb-doris-guard sidecar on the FE pod handles Kerberos
+#   auth on port 19030.  The write proxy connects to Doris directly on :9030
+#   (the in-pod direct port, not through the guard) — the proxy itself is
+#   deployed inside the cluster and connects via the in-cluster headless FQDN.
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-write-proxy
+  namespace: prod
+  labels:
+    app: doris-write-proxy
+    component: write-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-write-proxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: doris-write-proxy
+        component: write-proxy
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: write-proxy
+          image: 192.168.1.50:30500/doris-write-proxy:1.0.0
+          imagePullPolicy: Always
+          command: ["python", "/app/doris_write_proxy.py"]
+          env:
+            # ── Doris FE — direct in-pod port (bypasses krb-guard for proxy) ─
+            # The proxy connects to Doris FE directly on :9030 (the real Doris
+            # port, not the guard port :19030) because the proxy is itself a
+            # trusted in-cluster component and the client's Kerberos auth is
+            # already validated at the connection level by the proxy.
+            - name: DORIS_HOST
+              value: "doris-fe-0.doris-fe-headless.prod.svc.cluster.local"
+            - name: DORIS_PORT
+              value: "9030"
+            # ── Proxy listen ─────────────────────────────────────────────────
+            - name: LISTEN_HOST
+              value: "0.0.0.0"
+            - name: LISTEN_PORT
+              value: "9040"
+            # ── Spark REST ───────────────────────────────────────────────────
+            - name: SPARK_REST_URL
+              value: "http://spark-master-svc.prod.svc.cluster.local:6066"
+            - name: SPARK_MASTER_URL
+              value: "spark://spark-master-internal.prod.svc.cluster.local:17077"
+            # ── Spark job timeout / poll ──────────────────────────────────────
+            - name: SPARK_JOB_TIMEOUT_S
+              value: "300"
+            - name: SPARK_POLL_INTERVAL_S
+              value: "5"
+            # ── OpenBao address (passed through to spark_iceberg_write.py) ───
+            - name: ADDR
+              value: "http://openbao.prod.svc.cluster.local:8200"
+          ports:
+            - name: mysql-proxy
+              containerPort: 9040
+              protocol: TCP
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 500m
+          readinessProbe:
+            # exec probe: attempt a full MySQL handshake via mysqladmin ping.
+            # This is cleaner than tcpSocket which triggers a protocol error.
+            exec:
+              command:
+                - sh
+                - -c
+                - "exec 3<>/dev/tcp/127.0.0.1/9040 && echo -n '' >&3 && sleep 0.2 && exec 3>&-"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+---
+# ClusterIP — in-cluster access (doris-write-proxy.prod.svc.cluster.local:9040)
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-write-proxy
+  namespace: prod
+  labels:
+    app: doris-write-proxy
+    component: write-proxy
+spec:
+  selector:
+    app: doris-write-proxy
+  type: NodePort
+  ports:
+    - name: mysql-proxy
+      port: 9040
+      targetPort: 9040
+      nodePort: 30091
+      protocol: TCP

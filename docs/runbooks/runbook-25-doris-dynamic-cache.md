@@ -197,14 +197,57 @@ Rules:
 
 ### 2.5 Write-Pushdown Logic
 
-| Step | Detail |
+Write pushdown is handled by a **dedicated `doris-write-proxy` pod** — a
+transparent MySQL protocol proxy that sits between the client and Doris FE.
+
+**Manifest:** [`manifests/doris/write-proxy/doris-write-proxy-deployment.yaml`](../../../manifests/doris/write-proxy/doris-write-proxy-deployment.yaml)
+
+**Client connection endpoint (write proxy):**
+- NodePort: `192.168.1.50:30091`
+- In-cluster: `doris-write-proxy.prod.svc.cluster.local:9040`
+
+**Architecture:**
+
+```
+MySQL client
+     │  MySQL protocol  →  :30091 (NodePort)
+     ▼
+doris-write-proxy  (pod, port 9040)
+     │
+     ├─ DML against managed catalog?
+     │   (INSERT/UPDATE/DELETE/MERGE with polaris./databricks./postgres./oracle./mongodb.)
+     │         YES — intercepted BEFORE sending to Doris
+     │          │
+     │          ├─ POST /v1/submissions/create  →  Spark REST :6066
+     │          │    spark_iceberg_write.py executes via spark.sql()
+     │          │    Credentials loaded from OpenBao at Spark job runtime
+     │          │
+     │          ├─ Poll driverState every 5s until FINISHED / FAILED / KILLED
+     │          │
+     │          ├─ FINISHED  →  MySQL OK packet to client  ✅
+     │          └─ FAILED    →  MySQL ERR packet to client ❌ (Spark error message)
+     │
+     └─ Everything else (SELECT, DDL, local DML, USE, SHOW …)
+               │
+               ▼
+          Forward to Doris FE :9030
+          Stream Doris response back to client unchanged
+```
+
+**Key behaviours:**
+
+| Behaviour | Detail |
 |---|---|
-| **Detection** | Each daemon cycle scans `__internal_schema.audit_log` for `INSERT`, `UPDATE`, `DELETE`, `MERGE` statements where `catalog IN (managed_catalogs)` |
-| **Deduplication** | Statements are tracked by `query_id` — identical query not submitted twice within the lookback window |
-| **Spark submission** | Calls `POST /v1/submissions/create` on the Spark standalone REST API |
-| **Credentials** | The submitted `spark_iceberg_write.py` job reads credentials fresh from OpenBao at runtime — never passed in the submission payload |
-| **Retry** | If the Spark REST call fails, the query_id is **not** marked as submitted — it will be retried on the next cycle |
+| **No Doris round-trip for catalog DML** | The proxy detects the catalog name in the SQL and routes to Spark immediately — Doris is never contacted for these statements |
+| **Client gets real result** | Client blocks until Spark job completes and receives OK or ERR — no async surprise |
+| **Local Doris DML unchanged** | `INSERT INTO internal_table …`, DDL, SELECTs all pass through to Doris unmodified |
+| **Credentials** | `spark_iceberg_write.py` reads Polaris OAuth2 + S3 credentials from OpenBao at Spark job startup |
 | **Supported DML** | `INSERT INTO`, `INSERT OVERWRITE`, `UPDATE … SET`, `DELETE FROM`, `DELETE`, `MERGE INTO … USING` |
+| **Timeout** | `SPARK_JOB_TIMEOUT_S=300` — if Spark doesn't finish in 5 min, client receives ERR |
+
+> **Note:** The cache-manager `WriteInterceptor` (audit-log based) remains active
+> as a fallback — it catches any DML that reaches Doris directly (e.g. connections
+> that bypass the proxy and connect to Doris on `:9030` directly).
 
 ### 2.6 LRU Eviction Logic
 
