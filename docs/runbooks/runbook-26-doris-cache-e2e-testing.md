@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-04 |
+| **Last Updated** | 2026-09-09 |
 | **Related** | RB-25 (Cache Manager Setup & Operations) · RB-05 (Doris & Analytics) |
 
 ---
@@ -45,6 +45,7 @@ The test covers six phases in order:
 | T-09 | P-2 | Daemon | Startup log shows successful OpenBao authentication |
 | T-10 | P-2 | Daemon | Liveness heartbeat file is fresh |
 | T-11 | P-3 | Seeding | Queries against all 5 catalogs return results |
+| T-11a | P-3 | Seeding | *(Fix)* S3 credentials missing — drop and recreate catalogs |
 | T-12 | P-3 | Seeding | Doris audit log records those queries |
 | T-13 | P-3 | Seeding | Daemon cycle picks up audit hits |
 | T-14 | P-3 | Seeding | `table_query_stats` rows appear after first cycle |
@@ -336,25 +337,97 @@ Run each query from a MySQL client connected to Doris (`192.168.1.50:30090`).
 A result with at least 1 row (even `COUNT(*) = 0`) is sufficient — we are testing
 reachability, not data content.
 
+**Actual namespace/table map (confirmed 2026-09-09):**
+
+| Catalog | Database | Table | Rows (approx) |
+|---|---|---|---|
+| `polaris` | `tpcds_sf10tcl` | `store_sales` | 1 500 000 |
+| `databricks` | `lakehouse_db` | `customers` | 10 005 |
+| `postgres` | `public` | `customers` | 1 000 |
+| `oracle` | `tpcds` | `warehouse` | 1 |
+| `mongodb` | `cache_testing` | `orders` | 0 (empty, table exists) |
+
 ```sql
--- polaris
+-- polaris  (warehouse: IcebergCatalog)
 SELECT COUNT(*) AS cnt FROM polaris.tpcds_sf10tcl.store_sales;
 
--- databricks
-SELECT COUNT(*) AS cnt FROM databricks.star_lakehouse_db.sales_fact;
+-- databricks  (warehouse: star_lakehouse → db: lakehouse_db)
+SELECT COUNT(*) AS cnt FROM databricks.lakehouse_db.customers;
 
--- postgres
-SELECT COUNT(*) AS cnt FROM postgres.public.events;
+-- postgres  (warehouse: pg_lakehouse → db: public)
+SELECT COUNT(*) AS cnt FROM postgres.public.customers;
 
--- oracle
-SELECT COUNT(*) AS cnt FROM oracle.finance.general_ledger;
+-- oracle  (warehouse: ora_lakehouse → db: tpcds)
+SELECT COUNT(*) AS cnt FROM oracle.tpcds.warehouse;
 
--- mongodb
-SELECT COUNT(*) AS cnt FROM mongodb.analytics.user_events;
+-- mongodb  (warehouse: mgo_lakehouse → db: cache_testing)
+SELECT COUNT(*) AS cnt FROM mongodb.cache_testing.orders;
 ```
 
-✅ Pass: each query returns a single row with a numeric `cnt` (any value including 0).  
-❌ Fail: `Unknown table` / `Catalog not found` — verify T-03. `Connection timed out` — check catalog credentials in OpenBao.
+✅ Pass: each query returns a single row with a numeric `cnt` (any value including 0).
+❌ Fail: `SdkClientException: Unable to load credentials from AwsCredentialsProviderChain` → catalog is missing S3 credentials. See **T-11a** below.
+❌ Fail: `Database [X] does not exist` → wrong namespace in the query — use the table map above. Run `SHOW DATABASES FROM <catalog>;` to enumerate what Polaris actually exposes.
+❌ Fail: `Catalog not found` → verify T-03; catalog may need to be recreated.
+
+---
+
+### T-11a — Fix: S3 credentials missing from catalog definition
+
+> **Root cause (confirmed 2026-09-09):** All 5 catalogs were created without
+> `s3.access-key-id` / `s3.secret-access-key` properties. Doris BE queries the
+> Polaris REST API for Iceberg metadata (namespace/table discovery) without S3
+> creds, so `SHOW DATABASES` and `SHOW TABLES` work fine. But when a query
+> actually reads data files the BE must access S3 directly — and with no
+> credentials configured in the catalog it falls back to
+> `AwsCredentialsProviderChain` which finds nothing and throws
+> `SdkClientException`.
+>
+> The fix is to drop and recreate all 5 catalogs with S3 properties pulled from
+> OpenBao. The `iceberg_polaris_rw` catalog (the original write catalog) had
+> these properties from day one; the 5 managed catalogs were missing them.
+
+**Step 1 — Pull S3 credentials from OpenBao:**
+
+```bash
+BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+
+S3_RAW=$(curl -s -H "X-Vault-Token: ${BAO_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/platform/s3)
+
+export S3_KEY=$(echo "$S3_RAW" | \
+  python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['access_key'])")
+export S3_SECRET=$(echo "$S3_RAW" | \
+  python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['secret_key'])")
+
+echo "S3_KEY=${S3_KEY}  S3_SECRET_LEN=${#S3_SECRET}"
+# Expected: S3_KEY=AKIA…  S3_SECRET_LEN=40
+```
+
+**Step 2 — Drop all 5 managed catalogs:**
+
+```sql
+DROP CATALOG IF EXISTS polaris;
+DROP CATALOG IF EXISTS databricks;
+DROP CATALOG IF EXISTS postgres;
+DROP CATALOG IF EXISTS oracle;
+DROP CATALOG IF EXISTS mongodb;
+```
+
+**Step 3 — Recreate with S3 credentials:**
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+envsubst < manifests/doris/setup/02_create_catalogs.sql \
+  | mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}"
+```
+
+`envsubst` expands `${S3_KEY}` and `${S3_SECRET}` before the SQL reaches Doris.
+The script ends with `SHOW CATALOGS` — verify all 5 appear.
+
+**Step 4 — Re-run T-11 queries** to confirm each returns a numeric `cnt`.
 
 ---
 
@@ -373,10 +446,21 @@ GROUP BY catalog, db
 ORDER BY catalog;
 ```
 
-**Expected:** 5 rows — one per catalog.
+**Expected — 5 rows, one per catalog:**
 
-✅ Pass: all 5 catalogs appear.  
+```
+catalog     | db              | hits
+------------|-----------------|-----
+databricks  | lakehouse_db    |   1
+mongodb     | cache_testing   |   1
+oracle      | tpcds           |   1
+polaris     | tpcds_sf10tcl   |   1
+postgres    | public          |   1
+```
+
+✅ Pass: all 5 catalogs appear with `hits ≥ 1`.
 ❌ Fail: 0 rows → audit log plugin not enabled. Check `SHOW VARIABLES LIKE 'enable_audit%'` in Doris; if disabled, set `enable_audit_plugin=true` in `fe.conf` and restart FE.
+❌ Fail: fewer than 5 rows → re-run the missing catalog's T-11 query and wait 30 s more.
 
 ---
 
@@ -438,6 +522,7 @@ WHERE catalog_name = 'polaris'
   AND table_name = 'store_sales';
 
 -- Run the seeding query again (from another MySQL session)
+-- Use polaris.tpcds_sf10tcl.store_sales (1.5 M rows — reliably lands in audit log)
 SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.store_sales;
 ```
 
