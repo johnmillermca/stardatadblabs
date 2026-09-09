@@ -217,9 +217,13 @@ curl -s --max-time 5 \
 
 # In-cluster (from any prod pod — matches what write-proxy and cache-manager use)
 kubectl exec -n prod deployment/doris-cache-manager -- python3 -c "
-import urllib.request, json
-r = urllib.request.urlopen('http://spark-master-svc.prod.svc.cluster.local:6066/v1/submissions/status', timeout=5)
-print(r.status, json.loads(r.read()).get('serverSparkVersion'))
+import urllib.request, json, urllib.error
+try:
+    r = urllib.request.urlopen('http://spark-master-svc.prod.svc.cluster.local:6066/v1/submissions/status', timeout=5)
+    body = r.read()
+except urllib.error.HTTPError as e:
+    body = e.read()
+print(json.loads(body).get('serverSparkVersion'))
 " 2>&1
 ```
 
