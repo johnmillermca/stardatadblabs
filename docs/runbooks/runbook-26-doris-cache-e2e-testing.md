@@ -337,36 +337,39 @@ Run each query from a MySQL client connected to Doris (`192.168.1.50:30090`).
 A result with at least 1 row (even `COUNT(*) = 0`) is sufficient — we are testing
 reachability, not data content.
 
-**Actual namespace/table map (confirmed 2026-09-09):**
+**Largest populated tables per catalog (confirmed 2026-09-09):**
 
-| Catalog | Database | Table | Rows (approx) |
+| Catalog | Database | Table | Rows (confirmed) |
 |---|---|---|---|
-| `polaris` | `tpcds_sf10tcl` | `store_sales` | 1 500 000 |
+| `polaris` | `tpcds_sf10tcl` | `inventory` | 7 200 000 |
 | `databricks` | `lakehouse_db` | `customers` | 10 005 |
-| `postgres` | `public` | `customers` | 1 000 |
-| `oracle` | `tpcds` | `warehouse` | 1 |
-| `mongodb` | `cache_testing` | `orders` | 0 (empty, table exists) |
+| `postgres` | `public` | `products` | 54 500 |
+| `oracle` | `tpcds` | `income_band` | 3 |
+| `mongodb` | `cache_testing` | `products` | 19 849 651 |
+
+> Oracle's `tpcds` warehouse is sparsely populated — most tables are empty.
+> `income_band` (3 rows) is the best available for a non-zero result.
 
 ```bash
-# polaris  (warehouse: IcebergCatalog)
+# polaris  (warehouse: IcebergCatalog — 7.2M rows, good cache seeding target)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) AS cnt FROM polaris.tpcds_sf10tcl.store_sales;"
+  -e "SELECT COUNT(*) AS cnt FROM polaris.tpcds_sf10tcl.inventory;"
 
 # databricks  (warehouse: star_lakehouse → db: lakehouse_db)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "SELECT COUNT(*) AS cnt FROM databricks.lakehouse_db.customers;"
 
-# postgres  (warehouse: pg_lakehouse → db: public)
+# postgres  (warehouse: pg_lakehouse → db: public — 54.5K rows)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) AS cnt FROM postgres.public.customers;"
+  -e "SELECT COUNT(*) AS cnt FROM postgres.public.products;"
 
-# oracle  (warehouse: ora_lakehouse → db: tpcds)
+# oracle  (warehouse: ora_lakehouse → db: tpcds — largest non-empty table)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) AS cnt FROM oracle.tpcds.warehouse;"
+  -e "SELECT COUNT(*) AS cnt FROM oracle.tpcds.income_band;"
 
-# mongodb  (warehouse: mgo_lakehouse → db: cache_testing)
+# mongodb  (warehouse: mgo_lakehouse → db: cache_testing — 19.8M rows)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) AS cnt FROM mongodb.cache_testing.orders;"
+  -e "SELECT COUNT(*) AS cnt FROM mongodb.cache_testing.products;"
 ```
 
 ✅ Pass: each query returns a single row with a numeric `cnt` (any value including 0).
@@ -440,11 +443,14 @@ The script ends with `SHOW CATALOGS` — verify all 5 appear.
 
 ### T-12 — Doris audit log records those queries
 
-Wait ~30 seconds after T-11, then:
+Run immediately after T-11 (no need to wait).
 
 > **Note:** Doris always records `catalog = 'internal'` in `audit_log` regardless
 > of which external catalog a query targets. The correct way to find external
 > catalog queries is to match the catalog name inside the `stmt` column.
+> The window is `INTERVAL 15 MINUTE` to give buffer if T-11 took a few minutes.
+> `return_rows = 1` selects only the scalar COUNT queries (each returns exactly
+> 1 row) and excludes the T-12 meta-query itself (which returns many rows).
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
@@ -459,8 +465,9 @@ SELECT
     COUNT(*) AS hits
 FROM __internal_schema.audit_log
 WHERE
-    time >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+    time >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
     AND is_query = 1
+    AND return_rows = 1
     AND (LOWER(TRIM(stmt)) LIKE 'select%' OR LOWER(TRIM(stmt)) LIKE 'with%')
     AND (
         LOWER(stmt) LIKE '%polaris.%'
@@ -488,7 +495,7 @@ postgres    |   1
 
 ✅ Pass: all 5 catalogs appear with `hits ≥ 1`.
 ❌ Fail: 0 rows → audit log plugin not enabled. Check `SHOW VARIABLES LIKE 'enable_audit_plugin'`; if `false`, set `enable_audit_plugin=true` in `fe.conf` and restart FE.
-❌ Fail: fewer than 5 rows → re-run the missing catalog's T-11 query and wait 30 s more.
+❌ Fail: fewer than 5 rows → re-run the missing catalog's T-11 query; audit log flushes every 60 s so wait up to 1 minute, then re-run T-12.
 
 ---
 
@@ -550,12 +557,12 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT total_select_count
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';"
+  AND table_name = 'inventory';"
 
 # Run the seeding query again
-# Use polaris.tpcds_sf10tcl.store_sales (1.5 M rows — reliably lands in audit log)
+# Use polaris.tpcds_sf10tcl.inventory (7.2M rows — reliably lands in audit log)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.store_sales;"
+  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.inventory;"
 ```
 
 Restart the daemon to force a new cycle:
@@ -571,7 +578,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT total_select_count
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';"
+  AND table_name = 'inventory';"
 ```
 
 **Expected:** count is higher than the value recorded before the second query.
@@ -616,7 +623,7 @@ warm_interval_min ≈ select_interval_min × 0.667  (within rounding)
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.store_sales USING JOB;"
+  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.inventory USING JOB;"
 ```
 
 **Expected:** query returns without error (Doris responds immediately; the job runs async).
@@ -655,7 +662,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state, last_warmed_ts
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';"
+  AND table_name = 'inventory';"
 ```
 
 **Expected:**
@@ -700,7 +707,7 @@ kubectl logs -n prod -l app=doris-cache-manager --tail=80 \
 **Expected:**
 ```
 Warm-up evaluation: N eligible tables, M triggered.
-WARM_UP started for polaris.tpcds_sf10tcl.store_sales.
+WARM_UP started for polaris.tpcds_sf10tcl.inventory.
 ```
 where `M ≥ 1`.
 
@@ -718,7 +725,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT last_warmed_ts, cache_state
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';"
+  AND table_name = 'inventory';"
 ```
 
 **Expected:** `last_warmed_ts` is a timestamp within the last 10 minutes.
@@ -739,7 +746,7 @@ WHERE catalog_name = 'polaris'
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.store_sales USING COLD_DOWN;"
+  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.inventory USING COLD_DOWN;"
 ```
 
 **Expected:** no SQL error.
@@ -820,7 +827,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT COUNT(*) AS eviction_count
 FROM platform_meta.cache_eviction_log
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales'
+  AND table_name = 'inventory'
   AND evicted_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE);
 "
 ```
@@ -875,9 +882,9 @@ DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
 
 # Connect via write proxy on port 30091
 mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
-  -e "INSERT INTO polaris.tpcds_sf10tcl.store_sales
+  -e "INSERT INTO polaris.tpcds_sf10tcl.inventory
       SELECT ss_sold_date_sk, ss_item_sk, ss_customer_sk, 0, 0, 0
-      FROM polaris.tpcds_sf10tcl.store_sales
+      FROM polaris.tpcds_sf10tcl.inventory
       WHERE 1=0;"
 ```
 
@@ -898,9 +905,9 @@ kubectl logs -n prod deployment/doris-write-proxy --tail=50 \
 
 **Expected:**
 ```
-WriteProxy: intercepted polaris.tpcds_sf10tcl.store_sales DML from <ip>:<port> — routing to Spark.
-WriteProxy: polaris.tpcds_sf10tcl.store_sales → Spark submissionId=driver-<timestamp>-<hash>
-WriteProxy: polaris.tpcds_sf10tcl.store_sales FINISHED.
+WriteProxy: intercepted polaris.tpcds_sf10tcl.inventory DML from <ip>:<port> — routing to Spark.
+WriteProxy: polaris.tpcds_sf10tcl.inventory → Spark submissionId=driver-<timestamp>-<hash>
+WriteProxy: polaris.tpcds_sf10tcl.inventory FINISHED.
 ```
 
 Note the `submissionId` for T-29.
@@ -954,7 +961,7 @@ mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
 
 ```bash
 mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.store_sales;"
+  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.inventory;"
 ```
 
 **Expected:** returns a row count — proxy forwards SELECT to Doris unchanged.
@@ -1066,9 +1073,9 @@ Expected healthy summary:
 === Cache Manager cycle start: ... ===
 Audit log scrape: found N distinct table/catalog pairs with SELECTs.
 Warm-up evaluation: N eligible tables, N triggered.
-WARM_UP started for polaris.tpcds_sf10tcl.store_sales.
+WARM_UP started for polaris.tpcds_sf10tcl.inventory.
 WriteInterceptor: 1 new DML write(s) detected against external catalogs.
-WriteInterceptor: pushed polaris.tpcds_sf10tcl.store_sales (qid=...) → Spark submissionId=driver-...
+WriteInterceptor: pushed polaris.tpcds_sf10tcl.inventory (qid=...) → Spark submissionId=driver-...
 === Cycle done. active_warmups=N ===
 ```
 
