@@ -10,7 +10,7 @@
 #   secret/data/platform/polaris → spark_svc_id, spark_svc_secret
 #
 # The cache manager:
-#   • Scrapes the Doris audit log every hour (SCAN_INTERVAL_S=3600)
+#   • Scrapes the Doris audit log every 5 minutes (SCAN_INTERVAL_S=300)
 #   • Warms up segments for hot tables (select_interval × 2/3 cadence)
 #   • Evicts cold tables after 24 h of inactivity
 #   • Runs up to 32 concurrent warm-up jobs
@@ -87,7 +87,7 @@ spec:
               value: "9030"
             # ── Tuning ─────────────────────────────────────────────────────
             - name: SCAN_INTERVAL_S
-              value: "3600"
+              value: "300"
             - name: LRU_EVICT_HOURS
               value: "24"
             - name: MAX_CONCURRENT
@@ -113,7 +113,7 @@ spec:
               command:
                 - sh
                 - -c
-                - "test -f /tmp/cache_manager_alive && test $(( $(date +%s) - $(stat -c %Y /tmp/cache_manager_alive) )) -lt 7200"
+                - "test -f /tmp/cache_manager_alive && test $(( $(date +%s) - $(stat -c %Y /tmp/cache_manager_alive) )) -lt 900"
             initialDelaySeconds: 120
             periodSeconds: 300
             failureThreshold: 3
