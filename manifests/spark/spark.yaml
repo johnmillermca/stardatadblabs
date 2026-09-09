@@ -70,6 +70,11 @@ spec:
       port: 8080
       targetPort: 8080
       nodePort: 30707
+    # Spark standalone REST submission API — required for write-pushdown (doris-write-proxy)
+    - name: rest-api
+      port: 6066
+      targetPort: 6066
+      nodePort: 30606
 ---
 apiVersion: v1
 kind: Service
@@ -106,6 +111,10 @@ spec:
     - name: rpc-internal
       port: 17077
       targetPort: 17077
+    # REST submission API — in-cluster access for write-proxy and cache-manager
+    - name: rest-api
+      port: 6066
+      targetPort: 6066
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -200,13 +209,19 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             - name: SPARK_DAEMON_JAVA_OPTS
-              value: "-Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf"
+              value: "-Djava.security.krb5.conf=/etc/krb5.conf.d/cluster.conf -Dspark.master.rest.enabled=true -Dspark.master.rest.port=6066"
             # Tell Spark master to bind on port 17077 (guard proxies 7077→17077)
             - name: SPARK_MASTER_PORT
               value: "17077"
+            # Enable the Spark standalone REST submission API on port 6066.
+            # Required for doris-write-proxy and doris-cache-manager write-pushdown.
+            - name: SPARK_MASTER_REST_PORT
+              value: "6066"
           ports:
             - containerPort: 17077
             - containerPort: 8080
+            - name: rest-api
+              containerPort: 6066
           volumeMounts:
             # krb5.conf: included by /etc/krb5.conf via includedir — JVM JAAS
             # uses this to locate kerberos-kdc.prod.svc.cluster.local
