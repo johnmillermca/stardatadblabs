@@ -90,17 +90,28 @@ _PATH_POLARIS     = "secret/data/platform/polaris"
 _DORIS_HOST_DEFAULT = "doris-fe.prod.svc.cluster.local"
 _DORIS_PORT_DEFAULT = 9030
 
-# Catalogs managed by the cache daemon (mirrors bao_spark_init.py)
-MANAGED_CATALOGS = ["polaris", "databricks", "postgres", "oracle", "mongodb"]
+# Catalogs managed by the cache daemon.
+# Driven by env var MANAGED_CATALOGS (comma-separated) so no code change is
+# needed when catalogs are added or removed.
+# Default mirrors the 5 catalogs defined in 02_create_catalogs.sql.
+_managed_catalogs_env = os.environ.get(
+    "MANAGED_CATALOGS",
+    "polaris,databricks,postgres,oracle,mongodb",
+)
+MANAGED_CATALOGS: list[str] = [c.strip() for c in _managed_catalogs_env.split(",") if c.strip()]
 
-# Warehouse name for each catalog — passed to the Spark write-pushdown job
-# so it can re-establish the same catalog configuration Spark uses natively.
+# Warehouse name for each catalog — passed to the Spark write-pushdown job.
+# Driven by env var CATALOG_WAREHOUSES as "catalog:warehouse,..." pairs.
+# Default mirrors bao_spark_init.py warehouse names.
+_catalog_warehouses_env = os.environ.get(
+    "CATALOG_WAREHOUSES",
+    "polaris:IcebergCatalog,databricks:star_lakehouse,postgres:pg_lakehouse,oracle:ora_lakehouse,mongodb:mgo_lakehouse",
+)
 CATALOG_WAREHOUSE: dict[str, str] = {
-    "polaris":    "IcebergCatalog",
-    "databricks": "star_lakehouse",
-    "postgres":   "pg_lakehouse",
-    "oracle":     "ora_lakehouse",
-    "mongodb":    "mgo_lakehouse",
+    k.strip(): v.strip()
+    for pair in _catalog_warehouses_env.split(",")
+    if ":" in pair
+    for k, v in [pair.split(":", 1)]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,7 +316,14 @@ class AuditLogScraper:
     def _scrape_audit_log(self, doris: DorisClient) -> dict[TableKey, int]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self._LOOKBACK_HOURS)
         cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-        catalogs_in = ", ".join(f"'{c}'" for c in MANAGED_CATALOGS)
+
+        # NOTE: Doris always logs catalog='internal' in audit_log regardless of
+        # which external catalog the query targets.  The only reliable way to
+        # detect external-catalog queries is to match the catalog name inside the
+        # stmt text itself (3-part references: catalog.db.table).
+        stmt_filters = " OR ".join(
+            f"LOWER(stmt) LIKE '%{c}.%'" for c in MANAGED_CATALOGS
+        )
 
         # Doris audit_log columns: query_id, time, client_ip, user, catalog,
         #   db, state, query_time, scan_rows, scan_bytes, return_rows,
@@ -313,32 +331,24 @@ class AuditLogScraper:
         #   sql_digest, peak_memory_bytes, stmt
         sql = f"""
             SELECT
-                catalog,
-                db,
-                -- Extract bare table name from the first FROM clause.
-                -- audit_log.stmt is the raw SQL; we rely on the `db` column
-                -- for the database and use a best-effort regex via Doris regexp.
-                -- For simplicity we count per (catalog, db) and enumerate the
-                -- tables via information_schema later; here we group by stmt_id.
                 stmt,
                 COUNT(*) AS hit_count
             FROM __internal_schema.audit_log
             WHERE
                 time >= '{cutoff_str}'
                 AND is_query = 1
-                AND catalog IN ({catalogs_in})
                 AND (LOWER(TRIM(stmt)) LIKE 'select%'
                      OR LOWER(TRIM(stmt)) LIKE 'with%')
-            GROUP BY catalog, db, stmt
+                AND ({stmt_filters})
+            GROUP BY stmt
         """
         rows = doris.execute(sql)
 
         counts: dict[TableKey, int] = {}
-        for catalog, db, stmt, hit_count in rows:
-            table = _extract_table_from_stmt(stmt, db)
-            if not table:
+        for stmt, hit_count in rows:
+            key = _extract_key_from_stmt(stmt)
+            if not key:
                 continue
-            key = TableKey(catalog=catalog, db=db or "", table=table)
             counts[key] = counts.get(key, 0) + int(hit_count)
 
         logger.info(
@@ -348,31 +358,40 @@ class AuditLogScraper:
         return counts
 
 
-def _extract_table_from_stmt(stmt: str, default_db: str) -> str | None:
+def _extract_key_from_stmt(stmt: str) -> "TableKey | None":
     """
-    Best-effort extraction of the primary table reference from a SQL statement.
-    Handles: SELECT ... FROM catalog.db.table, SELECT ... FROM db.table,
-             SELECT ... FROM table.
-    Returns the bare table name (no catalog/db prefix).
+    Extract a TableKey (catalog, db, table) from the first table reference in a
+    SQL statement.  Only returns a key when the reference is a fully-qualified
+    3-part name (catalog.db.table) whose catalog is in MANAGED_CATALOGS.
+
+    Doris audit_log always records catalog='internal' even for external-catalog
+    queries, so we parse the catalog out of the stmt text instead.
     """
     if not stmt:
         return None
     lower = stmt.lower()
-    # Find position of 'from' keyword
-    idx = lower.find(" from ")
-    if idx == -1:
-        idx = lower.find("\nfrom ")
-    if idx == -1:
+    # Find 'FROM' keyword
+    for marker in (" from ", "\nfrom ", "\tfrom "):
+        idx = lower.find(marker)
+        if idx != -1:
+            rest = stmt[idx + len(marker):].strip()
+            break
+    else:
         return None
-    rest = stmt[idx + 6:].strip()
-    # Grab the first token (before space, newline, comma, or paren)
+    # Grab first token (table reference, possibly catalog.db.table)
     m = re.match(r"([`\w.\-]+)", rest)
     if not m:
         return None
     ref = m.group(1).strip("`")
-    parts = ref.split(".")
-    # Return the rightmost part (table name)
-    return parts[-1] if parts else None
+    parts = [p.strip("`") for p in ref.split(".")]
+    if len(parts) == 3:
+        catalog, db, table = parts
+        if catalog.lower() in MANAGED_CATALOGS:
+            return TableKey(catalog=catalog.lower(), db=db, table=table)
+    elif len(parts) == 2:
+        # db.table — catalog unknown, skip (can't attribute to a managed catalog)
+        return None
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -852,23 +871,30 @@ class WriteInterceptor:
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _scrape_writes(self, doris: DorisClient) -> list[PendingWrite]:
-        """Query audit_log for DML statements against managed catalog tables."""
+        """Query audit_log for DML statements against managed catalog tables.
+
+        NOTE: Doris always logs catalog='internal' in audit_log regardless of
+        which external catalog the DML targets.  We match on stmt text instead.
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self._LOOKBACK_HOURS)
         cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-        catalogs_in = ", ".join(f"'{c}'" for c in MANAGED_CATALOGS)
+
+        stmt_filters = " OR ".join(
+            f"LOWER(stmt) LIKE '%{c}.%'" for c in MANAGED_CATALOGS
+        )
 
         sql = f"""
-            SELECT query_id, catalog, db, stmt
+            SELECT query_id, stmt
             FROM __internal_schema.audit_log
             WHERE
                 time >= '{cutoff_str}'
-                AND catalog IN ({catalogs_in})
                 AND (
                     LOWER(TRIM(stmt)) LIKE 'insert%'
                     OR LOWER(TRIM(stmt)) LIKE 'update%'
                     OR LOWER(TRIM(stmt)) LIKE 'delete%'
                     OR LOWER(TRIM(stmt)) LIKE 'merge%'
                 )
+                AND ({stmt_filters})
         """
         try:
             rows = doris.execute(sql)
@@ -878,21 +904,21 @@ class WriteInterceptor:
 
         result: list[PendingWrite] = []
         now = datetime.now(timezone.utc)
-        for query_id, catalog, db, stmt in rows:
+        for query_id, stmt in rows:
             if not _WRITE_VERBS_RE.match(stmt or ""):
                 continue
-            table = _extract_table_from_write_stmt(stmt, db or "")
-            if not table:
+            key = _extract_key_from_stmt(stmt)
+            if not key:
                 logger.debug(
-                    "WriteInterceptor: could not extract table from stmt (qid=%s) — skip.",
+                    "WriteInterceptor: could not extract catalog.db.table from stmt (qid=%s) — skip.",
                     query_id,
                 )
                 continue
             result.append(PendingWrite(
                 query_id=str(query_id),
-                catalog=catalog or "",
-                db=db or "",
-                table=table,
+                catalog=key.catalog,
+                db=key.db,
+                table=key.table,
                 stmt=stmt,
                 detected_at=now,
             ))

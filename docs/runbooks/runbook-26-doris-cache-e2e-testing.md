@@ -442,33 +442,52 @@ The script ends with `SHOW CATALOGS` — verify all 5 appear.
 
 Wait ~30 seconds after T-11, then:
 
+> **Note:** Doris always records `catalog = 'internal'` in `audit_log` regardless
+> of which external catalog a query targets. The correct way to find external
+> catalog queries is to match the catalog name inside the `stmt` column.
+
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
-SELECT catalog, db, COUNT(*) AS hits
+SELECT
+    CASE
+      WHEN LOWER(stmt) LIKE '%polaris.%'    THEN 'polaris'
+      WHEN LOWER(stmt) LIKE '%databricks.%' THEN 'databricks'
+      WHEN LOWER(stmt) LIKE '%postgres.%'   THEN 'postgres'
+      WHEN LOWER(stmt) LIKE '%oracle.%'     THEN 'oracle'
+      WHEN LOWER(stmt) LIKE '%mongodb.%'    THEN 'mongodb'
+    END AS catalog,
+    COUNT(*) AS hits
 FROM __internal_schema.audit_log
 WHERE
     time >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
     AND is_query = 1
-    AND catalog IN ('polaris','databricks','postgres','oracle','mongodb')
-GROUP BY catalog, db
-ORDER BY catalog;
+    AND (LOWER(TRIM(stmt)) LIKE 'select%' OR LOWER(TRIM(stmt)) LIKE 'with%')
+    AND (
+        LOWER(stmt) LIKE '%polaris.%'
+     OR LOWER(stmt) LIKE '%databricks.%'
+     OR LOWER(stmt) LIKE '%postgres.%'
+     OR LOWER(stmt) LIKE '%oracle.%'
+     OR LOWER(stmt) LIKE '%mongodb.%'
+    )
+GROUP BY 1
+ORDER BY 1;
 "
 ```
 
 **Expected — 5 rows, one per catalog:**
 
 ```
-catalog     | db              | hits
-------------|-----------------|-----
-databricks  | lakehouse_db    |   1
-mongodb     | cache_testing   |   1
-oracle      | tpcds           |   1
-polaris     | tpcds_sf10tcl   |   1
-postgres    | public          |   1
+catalog     | hits
+------------|-----
+databricks  |   1
+mongodb     |   1
+oracle      |   1
+polaris     |   1
+postgres    |   1
 ```
 
 ✅ Pass: all 5 catalogs appear with `hits ≥ 1`.
-❌ Fail: 0 rows → audit log plugin not enabled. Check `SHOW VARIABLES LIKE 'enable_audit%'` in Doris; if disabled, set `enable_audit_plugin=true` in `fe.conf` and restart FE.
+❌ Fail: 0 rows → audit log plugin not enabled. Check `SHOW VARIABLES LIKE 'enable_audit_plugin'`; if `false`, set `enable_audit_plugin=true` in `fe.conf` and restart FE.
 ❌ Fail: fewer than 5 rows → re-run the missing catalog's T-11 query and wait 30 s more.
 
 ---
