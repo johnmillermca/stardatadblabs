@@ -347,21 +347,26 @@ reachability, not data content.
 | `oracle` | `tpcds` | `warehouse` | 1 |
 | `mongodb` | `cache_testing` | `orders` | 0 (empty, table exists) |
 
-```sql
--- polaris  (warehouse: IcebergCatalog)
-SELECT COUNT(*) AS cnt FROM polaris.tpcds_sf10tcl.store_sales;
+```bash
+# polaris  (warehouse: IcebergCatalog)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) AS cnt FROM polaris.tpcds_sf10tcl.store_sales;"
 
--- databricks  (warehouse: star_lakehouse → db: lakehouse_db)
-SELECT COUNT(*) AS cnt FROM databricks.lakehouse_db.customers;
+# databricks  (warehouse: star_lakehouse → db: lakehouse_db)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) AS cnt FROM databricks.lakehouse_db.customers;"
 
--- postgres  (warehouse: pg_lakehouse → db: public)
-SELECT COUNT(*) AS cnt FROM postgres.public.customers;
+# postgres  (warehouse: pg_lakehouse → db: public)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) AS cnt FROM postgres.public.customers;"
 
--- oracle  (warehouse: ora_lakehouse → db: tpcds)
-SELECT COUNT(*) AS cnt FROM oracle.tpcds.warehouse;
+# oracle  (warehouse: ora_lakehouse → db: tpcds)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) AS cnt FROM oracle.tpcds.warehouse;"
 
--- mongodb  (warehouse: mgo_lakehouse → db: cache_testing)
-SELECT COUNT(*) AS cnt FROM mongodb.cache_testing.orders;
+# mongodb  (warehouse: mgo_lakehouse → db: cache_testing)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) AS cnt FROM mongodb.cache_testing.orders;"
 ```
 
 ✅ Pass: each query returns a single row with a numeric `cnt` (any value including 0).
