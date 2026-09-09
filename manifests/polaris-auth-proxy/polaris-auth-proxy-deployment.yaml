@@ -1,0 +1,84 @@
+# =============================================================================
+# Polaris Auth Proxy — Deployment + Service
+# Namespace : prod
+#
+# Replaces the nginx hardcoded-token approach with a Python HTTP proxy that:
+#   • Fetches OAuth2 tokens from Polaris at startup using credentials from OpenBao
+#   • Automatically refreshes tokens TOKEN_REFRESH_BUFFER_S (300s) before expiry
+#   • Injects "Authorization: Bearer <token>" into every forwarded request
+#   • Forwards all other request headers and body to Polaris unchanged
+#   • Streams Polaris responses back to callers unchanged
+#
+# Port mapping (matches legacy nginx contract — no catalog changes needed):
+#   :8282  — doris-writer principal  (read + write)
+#   :8283  — doris-reader principal  (read-only)
+#
+# Credentials: read from OpenBao at startup via polaris-token-refresher SA.
+#   OpenBao path: secret/data/platform/polaris
+#   Keys used: doris_writer_id, doris_writer_secret, doris_reader_id, doris_reader_secret
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polaris-auth-proxy
+  namespace: prod
+  labels:
+    app: polaris-auth-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: polaris-auth-proxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: polaris-auth-proxy
+    spec:
+      serviceAccountName: polaris-token-refresher
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: polaris-auth-proxy
+          image: 192.168.1.50:30500/polaris-auth-proxy:1.0.0
+          imagePullPolicy: Always
+          command: ["python", "/app/polaris_auth_proxy.py"]
+          env:
+            - name: POLARIS_URL
+              value: "http://polaris-rest.prod.svc.cluster.local:8181"
+            - name: ADDR
+              value: "http://openbao.prod.svc.cluster.local:8200"
+            - name: BAO_ROLE
+              value: "polaris-token-refresher"
+            # Refresh token 300s (5 min) before it expires
+            - name: TOKEN_REFRESH_BUFFER_S
+              value: "300"
+            - name: PORT_WRITER
+              value: "8282"
+            - name: PORT_READER
+              value: "8283"
+          ports:
+            - name: writer
+              containerPort: 8282
+            - name: reader
+              containerPort: 8283
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+              cpu: 200m
+          readinessProbe:
+            tcpSocket:
+              port: 8283
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8283
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
