@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-09 |
+| **Last Updated** | 2026-09-09 (polaris-auth-proxy auto-refresh) |
 | **Related** | RB-05 (Doris & Analytics), RB-11 (Kerberos), RB-13 (RBAC) |
 
 ---
@@ -144,24 +144,38 @@ is only a mount point — the backing device is `rhel-home`, not `rhel-root`.
 | File | Purpose |
 |---|---|
 | `manifests/doris/setup/01_drop_catalogs.sql` | Drop all existing Doris external catalogs |
-| `manifests/doris/setup/02_create_catalogs.sql` | Create 5 Iceberg catalogs (envsubst for credentials) |
+| `manifests/doris/setup/02_create_catalogs.sql` | Create 5 Iceberg catalogs — points to `polaris-auth-proxy:8283` (no credentials needed) |
 | `manifests/doris/setup/03_create_metadata_tables.sql` | Create `platform_meta` database and tracking tables |
 | `manifests/doris/cache_manager/doris_cache_manager.py` | Python daemon — monitoring, warm-up, LRU eviction |
 | `manifests/doris/cache_manager/Dockerfile` | Container image build |
 | `manifests/doris/cache_manager/spark_iceberg_write.py` | PySpark job executed on Spark workers for write pushdown |
 | `manifests/doris/cache_manager/doris-cache-manager-deployment.yaml` | Kubernetes Deployment in `prod` namespace |
+| `manifests/polaris-auth-proxy/polaris_auth_proxy.py` | Auto-refreshing OAuth2 token proxy — injects `Bearer` token into all Polaris requests |
+| `manifests/polaris-auth-proxy/Dockerfile` | polaris-auth-proxy container image |
+| `manifests/polaris-auth-proxy/polaris-auth-proxy-deployment.yaml` | Kubernetes Deployment for polaris-auth-proxy |
+| `manifests/doris/write-proxy/doris_write_proxy.py` | Transparent MySQL protocol proxy — intercepts catalog DML and pushes to Spark |
+| `manifests/doris/write-proxy/Dockerfile` | doris-write-proxy container image |
+| `manifests/doris/write-proxy/doris-write-proxy-deployment.yaml` | Kubernetes Deployment + NodePort Service for write proxy |
 
 ### 2.2 Credentials
 
 All credentials are read from OpenBao at runtime — nothing is hard-coded.
 
-| OpenBao Path | Keys Used |
-|---|---|
-| `secret/data/platform/doris` | `admin_password` |
-| `secret/data/platform/polaris` | `spark_svc_id`, `spark_svc_secret` |
+| Component | OpenBao Path | Keys Used |
+|---|---|---|
+| Cache manager daemon | `secret/data/platform/doris` | `admin_password` |
+| Cache manager daemon | `secret/data/platform/polaris` | `spark_svc_id`, `spark_svc_secret` |
+| polaris-auth-proxy | `secret/data/platform/polaris` | `doris_reader_id`, `doris_reader_secret`, `doris_writer_id`, `doris_writer_secret` |
 
-The daemon authenticates via the `doris-cache-manager` ServiceAccount JWT bound to
-the **`doris-cache-manager`** OpenBao K8s auth role (policy: `platform-secrets-read`).
+**ServiceAccount → OpenBao role mapping:**
+
+| ServiceAccount | OpenBao Role | Policy |
+|---|---|---|
+| `doris-cache-manager` | `doris-cache-manager` | `platform-secrets-read` |
+| `polaris-token-refresher` | `polaris-token-refresher` | `polaris-token-refresh` |
+
+> **Note:** The `polaris-auth-proxy` uses the `polaris-token-refresher` ServiceAccount
+> (pre-existing). No new OpenBao role was required.
 
 > **Note:** The Doris root password is also injected as `DORIS_ADMIN_PASSWORD` from
 > the `rbac-plane-credentials` K8s secret. This is a startup fallback only — if
@@ -1109,6 +1123,82 @@ kubectl exec -n prod doris-be-0 -- \
 
 ---
 
+### 7.10 All Doris Catalog Queries Fail — `NotAuthorizedException: Not authorized`
+
+**Symptom:**
+
+```sql
+SWITCH polaris;
+SHOW DATABASES;
+-- ERROR 1105 (HY000): errCode = 2, detailMessage =
+--   Failed to init catalog: polaris, error: NotAuthorizedException: Not authorized:
+```
+
+All 5 managed catalogs (`polaris`, `databricks`, `postgres`, `oracle`, `mongodb`) return
+the same error simultaneously.
+
+**Root cause:** The `polaris-auth-proxy` (nginx) was injecting hardcoded JWT tokens
+as `Authorization: Bearer <token>` headers in its nginx ConfigMap.  Those tokens contain
+an `exp` (expiry) timestamp — when they expire, every catalog request to Polaris returns
+`401 Unauthorized`, which Doris surfaces as `NotAuthorizedException`.
+
+This is confirmed by checking Polaris logs:
+```bash
+kubectl logs -n prod -l app=polaris --tail=50 | grep "401"
+# Output: GET /api/catalog/v1/config?warehouse=IcebergCatalog HTTP/1.1" 401
+#         GET /api/catalog/v1/config?warehouse=star_lakehouse  HTTP/1.1" 401
+# ... (all 5 warehouses 401)
+```
+
+**Fix — polaris-auth-proxy now auto-refreshes tokens:**
+
+The nginx pod was replaced with [`manifests/polaris-auth-proxy/polaris_auth_proxy.py`](../../../manifests/polaris-auth-proxy/polaris_auth_proxy.py) — a Python HTTP proxy that:
+- Fetches fresh tokens from Polaris via `client_credentials` using credentials from OpenBao
+- Runs a background thread that refreshes tokens **300s before expiry** — tokens are always valid
+- Injects `Authorization: Bearer <live-token>` into every forwarded request
+
+The 5 Doris catalogs now point to the auth proxy (not Polaris directly) — no OAuth2
+config in the catalog definition is needed:
+
+```sql
+-- New catalog pattern (no credentials, no oauth2 config):
+CREATE CATALOG polaris PROPERTIES (
+    "type"                 = "iceberg",
+    "iceberg.catalog.type" = "rest",
+    "uri"                  = "http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog",
+    "warehouse"            = "IcebergCatalog"
+);
+```
+
+**Recreate catalogs after any proxy restart:**
+
+The proxy does not store state — on restart it fetches fresh tokens immediately.
+Doris catalogs do not need to be recreated after a proxy restart; they will reconnect
+automatically on the next query.
+
+**Verify the proxy has valid tokens:**
+
+```bash
+kubectl logs -n prod deployment/polaris-auth-proxy | grep -E "token obtained|refresh"
+# Expected:
+# TokenManager[writer]: token obtained, valid for 3600s.
+# TokenManager[reader]: token obtained, valid for 3600s.
+# TokenManager[writer]: background refresh thread started.
+# TokenManager[reader]: background refresh thread started.
+```
+
+**Verify a catalog works:**
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SWITCH polaris; SHOW DATABASES;"
+# Expected: tpcds, tpcds_sf10tcl, information_schema, mysql
+```
+
+---
+
 ## 9. Known Issues & Deployment History
 
 ### 9.2 Segment Cache Rollout (2026-09-09)
@@ -1146,6 +1236,52 @@ the 70 GB OS root (`rhel-root`/`/opt`).
 **Outstanding:** Dead ghost backend `10.244.26.90:9050` remains in
 `SHOW BACKENDS` (`HeartbeatFailureCounter: 85459+`). Drop with
 `ALTER SYSTEM DROP BACKEND "10.244.26.90:9050";` when convenient (see §7.9).
+
+---
+
+### 9.3 Polaris Auth Proxy — Hardcoded Token Expiry (2026-09-09)
+
+**Context:** All 5 Doris Iceberg catalogs (`polaris`, `databricks`, `postgres`,
+`oracle`, `mongodb`) returned `NotAuthorizedException: Not authorized` on every
+query after the session on 2026-09-09.
+
+**Root cause:** The `polaris-auth-proxy` was an nginx pod whose ConfigMap contained
+JWT Bearer tokens hard-coded as `proxy_set_header Authorization "Bearer <token>"`.
+Each token has an `exp` field encoding its expiry timestamp:
+
+| Port | Principal | Token `iat` | Token `exp` | Status |
+|---|---|---|---|---|
+| `:8282` | `doris-writer` | 2026-09-07 | 2026-09-07 +1h | **Expired** |
+| `:8283` | `doris-reader` | 2026-08-10 | 2026-08-10 +1h | **Expired (26 days)** |
+
+When tokens expired, Polaris returned `401` on `GET /api/catalog/v1/config?warehouse=…`,
+which Doris surfaces as `NotAuthorizedException`. The nginx pod was restarted every hour
+(via a CronJob) to rotate the hardcoded tokens — but the CronJob did not update the
+ConfigMap, only restarted the pod, which reloaded the same expired tokens.
+
+**Resolution:** Replaced the nginx pod with a Python auto-refreshing proxy:
+
+- **New image:** `192.168.1.50:30500/polaris-auth-proxy:1.0.0`
+- **Source:** [`manifests/polaris-auth-proxy/polaris_auth_proxy.py`](../../../manifests/polaris-auth-proxy/polaris_auth_proxy.py)
+- **Mechanism:** Fetches tokens via OAuth2 `client_credentials` from Polaris at startup,
+  using `doris_reader_id`/`doris_writer_id` credentials read from OpenBao
+  (`secret/data/platform/polaris`). Refreshes proactively 300s before expiry.
+- **K8s auth:** Uses existing `polaris-token-refresher` ServiceAccount + OpenBao role —
+  no new roles or secrets required.
+- **Port contract unchanged:** `:8282` = writer, `:8283` = reader.
+
+All 5 catalogs were recreated pointing to `polaris-auth-proxy:8283` with no OAuth2
+properties — the proxy injects auth transparently. Catalogs verified working immediately
+after recreation (git: `75d3621`).
+
+**Confirmed working (2026-09-09):**
+```
+polaris    → tpcds, tpcds_sf10tcl  ✅
+databricks → demo, lakehouse_db    ✅
+postgres   → public                ✅
+oracle     → cache_testing, tpcds  ✅
+mongodb    → cache_testing         ✅
+```
 
 ---
 
