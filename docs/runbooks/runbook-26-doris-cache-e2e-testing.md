@@ -411,12 +411,14 @@ echo "S3_KEY=${S3_KEY}  S3_SECRET_LEN=${#S3_SECRET}"
 
 **Step 2 — Drop all 5 managed catalogs:**
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 DROP CATALOG IF EXISTS polaris;
 DROP CATALOG IF EXISTS databricks;
 DROP CATALOG IF EXISTS postgres;
 DROP CATALOG IF EXISTS oracle;
 DROP CATALOG IF EXISTS mongodb;
+"
 ```
 
 **Step 3 — Recreate with S3 credentials:**
@@ -440,7 +442,8 @@ The script ends with `SHOW CATALOGS` — verify all 5 appear.
 
 Wait ~30 seconds after T-11, then:
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog, db, COUNT(*) AS hits
 FROM __internal_schema.audit_log
 WHERE
@@ -449,6 +452,7 @@ WHERE
     AND catalog IN ('polaris','databricks','postgres','oracle','mongodb')
 GROUP BY catalog, db
 ORDER BY catalog;
+"
 ```
 
 **Expected — 5 rows, one per catalog:**
@@ -500,12 +504,14 @@ where `N ≥ 1`.
 
 ### T-14 — `table_query_stats` rows appear after first cycle
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, db_name, table_name,
        total_select_count, cache_state, last_select_ts
 FROM platform_meta.table_query_stats
 ORDER BY last_select_ts DESC
 LIMIT 10;
+"
 ```
 
 **Expected:** at least 1 row per catalog queried in T-11.
@@ -519,16 +525,18 @@ LIMIT 10;
 
 Note the current `total_select_count` for one table, then re-run its query:
 
-```sql
--- Record current count
+```bash
+# Record current count
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT total_select_count
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';
+  AND table_name = 'store_sales';"
 
--- Run the seeding query again (from another MySQL session)
--- Use polaris.tpcds_sf10tcl.store_sales (1.5 M rows — reliably lands in audit log)
-SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.store_sales;
+# Run the seeding query again
+# Use polaris.tpcds_sf10tcl.store_sales (1.5 M rows — reliably lands in audit log)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.store_sales;"
 ```
 
 Restart the daemon to force a new cycle:
@@ -539,11 +547,12 @@ kubectl rollout restart deployment/doris-cache-manager -n prod
 
 After the cycle completes, re-check:
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT total_select_count
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';
+  AND table_name = 'store_sales';"
 ```
 
 **Expected:** count is higher than the value recorded before the second query.
@@ -557,7 +566,8 @@ WHERE catalog_name = 'polaris'
 
 After T-15 (at least 2 query hits on a table):
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT
     catalog_name,
     table_name,
@@ -568,6 +578,7 @@ FROM platform_meta.table_query_stats
 WHERE total_select_count > 1
 ORDER BY total_select_count DESC
 LIMIT 5;
+"
 ```
 
 **Expected:** `select_interval_min` and `warm_interval_min` are non-NULL, and:
@@ -584,10 +595,9 @@ warm_interval_min ≈ select_interval_min × 0.667  (within rounding)
 
 ### T-17 — Manual `WARM UP CACHE … USING JOB` succeeds
 
-```sql
-WARM UP CACHE
-  ON TABLE polaris.tpcds_sf10tcl.store_sales
-  USING JOB;
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.store_sales USING JOB;"
 ```
 
 **Expected:** query returns without error (Doris responds immediately; the job runs async).
@@ -601,8 +611,9 @@ WARM UP CACHE
 
 Poll every 15 seconds until the job finishes (typically < 2 minutes for a small table):
 
-```sql
-SHOW WARM UP JOB WHERE TableName = 'store_sales';
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SHOW WARM UP JOB WHERE TableName = 'store_sales';"
 ```
 
 **Expected column values:**
@@ -620,11 +631,12 @@ SHOW WARM UP JOB WHERE TableName = 'store_sales';
 
 After T-18:
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state, last_warmed_ts
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';
+  AND table_name = 'store_sales';"
 ```
 
 **Expected:**
@@ -682,11 +694,12 @@ where `M ≥ 1`.
 
 After T-20 completes:
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT last_warmed_ts, cache_state
 FROM platform_meta.table_query_stats
 WHERE catalog_name = 'polaris'
-  AND table_name = 'store_sales';
+  AND table_name = 'store_sales';"
 ```
 
 **Expected:** `last_warmed_ts` is a timestamp within the last 10 minutes.
@@ -705,10 +718,9 @@ WHERE catalog_name = 'polaris'
 
 ### T-22 — Manual `COLD_DOWN` executes without error
 
-```sql
-WARM UP CACHE
-  ON TABLE polaris.tpcds_sf10tcl.store_sales
-  USING COLD_DOWN;
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.store_sales USING COLD_DOWN;"
 ```
 
 **Expected:** no SQL error.
@@ -757,11 +769,13 @@ kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 
 ### T-24 — `cache_eviction_log` records the eviction event
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, db_name, table_name, evicted_at, reason, last_select_ts
 FROM platform_meta.cache_eviction_log
 ORDER BY evicted_at DESC
 LIMIT 5;
+"
 ```
 
 **Expected:** at least one row for `polaris / tpcds_sf10tcl / store_sales` with `reason = 'no_select_0h'` (or `no_select_24h` if the 24-hour path was used).
@@ -782,12 +796,14 @@ kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 sleep 15
 ```
 
-```sql
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT COUNT(*) AS eviction_count
 FROM platform_meta.cache_eviction_log
 WHERE catalog_name = 'polaris'
   AND table_name = 'store_sales'
   AND evicted_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE);
+"
 ```
 
 **Expected:** `eviction_count = 0` (no new eviction for an already-COLD table).
@@ -996,8 +1012,9 @@ mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
 
 After all tests are complete, verify the full pass matrix:
 
-```sql
--- Quick snapshot of current metadata state
+```bash
+# Quick snapshot of current metadata state
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT
     catalog_name,
     table_name,
@@ -1008,12 +1025,15 @@ SELECT
     warm_interval_min
 FROM platform_meta.table_query_stats
 ORDER BY catalog_name, table_name;
+"
 
--- Eviction audit
+# Eviction audit
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, table_name, evicted_at, reason
 FROM platform_meta.cache_eviction_log
 ORDER BY evicted_at DESC
 LIMIT 10;
+"
 ```
 
 ```bash
