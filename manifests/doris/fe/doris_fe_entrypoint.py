@@ -80,7 +80,7 @@ def _run_fe() -> int:
     Start start_fe.sh as a child process, proxy signals, return exit code.
     start_fe.sh expects the master FQDN as its first argument (same as before).
     """
-    cmd = [FE_SCRIPT, "--daemon=false"] + FE_ARGS
+    cmd = [FE_SCRIPT] + FE_ARGS
     log.info("Starting Doris FE: %s", " ".join(cmd))
 
     proc = subprocess.Popen(
