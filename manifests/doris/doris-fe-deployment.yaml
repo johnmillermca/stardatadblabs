@@ -165,6 +165,8 @@ spec:
             - /app/doris_fe_entrypoint.py
             - doris-fe-headless.prod.svc.cluster.local
             - --metadata_failure_recovery
+            - --recovery_journal_id
+            - "762855"
           ports:
             - name: http
               containerPort: 8030
