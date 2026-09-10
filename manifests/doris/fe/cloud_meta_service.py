@@ -178,14 +178,19 @@ def _node_info_pb() -> bytes:
 def _fe_node_info_pb() -> bytes:
     """
     NodeInfoPB for the FE itself.
-    node_type=11: FE_MASTER=1 — CloudEnv reads this to determine the FE's role.
+
+    CloudEnv.lambda#2 builds:  (enable_fqdn_mode ? host : ip) + "_" + editLogPort
+    and compares it to selfNode.getIdent() = "<fqdn>_9010".
+
+    Field numbers (from Cloud.java):
+      cloud_unique_id = 1, ip = 3, edit_log_port = 10, host = 13, node_type = 11
     """
     return (
-        _field_str(1,  CLOUD_UID)    +   # cloud_unique_id (must match FE's cloud_unique_id)
-        _field_str(3,  FE_HOST)      +   # ip
-        _field_varint(8, FE_HB_PORT) +   # heartbeat_port (edit-log port)
-        _field_str(13, FE_HOST)      +   # host
-        _field_varint(11, 1)             # node_type = FE_MASTER (1)
+        _field_str(1,  CLOUD_UID)       +   # cloud_unique_id (must match FE's cloud_unique_id)
+        _field_str(3,  FE_HOST)         +   # ip
+        _field_varint(10, FE_HB_PORT)   +   # edit_log_port (field 10) — used for selfNode match
+        _field_str(13, FE_HOST)         +   # host (used when enable_fqdn_mode=true)
+        _field_varint(11, 1)                # node_type = FE_MASTER (1)
     )
 
 
