@@ -82,7 +82,14 @@ SPARK_POLL_INTERVAL_S = int(os.environ.get("SPARK_POLL_INTERVAL_S", "5"))
 BAO_ADDR            = os.environ.get("ADDR") or os.environ.get("BAO_ADDR",
     "http://openbao.prod.svc.cluster.local:8200")
 
-_SPARK_WRITE_SCRIPT = "/app/spark_iceberg_write.py"
+# Path to the PySpark write script submitted to Spark workers.
+# Must be accessible from Spark worker nodes — use an s3:// URL (uploaded once
+# to S3) rather than a local /app/ path which only exists in the proxy container.
+# Override via SPARK_WRITE_SCRIPT env var if the S3 path changes.
+_SPARK_WRITE_SCRIPT = os.environ.get(
+    "SPARK_WRITE_SCRIPT",
+    "s3://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py",
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Managed catalogs + warehouse mapping

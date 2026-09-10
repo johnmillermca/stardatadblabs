@@ -137,8 +137,14 @@ SPARK_MASTER_URL = os.environ.get(
     "spark://spark-master-internal.prod.svc.cluster.local:17077",
 )
 SPARK_VERSION    = os.environ.get("SPARK_VERSION", "3.5.1")
-# Path of the write-pushdown PySpark script baked into the image.
-_SPARK_WRITE_SCRIPT = "/app/spark_iceberg_write.py"
+# Path to the PySpark write script submitted to Spark workers.
+# Must be accessible from Spark worker nodes — use an s3:// URL (uploaded once
+# to S3) rather than a local /app/ path which only exists in the cache-manager
+# container.  Override via SPARK_WRITE_SCRIPT env var if the S3 path changes.
+_SPARK_WRITE_SCRIPT = os.environ.get(
+    "SPARK_WRITE_SCRIPT",
+    "s3://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py",
+)
 # How frequently the write-interceptor background thread polls audit_log (seconds).
 WRITE_POLL_INTERVAL_S = int(os.environ.get("WRITE_POLL_INTERVAL_S", "10"))
 
