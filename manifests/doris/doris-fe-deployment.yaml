@@ -159,6 +159,7 @@ spec:
         # ── Doris FE ─────────────────────────────────────────────────────────
         - name: doris-fe
           image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger-ms
+          imagePullPolicy: Always
           command:
             - python3
             - /app/doris_fe_entrypoint.py
