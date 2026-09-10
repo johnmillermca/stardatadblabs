@@ -56,11 +56,6 @@ data:
     enable_fqdn_mode = true
     advertised_address = doris-fe-0.doris-fe-headless.prod.svc.cluster.local
     priority_networks = 10.244.0.0/16
-    # ── Cloud / disaggregated mode — enables WARM UP CLUSTER, SHOW WARM UP JOB,
-    #    and COLD_DOWN SQL commands via the embedded Python MetaService stub.
-    #    The stub runs on localhost:5000 (loopback only) and has zero impact on
-    #    query/scan/load performance — those go directly over FE→BE Thrift.
-    deploy_mode = local
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -155,14 +150,11 @@ spec:
             periodSeconds: 10
 
         # ── Doris FE ─────────────────────────────────────────────────────────
-        # TEMPORARY: run original image in local mode to generate a fresh
-        # checkpoint image, then switch back to fe-4.0.7-ranger-ms (cloud mode).
         - name: doris-fe
-          image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger
+          image: 192.168.1.50:30500/apache/doris:fe-4.0.7
           command:
-            - bash
-            - /opt/apache-doris/fe/bin/start_fe.sh
-            - --console
+            - /opt/apache-doris/fe_entrypoint.sh
+            - doris-fe-headless.prod.svc.cluster.local
           ports:
             - name: http
               containerPort: 8030
