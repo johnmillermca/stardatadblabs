@@ -103,12 +103,13 @@ spec:
             # generates "0 bytes read on a total of 4 expected bytes" errors every
             # 10 s because the MySQL protocol proxy expects a 4-byte packet header
             # before the handshake response, but the probe sends nothing.
-            # Use an exec probe that checks the Python process is alive instead.
+            # Use /proc/1/cmdline to verify PID 1 is the proxy process — works
+            # on any slim Python image without needing pgrep or procps.
             exec:
               command:
                 - sh
                 - -c
-                - "kill -0 $(pgrep -f doris_write_proxy.py) 2>/dev/null"
+                - "grep -q doris_write_proxy /proc/1/cmdline"
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
@@ -117,7 +118,7 @@ spec:
               command:
                 - sh
                 - -c
-                - "kill -0 $(pgrep -f doris_write_proxy.py) 2>/dev/null"
+                - "grep -q doris_write_proxy /proc/1/cmdline"
             initialDelaySeconds: 15
             periodSeconds: 30
             failureThreshold: 3
