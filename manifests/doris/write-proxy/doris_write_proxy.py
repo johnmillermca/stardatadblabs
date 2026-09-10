@@ -287,14 +287,23 @@ def _catalog_and_parts(stmt: str) -> Tuple[str | None, str | None, str | None]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Spark submission (synchronous, runs in executor thread)
+# Spark submission via spark-submit (synchronous, runs in executor thread)
 # ─────────────────────────────────────────────────────────────────────────────
+import subprocess
+
+# spark-submit binary — must be present in the proxy image or on PATH.
+# We invoke it in client mode from inside the pod so the driver runs here
+# and logs are captured directly.  The Spark REST API does not support
+# PySpark cluster-mode submission (DriverWrapper requires a non-empty Java
+# mainClass; Python scripts need PythonRunner which is only wired by
+# spark-submit, not the REST endpoint).
+_SPARK_SUBMIT  = os.environ.get("SPARK_SUBMIT_BIN", "spark-submit")
 
 def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tuple[bool, str]:
     """
-    Submit stmt to Spark REST and block until terminal state.
+    Execute spark_iceberg_write.py via spark-submit (client mode, blocking).
     Returns (success: bool, message: str).
-    Runs in a thread-pool executor so it does not block the event loop.
+    Runs in a thread-pool executor so it does not block the asyncio event loop.
     """
     warehouse = MANAGED_CATALOGS[catalog]
     job_args  = json.dumps({
@@ -305,70 +314,50 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
         "stmt":      stmt,
     })
 
-    payload = {
-        "action":      "CreateSubmissionRequest",
-        "appResource": _SPARK_WRITE_SCRIPT,
-        "mainClass":   "",  # PySpark — empty mainClass, Spark uses SparkSubmit
-        "appArgs":     [job_args],
-        "sparkProperties": {
-            "spark.app.name":                              f"doris-write-proxy-{catalog}-{table}",
-            "spark.master":                                SPARK_MASTER_URL,
-            "spark.submit.deployMode":                     "cluster",
-            # S3A credentials so the worker can fetch the appResource script
-            # from s3a://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py
-            "spark.hadoop.fs.s3a.access.key":              _S3_KEY,
-            "spark.hadoop.fs.s3a.secret.key":              _S3_SECRET,
-            "spark.hadoop.fs.s3a.endpoint":                "s3.us-east-2.amazonaws.com",
-            "spark.hadoop.fs.s3a.impl":                    "org.apache.hadoop.fs.s3a.S3AFileSystem",
-            "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-        },
-        "environmentVariables": {"ADDR": BAO_ADDR},
-        "clientSparkVersion": "3.5.1",
-    }
+    cmd = [
+        _SPARK_SUBMIT,
+        "--master",      SPARK_MASTER_URL,
+        "--deploy-mode", "client",
+        "--name",        f"doris-write-proxy-{catalog}-{table}",
+        _SPARK_WRITE_SCRIPT,
+        job_args,
+    ]
 
-    # ── Submit ─────────────────────────────────────────────────────────────────
-    url = f"{SPARK_REST_URL}/v1/submissions/create"
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    env = os.environ.copy()
+    env["ADDR"] = BAO_ADDR
+
+    logger.info("WriteProxy: spark-submit %s.%s.%s", catalog, db, table)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
-        submission_id = result.get("submissionId")
-        if not submission_id:
-            return False, f"Spark did not return submissionId: {result}"
-    except Exception as exc:
-        return False, f"Spark submission failed: {exc}"
+        result = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=SPARK_JOB_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"spark-submit timed out after {SPARK_JOB_TIMEOUT_S}s"
+    except FileNotFoundError:
+        return False, f"spark-submit not found at '{_SPARK_SUBMIT}' — set SPARK_SUBMIT_BIN env var"
 
-    logger.info("WriteProxy: %s.%s.%s → Spark submissionId=%s", catalog, db, table, submission_id)
+    # Log the driver output for observability
+    if result.stdout:
+        for line in result.stdout.strip().splitlines():
+            logger.info("WriteProxy [spark stdout]: %s", line)
+    if result.stderr:
+        for line in result.stderr.strip().splitlines()[-20:]:
+            logger.info("WriteProxy [spark stderr]: %s", line)
 
-    # ── Poll until terminal ─────────────────────────────────────────────────────
-    status_url = f"{SPARK_REST_URL}/v1/submissions/status/{submission_id}"
-    terminal   = {"FINISHED", "FAILED", "KILLED", "ERROR"}
-    deadline   = time.monotonic() + SPARK_JOB_TIMEOUT_S
-
-    while time.monotonic() < deadline:
-        time.sleep(SPARK_POLL_INTERVAL_S)
-        try:
-            with urllib.request.urlopen(status_url, timeout=10) as resp:
-                status = json.loads(resp.read())
-            state = status.get("driverState", "UNKNOWN").upper()
-        except Exception as exc:
-            logger.warning("WriteProxy: status poll error (%s) — retrying.", exc)
-            continue
-
-        if state in terminal:
-            if state == "FINISHED":
-                logger.info("WriteProxy: %s.%s.%s FINISHED.", catalog, db, table)
-                return True, f"Write succeeded via Spark (submissionId={submission_id})"
-            else:
-                msg = f"Spark job {state} (submissionId={submission_id})"
-                logger.error("WriteProxy: %s.%s.%s %s.", catalog, db, table, state)
-                return False, msg
-
-    return False, f"Timed out after {SPARK_JOB_TIMEOUT_S}s (submissionId={submission_id})"
+    if result.returncode == 0:
+        logger.info("WriteProxy: %s.%s.%s spark-submit FINISHED.", catalog, db, table)
+        return True, "Write succeeded via spark-submit"
+    else:
+        # Extract last meaningful error line from stderr
+        err_lines = [l for l in result.stderr.strip().splitlines() if l.strip()]
+        last_err  = err_lines[-1] if err_lines else "unknown error"
+        logger.error("WriteProxy: %s.%s.%s spark-submit FAILED (rc=%d): %s",
+                     catalog, db, table, result.returncode, last_err)
+        return False, f"spark-submit failed (rc={result.returncode}): {last_err}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
