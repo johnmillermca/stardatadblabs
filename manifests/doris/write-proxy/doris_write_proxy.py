@@ -308,10 +308,7 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
     payload = {
         "action":      "CreateSubmissionRequest",
         "appResource": _SPARK_WRITE_SCRIPT,
-        # PySpark scripts submitted via the Spark standalone REST API in cluster
-        # mode require DriverWrapper as mainClass — an empty string causes
-        # ClassNotFoundException in the worker JVM.
-        "mainClass":   "org.apache.spark.deploy.worker.DriverWrapper",
+        "mainClass":   "",  # PySpark — empty mainClass, Spark uses SparkSubmit
         "appArgs":     [job_args],
         "sparkProperties": {
             "spark.app.name":                              f"doris-write-proxy-{catalog}-{table}",

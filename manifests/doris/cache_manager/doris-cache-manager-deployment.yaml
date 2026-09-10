@@ -81,7 +81,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: cache-manager
-          image: 192.168.1.50:30500/doris-cache-manager:1.5.4
+          image: 192.168.1.50:30500/doris-cache-manager:1.5.5
           imagePullPolicy: Always
           command: ["python", "/app/doris_cache_manager.py"]
           env:
