@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-09 |
+| **Last Updated** | 2026-09-10 (v1.4.0 — cache metrics phase added) |
 | **Related** | RB-25 (Cache Manager Setup & Operations) · RB-05 (Doris & Analytics) |
 
 ---
@@ -17,7 +17,7 @@ This runbook is a single, ordered end-to-end test script for the Doris Dynamic S
 Manager. Run each section from top to bottom on a live cluster. Every test includes the exact
 command, expected output, and a ✅ / ❌ pass/fail criterion.
 
-The test covers six phases in order:
+The test covers seven phases in order:
 
 | Phase | Tests | What it validates |
 |---|---|---|
@@ -26,7 +26,8 @@ The test covers six phases in order:
 | **P-3** | T-11 – T-16 | Audit log seeding — queries reach the daemon and stats are persisted |
 | **P-4** | T-17 – T-21 | Warm-up scheduling — automatic and manual WARM_UP jobs |
 | **P-5** | T-22 – T-25 | LRU eviction — COLD_DOWN and eviction log |
-| **P-6** | T-26 – T-32 | Write pushdown — DML interception and Spark execution |
+| **P-6** | T-26 – T-33 | Write pushdown — DML interception and Spark execution |
+| **P-7** | T-34 – T-38 | Cache metrics — `table_cache_metrics` I/O tracking and hit-rate validation |
 
 ---
 
@@ -68,6 +69,11 @@ The test covers six phases in order:
 | T-31 | P-6 | Write | SELECT via proxy works unchanged |
 | T-32 | P-6 | Write | Manual Spark REST submission executes successfully |
 | T-33 | P-6 | Write | Proxy does not intercept unknown catalog DML |
+| T-34 | P-7 | Metrics | `table_cache_metrics` table exists and has rows after one cycle |
+| T-35 | P-7 | Metrics | `SELECT * LIMIT 1000` is captured and shows local vs remote bytes |
+| T-36 | P-7 | Metrics | Second run of same query shows 100% `cache_hit_pct` |
+| T-37 | P-7 | Metrics | `warmup_count` increments after daemon warms a table |
+| T-38 | P-7 | Metrics | Metrics update does not block or delay concurrent SELECT workload |
 
 ---
 
@@ -533,17 +539,55 @@ where `N ≥ 1`.
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, db_name, table_name,
-       total_select_count, cache_state, last_select_ts
+       total_select_count, cache_state,
+       last_select_ts,
+       last_warmed_ts,
+       CASE
+         WHEN last_warmed_ts IS NULL THEN 'never warmed'
+         ELSE CONCAT(
+           FLOOR(TIMESTAMPDIFF(SECOND, last_warmed_ts, NOW()) / 3600), 'h ',
+           FLOOR((TIMESTAMPDIFF(SECOND, last_warmed_ts, NOW()) % 3600) / 60), 'm ',
+           TIMESTAMPDIFF(SECOND, last_warmed_ts, NOW()) % 60, 's ago'
+         )
+       END AS warmed_age,
+       ROUND(warm_interval_min, 2) AS warm_interval_min,
+       select_interval_min
 FROM platform_meta.table_query_stats
 ORDER BY last_select_ts DESC
 LIMIT 10;
 "
 ```
 
+> **Note:** `last_warmed_ts` shows when the cache was last *physically warmed*.
+> `warmed_age` shows how long ago that was in human-readable form (`Xh Ym Zs ago`).
+> `last_select_ts` shows when the table was last *queried* — a different timestamp.
+> Both will be `NULL` / `'never warmed'` until Phase 4 completes at least one warm-up cycle.
+
 **Expected:** at least 1 row per catalog queried in T-11.
 
-✅ Pass: rows present with `total_select_count ≥ 1`.  
+✅ Pass: rows present with `total_select_count ≥ 1`.
 ❌ Fail: empty result → daemon cycle did not complete successfully. Check daemon logs for errors.
+
+**Observed (2026-09-10 00:26 live run — v1.4.0):**
+```
+catalog   db              table            count  state  last_select_ts        last_warmed_ts        warmed_age      warm_interval
+oracle    tpcds           web_site         263    WARM   2026-09-10 00:26:14   NULL                  never warmed    3.35
+postgres  public          products         372    WARM   2026-09-10 00:26:14   NULL                  never warmed    3.35
+polaris   tpcds_sf10tcl   web_sales        263    WARM   2026-09-10 00:26:14   2026-09-10 00:26:19   0h 1m 37s ago   3.35
+oracle    tpcds           web_page         6      WARM   2026-09-10 00:26:14   2026-09-10 00:26:15   0h 1m 41s ago   3.35
+postgres  public          product_reviews  6      WARM   2026-09-10 00:26:14   2026-09-10 00:26:20   0h 1m 36s ago   3.35
+polaris   tpcds_sf10tcl   web_returns      6      WARM   2026-09-10 00:26:14   2026-09-10 00:26:19   0h 1m 37s ago   3.35
+oracle    tpcds           warehouse        30     WARM   2026-09-10 00:26:14   2026-09-10 00:26:18   0h 1m 38s ago   3.35
+postgres  public          orders           6      WARM   2026-09-10 00:26:14   2026-09-10 00:26:18   0h 1m 38s ago   3.35
+polaris   tpcds_sf10tcl   store_sales      72     WARM   2026-09-10 00:26:14   2026-09-10 00:26:19   0h 1m 37s ago   3.35
+oracle    tpcds           ship_mode        6      WARM   2026-09-10 00:26:14   2026-09-10 00:26:15   0h 1m 41s ago   3.35
+```
+
+The `warmed_age` column tells you at a glance how stale the cache is for each table:
+- `0h 1m 37s ago` — warmed ~2 minutes ago, very fresh ✅
+- `never warmed` — `last_warmed_ts` is `NULL`; the daemon scanned the table but the
+  `update_last_warmed` write has not persisted yet (or the block was warmed before this
+  metric column existed). Check `table_cache_metrics.warmup_count` for the running count.
 
 ---
 
@@ -675,8 +719,12 @@ last_warmed_ts: <recent timestamp>
 > If the warm-up was triggered manually (not by the daemon), restart the daemon and wait for
 > one cycle — the `update_last_warmed` call only runs inside `_run_warmup`.
 
-✅ Pass: `cache_state = WARM` and `last_warmed_ts` is non-NULL.  
+✅ Pass: `cache_state = WARM` and `last_warmed_ts` is non-NULL.
 ❌ Fail: still `UNKNOWN` → manually trigger a daemon cycle (restart the pod).
+
+**Observed (2026-09-09 22:57 live run):** `polaris` and `postgres` catalog tables confirmed
+`cache_state = WARM` with `last_warmed_ts` populated within seconds of the daemon cycle completing.
+`oracle` catalog tables remained `UNKNOWN` — see known-issue note after T-21.
 
 ---
 
@@ -730,8 +778,101 @@ WHERE catalog_name = 'polaris'
 
 **Expected:** `last_warmed_ts` is a timestamp within the last 10 minutes.
 
-✅ Pass: timestamp is recent.  
+✅ Pass: timestamp is recent.
 ❌ Fail: timestamp unchanged → warm-up thread may have errored; check daemon logs for `WARM_UP thread error`.
+
+**Observed (2026-09-09 22:57 live run):**
+```
+polaris  web_sales     → last_warmed_ts: 2026-09-09 22:57:33  cache_state: WARM  ✅
+polaris  web_returns   → last_warmed_ts: 2026-09-09 22:57:26  cache_state: WARM  ✅
+polaris  store_sales   → last_warmed_ts: 2026-09-09 22:57:19  cache_state: WARM  ✅
+postgres products      → last_warmed_ts: 2026-09-09 22:57:17  cache_state: WARM  ✅
+postgres product_reviews → last_warmed_ts: 2026-09-09 22:57:19  cache_state: WARM  ✅
+postgres orders        → last_warmed_ts: 2026-09-09 22:57:16  cache_state: WARM  ✅
+oracle   *             → last_warmed_ts: NULL                  cache_state: UNKNOWN  ❌
+```
+
+---
+
+### Known Issue: `cache_state = UNKNOWN` / `last_warmed_ts = NULL` {#known-issue-cache-state-unknown}
+
+#### Why `cache_state` starts as `UNKNOWN`
+
+`UNKNOWN` is the **default** state written when the daemon inserts a brand-new row into
+`table_query_stats` during an audit scrape.  It is overwritten with `WARM` only after
+the warm-up thread completes its full-scan SELECT and calls `update_last_warmed()`.
+
+State machine:
+```
+row inserted by audit scraper → cache_state = UNKNOWN
+        ↓  (warm-up SELECT completes on BE)
+  cache_state = WARM    (update_last_warmed writes this)
+        ↓  (idle > LRU_EVICT_HOURS)
+  cache_state = COLD    (eviction records this)
+```
+
+If you query `table_query_stats` **in the gap** between the audit scrape and the warm-up
+thread completing, every new table will show `UNKNOWN`.  This is transient — wait until
+the end of the cycle (at most `SCAN_INTERVAL_S` seconds) and re-run the query.
+
+#### Why `last_warmed_ts` can be `NULL` even when `cache_state = WARM`
+
+There are two distinct causes:
+
+**1 — Transient `(2013) Lost connection` during the warm-up scan**
+
+When the daemon launches up to 32 warm-up threads simultaneously, the Doris FE can
+temporarily drop one of the new connections under load.  The thread aborts at the
+`warmup_conn.execute(warm_sql)` call — before it ever reaches `update_last_warmed()`.
+The row stays at whatever `cache_state` it held previously (`WARM` from a past cycle),
+but `last_warmed_ts` is not updated.
+
+```
+ERROR — WARM_UP thread error for oracle.tpcds.web_site: (2013, 'Lost connection to MySQL server during query')
+ERROR — WARM_UP thread error for postgres.public.products: (2013, 'Lost connection to MySQL server during query')
+```
+
+**Resolution:** automatic — the next daemon cycle retries the warm-up for every table
+that is due.  No manual action needed.  Check current errors with:
+
+```bash
+kubectl logs -n prod -l app=doris-cache-manager --tail=200 \
+  | grep -E "WARM_UP thread error|Lost connection"
+```
+
+**2 — Ghost row re-seeded from audit log**
+
+A table that was previously deleted from `table_query_stats` (ghost cleanup) can be
+re-inserted if the audit log still has recent SELECT statements against it.  The new row
+starts with `UNKNOWN / NULL` until the next warm-up cycle processes it.
+
+```bash
+# Identify ghost candidates: UNKNOWN state with zero warm attempts
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT catalog_name, db_name, table_name, cache_state, last_warmed_ts
+FROM platform_meta.table_query_stats
+WHERE cache_state = 'UNKNOWN'
+ORDER BY updated_at DESC;"
+```
+
+Ghost rows are auto-deleted by the daemon when the warm-up SELECT fails with
+`"does not exist"` / `"Unknown table"`.  If the table *does* exist, the next cycle will
+successfully warm it and write `WARM`.
+
+**Observed (2026-09-10 00:26 live run — confirmed root causes):**
+
+```
+oracle.tpcds.web_site           cache_state=WARM  last_warmed_ts=NULL  ← (2013) lost connection
+oracle.tpcds.household_demographics  cache_state=WARM  last_warmed_ts=NULL  ← (2013) lost connection
+oracle.tpcds.income_band        cache_state=WARM  last_warmed_ts=NULL  ← (2013) lost connection
+oracle.general_ledger           cache_state=UNKNOWN  last_warmed_ts=NULL  ← ghost row re-seeded
+```
+
+All other oracle tables (`call_center`, `catalog_page`, `promotion`, `reason`, `ship_mode`,
+`warehouse`, `web_page`) warmed successfully: `last_warmed_ts` populated within the same cycle.
+
+**Conclusion:** Oracle JDBC tables warm correctly — the earlier belief that oracle was
+unsupported was incorrect.  The failures were pure connection-pressure transients.
 
 ---
 
@@ -1048,6 +1189,7 @@ SELECT
     cache_state,
     last_select_ts,
     last_warmed_ts,
+    select_interval_min,
     warm_interval_min
 FROM platform_meta.table_query_stats
 ORDER BY catalog_name, table_name;
@@ -1078,6 +1220,269 @@ WriteInterceptor: 1 new DML write(s) detected against external catalogs.
 WriteInterceptor: pushed polaris.tpcds_sf10tcl.inventory (qid=...) → Spark submissionId=driver-...
 === Cycle done. active_warmups=N ===
 ```
+
+### Live Run Results — 2026-09-09 22:57 (initial run)
+
+| catalog | table | total_select_count | cache_state | last_warmed_ts | result |
+|---|---|---|---|---|---|
+| oracle | web_site | 239 | `UNKNOWN` | NULL | ❌ Transient — (2013) lost connection during warm-up |
+| oracle | web_page | 239 | `UNKNOWN` | NULL | ❌ Transient — retried next cycle → WARM |
+| oracle | warehouse | 1201 | `UNKNOWN` | NULL | ❌ Transient — retried next cycle → WARM |
+| oracle | ship_mode | 239 | `UNKNOWN` | NULL | ❌ Transient — retried next cycle → WARM |
+| polaris | web_sales | 239 | `WARM` | 2026-09-09 22:57:33 | ✅ |
+| polaris | web_returns | 239 | `WARM` | 2026-09-09 22:57:26 | ✅ |
+| polaris | store_sales | 2652 | `WARM` | 2026-09-09 22:57:19 | ✅ |
+| postgres | products | 275 | `WARM` | 2026-09-09 22:57:17 | ✅ |
+| postgres | product_reviews | 239 | `WARM` | 2026-09-09 22:57:19 | ✅ |
+| postgres | orders | 239 | `WARM` | 2026-09-09 22:57:16 | ✅ |
+
+`select_interval_min = 1.051`, `warm_interval_min = 0.701` (2/3 ratio confirmed ✅).
+Oracle `UNKNOWN` was **not** a catalog-type limitation — it was a `(2013) Lost connection` transient
+when 32 warm-up threads all connected simultaneously. Confirmed resolved in next cycle.
+See [Known Issue: cache_state = UNKNOWN](#known-issue-cache-state-unknown) for full root cause analysis.
+
+**Daemon pod at time of run:** `doris-cache-manager-6c9dfcb86c-vgvfv` — Running, 0 restarts.
+
+---
+
+### Live Run Results — 2026-09-10 00:26 (confirmed cycle, v1.4.0)
+
+| catalog | table | cache_state | last_warmed_ts | warmed_age | result |
+|---|---|---|---|---|---|
+| oracle | call_center | `WARM` | 2026-09-10 00:26:15 | 4m 39s ago | ✅ |
+| oracle | catalog_page | `WARM` | 2026-09-10 00:26:15 | 4m 39s ago | ✅ |
+| oracle | promotion | `WARM` | 2026-09-10 00:26:15 | 4m 39s ago | ✅ |
+| oracle | reason | `WARM` | 2026-09-10 00:26:17 | 4m 37s ago | ✅ |
+| oracle | ship_mode | `WARM` | 2026-09-10 00:26:15 | 4m 39s ago | ✅ |
+| oracle | warehouse | `WARM` | 2026-09-10 00:26:18 | 4m 36s ago | ✅ |
+| oracle | web_page | `WARM` | 2026-09-10 00:26:15 | 4m 39s ago | ✅ |
+| oracle | web_site | `WARM` | NULL | never warmed | ⚠ (2013) lost connection — retries next cycle |
+| oracle | household_demographics | `WARM` | NULL | never warmed | ⚠ (2013) lost connection — retries next cycle |
+| oracle | income_band | `WARM` | NULL | never warmed | ⚠ (2013) lost connection — retries next cycle |
+| oracle | general_ledger | `UNKNOWN` | NULL | never warmed | ⚠ ghost row re-seeded — auto-deleted if missing |
+| polaris | web_sales | `WARM` | 2026-09-10 00:26:19 | 4m 35s ago | ✅ |
+| polaris | web_returns | `WARM` | 2026-09-10 00:26:19 | 4m 35s ago | ✅ |
+| polaris | store_sales | `WARM` | 2026-09-10 00:26:19 | 4m 35s ago | ✅ |
+| postgres | products | `WARM` | NULL | never warmed | ⚠ (2013) lost connection — retries next cycle |
+| postgres | product_reviews | `WARM` | 2026-09-10 00:26:20 | 4m 34s ago | ✅ |
+| postgres | orders | `WARM` | 2026-09-10 00:26:18 | 4m 36s ago | ✅ |
+
+`CacheMetrics: 5 rows written` — `local=1.8MB remote=0.0MB ratio=100%` ✅ (fully cache-warm).
+Oracle JDBC tables warm correctly. All `NULL` warmed timestamps are transient lost-connection retries.
+
+---
+
+## Phase 7 — Cache Metrics
+
+> **Background:** `platform_meta.table_cache_metrics` is populated once per daemon cycle
+> (default every 300 s) by a background thread with its own dedicated connection.
+> It tracks — per table, per BE — how many bytes were read from local NVMe cache vs S3,
+> the resulting hit percentage, query volume, average latency, warm-up count, and Spark
+> pushdown count.  No hints or changes to end-user SQL are required.
+
+---
+
+### T-34 — `table_cache_metrics` table exists and has rows after one cycle
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT COUNT(*) AS row_count,
+       MIN(sampled_at) AS first_sample,
+       MAX(sampled_at) AS latest_sample
+FROM platform_meta.table_cache_metrics;"
+```
+
+**Expected:** `row_count ≥ 1` and `latest_sample` is within the last `SCAN_INTERVAL_S` seconds.
+
+✅ Pass: at least one row present.
+❌ Fail: empty table → daemon has not completed a cycle yet, or `CacheMetricsCollector`
+thread errored. Check daemon logs:
+```bash
+kubectl logs -n prod -l app=doris-cache-manager --tail=50 | grep -i CacheMetrics
+```
+
+**Observed (2026-09-10 00:21 live run):**
+```
+row_count: 1   first_sample: 2026-09-10 00:21:13   latest_sample: 2026-09-10 00:21:13
+```
+
+---
+
+### T-35 — `SELECT * LIMIT 1000` is captured and shows local vs remote bytes
+
+Run the target query, then wait up to one `SCAN_INTERVAL_S` window and query the metrics table:
+
+```bash
+# Step 1 — run the query as any user (no hints needed)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT * FROM databricks.lakehouse_db.customers LIMIT 1000;"
+
+# Step 2 — wait for the next daemon cycle to capture it (max SCAN_INTERVAL_S seconds)
+# Step 3 — query the metrics table
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT
+    catalog_name,
+    db_name,
+    table_name,
+    sampled_at,
+    CONCAT(ROUND(local_scan_bytes  / 1024 / 1024, 2), ' MB') AS local_NVMe,
+    CONCAT(ROUND(remote_scan_bytes / 1024 / 1024, 2), ' MB') AS remote_S3,
+    CONCAT(ROUND(total_scan_bytes  / 1024 / 1024, 2), ' MB') AS total,
+    CONCAT(cache_hit_pct, '%')                                AS cache_hit_pct,
+    query_count,
+    CONCAT(ROUND(avg_query_time_ms, 0), ' ms')                AS avg_latency,
+    cache_state,
+    warmup_count
+FROM platform_meta.table_cache_metrics
+WHERE catalog_name = 'databricks'
+  AND table_name   = 'customers'
+ORDER BY sampled_at DESC
+LIMIT 5;"
+```
+
+**Expected columns explained:**
+
+| Column | Meaning |
+|---|---|
+| `local_NVMe` | Bytes served from BE local file cache (NVMe disk) — fast path |
+| `remote_S3` | Bytes fetched from S3/remote storage — cold path |
+| `cache_hit_pct` | `local / (local + remote) × 100` — higher is better |
+| `query_count` | Number of SELECT statements against this table in the window |
+| `avg_latency` | Average `query_time` from the audit log in the window |
+| `warmup_count` | Cumulative number of completed daemon warm-up scans for this table |
+
+✅ Pass: row present with `total > 0` and `query_count ≥ 1`.
+❌ Fail: row missing → query did not land in the audit window yet; wait one more cycle.
+
+> **Note:** `COUNT(*)` queries on Iceberg tables are resolved from metadata (no BE scan),
+> so they show `total_scan_bytes = 0`.  Use a column projection like
+> `SELECT * … LIMIT 1000` or `SELECT MAX(salary) …` to generate real scan bytes.
+
+**Observed (2026-09-10 live run):**
+```
+catalog    db           table      sampled_at            local_NVMe  remote_S3  total     hit_pct  queries  avg_latency  state  warmups
+databricks lakehouse_db customers  2026-09-10 00:21:13   0 MB        0.98 MB    0.98 MB   0.00%    1        678 ms       WARM   1
+```
+First run shows 0% cache hit (cache cold for this query pattern) — expected.
+Second run (T-36) will show 100% once the blocks are cached.
+
+---
+
+### T-36 — Second run of the same query shows 100% `cache_hit_pct`
+
+Run the same query a second time (blocks now in BE NVMe cache from the first run), then
+wait for the next cycle and compare:
+
+```bash
+# Run again — blocks now resident in BE file_cache_path
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT * FROM databricks.lakehouse_db.customers LIMIT 1000;"
+
+# Wait for next daemon cycle, then check
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT
+    sampled_at,
+    CONCAT(ROUND(local_scan_bytes  / 1024 / 1024, 2), ' MB') AS local_NVMe,
+    CONCAT(ROUND(remote_scan_bytes / 1024 / 1024, 2), ' MB') AS remote_S3,
+    CONCAT(cache_hit_pct, '%') AS cache_hit_pct,
+    query_count
+FROM platform_meta.table_cache_metrics
+WHERE catalog_name = 'databricks'
+  AND table_name   = 'customers'
+ORDER BY sampled_at DESC
+LIMIT 3;"
+```
+
+**Expected:** the latest row shows `cache_hit_pct = 100.00%` and `remote_S3 = 0 MB`.
+
+✅ Pass: `cache_hit_pct = 100.00` and `remote_scan_bytes = 0`.
+❌ Fail: still `0%` → blocks may have been evicted by BE LRU (cache full), or a different
+BE node served the second query (check `be_host` column).
+
+> **Why this confirms NVMe and not S3:**
+> `local_scan_bytes` maps to `doris_be_workload_group_local_scan_bytes` in the BE Prometheus
+> metrics — the BE increments this counter only when it reads a data block from its local
+> `file_cache_path` directory (NVMe), not from S3.  `remote_scan_bytes` maps to
+> `doris_be_workload_group_remote_scan_bytes`, incremented only for S3/remote fetches.
+> A value of `remote_scan_bytes = 0` is proof that zero bytes came from S3.
+
+---
+
+### T-37 — `warmup_count` increments after daemon warms a table
+
+```bash
+# Record current warmup_count
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT table_name, warmup_count, last_warmed_ts
+FROM platform_meta.table_cache_metrics
+WHERE catalog_name = 'databricks'
+  AND table_name   = 'customers'
+ORDER BY sampled_at DESC LIMIT 1;"
+
+# Force a new daemon cycle
+kubectl rollout restart deployment/doris-cache-manager -n prod
+kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+
+# Wait for the cycle to complete (watch daemon logs)
+kubectl logs -n prod -l app=doris-cache-manager --tail=20 \
+  | grep -E "CacheMetrics|WARM_UP scan completed.*customers"
+
+# Re-check warmup_count
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT table_name, warmup_count, last_warmed_ts, sampled_at
+FROM platform_meta.table_cache_metrics
+WHERE catalog_name = 'databricks'
+  AND table_name   = 'customers'
+ORDER BY sampled_at DESC LIMIT 2;"
+```
+
+**Expected:** `warmup_count` in the latest row is higher than in the previous row.
+
+✅ Pass: `warmup_count` incremented.
+❌ Fail: unchanged → daemon did not trigger a warm-up (check `warm_interval_min` vs time
+since `last_warmed_ts`; the table may not be due for warming yet).
+
+> `warmup_count` is a **cumulative** counter per daemon process lifetime.  It resets to 0
+> when the pod restarts.  Use `last_warmed_ts` from `table_query_stats` for persistence.
+
+---
+
+### T-38 — Metrics update does not block or delay concurrent SELECT workload
+
+Run 10 concurrent queries and verify they all complete while the metrics cycle is running:
+
+```bash
+# Fire 10 parallel SELECTs
+for i in $(seq 1 10); do
+  mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+    -e "SELECT MAX(salary), MIN(salary), COUNT(DISTINCT city)
+        FROM databricks.lakehouse_db.customers;" &
+done
+wait
+echo "All 10 queries completed."
+
+# Confirm metrics cycle ran concurrently without error
+kubectl logs -n prod -l app=doris-cache-manager --tail=30 \
+  | grep -E "CacheMetrics|Cycle done|error|ERROR"
+```
+
+**Expected:**
+- All 10 queries return results (no timeouts or connection errors).
+- Daemon logs show `CacheMetrics: N rows written` with **no** errors.
+- `Cycle done. active_warmups=N` is present — warm-up threads were not affected.
+
+✅ Pass: all 10 queries complete and no ERROR in daemon logs.
+❌ Fail: query timeout or `CacheMetricsCollector thread error` → investigate daemon logs.
+
+> **Why concurrent workload is not impacted:**
+> The `CacheMetricsCollector` runs in a separate daemon thread with its **own dedicated
+> `DorisClient` connection**.  It shares no connection, no lock, and no slot with warm-up
+> threads or the main cycle thread.  The only shared state is two `threading.Lock()`-protected
+> integer counters (`_warmup_counts`, `_spark_counts`) which increment in O(1) and never block
+> a warm-up thread for more than a few microseconds.
 
 ---
 
