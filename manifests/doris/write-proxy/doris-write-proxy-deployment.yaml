@@ -93,11 +93,13 @@ spec:
               protocol: TCP
           resources:
             requests:
-              memory: 64Mi
+              memory: 512Mi
               cpu: 100m
             limits:
-              memory: 256Mi
-              cpu: 500m
+              # spark-submit client mode runs a JVM driver inside this pod.
+              # JVM needs ~400 MB baseline + SparkContext overhead.
+              memory: 2Gi
+              cpu: 1000m
           readinessProbe:
             # tcpSocket probes open and immediately close the connection — this
             # generates "0 bytes read on a total of 4 expected bytes" errors every
