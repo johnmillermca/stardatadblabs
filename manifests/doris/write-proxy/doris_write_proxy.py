@@ -313,28 +313,35 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
         "stmt":      stmt,
     })
 
-    # Iceberg + AWS JARs are not bundled in the pyspark pip package —
-    # they live on the Spark cluster nodes at /opt/spark/jars/.
-    # Pass them via --jars so the local SparkSession can load IcebergCatalog.
+    # JARs required by the driver (client mode — driver runs in this pod).
+    # These are fetched from the Spark master's HTTP file server at job launch.
+    # Gluten JAR must be on --driver-class-path (not just --jars) because
+    # spark.plugins loads GlutenPlugin at SparkContext init, before --jars
+    # are placed on the classpath.
     _SPARK_MASTER_HTTP = os.environ.get(
         "SPARK_MASTER_HTTP", "http://spark-master-svc.prod.svc.cluster.local:8080"
     )
-    _ICEBERG_JARS = ",".join([
+    _GLUTEN_JAR = (
+        f"{_SPARK_MASTER_HTTP}/static/../jars/"
+        "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
+    )
+    _EXTRA_JARS = ",".join([
         f"{_SPARK_MASTER_HTTP}/static/../jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
         f"{_SPARK_MASTER_HTTP}/static/../jars/iceberg-aws-bundle-1.9.2.jar",
         f"{_SPARK_MASTER_HTTP}/static/../jars/hadoop-aws-3.3.4.jar",
         f"{_SPARK_MASTER_HTTP}/static/../jars/aws-java-sdk-bundle-1.12.262.jar",
-        # Gluten+Velox native execution — same bundle used by all cluster jobs.
-        # GlutenPlugin is registered via spark.plugins in spark_iceberg_write.py.
-        f"{_SPARK_MASTER_HTTP}/static/../jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar",
+        _GLUTEN_JAR,
     ])
 
     cmd = [
         _SPARK_SUBMIT,
-        "--master",      SPARK_MASTER_URL,
-        "--deploy-mode", "client",
-        "--name",        f"doris-write-proxy-{catalog}-{table}",
-        "--jars",        _ICEBERG_JARS,
+        "--master",            SPARK_MASTER_URL,
+        "--deploy-mode",       "client",
+        "--name",              f"doris-write-proxy-{catalog}-{table}",
+        "--jars",              _EXTRA_JARS,
+        # Gluten plugin must be on driver classpath at SparkContext init time
+        "--driver-class-path", _GLUTEN_JAR,
+        "--conf", f"spark.executor.extraClassPath={_GLUTEN_JAR}",
         _SPARK_WRITE_SCRIPT,
         job_args,
     ]
