@@ -15,7 +15,7 @@
 #   • Evicts cold tables after 24 h of inactivity
 #   • Runs up to 32 concurrent warm-up jobs
 #
-# Image: 192.168.1.50:30500/doris-cache-manager:1.6.0
+# Image: 192.168.1.50:30500/doris-cache-manager:1.4.0
 #   Built from manifests/doris/cache_manager/ — see runbook-25 for build steps.
 #   1.1.0 — fix audit_log catalog detection (use stmt LIKE, not catalog IN);
 #            make MANAGED_CATALOGS and CATALOG_WAREHOUSES env-var driven.
@@ -39,22 +39,6 @@
 #            query_count, avg_query_time_ms, warmup_count, spark_pushdown_count.
 #            Runs in its own daemon thread with its own DorisClient — zero
 #            impact on warm-up or write-pushdown concurrency.
-#   1.5.0 — Replace SELECT COUNT(*) + enable_file_cache=true warm-up with the
-#            native Community Edition command WARM UP SELECT * FROM table.
-#            This is the correct CE 4.0 warm-up mechanism: synchronous, returns
-#            per-BE metrics (ScanRows, ScanBytes, ScanBytesFromLocalStorage,
-#            ScanBytesFromRemoteStorage, BytesWriteIntoCache), and fans out to
-#            all alive BEs automatically — no per-BE SET_VAR hint required.
-#            Simplifies WarmupExecutor: one thread per table (was per table×BE).
-#   1.6.0 — Restore WARM UP CACHE … USING JOB (async) + SHOW WARM UP JOB
-#            (state polling) + WARM UP CACHE … USING COLD_DOWN (active eviction)
-#            now that the product runs on a customized Doris build that supports
-#            all three commands.
-#            WarmupExecutor.submit() issues USING JOB and records the numeric
-#            JobId; poll_jobs() is called each cycle to poll SHOW WARM UP JOB
-#            and transitions FINISHED jobs to WARM state.  evict() issues
-#            USING COLD_DOWN to actively flush BE cache blocks before recording
-#            the eviction row.
 # =============================================================================
 ---
 apiVersion: v1
@@ -95,7 +79,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: cache-manager
-          image: 192.168.1.50:30500/doris-cache-manager:1.6.0
+          image: 192.168.1.50:30500/doris-cache-manager:1.4.0
           imagePullPolicy: Always
           command: ["python", "/app/doris_cache_manager.py"]
           env:

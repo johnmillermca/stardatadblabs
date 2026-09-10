@@ -14,8 +14,7 @@ Responsibilities
 5. If a warm-up is still running after WARMUP_STALE_MINUTES (5 min), skip and
    retry at the next scheduled window — do not launch a duplicate.
 6. If a table has not been SELECTed in the past LRU_EVICT_HOURS (24 h), issue
-   WARM UP CACHE … USING COLD_DOWN to evict the table from all BE caches and
-   write an eviction row to platform_meta.cache_eviction_log.
+   COLD_DOWN and write an eviction row to platform_meta.cache_eviction_log.
 7. Write-pushdown: DML statements (INSERT / UPDATE / DELETE / MERGE / INSERT
    OVERWRITE) that target external catalog tables are detected in the audit log.
    Because Doris treats external Iceberg catalogs as read-only at the storage
@@ -626,38 +625,35 @@ class MetaStore:
 # ─────────────────────────────────────────────────────────────────────────────
 class WarmupExecutor:
     """
-    Warms the Doris file cache for a table using:
-        WARM UP CACHE ON <catalog>.<db>.<table> USING JOB
-    and evicts cold tables using:
-        WARM UP CACHE ON <catalog>.<db>.<table> USING COLD_DOWN
+    Warms the Doris file cache for a table by issuing a full-scan SELECT with
+    enable_file_cache=true in a background thread.
 
-    Warm-up flow
-    ------------
-    1. submit()         — issues WARM UP CACHE … USING JOB (async, returns a
-                          numeric JobId immediately; does NOT block).
-    2. poll_jobs()      — called each daemon cycle; issues SHOW WARM UP JOB for
-                          every active job and transitions FINISHED jobs to WARM
-                          state in metadata.  Cancels STALE jobs (running longer
-                          than WARMUP_STALE_MIN).
+    Doris 4.0 Community Edition does NOT support the Cloud-Edition-only
+    `WARM UP CACHE … USING JOB` / `SHOW WARM UP JOB` syntax — those commands
+    raise "errCode = 2 … no viable alternative at input 'WARM UP CACHE'".
 
-    COLD_DOWN flow
-    --------------
-    evict()             — issues WARM UP CACHE … USING COLD_DOWN to actively
-                          flush the table's blocks from all BE caches, then
-                          records the eviction in platform_meta.cache_eviction_log.
+    The correct warm-up mechanism for Community Edition is a full table scan:
+        SET enable_file_cache = true;
+        SELECT COUNT(*) FROM catalog.db.table;
 
-    SHOW WARM UP JOB columns (Doris custom extension):
-        JobId | CatalogName | DbName | TableName | State | CreateTime | FinishTime | ErrMsg
-    State values: PENDING | RUNNING | FINISHED | CANCELLED
+    The BE pulls every data block from S3/remote storage into the local
+    file_cache_path directory as a side-effect of reading, so subsequent
+    queries find the data cached locally.  The scan itself is blocking —
+    the thread waits for it to finish, then marks the table WARM.
+
+    LRU eviction is managed natively by the BE (file_cache LRU).  There is no
+    programmatic COLD_DOWN command in Community Edition; the evict() method
+    records the eviction in the audit table only — the BE will expire the
+    blocks naturally when the cache fills.
     """
 
     def __init__(self, meta: MetaStore, metrics: "CacheMetricsCollector | None" = None) -> None:
         self._meta    = meta
         self._metrics = metrics
         self._lock = threading.Lock()
-        # Active warm-up jobs: (TableKey, job_id_str) → WarmupJob.
-        # job_id_str is the numeric JobId returned by WARM UP CACHE … USING JOB,
-        # stored as a string for use as a dict key.
+        # Active warm-up jobs: (TableKey, be_backend_id) → WarmupJob.
+        # Keyed by (table, BE) pair so each BE gets its own independent slot —
+        # a single table can have N concurrent jobs, one per BE node.
         self._active: dict[tuple[TableKey, str], WarmupJob] = {}
         self._eviction_counter = int(time.time())  # monotonic id seed
 
@@ -669,133 +665,79 @@ class WarmupExecutor:
             return len(self._active)
 
     def is_running(self, key: TableKey, be: BeNode) -> bool:
-        """True if any warm-up job is currently active for this table.
-
-        `be` is accepted for API compatibility but is no longer used — jobs are
-        now tracked per-table by JobId, not per (table, BE) pair.
-        """
         with self._lock:
             self._reap_done()
-            return any(k == key for k, _ in self._active)
+            return (key, be.backend_id) in self._active
 
     def is_stale(self, key: TableKey, be: BeNode) -> bool:
-        """True if a warm-up for this table has been running > WARMUP_STALE_MIN minutes."""
+        """True if a warm-up has been running for > WARMUP_STALE_MIN minutes."""
         with self._lock:
-            for (k, _), job in self._active.items():
-                if k == key:
-                    age = (datetime.now(timezone.utc) - job.started_at).total_seconds()
-                    return age > WARMUP_STALE_MIN * 60
-        return False
+            job = self._active.get((key, be.backend_id))
+            if job is None:
+                return False
+            age = (datetime.now(timezone.utc) - job.started_at).total_seconds()
+            return age > WARMUP_STALE_MIN * 60
 
     def submit(
         self,
         key: TableKey,
+        be: BeNode,
         doris_creds: dict[str, str],
         meta_doris: DorisClient,
     ) -> None:
-        """Issue WARM UP CACHE … USING JOB for one table.
+        """Launch a warm-up thread for the (key, BE) pair if a slot is available.
 
-        The command returns immediately with a JobId.  The thread records the
-        JobId in _active; poll_jobs() checks status each cycle.
+        Each (table, BE) pair gets its own thread so every alive BE node is
+        warmed independently.  The active-slot limit (MAX_CONCURRENT) is shared
+        across all in-flight (table, BE) pairs.
         """
+        slot = (key, be.backend_id)
         with self._lock:
             self._reap_done()
             if len(self._active) >= MAX_CONCURRENT:
                 logger.warning(
-                    "WARM_UP skipped for %s — max concurrent (%d) reached.",
-                    key, MAX_CONCURRENT,
+                    "WARM_UP skipped for %s on BE %s — max concurrent (%d) reached.",
+                    key, be, MAX_CONCURRENT,
                 )
                 return
-            if any(k == key for k, _ in self._active):
-                logger.debug("WARM_UP already running for %s — skipping.", key)
+            if slot in self._active:
+                logger.debug("WARM_UP already running for %s on BE %s — skipping.", key, be)
                 return
 
-        started = datetime.now(timezone.utc)
-        # Each thread gets its own DorisClient to avoid connection sharing.
-        thread_meta_doris = DorisClient(
-            host=meta_doris._host,
-            port=meta_doris._port,
-            user=meta_doris._user,
-            password=meta_doris._password,
-        )
-        sentinel_be = BeNode(backend_id="job", host="", http_port=0, cache_path="")
-        t = threading.Thread(
-            target=self._run_warmup,
-            args=(key, doris_creds, thread_meta_doris, started),
-            name=f"warmup-{key}",
-            daemon=True,
-        )
+            started = datetime.now(timezone.utc)
+            # Each thread gets its own DorisClient so concurrent update_last_warmed
+            # calls never share a connection — sharing caused (2013) Lost Connection
+            # and "Packet sequence number wrong" errors under MAX_CONCURRENT load.
+            thread_meta_doris = DorisClient(
+                host=meta_doris._host,
+                port=meta_doris._port,
+                user=meta_doris._user,
+                password=meta_doris._password,
+            )
+            t = threading.Thread(
+                target=self._run_warmup,
+                args=(key, be, doris_creds, thread_meta_doris, started),
+                name=f"warmup-{key}-{be.backend_id}",
+                daemon=True,
+            )
+            self._active[slot] = WarmupJob(key=key, be=be, started_at=started, thread=t)
+
         t.start()
-        logger.info("WARM_UP submitted for %s (WARM UP CACHE … USING JOB).", key)
-
-        # The thread will register the slot once it has the JobId; we track a
-        # temporary placeholder so is_running() returns True immediately.
-        _PENDING = "__pending__"
-        with self._lock:
-            self._active[(key, _PENDING)] = WarmupJob(
-                key=key, be=sentinel_be, started_at=started, thread=t
-            )
-
-    def poll_jobs(self, doris_creds: dict[str, str], meta_doris: DorisClient) -> None:
-        """Poll SHOW WARM UP JOB for every active job and update metadata.
-
-        Called once per daemon cycle (before warm-up scheduling) so that
-        FINISHED jobs are reaped and their metadata is updated promptly.
-        """
-        with self._lock:
-            self._reap_done()
-            active_snapshot = dict(self._active)
-
-        if not active_snapshot:
-            return
-
-        try:
-            poll_conn = DorisClient(
-                host=DORIS_HOST,
-                port=DORIS_PORT,
-                user=DORIS_USER,
-                password=doris_creds["admin_password"],
-            )
-        except Exception as exc:
-            logger.error("poll_jobs: could not create DorisClient: %s", exc)
-            return
-
-        for (key, job_id), job in active_snapshot.items():
-            if job_id == "__pending__":
-                # Thread hasn't registered the real JobId yet — skip this cycle.
-                continue
-            self._poll_one(poll_conn, meta_doris, key, job_id, job)
+        logger.info("WARM_UP started for %s on BE %s (cache_path=%s).", key, be, be.cache_path)
 
     def evict(
         self, key: TableKey, doris: DorisClient, meta: MetaStore,
         last_select_ts: datetime | None
     ) -> None:
-        """Issue WARM UP CACHE … USING COLD_DOWN and record the eviction.
+        """Record a cache eviction event.
 
-        COLD_DOWN actively flushes the table's cache blocks from all alive BEs
-        so the freed space is immediately available for other hot tables.
-        After the command completes, the eviction is logged in the audit table
-        and cache_state is set to COLD so the scheduler stops issuing warm-up
-        jobs for this idle table.
+        Doris 4.0 Community Edition has no programmatic COLD_DOWN command.
+        The BE manages its file_cache LRU natively and will evict cold blocks
+        when the cache fills.  We record the eviction in the audit table so
+        the daemon stops re-issuing warm-up jobs for idle tables.
         """
         now = datetime.now(timezone.utc)
-
-        cold_sql = (
-            f"WARM UP CACHE ON `{key.catalog}`.`{key.db}`.`{key.table}` "
-            f"USING COLD_DOWN"
-        )
-        try:
-            doris.execute(cold_sql)
-            logger.info("COLD_DOWN issued for %s.", key)
-        except Exception as exc:
-            logger.error("COLD_DOWN failed for %s: %s — eviction still recorded.", key, exc)
-
-        # Update cache_state to COLD in metadata so the scheduler stops
-        # re-issuing warm-up jobs for this table.
-        try:
-            meta.update_last_warmed(doris, key, now, "COLD")
-        except Exception as exc:
-            logger.error("Failed to update cache_state=COLD for %s: %s", key, exc)
+        logger.info("LRU eviction recorded for %s (no COLD_DOWN in Community Edition).", key)
 
         with self._lock:
             self._eviction_counter += 1
@@ -827,22 +769,22 @@ class WarmupExecutor:
     def _run_warmup(
         self,
         key: TableKey,
+        be: BeNode,
         doris_creds: dict[str, str],
         meta_doris: DorisClient,
         started: datetime,
     ) -> None:
-        """Background thread: submit WARM UP CACHE … USING JOB and register the JobId.
+        """Background thread: warm one BE's file cache via a pinned full-scan SELECT.
 
-        WARM UP CACHE … USING JOB submits an asynchronous warm-up job on Doris
-        and returns a JobId immediately (result set: one row with the numeric
-        JobId).  The actual cache-fill happens in the background on the BEs.
-        poll_jobs() checks job state each cycle via SHOW WARM UP JOB.
+        The SET_VAR(file_cache_base_path=...) hint pins the scan fragment to the
+        target BE so its local cache is populated regardless of which BE the FE
+        would otherwise choose.  One thread is launched per alive BE per table,
+        ensuring every BE in the cluster is warmed.
 
-        meta_doris is a dedicated DorisClient created per-thread by submit().
+        meta_doris is a dedicated DorisClient created per-thread by submit() so
+        concurrent update_last_warmed writes never share a connection.
         """
-        _PENDING = "__pending__"
-        pending_slot = (key, _PENDING)
-        job_slot: tuple[TableKey, str] | None = None
+        slot = (key, be.backend_id)
         try:
             warmup_conn = DorisClient(
                 host=DORIS_HOST,
@@ -851,33 +793,41 @@ class WarmupExecutor:
                 password=doris_creds["admin_password"],
             )
 
+            # Pin the warm-up scan to this specific BE's cache path.
+            # SET_VAR hint is inlined in the query so it is scoped to this
+            # statement only — no session state leaks to other threads.
             warm_sql = (
-                f"WARM UP CACHE ON `{key.catalog}`.`{key.db}`.`{key.table}` "
-                f"USING JOB"
+                f"SELECT /*+ SET_VAR(enable_file_cache=true, "
+                f"file_cache_base_path='{be.cache_path}') */ "
+                f"COUNT(*) "
+                f"FROM `{key.catalog}`.`{key.db}`.`{key.table}`"
             )
-            logger.info("WARM_UP job submitted for %s.", key)
-            rows = warmup_conn.execute(warm_sql)
+            logger.info("WARM_UP scan issued for %s on BE %s.", key, be)
+            warmup_conn.execute(warm_sql)
 
-            # Result set: [[JobId]] — one row, one column with the numeric job id.
-            job_id = str(rows[0][0]) if rows else "unknown"
-            logger.info("WARM_UP job accepted for %s — JobId=%s.", key, job_id)
+            finished_at = datetime.now(timezone.utc)
+            logger.info("WARM_UP scan completed for %s on BE %s.", key, be)
 
-            sentinel_be = BeNode(backend_id="job", host="", http_port=0, cache_path="")
-            job_slot = (key, job_id)
-            with self._lock:
-                # Replace the __pending__ slot with the real JobId slot.
-                if pending_slot in self._active:
-                    pending_job = self._active.pop(pending_slot)
-                    pending_job.be = sentinel_be
-                    self._active[job_slot] = pending_job
-                else:
-                    # Slot was already reaped (very fast cycle) — re-insert.
-                    self._active[job_slot] = WarmupJob(
-                        key=key, be=sentinel_be, started_at=started, thread=threading.current_thread()  # type: ignore[arg-type]
-                    )
+            # Notify metrics collector — thread-safe counter increment.
+            if self._metrics:
+                self._metrics.record_warmup_completion(key)
+
+            # Only write last_warmed_ts once — when ALL BEs have finished for
+            # this table.  We do it on every completion; the last writer wins,
+            # which is fine because the timestamp just needs to be recent.
+            try:
+                self._meta.update_last_warmed(
+                    meta_doris, key, finished_at, "WARM"
+                )
+            except Exception as meta_exc:
+                logger.error(
+                    "Failed to update last_warmed for %s (BE %s): %s", key, be, meta_exc
+                )
 
         except Exception as exc:
             err_str = str(exc)
+            # Permanent failure: the table/database no longer exists in the catalog.
+            # Delete the ghost row so the scheduler stops retrying it every cycle.
             if any(ghost in err_str for ghost in self._GHOST_ERRORS):
                 logger.warning(
                     "WARM_UP ghost row detected for %s (%s) — deleting from table_query_stats.",
@@ -894,75 +844,12 @@ class WarmupExecutor:
                     logger.error("Failed to delete ghost row for %s: %s", key, del_exc)
             else:
                 logger.error(
-                    "WARM_UP thread error for %s: %s", key, exc, exc_info=True
+                    "WARM_UP thread error for %s on BE %s: %s", key, be, exc, exc_info=True
                 )
-            # Remove the pending slot so is_running() no longer blocks this table.
+        finally:
             with self._lock:
-                if pending_slot in self._active:
-                    self._active[pending_slot].done = True
-
-    def _poll_one(
-        self,
-        poll_conn: DorisClient,
-        meta_doris: DorisClient,
-        key: TableKey,
-        job_id: str,
-        job: WarmupJob,
-    ) -> None:
-        """Check the state of one warm-up job via SHOW WARM UP JOB."""
-        try:
-            rows = poll_conn.execute(
-                f"SHOW WARM UP JOB WHERE JobId = {job_id}"
-            )
-        except Exception as exc:
-            logger.error("poll_jobs: SHOW WARM UP JOB failed for %s JobId=%s: %s", key, job_id, exc)
-            return
-
-        if not rows:
-            logger.warning("poll_jobs: no result for JobId=%s (%s) — treating as stale.", job_id, key)
-            with self._lock:
-                if (key, job_id) in self._active:
-                    self._active[(key, job_id)].done = True
-            return
-
-        # Columns: JobId | CatalogName | DbName | TableName | State | CreateTime | FinishTime | ErrMsg
-        state   = str(rows[0][4]).upper()
-        err_msg = str(rows[0][7]) if len(rows[0]) > 7 else ""
-
-        if state == "FINISHED":
-            finished_at = datetime.now(timezone.utc)
-            logger.info("WARM_UP JobId=%s FINISHED for %s.", job_id, key)
-            if self._metrics:
-                self._metrics.record_warmup_completion(key)
-            try:
-                self._meta.update_last_warmed(meta_doris, key, finished_at, "WARM")
-            except Exception as exc:
-                logger.error("poll_jobs: update_last_warmed failed for %s: %s", key, exc)
-            with self._lock:
-                if (key, job_id) in self._active:
-                    self._active[(key, job_id)].done = True
-
-        elif state == "CANCELLED":
-            logger.warning("WARM_UP JobId=%s CANCELLED for %s: %s", job_id, key, err_msg)
-            with self._lock:
-                if (key, job_id) in self._active:
-                    self._active[(key, job_id)].done = True
-
-        elif state in ("PENDING", "RUNNING"):
-            age_min = (datetime.now(timezone.utc) - job.started_at).total_seconds() / 60.0
-            if age_min > WARMUP_STALE_MIN:
-                logger.warning(
-                    "WARM_UP JobId=%s stale (%.1f min, threshold=%d min) for %s — marking done.",
-                    job_id, age_min, WARMUP_STALE_MIN, key,
-                )
-                with self._lock:
-                    if (key, job_id) in self._active:
-                        self._active[(key, job_id)].done = True
-            else:
-                logger.debug("WARM_UP JobId=%s still %s for %s (%.1f min).", job_id, state, key, age_min)
-
-        else:
-            logger.warning("WARM_UP JobId=%s unknown state '%s' for %s.", job_id, state, key)
+                if slot in self._active:
+                    self._active[slot].done = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -978,8 +865,9 @@ class WarmupScheduler:
     - A warm-up is triggered if:
         now - last_warmed_ts >= warm_interval_min
         OR the table has never been warmed.
-    - If a warm-up job is already active for the table (PENDING or RUNNING), skip it.
-    - If a warm-up has been running > WARMUP_STALE_MIN, log a warning and skip.
+    - If a warm-up is already running for the table:
+        - Skip if running time < WARMUP_STALE_MIN.
+        - Skip (retry next schedule) if running time >= WARMUP_STALE_MIN.
     """
 
     def __init__(self, executor: WarmupExecutor) -> None:
@@ -997,9 +885,6 @@ class WarmupScheduler:
         eligible = 0
         triggered = 0
 
-        # Dummy BE node — is_running / is_stale are now keyed by table only.
-        dummy_be = BeNode(backend_id="job", host="", http_port=0, cache_path="")
-
         for key, s in stats.items():
             if s["total_select_count"] <= 1:
                 continue  # Need at least 2 hits to estimate interval
@@ -1011,6 +896,7 @@ class WarmupScheduler:
 
             last_warmed: datetime | None = s.get("last_warmed_ts")
             if last_warmed is not None:
+                # Ensure timezone-aware comparison
                 if last_warmed.tzinfo is None:
                     last_warmed = last_warmed.replace(tzinfo=timezone.utc)
                 minutes_since_warm = (now - last_warmed).total_seconds() / 60.0
@@ -1021,21 +907,24 @@ class WarmupScheduler:
                     )
                     continue
 
-            if self._executor.is_running(key, dummy_be):
-                if self._executor.is_stale(key, dummy_be):
-                    logger.warning(
-                        "%s: warm-up job stale (> %d min) — skip, retry next cycle.",
-                        key, WARMUP_STALE_MIN,
-                    )
-                else:
-                    logger.debug("%s: warm-up job already active — skip.", key)
-                continue
-            self._executor.submit(key, doris_creds, meta_doris)
-            triggered += 1
+            # Fan out: submit one warm-up thread per alive BE node so every
+            # BE's file cache is populated independently.
+            for be in be_nodes:
+                if self._executor.is_running(key, be):
+                    if self._executor.is_stale(key, be):
+                        logger.warning(
+                            "%s on BE %s: warm-up stale (> %d min) — skip, retry next cycle.",
+                            key, be, WARMUP_STALE_MIN,
+                        )
+                    else:
+                        logger.debug("%s on BE %s: warm-up already running — skip.", key, be)
+                    continue
+                self._executor.submit(key, be, doris_creds, meta_doris)
+                triggered += 1
 
         logger.info(
-            "Warm-up evaluation: %d eligible tables, %d triggered.",
-            eligible, triggered,
+            "Warm-up evaluation: %d eligible tables, %d triggered across %d BE(s).",
+            eligible, triggered, len(be_nodes),
         )
 
 
@@ -1045,8 +934,7 @@ class WarmupScheduler:
 class LRUEvictionChecker:
     """
     Marks tables as COLD if they haven't been SELECTed in LRU_EVICT_HOURS.
-    Issues WARM UP CACHE … USING COLD_DOWN to flush the table from all BE caches,
-    updates cache_state to COLD, and records the eviction in the audit table.
+    Issues COLD_DOWN to Doris and records the eviction in the audit table.
     """
 
     def check(
@@ -1705,24 +1593,19 @@ class CacheManagerDaemon:
                 "cache_state":         cache_state,
             }
 
-        # 5. Poll outstanding WARM UP CACHE … USING JOB jobs before scheduling
-        #    new ones so that freshly-FINISHED jobs are reaped and their slots
-        #    freed before the scheduler tries to submit more work.
-        self._executor.poll_jobs(self._doris_creds, self._meta_doris)
-
-        # 6. LRU eviction — check all known tables (including those not queried this cycle)
+        # 5. LRU eviction — check all known tables (including those not queried this cycle)
         self._lru.check(updated_stats, self._meta_doris, self._executor, self._meta, now)
 
-        # 7. Warm-up scheduling — fan out across all alive BE nodes
+        # 6. Warm-up scheduling — fan out across all alive BE nodes
         self._scheduler.evaluate(
             updated_stats, be_nodes, self._doris_creds, self._meta_doris, self._meta, now
         )
 
-        # 8. Write-pushdown — intercept DML writes against external catalogs
+        # 7. Write-pushdown — intercept DML writes against external catalogs
         #    and re-submit them to Spark.
         self._write_interceptor.scan_and_push(self._meta_doris, self._polaris_creds)
 
-        # 9. Cache metrics — collect and write to table_cache_metrics async.
+        # 8. Cache metrics — collect and write to table_cache_metrics async.
         #    Fires in a separate daemon thread; returns immediately so it
         #    cannot block or delay any warm-up or write-pushdown work.
         self._metrics.collect(be_nodes, updated_stats, self._doris_creds, now)
