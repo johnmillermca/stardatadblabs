@@ -88,6 +88,7 @@ _BAO_IN_CLUSTER   = "http://openbao.prod.svc.cluster.local:8200"
 _K8S_SA_JWT_FILE  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _PATH_DORIS       = "secret/data/platform/doris"
 _PATH_POLARIS     = "secret/data/platform/polaris"
+_PATH_S3          = "secret/data/platform/s3"
 
 _DORIS_HOST_DEFAULT = "doris-fe.prod.svc.cluster.local"
 _DORIS_PORT_DEFAULT = 9030
@@ -138,12 +139,13 @@ SPARK_MASTER_URL = os.environ.get(
 )
 SPARK_VERSION    = os.environ.get("SPARK_VERSION", "3.5.1")
 # Path to the PySpark write script submitted to Spark workers.
-# Must be accessible from Spark worker nodes — use an s3:// URL (uploaded once
-# to S3) rather than a local /app/ path which only exists in the cache-manager
-# container.  Override via SPARK_WRITE_SCRIPT env var if the S3 path changes.
+# Must be accessible from Spark worker nodes — use s3a:// (Hadoop S3A, bundled
+# with Spark) rather than s3:// (no FileSystem handler in standalone mode) or a
+# local /app/ path (only exists inside the cache-manager container).
+# Override via SPARK_WRITE_SCRIPT env var if the S3 path changes.
 _SPARK_WRITE_SCRIPT = os.environ.get(
     "SPARK_WRITE_SCRIPT",
-    "s3://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py",
+    "s3a://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py",
 )
 # How frequently the write-interceptor background thread polls audit_log (seconds).
 WRITE_POLL_INTERVAL_S = int(os.environ.get("WRITE_POLL_INTERVAL_S", "10"))
@@ -193,6 +195,49 @@ class WarmupJob:
     started_at: datetime
     thread: threading.Thread
     done: bool = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3A Spark properties helper
+# ─────────────────────────────────────────────────────────────────────────────
+def _s3a_spark_props() -> dict[str, str]:
+    """
+    Return spark.hadoop.fs.s3a.* properties needed by Spark workers to fetch
+    the appResource script from s3a://.  Reads credentials from OpenBao
+    (same path as BaoClient but using stdlib only, called once at job submission).
+    Falls back to empty dict on any error so the submission still proceeds.
+    """
+    try:
+        token: str | None = None
+        if os.path.exists(_K8S_SA_JWT_FILE):
+            with open(_K8S_SA_JWT_FILE) as fh:
+                jwt = fh.read().strip()
+            payload = json.dumps({"role": BAO_ROLE, "jwt": jwt}).encode()
+            req = urllib.request.Request(
+                f"{BAO_ADDR}/v1/auth/kubernetes/login",
+                data=payload, headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                token = json.loads(resp.read())["auth"]["client_token"]
+        else:
+            token = os.environ.get("TOKEN") or os.environ.get("BAO_TOKEN", "")
+        req = urllib.request.Request(
+            f"{BAO_ADDR}/v1/{_PATH_S3}",
+            headers={"X-Vault-Token": token}, method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        s3 = data.get("data", {}).get("data", data.get("data", {}))
+        return {
+            "spark.hadoop.fs.s3a.access.key":               s3["access_key"],
+            "spark.hadoop.fs.s3a.secret.key":               s3["secret_key"],
+            "spark.hadoop.fs.s3a.endpoint":                 "s3.us-east-2.amazonaws.com",
+            "spark.hadoop.fs.s3a.impl":                     "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+        }
+    except Exception as exc:
+        logger.warning("_s3a_spark_props: could not load S3 creds (%s) — s3a:// fetch may fail.", exc)
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1152,6 +1197,9 @@ class WriteInterceptor:
                 "spark.app.name":           f"doris-write-pushdown-{pw.catalog}-{pw.table}",
                 "spark.master":             SPARK_MASTER_URL,
                 "spark.submit.deployMode":  "cluster",
+                # S3A credentials so the Spark worker can fetch the appResource
+                # script from s3a://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py
+                **_s3a_spark_props(),
                 # The write script handles all further Spark conf (Iceberg, S3,
                 # OAuth2) by calling BaoSparkInit internally.
             },

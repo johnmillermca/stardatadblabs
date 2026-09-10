@@ -81,14 +81,52 @@ SPARK_POLL_INTERVAL_S = int(os.environ.get("SPARK_POLL_INTERVAL_S", "5"))
 
 BAO_ADDR            = os.environ.get("ADDR") or os.environ.get("BAO_ADDR",
     "http://openbao.prod.svc.cluster.local:8200")
+_BAO_K8S_SA_JWT     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_BAO_ROLE           = os.environ.get("BAO_ROLE", "platform-secrets-read")
+_PATH_S3            = "secret/data/platform/s3"
+
+def _load_s3_creds() -> tuple[str, str]:
+    """Load S3 access/secret keys from OpenBao at startup (stdlib only)."""
+    # Try K8s SA JWT first
+    if os.path.exists(_BAO_K8S_SA_JWT):
+        with open(_BAO_K8S_SA_JWT) as fh:
+            jwt = fh.read().strip()
+        payload = json.dumps({"role": _BAO_ROLE, "jwt": jwt}).encode()
+        req = urllib.request.Request(
+            f"{BAO_ADDR}/v1/auth/kubernetes/login",
+            data=payload, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            token = json.loads(resp.read())["auth"]["client_token"]
+    else:
+        token = os.environ.get("TOKEN") or os.environ.get("BAO_TOKEN", "")
+
+    req = urllib.request.Request(
+        f"{BAO_ADDR}/v1/{_PATH_S3}",
+        headers={"X-Vault-Token": token}, method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    s3 = data.get("data", {}).get("data", data.get("data", {}))
+    return s3["access_key"], s3["secret_key"]
+
+# Load S3 credentials at module import time (once per process).
+try:
+    _S3_KEY, _S3_SECRET = _load_s3_creds()
+    logger.info("S3 credentials loaded from OpenBao for s3a:// script fetch.")
+except Exception as _e:
+    logger.warning("Could not load S3 creds from OpenBao (%s) — s3a:// fetch may fail.", _e)
+    _S3_KEY  = os.environ.get("S3_ACCESS_KEY", "")
+    _S3_SECRET = os.environ.get("S3_SECRET_KEY", "")
 
 # Path to the PySpark write script submitted to Spark workers.
-# Must be accessible from Spark worker nodes — use an s3:// URL (uploaded once
-# to S3) rather than a local /app/ path which only exists in the proxy container.
+# Must be accessible from Spark worker nodes — use s3a:// (Hadoop S3A, bundled
+# with Spark) rather than s3:// (no FileSystem handler in standalone mode) or a
+# local /app/ path (only exists inside the proxy container).
 # Override via SPARK_WRITE_SCRIPT env var if the S3 path changes.
 _SPARK_WRITE_SCRIPT = os.environ.get(
     "SPARK_WRITE_SCRIPT",
-    "s3://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py",
+    "s3a://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py",
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,9 +311,16 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
         "mainClass":   "",
         "appArgs":     [job_args],
         "sparkProperties": {
-            "spark.app.name":          f"doris-write-proxy-{catalog}-{table}",
-            "spark.master":            SPARK_MASTER_URL,
-            "spark.submit.deployMode": "cluster",
+            "spark.app.name":                              f"doris-write-proxy-{catalog}-{table}",
+            "spark.master":                                SPARK_MASTER_URL,
+            "spark.submit.deployMode":                     "cluster",
+            # S3A credentials so the worker can fetch the appResource script
+            # from s3a://xdatatoiceberg1/spark-scripts/spark_iceberg_write.py
+            "spark.hadoop.fs.s3a.access.key":              _S3_KEY,
+            "spark.hadoop.fs.s3a.secret.key":              _S3_SECRET,
+            "spark.hadoop.fs.s3a.endpoint":                "s3.us-east-2.amazonaws.com",
+            "spark.hadoop.fs.s3a.impl":                    "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
         },
         "environmentVariables": {"ADDR": BAO_ADDR},
         "clientSparkVersion": "3.5.1",
