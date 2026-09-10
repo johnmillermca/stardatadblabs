@@ -38,6 +38,7 @@ The test covers seven phases in order:
 | T-01 | P-1 | Infra | Doris FE is reachable |
 | T-02 | P-1 | Infra | Doris has at least one alive BE |
 | T-03 | P-1 | Infra | All 5 Iceberg catalogs are registered |
+| T-03a | P-1 | Infra | List all Iceberg tables across all catalogs |
 | T-04 | P-1 | Infra | `platform_meta` tables exist |
 | T-05 | P-1 | Infra | OpenBao K8s auth role `doris-cache-manager` exists |
 | T-06 | P-1 | Infra | OpenBao secret `secret/data/platform/doris` is populated |
@@ -153,6 +154,100 @@ mongodb
 
 ✅ Pass: all five managed catalogs (`polaris`, `databricks`, `postgres`, `oracle`, `mongodb`) are present.  
 ❌ Fail: any catalog missing — re-run RB-25 §3.5.
+
+---
+
+### T-03a — List all Iceberg tables across all catalogs
+
+Use this command to get a full inventory of every table visible to Doris (and therefore to Spark)
+across all 5 managed catalogs.  No credentials beyond `DORIS_PASS` are required.
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+for cat in polaris databricks postgres oracle mongodb; do
+  echo "======= $cat ======="
+  mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" --skip-column-names \
+    -e "SHOW DATABASES FROM \`${cat}\`;" 2>/dev/null \
+    | grep -v -E "^(information_schema|mysql)$" \
+    | while read db; do
+        mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" --skip-column-names \
+          -e "SHOW TABLES FROM \`${cat}\`.\`${db}\`;" 2>/dev/null \
+          | awk -v c="$cat" -v d="$db" '{print c"."d"."$1}'
+      done
+done
+```
+
+**Expected:** a flat list of fully-qualified `catalog.db.table` names, one per line.
+
+**Observed (2026-09-10 live):**
+```
+======= polaris =======
+polaris.tpcds_sf10tcl.call_center
+polaris.tpcds_sf10tcl.catalog_page
+polaris.tpcds_sf10tcl.catalog_returns
+polaris.tpcds_sf10tcl.catalog_sales
+polaris.tpcds_sf10tcl.customer
+polaris.tpcds_sf10tcl.customer_address
+polaris.tpcds_sf10tcl.customer_demographics
+polaris.tpcds_sf10tcl.date_dim
+polaris.tpcds_sf10tcl.household_demographics
+polaris.tpcds_sf10tcl.income_band
+polaris.tpcds_sf10tcl.inventory
+polaris.tpcds_sf10tcl.item
+polaris.tpcds_sf10tcl.promotion
+polaris.tpcds_sf10tcl.reason
+polaris.tpcds_sf10tcl.ship_mode
+polaris.tpcds_sf10tcl.store
+polaris.tpcds_sf10tcl.store_returns
+polaris.tpcds_sf10tcl.store_sales
+polaris.tpcds_sf10tcl.time_dim
+polaris.tpcds_sf10tcl.warehouse
+polaris.tpcds_sf10tcl.web_page
+polaris.tpcds_sf10tcl.web_returns
+polaris.tpcds_sf10tcl.web_sales
+polaris.tpcds_sf10tcl.web_site
+======= databricks =======
+databricks.demo.customers
+databricks.lakehouse_db.customer
+databricks.lakehouse_db.customers
+databricks.lakehouse_db.product
+======= postgres =======
+postgres.public.customers
+postgres.public.inventory_events
+postgres.public.orders
+postgres.public.product_reviews
+postgres.public.products
+======= oracle =======
+oracle.cache_testing.products
+oracle.tpcds.call_center
+oracle.tpcds.catalog_page
+oracle.tpcds.household_demographics
+oracle.tpcds.income_band
+oracle.tpcds.promotion
+oracle.tpcds.reason
+oracle.tpcds.ship_mode
+oracle.tpcds.warehouse
+oracle.tpcds.web_page
+oracle.tpcds.web_site
+======= mongodb =======
+mongodb.cache_testing.customers
+mongodb.cache_testing.inventory_events
+mongodb.cache_testing.order_items
+mongodb.cache_testing.orders
+mongodb.cache_testing.product_reviews
+mongodb.cache_testing.products
+```
+
+> **Note:** `_pipeline_watermarks` rows are filtered out above because `SHOW TABLES` returns
+> them alongside user tables.  They are internal bookkeeping tables written by the Spark
+> ingestion pipeline and should not be warmed or queried directly.
+
+✅ Pass: every expected table is listed under its catalog.
+❌ Fail: a catalog returns no tables → check if the Polaris warehouse has been populated
+(re-run the relevant ingestion job) or if S3 credentials are missing from the catalog
+definition (see T-11a).
 
 ---
 
