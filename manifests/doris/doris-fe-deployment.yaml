@@ -151,7 +151,7 @@ spec:
 
         # ── Doris FE ─────────────────────────────────────────────────────────
         - name: doris-fe
-          image: 192.168.1.50:30500/apache/doris:fe-4.0.7
+          image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger
           command:
             - /opt/apache-doris/fe_entrypoint.sh
             - doris-fe-headless.prod.svc.cluster.local
