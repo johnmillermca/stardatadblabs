@@ -15,7 +15,7 @@
 #   • Evicts cold tables after 24 h of inactivity
 #   • Runs up to 32 concurrent warm-up jobs
 #
-# Image: 192.168.1.50:30500/doris-cache-manager:1.3.0
+# Image: 192.168.1.50:30500/doris-cache-manager:1.4.0
 #   Built from manifests/doris/cache_manager/ — see runbook-25 for build steps.
 #   1.1.0 — fix audit_log catalog detection (use stmt LIKE, not catalog IN);
 #            make MANAGED_CATALOGS and CATALOG_WAREHOUSES env-var driven.
@@ -33,6 +33,12 @@
 #            Also: ghost-row auto-deletion (table/db does not exist errors),
 #            per-thread meta DorisClient to fix concurrent update_last_warmed
 #            connection corruption, DORIS_USER and SPARK_VERSION env vars.
+#   1.4.0 — CacheMetricsCollector: new background thread per cycle writes
+#            per-table, per-BE I/O metrics to platform_meta.table_cache_metrics.
+#            Tracks local_scan_bytes, remote_scan_bytes, cache_hit_pct,
+#            query_count, avg_query_time_ms, warmup_count, spark_pushdown_count.
+#            Runs in its own daemon thread with its own DorisClient — zero
+#            impact on warm-up or write-pushdown concurrency.
 # =============================================================================
 ---
 apiVersion: v1
@@ -73,7 +79,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: cache-manager
-          image: 192.168.1.50:30500/doris-cache-manager:1.3.0
+          image: 192.168.1.50:30500/doris-cache-manager:1.4.0
           imagePullPolicy: Always
           command: ["python", "/app/doris_cache_manager.py"]
           env:

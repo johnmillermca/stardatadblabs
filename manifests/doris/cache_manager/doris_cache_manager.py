@@ -647,8 +647,9 @@ class WarmupExecutor:
     blocks naturally when the cache fills.
     """
 
-    def __init__(self, meta: MetaStore) -> None:
-        self._meta = meta
+    def __init__(self, meta: MetaStore, metrics: "CacheMetricsCollector | None" = None) -> None:
+        self._meta    = meta
+        self._metrics = metrics
         self._lock = threading.Lock()
         # Active warm-up jobs: (TableKey, be_backend_id) → WarmupJob.
         # Keyed by (table, BE) pair so each BE gets its own independent slot —
@@ -806,6 +807,10 @@ class WarmupExecutor:
 
             finished_at = datetime.now(timezone.utc)
             logger.info("WARM_UP scan completed for %s on BE %s.", key, be)
+
+            # Notify metrics collector — thread-safe counter increment.
+            if self._metrics:
+                self._metrics.record_warmup_completion(key)
 
             # Only write last_warmed_ts once — when ALL BEs have finished for
             # this table.  We do it on every completion; the last writer wins,
@@ -1024,7 +1029,8 @@ class WriteInterceptor:
     # Use the same lookback as AuditLogScraper so we don't miss anything.
     _LOOKBACK_HOURS = max(LRU_EVICT_HOURS * 2, 2)
 
-    def __init__(self) -> None:
+    def __init__(self, metrics: "CacheMetricsCollector | None" = None) -> None:
+        self._metrics = metrics
         # query_ids already pushed to Spark this run — prevents re-submission.
         self._submitted: set[str] = set()
         # Bound the set size: prune entries older than one lookback window
@@ -1175,6 +1181,9 @@ class WriteInterceptor:
         now = datetime.now(timezone.utc)
         self._submitted.add(pw.query_id)
         self._submitted_ts[pw.query_id] = now
+        if self._metrics:
+            key = TableKey(catalog=pw.catalog, db=pw.db, table=pw.table)
+            self._metrics.record_spark_pushdown(key)
 
     def _prune_seen(self) -> None:
         """Remove query_ids older than one lookback window to bound memory."""
@@ -1242,6 +1251,224 @@ def _extract_table_from_write_stmt(stmt: str, default_db: str) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cache metrics collector
+# ─────────────────────────────────────────────────────────────────────────────
+class CacheMetricsCollector:
+    """
+    Collects per-table, per-BE cache I/O metrics each daemon cycle and writes
+    them to platform_meta.table_cache_metrics.
+
+    Design constraints
+    ------------------
+    1. Zero impact on concurrent operations.
+       - Runs in its own background thread with its own dedicated DorisClient
+         connection.  No connection is shared with warm-up threads or the main
+         cycle thread.
+       - Uses one executemany INSERT per cycle (one row per table×BE), not one
+         INSERT per query.  At 10 k+ queries/s this avoids any write amplification.
+
+    2. Source of truth.
+       - local_scan_bytes / remote_scan_bytes come from the BE Prometheus
+         endpoint sampled at cycle start and end.  The delta between two
+         consecutive samples covers this window.
+       - Per-table attribution: Doris audit_log records scan_bytes per query.
+         We apportion the per-query scan_bytes from the audit log into
+         local vs remote using the cluster-level local/remote ratio from the
+         BE metrics snapshot.  This is an approximation that avoids per-query
+         BE round-trips at 10 k qps.
+
+    3. Non-blocking.
+       - The collector thread is daemonized and fires once per daemon cycle.
+         If it falls behind, the main cycle proceeds — metrics are best-effort.
+    """
+
+    _WINDOW_S = SCAN_INTERVAL_S
+
+    def __init__(self) -> None:
+        self._warmup_counts: dict[tuple, int] = {}
+        self._warmup_lock = threading.Lock()
+        self._spark_counts: dict[tuple, int] = {}
+        self._spark_lock   = threading.Lock()
+        # Cumulative BE scan byte counters from last cycle — for delta calc.
+        self._be_snapshots: dict[str, dict] = {}  # be_host → {local, remote}
+
+    # ── Called by other components to feed event counters ────────────────────
+
+    def record_warmup_completion(self, key: TableKey) -> None:
+        """Called by WarmupExecutor._run_warmup after a successful scan."""
+        k = (key.catalog, key.db, key.table)
+        with self._warmup_lock:
+            self._warmup_counts[k] = self._warmup_counts.get(k, 0) + 1
+
+    def record_spark_pushdown(self, key: TableKey) -> None:
+        """Called by WriteInterceptor after a successful Spark submission."""
+        k = (key.catalog, key.db, key.table)
+        with self._spark_lock:
+            self._spark_counts[k] = self._spark_counts.get(k, 0) + 1
+
+    # ── Main entry point ─────────────────────────────────────────────────────
+
+    def collect(
+        self,
+        be_nodes: list[BeNode],
+        stats: dict[TableKey, dict],
+        doris_creds: dict[str, str],
+        now: datetime,
+    ) -> None:
+        """Spawn a background thread; returns immediately."""
+        t = threading.Thread(
+            target=self._collect_thread,
+            args=(be_nodes, stats, doris_creds, now),
+            name="cache-metrics-collector",
+            daemon=True,
+        )
+        t.start()
+
+    # ── Internal ─────────────────────────────────────────────────────────────
+
+    def _collect_thread(
+        self,
+        be_nodes: list[BeNode],
+        stats: dict[TableKey, dict],
+        doris_creds: dict[str, str],
+        now: datetime,
+    ) -> None:
+        try:
+            conn = DorisClient(
+                host=DORIS_HOST, port=DORIS_PORT,
+                user=DORIS_USER, password=doris_creds["admin_password"],
+            )
+            window_start = now - timedelta(seconds=self._WINDOW_S)
+            window_str   = window_start.strftime("%Y-%m-%d %H:%M:%S")
+            now_str      = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            # 1. Per-table scan_bytes + query stats from audit_log
+            catalog_filter = " OR ".join(
+                f"LOWER(stmt) LIKE '%{c}.%'" for c in MANAGED_CATALOGS
+            )
+            audit_rows = conn.execute(f"""
+                SELECT stmt,
+                       SUM(scan_bytes) AS total_bytes,
+                       COUNT(*)        AS query_count,
+                       AVG(query_time) AS avg_ms
+                FROM __internal_schema.audit_log
+                WHERE time >= '{window_str}'
+                  AND time <  '{now_str}'
+                  AND is_query = 1
+                  AND ({catalog_filter})
+                GROUP BY stmt
+            """)
+
+            per_table: dict[TableKey, dict] = {}
+            for stmt, total_bytes, qcount, avg_ms in audit_rows:
+                key = _extract_key_from_stmt(stmt)
+                if not key:
+                    continue
+                e = per_table.setdefault(key, {"bytes": 0, "queries": 0, "avg_ms": 0.0, "prev_q": 0})
+                prev_q = e["prev_q"]
+                new_q  = int(qcount or 0)
+                e["bytes"]   += int(total_bytes or 0)
+                e["queries"] += new_q
+                e["avg_ms"]   = (e["avg_ms"] * prev_q + float(avg_ms or 0) * new_q) / max(e["queries"], 1)
+                e["prev_q"]   = e["queries"]
+
+            if not per_table:
+                return
+
+            # 2. Sample each BE and write one batch of rows per BE
+            with self._warmup_lock:
+                warmup_snap = dict(self._warmup_counts)
+            with self._spark_lock:
+                spark_snap = dict(self._spark_counts)
+
+            for be in be_nodes:
+                self._write_be_rows(conn, be, per_table, stats,
+                                    warmup_snap, spark_snap, now_str)
+
+        except Exception as exc:
+            logger.error("CacheMetricsCollector thread error: %s", exc)
+
+    def _write_be_rows(
+        self,
+        conn: DorisClient,
+        be: BeNode,
+        per_table: dict[TableKey, dict],
+        stats: dict[TableKey, dict],
+        warmup_snap: dict,
+        spark_snap: dict,
+        now_str: str,
+    ) -> None:
+        # Fetch cumulative BE scan counters
+        url = f"http://{be.host}:{be.http_port}/metrics"
+        raw = ""
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode()
+        except Exception as exc:
+            logger.warning("CacheMetrics: cannot reach BE %s metrics: %s", be, exc)
+
+        def _sum_metric(text: str, name: str) -> int:
+            return sum(
+                int(float(line.split()[-1]))
+                for line in text.splitlines()
+                if line.startswith(name) and not line.startswith("#")
+                and line.split()[-1].replace(".","",1).isdigit()
+            )
+
+        cur_local  = _sum_metric(raw, "doris_be_workload_group_local_scan_bytes")
+        cur_remote = _sum_metric(raw, "doris_be_workload_group_remote_scan_bytes")
+        prev       = self._be_snapshots.get(be.host, {"local": cur_local, "remote": cur_remote})
+        d_local    = max(cur_local  - prev["local"],  0)
+        d_remote   = max(cur_remote - prev["remote"], 0)
+        self._be_snapshots[be.host] = {"local": cur_local, "remote": cur_remote}
+
+        total_d    = d_local + d_remote
+        local_r    = (d_local  / total_d) if total_d > 0 else 0.0
+        remote_r   = (d_remote / total_d) if total_d > 0 else 1.0
+
+        rows: list[tuple] = []
+        for key, data in per_table.items():
+            tbl_bytes    = data["bytes"]
+            local_bytes  = int(tbl_bytes * local_r)
+            remote_bytes = int(tbl_bytes * remote_r)
+            total_bytes  = local_bytes + remote_bytes
+            hit_pct      = round(local_bytes / total_bytes * 100, 2) if total_bytes > 0 else 0.0
+            s  = stats.get(key, {})
+            k  = (key.catalog, key.db, key.table)
+            lw = s.get("last_warmed_ts")
+            rows.append((
+                key.catalog, key.db, key.table, be.host, now_str,
+                local_bytes, remote_bytes, total_bytes, hit_pct,
+                data["queries"], round(data["avg_ms"], 2),
+                s.get("cache_state", "UNKNOWN"),
+                lw.strftime("%Y-%m-%d %H:%M:%S") if lw else None,
+                s.get("warm_interval_min"),
+                warmup_snap.get(k, 0),
+                spark_snap.get(k, 0),
+            ))
+
+        if not rows:
+            return
+
+        conn.execute_many("""
+            INSERT INTO platform_meta.table_cache_metrics
+                (catalog_name, db_name, table_name, be_host, sampled_at,
+                 local_scan_bytes, remote_scan_bytes, total_scan_bytes,
+                 cache_hit_pct, query_count, avg_query_time_ms,
+                 cache_state, last_warmed_ts, warm_interval_min,
+                 warmup_count, spark_pushdown_count)
+            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s)
+        """, rows)
+        logger.info(
+            "CacheMetrics: %d rows written for BE %s "
+            "(local=%.1fMB remote=%.1fMB ratio=%.0f%% local).",
+            len(rows), be,
+            d_local / 1024 / 1024, d_remote / 1024 / 1024, local_r * 100,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main daemon loop
 # ─────────────────────────────────────────────────────────────────────────────
 class CacheManagerDaemon:
@@ -1286,10 +1513,11 @@ class CacheManagerDaemon:
 
         self._meta              = MetaStore()
         self._scraper           = AuditLogScraper()
-        self._executor          = WarmupExecutor(self._meta)
+        self._metrics           = CacheMetricsCollector()
+        self._executor          = WarmupExecutor(self._meta, self._metrics)
         self._scheduler         = WarmupScheduler(self._executor)
         self._lru               = LRUEvictionChecker()
-        self._write_interceptor = WriteInterceptor()
+        self._write_interceptor = WriteInterceptor(self._metrics)
         self._be_discovery      = BeDiscovery()
 
     def run(self) -> None:
@@ -1376,6 +1604,11 @@ class CacheManagerDaemon:
         # 7. Write-pushdown — intercept DML writes against external catalogs
         #    and re-submit them to Spark.
         self._write_interceptor.scan_and_push(self._meta_doris, self._polaris_creds)
+
+        # 8. Cache metrics — collect and write to table_cache_metrics async.
+        #    Fires in a separate daemon thread; returns immediately so it
+        #    cannot block or delay any warm-up or write-pushdown work.
+        self._metrics.collect(be_nodes, updated_stats, self._doris_creds, now)
 
         # Touch heartbeat file for liveness probe
         try:
