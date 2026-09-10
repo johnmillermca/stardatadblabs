@@ -198,105 +198,102 @@ def _instance_info_pb() -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # gRPC generic handler
 # ─────────────────────────────────────────────────────────────────────────────
-class _MetaServiceHandler(grpc.ServiceRpcHandlers):
+# Known MetaService method names extracted from MetaServiceGrpc.class
+_MS_METHODS = [
+    "GetVersion", "CreateTablets", "UpdateTablet",
+    "BeginTxn", "PrecommitTxn", "CommitTxn", "AbortTxn",
+    "GetTxn", "GetTxnId", "GetCurrentMaxTxnId",
+    "BeginSubTxn", "AbortSubTxn", "CheckTxnConflict", "CleanTxnLabel",
+    "GetCluster", "GetInstance", "GetInstanceByRole",
+    "PrepareIndex", "CommitIndex", "DropIndex",
+    "PreparePartition", "CommitPartition", "DropPartition",
+    "GetTabletStats", "FinishTabletJob",
+    "CreateStage", "GetStage", "DropStage",
+    "GetIam", "BeginCopy", "FinishCopy", "GetCopyJob", "GetCopyFiles",
+    "FilterCopyFiles", "AlterCluster", "AlterObjStoreInfo", "AlterStorageVault",
+    "GetDeleteBitmapUpdateLock", "RemoveDeleteBitmapUpdateLock",
+    "GetObjStoreInfo", "AbortTxnWithCoordinator", "GetPrepareTxnByCoordinator",
+    "CreateInstance", "AlterInstance", "GetRLTaskCommitAttach", "ResetRLProgress",
+    "ResetStreamingJobOffset", "GetStreamingTaskCommitAttach",
+    "DeleteStreamingJob", "CheckKv",
+    "BeginSnapshot", "UpdateSnapshot", "CommitSnapshot", "AbortSnapshot",
+    "ListSnapshot", "DropSnapshot", "CloneInstance",
+]
+
+SERVICE_NAME = "doris.cloud.MetaService"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dispatch logic (plain functions, no class hierarchy needed)
+# ─────────────────────────────────────────────────────────────────────────────
+_call_counts: dict[str, int] = {}
+_count_lock = threading.Lock()
+
+
+def _count(method: str) -> None:
+    with _count_lock:
+        _call_counts[method] = _call_counts.get(method, 0) + 1
+        total = _call_counts[method]
+    if total == 1 or total % 100 == 0:
+        log.debug("MetaService.%s called (total=%d)", method, total)
+
+
+def _get_cluster(req_bytes: bytes) -> bytes:
     """
-    Dynamic gRPC handler for doris.cloud.MetaService.
-
-    Every RPC returns MetaServiceCode.OK with minimal valid payloads for the
-    two bootstrap calls (getCluster, getInstance) and empty-but-OK for all
-    others.  This ensures the FE JVM never blocks or retries on startup.
+    GetClusterResponse: status=1 (OK), cluster=2 (ClusterPB).
+    The FE calls this at startup to populate CloudSystemInfoService.
     """
+    _count("GetCluster")
+    fields = _parse_fields(req_bytes)
+    req_cluster = _str_field(fields, 4) or CLUSTER_NAME
+    log.info("getCluster requested cluster_name='%s'", req_cluster)
+    return _field_bytes(1, _ok_status()) + _field_bytes(2, _cluster_pb())
 
-    SERVICE = "doris.cloud.MetaService"
 
-    def __init__(self) -> None:
-        self._call_counts: dict[str, int] = {}
-        self._lock = threading.Lock()
+def _get_instance(req_bytes: bytes) -> bytes:
+    """GetInstanceResponse: status=1 (OK), instance=2 (InstanceInfoPB)."""
+    _count("GetInstance")
+    log.info("getInstance called")
+    return _field_bytes(1, _ok_status()) + _field_bytes(2, _instance_info_pb())
 
-    def _count(self, method: str) -> None:
-        with self._lock:
-            self._call_counts[method] = self._call_counts.get(method, 0) + 1
-            total = self._call_counts[method]
-        if total == 1 or total % 100 == 0:
-            log.debug("MetaService.%s called (total=%d)", method, total)
 
-    # ── Bootstrap responses ──────────────────────────────────────────────────
+def _ok_only(method: str, _req: bytes) -> bytes:
+    """Generic OK response for all transaction/tablet versioning RPCs."""
+    _count(method)
+    return _field_bytes(1, _ok_status())
 
-    def _get_cluster(self, req_bytes: bytes) -> bytes:
-        """
-        GetClusterResponse: status=1 (OK), cluster=2 (ClusterPB).
-        The FE calls this at startup to populate CloudSystemInfoService.
-        """
-        self._count("getCluster")
-        fields = _parse_fields(req_bytes)
-        req_cluster = _str_field(fields, 4) or CLUSTER_NAME
-        log.info("getCluster requested cluster_name='%s'", req_cluster)
-        return _field_bytes(1, _ok_status()) + _field_bytes(2, _cluster_pb())
 
-    def _get_instance(self, req_bytes: bytes) -> bytes:
-        """
-        GetInstanceResponse: status=1 (OK), instance=2 (InstanceInfoPB).
-        """
-        self._count("getInstance")
-        log.info("getInstance called")
-        return _field_bytes(1, _ok_status()) + _field_bytes(2, _instance_info_pb())
+def _dispatch(method: str, req: bytes) -> bytes:
+    if method == "GetCluster":
+        return _get_cluster(req)
+    if method == "GetInstance":
+        return _get_instance(req)
+    return _ok_only(method, req)
 
-    def _ok_only(self, method: str, _req: bytes) -> bytes:
-        """Generic OK response for all transaction/tablet versioning RPCs."""
-        self._count(method)
-        return _field_bytes(1, _ok_status())
 
-    # ── gRPC dispatch ────────────────────────────────────────────────────────
-
-    def _dispatch(self, method: str, req: bytes) -> bytes:
-        if method == "GetCluster":
-            return self._get_cluster(req)
-        if method == "GetInstance":
-            return self._get_instance(req)
-        # All other RPCs: return status=OK with no additional fields.
-        # This covers GetVersion, BeginTxn, CommitTxn, AbortTxn, etc.
-        # The FE handles empty responses gracefully (local BdbJE fallback).
-        return self._ok_only(method, req)
+# ─────────────────────────────────────────────────────────────────────────────
+# Generic gRPC service handler (grpc.GenericRpcHandler)
+# ─────────────────────────────────────────────────────────────────────────────
+class _GenericServiceHandler(grpc.GenericRpcHandler):
+    """Routes all incoming RPCs for doris.cloud.MetaService."""
 
     def service_name(self) -> str:
-        return self.SERVICE
+        return SERVICE_NAME
 
-    def method_handlers(self) -> dict[str, grpc.RpcMethodHandler]:
-        # Build a generic unary handler for every known MetaService method.
-        # The FE only calls the methods it needs; all others return OK.
-        methods = [
-            "GetVersion", "CreateTablets", "UpdateTablet",
-            "BeginTxn", "PrecommitTxn", "CommitTxn", "AbortTxn",
-            "GetTxn", "GetTxnId", "GetCurrentMaxTxnId",
-            "BeginSubTxn", "AbortSubTxn", "CheckTxnConflict", "CleanTxnLabel",
-            "GetCluster", "GetInstance", "GetInstanceByRole",
-            "PrepareIndex", "CommitIndex", "DropIndex",
-            "PreparePartition", "CommitPartition", "DropPartition",
-            "GetTabletStats", "FinishTabletJob",
-            "CreateStage", "GetStage", "DropStage",
-            "GetIam", "BeginCopy", "FinishCopy", "GetCopyJob", "GetCopyFiles",
-            "FilterCopyFiles", "AlterCluster", "AlterObjStoreInfo", "AlterStorageVault",
-            "GetDeleteBitmapUpdateLock", "RemoveDeleteBitmapUpdateLock",
-            "GetObjStoreInfo", "AbortTxnWithCoordinator", "GetPrepareTxnByCoordinator",
-            "CreateInstance", "AlterInstance", "GetRLTaskCommitAttach", "ResetRLProgress",
-            "ResetStreamingJobOffset", "GetStreamingTaskCommitAttach",
-            "DeleteStreamingJob", "CheckKv",
-            "BeginSnapshot", "UpdateSnapshot", "CommitSnapshot", "AbortSnapshot",
-            "ListSnapshot", "DropSnapshot", "CloneInstance",
-        ]
-        handlers: dict[str, grpc.RpcMethodHandler] = {}
-        for m in methods:
-            method_name = m  # capture for closure
-            def make_handler(mname: str) -> grpc.RpcMethodHandler:
-                def handle(req: bytes, ctx: grpc.ServicerContext) -> bytes:
-                    return self._dispatch(mname, req)
-                return grpc.unary_unary_rpc_method_handler(
-                    handle,
-                    request_deserializer=lambda b: b,
-                    response_serializer=lambda b: b,
-                )
-            handlers[m] = make_handler(m)
-        return handlers
+    def service(self, handler_call_details: grpc.HandlerCallDetails
+                ) -> grpc.RpcMethodHandler | None:
+        full = handler_call_details.method  # "/doris.cloud.MetaService/MethodName"
+        method = full.split("/")[-1] if full else ""
+        if method not in _MS_METHODS:
+            return None
+
+        def handle(req: bytes, _ctx: grpc.ServicerContext) -> bytes:
+            return _dispatch(method, req)
+
+        return grpc.unary_unary_rpc_method_handler(
+            handle,
+            request_deserializer=lambda b: b,
+            response_serializer=lambda b: b,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -315,7 +312,6 @@ class MetaServiceStub:
 
     def __init__(self, port: int | None = None) -> None:
         self._port = port or self.DEFAULT_PORT
-        self._handler = _MetaServiceHandler()
         self._server: grpc.Server | None = None
 
     def start(self) -> None:
@@ -324,17 +320,12 @@ class MetaServiceStub:
             options=[
                 ("grpc.max_receive_message_length", 64 * 1024 * 1024),
                 ("grpc.max_send_message_length",    64 * 1024 * 1024),
-                # Keep-alive: allow the FE to hold a long-lived channel
                 ("grpc.keepalive_time_ms",          60_000),
                 ("grpc.keepalive_timeout_ms",       10_000),
                 ("grpc.keepalive_permit_without_calls", True),
             ],
         )
-        # Register the service generically via ServiceRpcHandlers
-        from grpc import _server as _grpc_server  # noqa: F401
-        self._server.add_generic_rpc_handlers(
-            [_GenericServiceHandler(self._handler)]
-        )
+        self._server.add_generic_rpc_handlers([_GenericServiceHandler()])
         listen_addr = f"127.0.0.1:{self._port}"
         self._server.add_insecure_port(listen_addr)
         self._server.start()
@@ -352,24 +343,6 @@ class MetaServiceStub:
     def wait_for_termination(self) -> None:
         if self._server:
             self._server.wait_for_termination()
-
-
-class _GenericServiceHandler(grpc.GenericRpcHandler):
-    """Routes all incoming RPCs for doris.cloud.MetaService to our handler."""
-
-    def __init__(self, handler: _MetaServiceHandler) -> None:
-        self._handler = handler
-
-    def service_name(self) -> str:
-        return self._handler.SERVICE
-
-    def service(self, handler_call_details: grpc.HandlerCallDetails
-                ) -> grpc.RpcMethodHandler | None:
-        # method full name: /doris.cloud.MetaService/MethodName
-        full = handler_call_details.method  # e.g. "/doris.cloud.MetaService/GetCluster"
-        method = full.split("/")[-1] if full else ""
-        handlers = self._handler.method_handlers()
-        return handlers.get(method)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
