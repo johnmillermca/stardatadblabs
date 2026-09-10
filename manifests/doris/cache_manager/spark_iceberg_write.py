@@ -104,6 +104,19 @@ def _build_conf(catalog: str, warehouse: str, pol: dict, s3: dict) -> SparkConf:
     conf.setAppName(f"doris-write-pushdown-{catalog}")
     conf.setMaster(_SPARK_MASTER)
 
+    # ── Gluten + Velox native execution ───────────────────────────────────
+    # Mirrors spark-defaults.conf on the cluster so every write-pushdown job
+    # benefits from the same native columnar engine as all other Spark jobs.
+    # GlutenPlugin replaces Spark's Java row-based operators with Velox-backed
+    # columnar operators for scans, aggregations, joins, and writes.
+    # The gluten-velox-bundle JAR is added via --jars in the spark-submit
+    # call in doris_write_proxy.py / doris_cache_manager.py.
+    conf.set("spark.plugins",                             "org.apache.gluten.GlutenPlugin")
+    conf.set("spark.gluten.sql.columnar.backend.lib",     "velox")
+    conf.set("spark.memory.offHeap.enabled",              "true")
+    conf.set("spark.memory.offHeap.size",                 "2g")
+
+    # ── SQL extensions (Iceberg) ───────────────────────────────────────────
     conf.set(
         "spark.sql.extensions",
         "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -119,6 +132,11 @@ def _build_conf(catalog: str, warehouse: str, pol: dict, s3: dict) -> SparkConf:
     conf.set(f"spark.sql.catalog.{catalog}.scope",            "PRINCIPAL_ROLE:ALL")
     conf.set(f"spark.sql.catalog.{catalog}.warehouse",        warehouse)
     conf.set(f"spark.sql.catalog.{catalog}.rest.auth.type",   "oauth2")
+    # Iceberg write defaults — 256 MB target file size (matches cluster default)
+    conf.set("spark.sql.iceberg.write.format.default",        "parquet")
+    conf.set("spark.sql.iceberg.target-file-size-bytes",      "268435456")
+    # COUNT(*) answered from Iceberg snapshot metadata without S3 scan
+    conf.set("spark.sql.iceberg.aggregate-pushdown.enabled",  "true")
 
     # ── S3 / Iceberg S3FileIO ──────────────────────────────────────────────
     conf.set(f"spark.sql.catalog.{catalog}.s3.access-key-id",     s3["access_key"])
@@ -127,15 +145,16 @@ def _build_conf(catalog: str, warehouse: str, pol: dict, s3: dict) -> SparkConf:
     conf.set(f"spark.sql.catalog.{catalog}.s3.path-style-access", "true")
     conf.set(f"spark.sql.catalog.{catalog}.client.region",        s3["region"])
 
-    conf.set("spark.hadoop.fs.s3a.access.key",          s3["access_key"])
-    conf.set("spark.hadoop.fs.s3a.secret.key",          s3["secret_key"])
-    conf.set("spark.hadoop.fs.s3a.endpoint",            s3["endpoint"])
-    conf.set("spark.hadoop.fs.s3a.endpoint.region",     s3["region"])
+    conf.set("spark.hadoop.fs.s3a.access.key",              s3["access_key"])
+    conf.set("spark.hadoop.fs.s3a.secret.key",              s3["secret_key"])
+    conf.set("spark.hadoop.fs.s3a.endpoint",                s3["endpoint"])
+    conf.set("spark.hadoop.fs.s3a.endpoint.region",         s3["region"])
     conf.set("spark.hadoop.fs.s3a.impl",
              "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    conf.set("spark.hadoop.fs.s3a.path.style.access",   "true")
+    conf.set("spark.hadoop.fs.s3a.path.style.access",       "true")
+    conf.set("spark.hadoop.fs.s3a.connection.ssl.enabled",  "true")
 
-    conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+    conf.set("spark.serializer",                "org.apache.spark.serializer.KryoSerializer")
     conf.set("spark.kryo.registrationRequired", "false")
 
     return conf
