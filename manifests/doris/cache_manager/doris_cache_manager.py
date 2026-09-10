@@ -1191,7 +1191,10 @@ class WriteInterceptor:
         payload = {
             "action": "CreateSubmissionRequest",
             "appResource": _SPARK_WRITE_SCRIPT,
-            "mainClass": "",          # PySpark — no main class
+            # PySpark scripts submitted via the Spark standalone REST API in
+            # cluster mode require DriverWrapper as mainClass — empty string
+            # causes ClassNotFoundException in the worker JVM.
+            "mainClass": "org.apache.spark.deploy.worker.DriverWrapper",
             "appArgs": [job_args],
             "sparkProperties": {
                 "spark.app.name":           f"doris-write-pushdown-{pw.catalog}-{pw.table}",
