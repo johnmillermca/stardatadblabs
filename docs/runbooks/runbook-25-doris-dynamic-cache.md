@@ -34,7 +34,7 @@ Iceberg tables (Polaris REST)
      • Reads Doris audit_log every hour
      • Warms up hot tables: interval = select_interval × ⅔
      • Evicts cold tables: idle ≥ 24 h  →  COLD_DOWN
-     • Persists state in platform_meta (Doris internal tables)
+     • Persists state in system (Doris internal tables)
 ```
 
 ---
@@ -145,7 +145,7 @@ is only a mount point — the backing device is `rhel-home`, not `rhel-root`.
 |---|---|
 | `manifests/doris/setup/01_drop_catalogs.sql` | Drop all existing Doris external catalogs |
 | `manifests/doris/setup/02_create_catalogs.sql` | Create 5 Iceberg catalogs — points to `polaris-auth-proxy:8283` (no credentials needed) |
-| `manifests/doris/setup/03_create_metadata_tables.sql` | Create `platform_meta` database and tracking tables |
+| `manifests/doris/setup/03_create_metadata_tables.sql` | Create `system` database and tracking tables |
 | `manifests/doris/cache_manager/doris_cache_manager.py` | Python daemon — monitoring, warm-up, LRU eviction |
 | `manifests/doris/cache_manager/Dockerfile` | Container image build |
 | `manifests/doris/cache_manager/spark_iceberg_write.py` | PySpark job executed on Spark workers for write pushdown |
@@ -184,12 +184,13 @@ All credentials are read from OpenBao at runtime — nothing is hard-coded.
 
 ### 2.3 Metadata Tables
 
-Created in `platform_meta` (Doris internal database):
+Created in `system` (Doris internal database):
 
 | Table | Purpose |
 |---|---|
-| `platform_meta.table_query_stats` | Per-table SELECT count, timing, warm state |
-| `platform_meta.cache_eviction_log` | Audit log of every LRU eviction |
+| `system.table_query_stats` | Per-table SELECT count, timing, warm state |
+| `system.cache_eviction_log` | Audit log of every LRU eviction |
+| `system.table_cache_metrics` | Per-table, per-BE cache I/O metrics written each cycle by `CacheMetricsCollector` (v1.4.0+) |
 
 ### 2.4 Warm-Up Scheduling Logic
 
@@ -267,7 +268,7 @@ doris-write-proxy  (pod, port 9040)
 
 - After every scan cycle, any table with `last_select_ts` older than **24 hours** that
   is currently in state `WARM`, `WARMING`, or `UNKNOWN` receives a `COLD_DOWN`.
-- The eviction is recorded in `platform_meta.cache_eviction_log` with reason
+- The eviction is recorded in `system.cache_eviction_log` with reason
   `no_select_24h`.
 
 ---
@@ -280,7 +281,7 @@ doris-write-proxy  (pod, port 9040)
 - Polaris REST catalog is reachable at `http://polaris-rest.prod.svc.cluster.local:8181`.
 - OpenBao has `secret/data/platform/doris` and `secret/data/platform/polaris` populated.
 - The `doris-cache-manager` OpenBao K8s auth role exists (see §3.0 below).
-- The `platform_meta` database and tracking tables exist in Doris (see §3.6).
+- The `system` database and tracking tables exist in Doris (see §3.6).
 
 ### 3.0 One-Time OpenBao K8s Auth Role Setup
 
@@ -394,8 +395,8 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
 Verify:
 
 ```sql
-SHOW TABLES FROM platform_meta;
--- Expected: cache_eviction_log, table_query_stats
+SHOW TABLES FROM system;
+-- Expected: cache_eviction_log, table_cache_metrics, table_query_stats
 ```
 
 ### 3.7 Build the Cache Manager Container Image
@@ -473,16 +474,16 @@ Check metadata tables from Doris Web UI (`http://192.168.1.50:30030`) or MySQL:
 
 ```sql
 -- Web UI: run each statement separately (USE doesn't persist between statements)
-SHOW TABLES FROM platform_meta;
+SHOW TABLES FROM system;
 -- Expected: cache_eviction_log, table_query_stats
 
 SELECT catalog_name, db_name, table_name, total_select_count,
        last_select_ts, select_interval_min, warm_interval_min, cache_state
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 ORDER BY total_select_count DESC
 LIMIT 20;
 
-SELECT * FROM platform_meta.cache_eviction_log ORDER BY evicted_at DESC LIMIT 10;
+SELECT * FROM system.cache_eviction_log ORDER BY evicted_at DESC LIMIT 10;
 ```
 
 Trigger cache population by running a query against a managed catalog:
@@ -528,14 +529,14 @@ SELECT
     last_select_ts,
     warm_interval_min,
     last_warmed_ts
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 ORDER BY last_select_ts DESC;
 ```
 
 ### 5.4 Large-Dataset SELECT Samples
 
 These queries exercise all five catalogs at scale and will populate
-`platform_meta.table_query_stats` — triggering warm-up scheduling after the
+`system.table_query_stats` — triggering warm-up scheduling after the
 second cycle.  Run them from a MySQL client connected to Doris on port `30090`.
 
 #### 5.4.1 polaris — TPC-DS SF10TCL (store_sales: ~2.9 billion rows)
@@ -1292,9 +1293,9 @@ Documented here so future re-deployments avoid the same pitfalls.
 
 ---
 
-#### Issue 1 — `platform_meta` database did not exist
+#### Issue 1 — `system` database did not exist
 
-**Symptom:** `SHOW DATABASES FROM internal` did not include `platform_meta`.
+**Symptom:** `SHOW DATABASES FROM internal` did not include `system`.
 
 **Cause:** The SQL in `03_create_metadata_tables.sql` had not been applied to the cluster.
 

@@ -6,7 +6,7 @@ Dynamic segment-cache warm-up daemon for Apache Doris.
 Responsibilities
 ----------------
 1. Every hour: scan Doris query audit log to count SELECT hits per Iceberg table.
-2. Persist per-table stats in platform_meta.table_query_stats.
+2. Persist per-table stats in system.table_query_stats.
 3. If a table has been queried more than once, derive a warm-up interval:
        warm_interval = select_interval * 2/3
    and schedule WARM_UP jobs at that cadence.
@@ -14,7 +14,7 @@ Responsibilities
 5. If a warm-up is still running after WARMUP_STALE_MINUTES (5 min), skip and
    retry at the next scheduled window — do not launch a duplicate.
 6. If a table has not been SELECTed in the past LRU_EVICT_HOURS (24 h), issue
-   COLD_DOWN and write an eviction row to platform_meta.cache_eviction_log.
+   COLD_DOWN and write an eviction row to system.cache_eviction_log.
 7. Write-pushdown: DML statements (INSERT / UPDATE / DELETE / MERGE / INSERT
    OVERWRITE) that target external catalog tables are detected in the audit log.
    Because Doris treats external Iceberg catalogs as read-only at the storage
@@ -524,10 +524,10 @@ def _extract_key_from_stmt(stmt: str) -> "TableKey | None":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Metadata store (read/write platform_meta tables)
+# Metadata store (read/write system tables)
 # ─────────────────────────────────────────────────────────────────────────────
 class MetaStore:
-    """Read and update platform_meta.table_query_stats and cache_eviction_log."""
+    """Read and update system.table_query_stats and cache_eviction_log."""
 
     def load_all_stats(self, doris: DorisClient) -> dict[TableKey, dict]:
         """Return all rows from table_query_stats as a dict keyed by TableKey."""
@@ -535,7 +535,7 @@ class MetaStore:
             "SELECT catalog_name, db_name, table_name, total_select_count, "
             "last_select_ts, prev_select_ts, select_interval_min, warm_interval_min, "
             "last_warmed_ts, cache_state, updated_at "
-            "FROM platform_meta.table_query_stats"
+            "FROM system.table_query_stats"
         )
         result: dict[TableKey, dict] = {}
         for row in rows:
@@ -564,7 +564,7 @@ class MetaStore:
         cache_state: str,
     ) -> None:
         sql = """
-            INSERT INTO platform_meta.table_query_stats
+            INSERT INTO system.table_query_stats
                 (catalog_name, db_name, table_name, total_select_count,
                  last_select_ts, prev_select_ts, select_interval_min,
                  warm_interval_min, cache_state, updated_at)
@@ -585,7 +585,7 @@ class MetaStore:
         self, doris: DorisClient, key: TableKey, ts: datetime, state: str
     ) -> None:
         sql = """
-            UPDATE platform_meta.table_query_stats
+            UPDATE system.table_query_stats
             SET last_warmed_ts = %s, cache_state = %s, updated_at = %s
             WHERE catalog_name = %s AND db_name = %s AND table_name = %s
         """
@@ -607,7 +607,7 @@ class MetaStore:
         eviction_id: int,
     ) -> None:
         sql = """
-            INSERT INTO platform_meta.cache_eviction_log
+            INSERT INTO system.cache_eviction_log
                 (id, catalog_name, db_name, table_name, evicted_at, reason, last_select_ts)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
@@ -835,7 +835,7 @@ class WarmupExecutor:
                 )
                 try:
                     meta_doris.execute(
-                        "DELETE FROM platform_meta.table_query_stats "
+                        "DELETE FROM system.table_query_stats "
                         "WHERE catalog_name = %s AND db_name = %s AND table_name = %s",
                         (key.catalog, key.db, key.table),
                     )
@@ -1256,7 +1256,7 @@ def _extract_table_from_write_stmt(stmt: str, default_db: str) -> str | None:
 class CacheMetricsCollector:
     """
     Collects per-table, per-BE cache I/O metrics each daemon cycle and writes
-    them to platform_meta.table_cache_metrics.
+    them to system.table_cache_metrics.
 
     Design constraints
     ------------------
@@ -1452,7 +1452,7 @@ class CacheMetricsCollector:
             return
 
         conn.execute_many("""
-            INSERT INTO platform_meta.table_cache_metrics
+            INSERT INTO system.table_cache_metrics
                 (catalog_name, db_name, table_name, be_host, sampled_at,
                  local_scan_bytes, remote_scan_bytes, total_scan_bytes,
                  cache_hit_pct, query_count, avg_query_time_ms,

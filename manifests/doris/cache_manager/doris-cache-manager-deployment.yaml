@@ -34,7 +34,7 @@
 #            per-thread meta DorisClient to fix concurrent update_last_warmed
 #            connection corruption, DORIS_USER and SPARK_VERSION env vars.
 #   1.4.0 — CacheMetricsCollector: new background thread per cycle writes
-#            per-table, per-BE I/O metrics to platform_meta.table_cache_metrics.
+#            per-table, per-BE I/O metrics to system.table_cache_metrics.
 #            Tracks local_scan_bytes, remote_scan_bytes, cache_hit_pct,
 #            query_count, avg_query_time_ms, warmup_count, spark_pushdown_count.
 #            Runs in its own daemon thread with its own DorisClient — zero

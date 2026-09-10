@@ -1,20 +1,22 @@
 -- =============================================================================
 -- 03_create_metadata_tables.sql
--- Create the platform_meta database and tracking tables used by the
+-- Create the system database and tracking tables used by the
 -- Doris Dynamic Cache Manager.
 --
 -- Tables:
---   platform_meta.table_query_stats   — SELECT count per table, timing
---   platform_meta.cache_eviction_log  — LRU eviction audit trail
+--   system.table_query_stats   — SELECT count per table, timing
+--   system.cache_eviction_log  — LRU eviction audit trail
+--   system.table_cache_metrics — Per-table, per-BE cache I/O metrics
+--                                       (written by CacheMetricsCollector each cycle)
 --
 -- Run:
 --   mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
 --         < manifests/doris/setup/03_create_metadata_tables.sql
 -- =============================================================================
 
-CREATE DATABASE IF NOT EXISTS platform_meta;
+CREATE DATABASE IF NOT EXISTS system;
 
-USE platform_meta;
+USE system;
 
 -- ── table_query_stats ─────────────────────────────────────────────────────────
 -- Tracks how many times each external Iceberg table has been queried via Doris.
@@ -34,7 +36,7 @@ USE platform_meta;
 --   cache_state         — WARM | COLD | WARMING | UNKNOWN
 --   updated_at          — row last modified timestamp
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS platform_meta.table_query_stats (
+CREATE TABLE IF NOT EXISTS system.table_query_stats (
     catalog_name          VARCHAR(128)  NOT NULL,
     db_name               VARCHAR(256)  NOT NULL,
     table_name            VARCHAR(256)  NOT NULL,
@@ -65,7 +67,7 @@ PROPERTIES (
 --   reason        — human-readable eviction reason (e.g. "no_select_24h")
 --   last_select_ts — last SELECT seen before eviction (for audit)
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS platform_meta.cache_eviction_log (
+CREATE TABLE IF NOT EXISTS system.cache_eviction_log (
     id             BIGINT        NOT NULL,
     catalog_name   VARCHAR(128)  NOT NULL,
     db_name        VARCHAR(256)  NOT NULL,
@@ -80,5 +82,51 @@ PROPERTIES (
     "replication_num" = "1"
 );
 
+-- ── table_cache_metrics ───────────────────────────────────────────────────────
+-- Per-table, per-BE cache I/O metrics written once per daemon cycle by
+-- CacheMetricsCollector (background thread, own dedicated DorisClient).
+--
+-- Columns:
+--   catalog_name         — Doris catalog (polaris / databricks / postgres / oracle / mongodb)
+--   db_name              — database/namespace inside the catalog
+--   table_name           — table name
+--   be_host              — Backend node host (one row per table × BE per cycle)
+--   sampled_at           — Timestamp of this metrics snapshot
+--   local_scan_bytes     — Bytes served from BE local NVMe file_cache (fast path)
+--   remote_scan_bytes    — Bytes fetched from S3/remote storage (cold path)
+--   total_scan_bytes     — local + remote
+--   cache_hit_pct        — local / total × 100 (0.00–100.00)
+--   query_count          — Number of SELECTs in this cycle window
+--   avg_query_time_ms    — Average query_time from audit_log in this window
+--   cache_state          — Current WARM / COLD / WARMING / UNKNOWN state
+--   last_warmed_ts       — Last completed daemon warm-up timestamp
+--   warm_interval_min    — Computed warm-up cadence (select_interval × 2/3)
+--   warmup_count         — Cumulative warm-up completions this daemon process lifetime
+--   spark_pushdown_count — Cumulative write-pushdown submissions this daemon process lifetime
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS system.table_cache_metrics (
+    catalog_name          VARCHAR(128)  NOT NULL,
+    db_name               VARCHAR(256)  NOT NULL,
+    table_name            VARCHAR(256)  NOT NULL,
+    be_host               VARCHAR(256)  NOT NULL,
+    sampled_at            DATETIME      NOT NULL,
+    local_scan_bytes      BIGINT        NOT NULL DEFAULT 0,
+    remote_scan_bytes     BIGINT        NOT NULL DEFAULT 0,
+    total_scan_bytes      BIGINT        NOT NULL DEFAULT 0,
+    cache_hit_pct         DOUBLE        NOT NULL DEFAULT 0.0  COMMENT 'local / total × 100',
+    query_count           BIGINT        NOT NULL DEFAULT 0,
+    avg_query_time_ms     DOUBLE        NOT NULL DEFAULT 0.0,
+    cache_state           VARCHAR(16)   NOT NULL DEFAULT 'UNKNOWN',
+    last_warmed_ts        DATETIME      NULL,
+    warm_interval_min     DOUBLE        NULL,
+    warmup_count          BIGINT        NOT NULL DEFAULT 0,
+    spark_pushdown_count  BIGINT        NOT NULL DEFAULT 0
+)
+DUPLICATE KEY(catalog_name, db_name, table_name, be_host, sampled_at)
+DISTRIBUTED BY HASH(catalog_name) BUCKETS 4
+PROPERTIES (
+    "replication_num" = "1"
+);
+
 -- Verify
-SHOW TABLES FROM platform_meta;
+SHOW TABLES FROM system;

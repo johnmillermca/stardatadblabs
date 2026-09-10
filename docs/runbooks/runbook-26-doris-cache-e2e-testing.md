@@ -39,7 +39,7 @@ The test covers seven phases in order:
 | T-02 | P-1 | Infra | Doris has at least one alive BE |
 | T-03 | P-1 | Infra | All 5 Iceberg catalogs are registered |
 | T-03a | P-1 | Infra | List all Iceberg tables across all catalogs |
-| T-04 | P-1 | Infra | `platform_meta` tables exist |
+| T-04 | P-1 | Infra | `system` tables exist |
 | T-05 | P-1 | Infra | OpenBao K8s auth role `doris-cache-manager` exists |
 | T-06 | P-1 | Infra | OpenBao secret `secret/data/platform/doris` is populated |
 | T-07 | P-1 | Infra | Spark REST API is reachable |
@@ -251,10 +251,10 @@ definition (see T-11a).
 
 ---
 
-### T-04 — `platform_meta` tables exist
+### T-04 — `system` tables exist
 
 ```bash
-doris-mysql -e "SHOW TABLES FROM platform_meta;"
+doris-mysql -e "SHOW TABLES FROM system;"
 ```
 
 **Expected:**
@@ -264,7 +264,7 @@ table_query_stats
 ```
 
 ✅ Pass: both tables listed.  
-❌ Fail: `Unknown database 'platform_meta'` — apply `manifests/doris/setup/03_create_metadata_tables.sql` (RB-25 §3.6).
+❌ Fail: `Unknown database 'system'` — apply `manifests/doris/setup/03_create_metadata_tables.sql` (RB-25 §3.6).
 
 ---
 
@@ -647,7 +647,7 @@ SELECT catalog_name, db_name, table_name,
        END AS warmed_age,
        ROUND(warm_interval_min, 2) AS warm_interval_min,
        select_interval_min
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 ORDER BY last_select_ts DESC
 LIMIT 10;
 "
@@ -694,7 +694,7 @@ Note the current `total_select_count` for one table, then re-run its query:
 # Record current count
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT total_select_count
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE catalog_name = 'polaris'
   AND table_name = 'inventory';"
 
@@ -715,7 +715,7 @@ After the cycle completes, re-check:
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT total_select_count
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE catalog_name = 'polaris'
   AND table_name = 'inventory';"
 ```
@@ -739,7 +739,7 @@ SELECT
     total_select_count,
     select_interval_min,
     warm_interval_min
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE total_select_count > 1
 ORDER BY total_select_count DESC
 LIMIT 5;
@@ -797,7 +797,7 @@ writes them into `file_cache_path` as a side-effect.
 ### T-18 — `SHOW WARM UP JOB` — not applicable (Community Edition)
 
 `SHOW WARM UP JOB` is a Cloud Edition command and raises a syntax error on this cluster.
-Skip this test.  Cache warm-up status is tracked via `platform_meta.table_query_stats`
+Skip this test.  Cache warm-up status is tracked via `system.table_query_stats`
 (`cache_state`, `last_warmed_ts`) populated by the daemon after each `_run_warmup` call.
 
 To confirm the manual T-17 warm-up was effective, proceed directly to T-19.
@@ -811,7 +811,7 @@ After T-18:
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state, last_warmed_ts
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE catalog_name = 'polaris'
   AND table_name = 'inventory';"
 ```
@@ -845,7 +845,7 @@ more than `warm_interval_min` apart:
 # Observe the warm_interval_min for inventory
 doris-mysql -e "
   SELECT warm_interval_min
-  FROM platform_meta.table_query_stats
+  FROM system.table_query_stats
   WHERE catalog_name='polaris' AND table_name='inventory';"
 
 # Force a cycle — wait at least warm_interval_min minutes — force another cycle
@@ -878,7 +878,7 @@ After T-20 completes:
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT last_warmed_ts, cache_state
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE catalog_name = 'polaris'
   AND table_name = 'inventory';"
 ```
@@ -957,7 +957,7 @@ starts with `UNKNOWN / NULL` until the next warm-up cycle processes it.
 # Identify ghost candidates: UNKNOWN state with zero warm attempts
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, db_name, table_name, cache_state, last_warmed_ts
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE cache_state = 'UNKNOWN'
 ORDER BY updated_at DESC;"
 ```
@@ -1009,7 +1009,7 @@ DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
 
 # Manually mark a table COLD to test the eviction path
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
-UPDATE platform_meta.table_query_stats
+UPDATE system.table_query_stats
 SET cache_state = 'COLD', updated_at = NOW()
 WHERE catalog_name = 'polaris'
   AND db_name      = 'tpcds_sf10tcl'
@@ -1017,7 +1017,7 @@ WHERE catalog_name = 'polaris'
 
 # Confirm
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
-SELECT cache_state FROM platform_meta.table_query_stats
+SELECT cache_state FROM system.table_query_stats
 WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 ```
 
@@ -1047,7 +1047,7 @@ sleep 15  # allow one cycle to complete
 # Check the state
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 ```
 
@@ -1070,7 +1070,7 @@ kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, db_name, table_name, evicted_at, reason, last_select_ts
-FROM platform_meta.cache_eviction_log
+FROM system.cache_eviction_log
 ORDER BY evicted_at DESC
 LIMIT 5;
 "
@@ -1097,7 +1097,7 @@ sleep 15
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT COUNT(*) AS eviction_count
-FROM platform_meta.cache_eviction_log
+FROM system.cache_eviction_log
 WHERE catalog_name = 'polaris'
   AND table_name = 'inventory'
   AND evicted_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE);
@@ -1322,14 +1322,14 @@ SELECT
     last_warmed_ts,
     select_interval_min,
     warm_interval_min
-FROM platform_meta.table_query_stats
+FROM system.table_query_stats
 ORDER BY catalog_name, table_name;
 "
 
 # Eviction audit
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT catalog_name, table_name, evicted_at, reason
-FROM platform_meta.cache_eviction_log
+FROM system.cache_eviction_log
 ORDER BY evicted_at DESC
 LIMIT 10;
 "
@@ -1405,7 +1405,7 @@ Oracle JDBC tables warm correctly. All `NULL` warmed timestamps are transient lo
 
 ## Phase 7 — Cache Metrics
 
-> **Background:** `platform_meta.table_cache_metrics` is populated once per daemon cycle
+> **Background:** `system.table_cache_metrics` is populated once per daemon cycle
 > (default every 300 s) by a background thread with its own dedicated connection.
 > It tracks — per table, per BE — how many bytes were read from local NVMe cache vs S3,
 > the resulting hit percentage, query volume, average latency, warm-up count, and Spark
@@ -1423,7 +1423,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT COUNT(*) AS row_count,
        MIN(sampled_at) AS first_sample,
        MAX(sampled_at) AS latest_sample
-FROM platform_meta.table_cache_metrics;"
+FROM system.table_cache_metrics;"
 ```
 
 **Expected:** `row_count ≥ 1` and `latest_sample` is within the last `SCAN_INTERVAL_S` seconds.
@@ -1467,7 +1467,7 @@ SELECT
     CONCAT(ROUND(avg_query_time_ms, 0), ' ms')                AS avg_latency,
     cache_state,
     warmup_count
-FROM platform_meta.table_cache_metrics
+FROM system.table_cache_metrics
 WHERE catalog_name = 'databricks'
   AND table_name   = 'customers'
 ORDER BY sampled_at DESC
@@ -1520,7 +1520,7 @@ SELECT
     CONCAT(ROUND(remote_scan_bytes / 1024 / 1024, 2), ' MB') AS remote_S3,
     CONCAT(cache_hit_pct, '%') AS cache_hit_pct,
     query_count
-FROM platform_meta.table_cache_metrics
+FROM system.table_cache_metrics
 WHERE catalog_name = 'databricks'
   AND table_name   = 'customers'
 ORDER BY sampled_at DESC
@@ -1548,7 +1548,7 @@ BE node served the second query (check `be_host` column).
 # Record current warmup_count
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT table_name, warmup_count, last_warmed_ts
-FROM platform_meta.table_cache_metrics
+FROM system.table_cache_metrics
 WHERE catalog_name = 'databricks'
   AND table_name   = 'customers'
 ORDER BY sampled_at DESC LIMIT 1;"
@@ -1564,7 +1564,7 @@ kubectl logs -n prod -l app=doris-cache-manager --tail=20 \
 # Re-check warmup_count
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT table_name, warmup_count, last_warmed_ts, sampled_at
-FROM platform_meta.table_cache_metrics
+FROM system.table_cache_metrics
 WHERE catalog_name = 'databricks'
   AND table_name   = 'customers'
 ORDER BY sampled_at DESC LIMIT 2;"

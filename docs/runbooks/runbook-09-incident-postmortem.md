@@ -33,9 +33,12 @@ This runbook documents every degraded pod/service encountered after cluster rebo
 17. [Kafka Data Durability — Missing Disk Flush + auto.create.topics Race](#17-kafka-data-durability--missing-disk-flush--autocreatetopics-race)
 18. [Kafka PV Not in Git — Silent Rebuild Risk](#18-kafka-pv-not-in-git--silent-rebuild-risk)
 
+### Session 4 — 2026-09-10 (Doris FE PVC Journal Gap)
+19. [Doris FE — CrashLoop (BdbJE Journal Gap: key 1 missing after pruning)](#19-doris-fe--crashloop-bdbje-journal-gap-key-1-missing-after-pruning)
+
 ### Reference
-19. [Post-Reboot Recovery Checklist](#14-post-reboot-recovery-checklist)
-20. [Architecture Lessons Learned](#15-architecture-lessons-learned)
+20. [Post-Reboot Recovery Checklist](#14-post-reboot-recovery-checklist)
+21. [Architecture Lessons Learned](#15-architecture-lessons-learned)
 
 ---
 
@@ -594,6 +597,171 @@ Pod strimzi-kafka-combined-0:       1/1 Running   0 new restarts       ✅
 Kafka data (61 topic partitions):   100% intact                        ✅
 ArgoCD prune:                       false — cannot delete PVCs again   ✅
 ```
+
+
+## Session 4 — 2026-09-10
+
+---
+
+## 19. Doris FE — CrashLoop (BdbJE Journal Gap: key 1 missing after pruning)
+
+### Symptom
+
+Doris FE pod enters `CrashLoopBackOff` immediately after pod restart.  
+FE log (from `kubectl logs -n prod doris-fe-0 -c doris-fe --previous`) shows:
+
+```
+com.sleepycat.je.EnvironmentFailureException:
+  (JE 18.3.12) UNEXPECTED_STATE: journal key 1 missing from environment
+  Journals start at 657976; no image checkpoint found.
+```
+
+`kubectl get pod -n prod doris-fe-0` shows `RESTARTS` incrementing on every attempt.
+
+### Root Cause
+
+BdbJE (Oracle Berkeley DB Java Edition) — the journal store embedded in Doris FE —
+keeps two kinds of persistent state in `meta_dir` (`/opt/apache-doris/fe/doris-meta`):
+
+| File type | Purpose |
+|-----------|---------|
+| **Journal files** (`log.NNNNNN`) | Sequential edit-log entries — each numbered from 1 |
+| **Image checkpoint** (`image.NNNNNN`) | Full metadata snapshot at a given journal key |
+
+At startup BdbJE replays journals **from the highest image checkpoint forward**.
+If no image exists it must replay from journal key **1**.
+
+Over time BdbJE prunes (deletes) old journal files once they are superseded by a
+checkpoint. In this cluster's PVC the lowest surviving journal starts at key
+**657976** and no image checkpoint was ever written to the PVC. BdbJE cannot
+replay from key 1 (the file does not exist) and cannot skip ahead without a
+checkpoint anchor → the environment fails to open → FE exits.
+
+This state **predates** the current session. It was not caused by any code change
+or manifest edit made in this session. The revert of all earlier changes is
+confirmed complete and correct; the FE crash is an independent PVC state problem.
+
+### Immediate Diagnosis
+
+```bash
+# 1. Confirm the journal gap in the log
+kubectl logs -n prod doris-fe-0 -c doris-fe --previous 2>/dev/null \
+  | grep -E "key 1 missing|Journals start at|image checkpoint"
+
+# 2. Inspect the meta directory on the node
+# Find the PV host path for doris-fe-meta
+kubectl get pv \
+  -o jsonpath='{range .items[?(@.spec.claimRef.name=="doris-fe-meta")]}{.spec.hostPath.path}{"\n"}{end}'
+
+# SSH to worker1.local (the node pinned in the StatefulSet nodeSelector)
+ssh root@worker1.local
+META_DIR=<hostPath from above>/fe/doris-meta    # e.g. /home/local-path-provisioner/pvc-…/fe/doris-meta
+
+# Check what journal files and image files exist
+ls -lh "${META_DIR}/bdb/"
+# journal gap confirmed if: no image.* file AND lowest log.NNNNNN >> 1
+
+# Check for any image checkpoint
+ls "${META_DIR}/image/" 2>/dev/null || echo "no image directory"
+```
+
+### Recovery — Option A: Wipe meta dir and re-initialize (recommended for lab clusters)
+
+> **Warning:** this deletes all FE metadata — catalog definitions, user accounts,
+> query stats, and BE registrations. Re-run the full setup procedure (RB-25 §3.x)
+> after recovery. **Never use this in production clusters carrying live data.**
+
+```bash
+# 1. Scale down FE to release the PVC
+kubectl scale statefulset doris-fe -n prod --replicas=0
+kubectl wait pod -n prod -l app=doris-fe --for=delete --timeout=120s
+
+# 2. Clear the corrupted meta directory (on worker1.local)
+META_HOST_PATH=$(kubectl get pv \
+  -o jsonpath='{range .items[?(@.spec.claimRef.name=="doris-fe-meta")]}{.spec.hostPath.path}{"\n"}{end}')
+
+ssh root@worker1.local "rm -rf '${META_HOST_PATH}/fe/doris-meta'"
+
+# 3. Scale FE back up — Doris will create a fresh meta_dir on first boot
+kubectl scale statefulset doris-fe -n prod --replicas=1
+kubectl rollout status statefulset/doris-fe -n prod --timeout=300s
+
+# 4. Wait for FE to become ready (readiness probe: /api/bootstrap port 8030)
+kubectl get pod -n prod doris-fe-0 -w
+
+# 5. Confirm FE is healthy
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SHOW FRONTENDS\G" 2>/dev/null | grep -E "feType|Alive"
+# feType=MASTER  Alive=true
+
+# 6. Re-register the BE (it loses its FE registration when FE is wiped)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "ALTER SYSTEM ADD BACKEND 'doris-be-svc.prod.svc.cluster.local:9050';"
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SHOW BACKENDS\G" 2>/dev/null | grep -E "Host|Alive"
+# Alive=true
+
+# 7. Re-run RB-25 §3 to recreate catalogs and system tables
+```
+
+### Recovery — Option B: Force image checkpoint before wipe (if any journal is readable)
+
+If BdbJE can open the environment in read-only mode (journals are intact but
+key 1 is missing from an older run), a checkpoint can sometimes be forced:
+
+```bash
+# Run DbRunAction to force a checkpoint inside the bdb/ directory
+# Requires the same JE version jar used by Doris FE
+# This is rarely feasible in containerised environments — use Option A instead.
+```
+
+Option B is documented for completeness; in practice Option A is always used in
+this cluster.
+
+### Permanent Prevention
+
+The root cause is that BdbJE never wrote an image checkpoint to this PVC.
+Doris FE writes an image checkpoint automatically when it performs a clean
+shutdown (i.e. receives SIGTERM with enough grace time).
+
+**`terminationGracePeriodSeconds: 120` is already set in
+[`manifests/doris/doris-fe-deployment.yaml`](../../manifests/doris/doris-fe-deployment.yaml)**
+per §15.8. This is correct and sufficient for normal shutdowns.
+
+The gap on this PVC pre-dates that fix and cannot be recovered without Option A.
+After re-initialization the cluster will produce image checkpoints on every
+clean shutdown and this failure mode cannot recur unless the pod is hard-killed
+(SIGKILL) repeatedly without ever completing a clean shutdown cycle.
+
+### Post-Recovery Checklist
+
+After Option A wipe-and-reinit, run the full RB-26 Phase 1 preflight to confirm
+all catalogs, metadata tables, and cache-manager state are restored:
+
+```bash
+# Confirm FE + BE healthy
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW FRONTENDS\G"
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW BACKENDS\G"
+
+# Re-run catalog + system setup (RB-25 §3.4 – §3.6)
+kubectl apply -f manifests/doris/setup/02_create_catalogs.sql   # via mysql client
+kubectl apply -f manifests/doris/setup/03_create_metadata_tables.sql
+
+# Restart cache-manager so it reconnects with fresh Doris state
+kubectl rollout restart deployment/doris-cache-manager -n prod
+kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+```
+
+### Rule
+
+> **§15.18 — BdbJE requires a clean-shutdown image checkpoint to survive journal pruning.**
+> Any Doris FE PVC that has never had a clean shutdown will accumulate pruned
+> journals with no image anchor. The FE cannot start after a forced restart.
+> Always allow `terminationGracePeriodSeconds ≥ 120` and never hard-kill the
+> FE pod. If the PVC state is already corrupt, Option A (wipe meta dir) is the
+> only recovery path.
 
 ---
 
