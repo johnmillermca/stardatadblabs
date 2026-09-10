@@ -703,7 +703,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "SHOW BACKENDS\G" 2>/dev/null | grep -E "Host|Alive"
 # Alive=true
 
-# 7. Re-run RB-25 §3 to recreate catalogs and system tables
+# 7. Re-run RB-25 §3 to recreate catalogs and cache_system tables
 ```
 
 ### Recovery — Option B: Force image checkpoint before wipe (if any journal is readable)
@@ -745,7 +745,7 @@ all catalogs, metadata tables, and cache-manager state are restored:
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW FRONTENDS\G"
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW BACKENDS\G"
 
-# Re-run catalog + system setup (RB-25 §3.4 – §3.6)
+# Re-run catalog + cache_system setup (RB-25 §3.4 – §3.6)
 kubectl apply -f manifests/doris/setup/02_create_catalogs.sql   # via mysql client
 kubectl apply -f manifests/doris/setup/03_create_metadata_tables.sql
 

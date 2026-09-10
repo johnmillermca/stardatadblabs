@@ -11,7 +11,7 @@
 #
 #   doris-table-refresh  (every 5 minutes)
 #     REFRESH TABLE — re-syncs only the Iceberg data file manifest for each
-#     hot table tracked in system.table_query_stats.  Picks up new
+#     hot table tracked in cache_system.table_query_stats.  Picks up new
 #     snapshots/partitions written by Spark so Doris queries see current data.
 #     Only the tables with the highest query counts are refreshed here; the
 #     full catalog refresh above covers all other tables every 6 h.

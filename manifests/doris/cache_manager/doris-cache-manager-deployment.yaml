@@ -33,8 +33,10 @@
 #            Also: ghost-row auto-deletion (table/db does not exist errors),
 #            per-thread meta DorisClient to fix concurrent update_last_warmed
 #            connection corruption, DORIS_USER and SPARK_VERSION env vars.
+#   1.5.0 — rename metadata database from platform_meta / system to cache_system
+#            (system is a reserved keyword in Doris; all SQL references updated).
 #   1.4.0 — CacheMetricsCollector: new background thread per cycle writes
-#            per-table, per-BE I/O metrics to system.table_cache_metrics.
+#            per-table, per-BE I/O metrics to cache_system.table_cache_metrics.
 #            Tracks local_scan_bytes, remote_scan_bytes, cache_hit_pct,
 #            query_count, avg_query_time_ms, warmup_count, spark_pushdown_count.
 #            Runs in its own daemon thread with its own DorisClient — zero
@@ -79,7 +81,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: cache-manager
-          image: 192.168.1.50:30500/doris-cache-manager:1.4.0
+          image: 192.168.1.50:30500/doris-cache-manager:1.5.0
           imagePullPolicy: Always
           command: ["python", "/app/doris_cache_manager.py"]
           env:

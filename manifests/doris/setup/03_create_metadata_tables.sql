@@ -1,12 +1,12 @@
 -- =============================================================================
 -- 03_create_metadata_tables.sql
--- Create the system database and tracking tables used by the
+-- Create the cache_system database and tracking tables used by the
 -- Doris Dynamic Cache Manager.
 --
 -- Tables:
---   system.table_query_stats   — SELECT count per table, timing
---   system.cache_eviction_log  — LRU eviction audit trail
---   system.table_cache_metrics — Per-table, per-BE cache I/O metrics
+--   cache_system.table_query_stats   — SELECT count per table, timing
+--   cache_system.cache_eviction_log  — LRU eviction audit trail
+--   cache_system.table_cache_metrics — Per-table, per-BE cache I/O metrics
 --                                       (written by CacheMetricsCollector each cycle)
 --
 -- Run:
@@ -14,9 +14,9 @@
 --         < manifests/doris/setup/03_create_metadata_tables.sql
 -- =============================================================================
 
-CREATE DATABASE IF NOT EXISTS system;
+CREATE DATABASE IF NOT EXISTS cache_system;
 
-USE system;
+USE cache_system;
 
 -- ── table_query_stats ─────────────────────────────────────────────────────────
 -- Tracks how many times each external Iceberg table has been queried via Doris.
@@ -36,7 +36,7 @@ USE system;
 --   cache_state         — WARM | COLD | WARMING | UNKNOWN
 --   updated_at          — row last modified timestamp
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS system.table_query_stats (
+CREATE TABLE IF NOT EXISTS cache_system.table_query_stats (
     catalog_name          VARCHAR(128)  NOT NULL,
     db_name               VARCHAR(256)  NOT NULL,
     table_name            VARCHAR(256)  NOT NULL,
@@ -67,7 +67,7 @@ PROPERTIES (
 --   reason        — human-readable eviction reason (e.g. "no_select_24h")
 --   last_select_ts — last SELECT seen before eviction (for audit)
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS system.cache_eviction_log (
+CREATE TABLE IF NOT EXISTS cache_system.cache_eviction_log (
     id             BIGINT        NOT NULL,
     catalog_name   VARCHAR(128)  NOT NULL,
     db_name        VARCHAR(256)  NOT NULL,
@@ -104,7 +104,7 @@ PROPERTIES (
 --   warmup_count         — Cumulative warm-up completions this daemon process lifetime
 --   spark_pushdown_count — Cumulative write-pushdown submissions this daemon process lifetime
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS system.table_cache_metrics (
+CREATE TABLE IF NOT EXISTS cache_system.table_cache_metrics (
     catalog_name          VARCHAR(128)  NOT NULL,
     db_name               VARCHAR(256)  NOT NULL,
     table_name            VARCHAR(256)  NOT NULL,
@@ -129,4 +129,4 @@ PROPERTIES (
 );
 
 -- Verify
-SHOW TABLES FROM system;
+SHOW TABLES FROM cache_system;
