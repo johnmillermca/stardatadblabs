@@ -119,14 +119,13 @@ except Exception as _e:
     _S3_KEY  = os.environ.get("S3_ACCESS_KEY", "")
     _S3_SECRET = os.environ.get("S3_SECRET_KEY", "")
 
-# Path to the PySpark write script submitted to Spark workers.
-# Must be a path present on every Spark worker node's local filesystem.
-# Deployed to /opt/spark/spark_iceberg_write.py on all worker pods via
-# the spark-scripts ConfigMap (see manifests/spark/spark-scripts-configmap.yaml).
+# Path to the PySpark write script.
+# In client mode the driver runs inside THIS pod, so the path must exist
+# locally here — /app/spark_iceberg_write.py is baked into the image.
 # Override via SPARK_WRITE_SCRIPT env var if the path changes.
 _SPARK_WRITE_SCRIPT = os.environ.get(
     "SPARK_WRITE_SCRIPT",
-    "/opt/spark/spark_iceberg_write.py",
+    "/app/spark_iceberg_write.py",
 )
 
 # ─────────────────────────────────────────────────────────────────────────────

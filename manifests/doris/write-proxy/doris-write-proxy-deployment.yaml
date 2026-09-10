@@ -56,7 +56,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: write-proxy
-          image: 192.168.1.50:30500/doris-write-proxy:1.0.6
+          image: 192.168.1.50:30500/doris-write-proxy:1.0.7
           imagePullPolicy: Always
           command: ["python", "/app/doris_write_proxy.py"]
           env:
