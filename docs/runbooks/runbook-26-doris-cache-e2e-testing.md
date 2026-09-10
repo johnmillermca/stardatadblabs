@@ -758,49 +758,64 @@ warm_interval_min ≈ select_interval_min × 0.667  (within rounding)
 
 ## Phase 4 — Warm-Up Scheduling
 
-> **⚠ Community Edition note:** `WARM UP CACHE … USING JOB` and `SHOW WARM UP JOB` are
-> **Cloud Edition-only** commands.  Running them on Doris 4.0 Community Edition returns:
-> ```
-> ERROR 1105 (HY000): errCode = 2, detailMessage =
-> no viable alternative at input 'WARM UP CACHE'(line 1, pos 8)
-> ```
-> The correct manual warm-up on Community Edition is a full-scan `SELECT` with
-> `enable_file_cache=true` (see T-17 below).  T-18 (`SHOW WARM UP JOB`) is not
-> applicable on this cluster.
+> **Warm-up command matrix (customized Doris build):**
+>
+> | Command | Status | Notes |
+> |---|---|---|
+> | `WARM UP CACHE … USING JOB` | ✅ **Works** | Async; returns a numeric `JobId` immediately |
+> | `SHOW WARM UP JOB WHERE JobId = <id>` | ✅ **Works** | Returns `State`: `PENDING \| RUNNING \| FINISHED \| CANCELLED` |
+> | `WARM UP CACHE … USING COLD_DOWN` | ✅ **Works** | Actively flushes the table's blocks from all BE caches |
 
-### T-17 — Manual cache warm-up via full-scan SELECT succeeds
+### T-17 — Manual cache warm-up via `WARM UP CACHE … USING JOB`
 
-Trigger a warm-up by running a column-projection SELECT with `enable_file_cache=true`.
-`COUNT(*)` alone resolves from Iceberg manifest metadata and generates zero scan bytes —
-use `MAX()` or `SELECT * LIMIT` to force real BE I/O that populates the file cache.
+`WARM UP CACHE … USING JOB` submits an **asynchronous** warm-up job and returns
+a `JobId` immediately.  The BEs fill the file cache in the background.
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
-      MAX(ss_sales_price)
-      FROM polaris.tpcds_sf10tcl.store_sales;"
+  -e "WARM UP CACHE ON polaris.tpcds_sf10tcl.store_sales USING JOB;"
 ```
 
-**Expected:** query returns a result (no error). The BE reads data blocks from S3 and
-writes them into `file_cache_path` as a side-effect.
+**Expected:** returns one row — the assigned `JobId`:
 
-✅ Pass: query returns a value without error.
-❌ Fail: `errCode` on SELECT → check catalog connectivity (T-03) and BE health (T-02).
+```
+JobId
+10023
+```
 
-> **Why not `COUNT(*)`?**  Iceberg stores row counts in snapshot metadata.  Doris resolves
-> `COUNT(*)` from metadata without touching data files — so no bytes land in the BE file
-> cache.  Any aggregate that requires reading data values (`MAX`, `MIN`, `SUM`, `AVG`) or a
-> `SELECT * LIMIT N` forces a real data scan.
+✅ Pass: a numeric `JobId` is returned without error.
+❌ Fail: `errCode` → check catalog connectivity (T-03) and BE health (T-02).
+
+Proceed to T-18 to monitor job completion.
 
 ---
 
-### T-18 — `SHOW WARM UP JOB` — not applicable (Community Edition)
+### T-18 — `SHOW WARM UP JOB` — monitor job state
 
-`SHOW WARM UP JOB` is a Cloud Edition command and raises a syntax error on this cluster.
-Skip this test.  Cache warm-up status is tracked via `platform_meta.table_query_stats`
-(`cache_state`, `last_warmed_ts`) populated by the daemon after each `_run_warmup` call.
+Poll the job submitted in T-17 using its `JobId`:
 
-To confirm the manual T-17 warm-up was effective, proceed directly to T-19.
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SHOW WARM UP JOB WHERE JobId = 10023;"
+```
+
+**Expected result columns:**
+```
+JobId | CatalogName | DbName          | TableName   | State    | CreateTime          | FinishTime          | ErrMsg
+10023 | polaris     | tpcds_sf10tcl   | store_sales | FINISHED | 2026-09-10 10:00:01 | 2026-09-10 10:00:18 |
+```
+
+`State` transitions: `PENDING → RUNNING → FINISHED`.
+
+| State | Meaning |
+|---|---|
+| `PENDING` | Job queued, BEs not yet started |
+| `RUNNING` | BEs are actively pulling data from S3 into local cache |
+| `FINISHED` | All blocks cached; job complete |
+| `CANCELLED` | Job was cancelled or failed — check `ErrMsg` |
+
+✅ Pass: `State = FINISHED` with an empty `ErrMsg`.
+❌ Fail: `State = CANCELLED` → check `ErrMsg`; check catalog connectivity (T-03) and BE health (T-02).
 
 ---
 
@@ -822,9 +837,12 @@ cache_state: WARM
 last_warmed_ts: <recent timestamp>
 ```
 
-> **Note:** The daemon updates `cache_state` to `WARM` when it polls the job to FINISHED.
-> If the warm-up was triggered manually (not by the daemon), restart the daemon and wait for
-> one cycle — the `update_last_warmed` call only runs inside `_run_warmup`.
+> **Note:** The daemon updates `cache_state` to `WARM` inside `poll_jobs()` when it sees
+> `SHOW WARM UP JOB` return `State = FINISHED`.  `poll_jobs()` is called at the start of
+> every cycle — typically within one `SCAN_INTERVAL_S` (300 s) of the job finishing.
+> If the warm-up was triggered **manually** (not by the daemon), the daemon will not
+> be tracking the `JobId`, so `cache_state` will not update automatically — manually
+> set `cache_state = 'WARM'` in `table_query_stats` or restart the pod to force a cycle.
 
 ✅ Pass: `cache_state = WARM` and `last_warmed_ts` is non-NULL.
 ❌ Fail: still `UNKNOWN` → manually trigger a daemon cycle (restart the pod).
@@ -852,17 +870,19 @@ doris-mysql -e "
 kubectl rollout restart deployment/doris-cache-manager -n prod
 ```
 
-Watch daemon logs for the automatic submission:
+Watch daemon logs for the automatic submission and subsequent polling:
 
 ```bash
 kubectl logs -n prod -l app=doris-cache-manager --tail=80 \
-  | grep -E "WARM_UP started|Warm-up evaluation"
+  | grep -E "WARM_UP submitted|WARM_UP job accepted|WARM_UP JobId|Warm-up evaluation"
 ```
 
 **Expected:**
 ```
 Warm-up evaluation: N eligible tables, M triggered.
-WARM_UP started for polaris.tpcds_sf10tcl.inventory.
+WARM_UP submitted for polaris.tpcds_sf10tcl.inventory (WARM UP CACHE … USING JOB).
+WARM_UP job accepted for polaris.tpcds_sf10tcl.inventory — JobId=10024.
+WARM_UP JobId=10024 FINISHED for polaris.tpcds_sf10tcl.inventory.
 ```
 where `M ≥ 1`.
 
@@ -985,54 +1005,41 @@ unsupported was incorrect.  The failures were pure connection-pressure transient
 
 ## Phase 5 — LRU Eviction
 
-> **⚠ Community Edition note:** `COLD_DOWN` (`WARM UP CACHE … USING COLD_DOWN`) is a
-> **Cloud Edition-only** command.  On Doris 4.0 Community Edition it raises the same syntax
-> error as `WARM UP CACHE … USING JOB`:
-> ```
-> ERROR 1105 (HY000): errCode = 2, detailMessage =
-> no viable alternative at input 'WARM UP CACHE'(line 1, pos 8)
-> ```
-> On Community Edition, the BE manages its file cache LRU natively — blocks are evicted
-> automatically when the cache fills.  There is no programmatic eviction command.
-> The daemon records evictions in `cache_eviction_log` and sets `cache_state = COLD`
-> in metadata, but it does **not** issue any SQL `COLD_DOWN` command.
+> The daemon's `LRUEvictionChecker` issues `WARM UP CACHE … USING COLD_DOWN` to actively
+> flush the table from all BE caches, sets `cache_state = COLD`, and writes a row to
+> `cache_eviction_log` when a table has not been SELECTed in the past `LRU_EVICT_HOURS`.
 
-### T-22 — Manual eviction — not applicable (Community Edition)
+### T-22 — Manual eviction via `WARM UP CACHE … USING COLD_DOWN`
 
-`COLD_DOWN` does not exist on this cluster.  To simulate eviction for testing purposes,
-directly update `cache_state` in the metadata table so the daemon's `LRUEvictionChecker`
-logic can be exercised:
+`COLD_DOWN` is fully supported on this build.  To test eviction manually:
 
 ```bash
 DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
 
-# Manually mark a table COLD to test the eviction path
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
-UPDATE platform_meta.table_query_stats
-SET cache_state = 'COLD', updated_at = NOW()
-WHERE catalog_name = 'polaris'
-  AND db_name      = 'tpcds_sf10tcl'
-  AND table_name   = 'store_sales';"
+# Issue COLD_DOWN to flush the table's cache blocks from all BEs
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "WARM UP CACHE ON polaris.tpcds_sf10tcl.store_sales USING COLD_DOWN;"
 
-# Confirm
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
-SELECT cache_state FROM platform_meta.table_query_stats
-WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
+# Confirm the cache blocks are gone by running WARM UP CACHE … USING JOB
+# and observing ScanBytesFromRemoteStorage > 0 on the next read
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "WARM UP CACHE ON polaris.tpcds_sf10tcl.store_sales USING JOB;"
 ```
 
-**Expected:** `cache_state = COLD`.
+**Expected:** `COLD_DOWN` returns without error; subsequent warm-up job shows data
+being fetched from S3 again (confirming the cache was cleared).
 
-✅ Pass: UPDATE succeeds and SELECT returns `COLD`.
-❌ Fail: row not found → table has not been seeded yet; run T-11 first.
+✅ Pass: both commands succeed without error.
+❌ Fail: `errCode` → check catalog connectivity (T-03) and BE health (T-02).
 
 ---
 
 ### T-23 — `cache_state` is recorded as `COLD` by daemon LRU eviction
 
-The daemon's `LRUEvictionChecker` marks tables `COLD` and writes a row to
-`cache_eviction_log` when `last_select_ts` is older than `LRU_EVICT_HOURS` (default 24h).
-It does **not** issue any SQL command to the BE — it only updates metadata.
+The daemon's `LRUEvictionChecker` issues `WARM UP CACHE … USING COLD_DOWN`, sets
+`cache_state = COLD`, and writes a row to `cache_eviction_log` when `last_select_ts`
+is older than `LRU_EVICT_HOURS` (default 24h).
 
 To trigger this path without waiting 24 hours, lower `LRU_EVICT_HOURS` to 0 and restart:
 
