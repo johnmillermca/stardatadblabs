@@ -56,6 +56,13 @@ data:
     enable_fqdn_mode = true
     advertised_address = doris-fe-0.doris-fe-headless.prod.svc.cluster.local
     priority_networks = 10.244.0.0/16
+    # ── Cloud / disaggregated mode — enables WARM UP CLUSTER, SHOW WARM UP JOB,
+    #    and COLD_DOWN SQL commands via the embedded Python MetaService stub.
+    #    The stub runs on localhost:5000 (loopback only) and has zero impact on
+    #    query/scan/load performance — those go directly over FE→BE Thrift.
+    deploy_mode = cloud
+    cloud_unique_id = doris-local-001
+    meta_service_endpoint = 127.0.0.1:5000
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -151,9 +158,10 @@ spec:
 
         # ── Doris FE ─────────────────────────────────────────────────────────
         - name: doris-fe
-          image: 192.168.1.50:30500/apache/doris:fe-4.0.7
+          image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger-ms
           command:
-            - /opt/apache-doris/fe_entrypoint.sh
+            - python3
+            - /app/doris_fe_entrypoint.py
             - doris-fe-headless.prod.svc.cluster.local
           ports:
             - name: http
@@ -170,6 +178,23 @@ spec:
                 secretKeyRef:
                   name: doris-credentials
                   key: admin-password
+            # ── MetaService stub config (Python cloud_meta_service.py) ────────
+            # These tell the stub which BE to advertise to the FE at bootstrap.
+            # Must match the actual BE FQDN + heartbeat port.
+            - name: MS_BE_HOST
+              value: "doris-be-0.doris-be-headless.prod.svc.cluster.local"
+            - name: MS_BE_HB_PORT
+              value: "9050"
+            - name: MS_CLOUD_UNIQUE_ID
+              value: "doris-local-001"
+            - name: MS_INSTANCE_ID
+              value: "doris-local"
+            - name: MS_CLUSTER_ID
+              value: "local-cluster-001"
+            - name: MS_CLUSTER_NAME
+              value: "local"
+            - name: MS_PORT
+              value: "5000"
           volumeMounts:
             - name: fe-config-rw
               mountPath: /opt/apache-doris/fe/conf/fe.conf
