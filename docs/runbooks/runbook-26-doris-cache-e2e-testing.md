@@ -985,59 +985,83 @@ unsupported was incorrect.  The failures were pure connection-pressure transient
 
 ## Phase 5 — LRU Eviction
 
-> **Note:** The daemon's LRU threshold is 24 hours by default. For testing, you can either
-> trigger eviction manually (T-22/T-23) or temporarily lower `LRU_EVICT_HOURS` to 0 and
-> restart the daemon to force the automatic path (T-25). The manual path is sufficient for
-> most validation.
+> **⚠ Community Edition note:** `COLD_DOWN` (`WARM UP CACHE … USING COLD_DOWN`) is a
+> **Cloud Edition-only** command.  On Doris 4.0 Community Edition it raises the same syntax
+> error as `WARM UP CACHE … USING JOB`:
+> ```
+> ERROR 1105 (HY000): errCode = 2, detailMessage =
+> no viable alternative at input 'WARM UP CACHE'(line 1, pos 8)
+> ```
+> On Community Edition, the BE manages its file cache LRU natively — blocks are evicted
+> automatically when the cache fills.  There is no programmatic eviction command.
+> The daemon records evictions in `cache_eviction_log` and sets `cache_state = COLD`
+> in metadata, but it does **not** issue any SQL `COLD_DOWN` command.
 
-### T-22 — Manual `COLD_DOWN` executes without error
+### T-22 — Manual eviction — not applicable (Community Edition)
+
+`COLD_DOWN` does not exist on this cluster.  To simulate eviction for testing purposes,
+directly update `cache_state` in the metadata table so the daemon's `LRUEvictionChecker`
+logic can be exercised:
 
 ```bash
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.inventory USING COLD_DOWN;"
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+# Manually mark a table COLD to test the eviction path
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+UPDATE platform_meta.table_query_stats
+SET cache_state = 'COLD', updated_at = NOW()
+WHERE catalog_name = 'polaris'
+  AND db_name      = 'tpcds_sf10tcl'
+  AND table_name   = 'store_sales';"
+
+# Confirm
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT cache_state FROM platform_meta.table_query_stats
+WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 ```
 
-**Expected:** no SQL error.
+**Expected:** `cache_state = COLD`.
 
-✅ Pass: statement completes without error.  
-❌ Fail: `Syntax error` → same version requirement as T-17.
+✅ Pass: UPDATE succeeds and SELECT returns `COLD`.
+❌ Fail: row not found → table has not been seeded yet; run T-11 first.
 
 ---
 
-### T-23 — `cache_state` returns to `COLD` after daemon eviction
+### T-23 — `cache_state` is recorded as `COLD` by daemon LRU eviction
 
-The daemon also issues `COLD_DOWN` internally when it detects a table is idle.
-To trigger the daemon path without waiting 24 hours, temporarily patch the deployment:
+The daemon's `LRUEvictionChecker` marks tables `COLD` and writes a row to
+`cache_eviction_log` when `last_select_ts` is older than `LRU_EVICT_HOURS` (default 24h).
+It does **not** issue any SQL command to the BE — it only updates metadata.
+
+To trigger this path without waiting 24 hours, lower `LRU_EVICT_HOURS` to 0 and restart:
 
 ```bash
-# Lower eviction threshold to 0 hours (evict immediately)
+# Lower eviction threshold to 0 (evict all tables immediately)
+# NOTE: ArgoCD will overwrite kubectl set env — edit the deployment YAML in git instead,
+# or use a temporary patch that ArgoCD will reconcile away on next sync.
 kubectl set env deployment/doris-cache-manager -n prod LRU_EVICT_HOURS=0
-
-# Wait for the rollout and one cycle
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
-sleep 10  # give the cycle time to complete
+sleep 15  # allow one cycle to complete
 
 # Check the state
-doris-mysql -e "
-  SELECT cache_state
-  FROM platform_meta.table_query_stats
-  WHERE catalog_name='polaris' AND table_name='store_sales';"
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT cache_state
+FROM platform_meta.table_query_stats
+WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 ```
 
-**Expected:**
-```
-COLD
-```
+**Expected:** `cache_state = COLD`.
 
-Restore the original threshold after the test:
+Restore immediately after the test (ArgoCD will also restore on next sync):
 
 ```bash
 kubectl set env deployment/doris-cache-manager -n prod LRU_EVICT_HOURS=24
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 ```
 
-✅ Pass: `cache_state = COLD`.  
-❌ Fail: still `WARM` → the daemon may have re-warmed the table in the same cycle; add a brief query-free interval before lowering the threshold.
+✅ Pass: `cache_state = COLD` after the cycle.
+❌ Fail: still `WARM` → the daemon re-warmed it in the same cycle before the eviction check ran; lower `MAX_CONCURRENT=0` temporarily to suppress warm-ups, then retry.
 
 ---
 
