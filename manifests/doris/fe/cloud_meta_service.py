@@ -198,27 +198,33 @@ def _instance_info_pb() -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # gRPC generic handler
 # ─────────────────────────────────────────────────────────────────────────────
-# Known MetaService method names extracted from MetaServiceGrpc.class
-_MS_METHODS = [
-    "GetVersion", "CreateTablets", "UpdateTablet",
-    "BeginTxn", "PrecommitTxn", "CommitTxn", "AbortTxn",
-    "GetTxn", "GetTxnId", "GetCurrentMaxTxnId",
-    "BeginSubTxn", "AbortSubTxn", "CheckTxnConflict", "CleanTxnLabel",
-    "GetCluster", "GetInstance", "GetInstanceByRole",
-    "PrepareIndex", "CommitIndex", "DropIndex",
-    "PreparePartition", "CommitPartition", "DropPartition",
-    "GetTabletStats", "FinishTabletJob",
-    "CreateStage", "GetStage", "DropStage",
-    "GetIam", "BeginCopy", "FinishCopy", "GetCopyJob", "GetCopyFiles",
-    "FilterCopyFiles", "AlterCluster", "AlterObjStoreInfo", "AlterStorageVault",
-    "GetDeleteBitmapUpdateLock", "RemoveDeleteBitmapUpdateLock",
-    "GetObjStoreInfo", "AbortTxnWithCoordinator", "GetPrepareTxnByCoordinator",
-    "CreateInstance", "AlterInstance", "GetRLTaskCommitAttach", "ResetRLProgress",
-    "ResetStreamingJobOffset", "GetStreamingTaskCommitAttach",
-    "DeleteStreamingJob", "CheckKv",
-    "BeginSnapshot", "UpdateSnapshot", "CommitSnapshot", "AbortSnapshot",
-    "ListSnapshot", "DropSnapshot", "CloneInstance",
-]
+# Method names extracted from MetaServiceGrpc.java inside doris-fe.jar (snake_case)
+_MS_METHODS = {
+    "abort_snapshot", "abort_sub_txn", "abort_txn", "abort_txn_with_coordinator",
+    "alter_cluster", "alter_iam", "alter_instance", "alter_obj_store_info",
+    "alter_ram_user", "alter_storage_vault",
+    "begin_copy", "begin_snapshot", "begin_sub_txn", "begin_txn",
+    "check_kv", "check_txn_conflict", "clean_txn_label", "clone_instance",
+    "commit_index", "commit_partition", "commit_restore_job", "commit_rowset",
+    "commit_snapshot", "commit_txn",
+    "create_instance", "create_stage", "create_tablets",
+    "delete_streaming_job", "drop_index", "drop_partition", "drop_snapshot", "drop_stage",
+    "filter_copy_files", "finish_copy", "finish_restore_job", "finish_tablet_job",
+    "get_cluster", "get_cluster_status", "get_copy_files", "get_copy_job",
+    "get_current_max_txn_id", "get_delete_bitmap", "get_delete_bitmap_update_lock",
+    "get_iam", "get_instance", "get_obj_store_info", "get_prepare_txn_by_coordinator",
+    "get_rl_task_commit_attach", "get_rowset", "get_schema_dict", "get_stage",
+    "get_streaming_task_commit_attach", "get_tablet", "get_tablet_stats",
+    "get_txn", "get_txn_id", "get_version",
+    "list_snapshot",
+    "precommit_txn", "prepare_index", "prepare_partition", "prepare_restore_job",
+    "prepare_rowset",
+    "remove_delete_bitmap", "remove_delete_bitmap_update_lock",
+    "reset_rl_progress", "reset_streaming_job_offset",
+    "start_tablet_job",
+    "update_ak_sk", "update_delete_bitmap", "update_packed_file_info",
+    "update_snapshot", "update_tablet", "update_tmp_rowset",
+}
 
 SERVICE_NAME = "doris.cloud.MetaService"
 
@@ -263,9 +269,9 @@ def _ok_only(method: str, _req: bytes) -> bytes:
 
 
 def _dispatch(method: str, req: bytes) -> bytes:
-    if method == "GetCluster":
+    if method == "get_cluster":
         return _get_cluster(req)
-    if method == "GetInstance":
+    if method == "get_instance":
         return _get_instance(req)
     return _ok_only(method, req)
 
