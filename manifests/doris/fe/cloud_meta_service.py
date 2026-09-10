@@ -152,10 +152,17 @@ def _ok_status(msg: str = "OK") -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 BE_HOST       = os.environ.get("MS_BE_HOST",        "doris-be-0.doris-be-headless.prod.svc.cluster.local")
 BE_HB_PORT    = int(os.environ.get("MS_BE_HB_PORT", "9050"))
+FE_HOST       = os.environ.get("MS_FE_HOST",        "doris-fe-0.doris-fe-headless.prod.svc.cluster.local")
+FE_HB_PORT    = int(os.environ.get("MS_FE_HB_PORT", "9010"))
 CLOUD_UID     = os.environ.get("MS_CLOUD_UNIQUE_ID", "doris-local-001")
 INSTANCE_ID   = os.environ.get("MS_INSTANCE_ID",    "doris-local")
 CLUSTER_ID    = os.environ.get("MS_CLUSTER_ID",     "local-cluster-001")
 CLUSTER_NAME  = os.environ.get("MS_CLUSTER_NAME",   "local")
+
+# The name CloudEnv uses when looking up the FE's own cluster to determine node_type.
+# Matches Config.cloud_sql_server_cluster_name default value.
+SQL_CLUSTER_NAME = "RESERVED_CLUSTER_NAME_FOR_SQL_SERVER"
+SQL_CLUSTER_ID   = os.environ.get("MS_SQL_CLUSTER_ID", "sql-cluster-001")
 
 
 def _node_info_pb() -> bytes:
@@ -168,9 +175,23 @@ def _node_info_pb() -> bytes:
     )
 
 
+def _fe_node_info_pb() -> bytes:
+    """
+    NodeInfoPB for the FE itself.
+    node_type=11: FE_MASTER=1 — CloudEnv reads this to determine the FE's role.
+    """
+    return (
+        _field_str(1,  CLOUD_UID)    +   # cloud_unique_id (must match FE's cloud_unique_id)
+        _field_str(3,  FE_HOST)      +   # ip
+        _field_varint(8, FE_HB_PORT) +   # heartbeat_port (edit-log port)
+        _field_str(13, FE_HOST)      +   # host
+        _field_varint(11, 1)             # node_type = FE_MASTER (1)
+    )
+
+
 def _cluster_pb() -> bytes:
     """
-    ClusterPB:
+    ClusterPB for BE compute nodes:
       cluster_id=1, cluster_name=2, type=3 (COMPUTE=1), nodes=5 (repeated NodeInfoPB),
       cluster_status=9 (NORMAL=1)
     """
@@ -180,6 +201,23 @@ def _cluster_pb() -> bytes:
         _field_varint(3, 1)             +   # type = COMPUTE (1)
         _field_bytes(5, _node_info_pb()) +  # nodes[0]
         _field_varint(9, 1)                 # cluster_status = NORMAL (1)
+    )
+
+
+def _sql_cluster_pb() -> bytes:
+    """
+    ClusterPB for the FE SQL-server cluster (type=SQL=0).
+    CloudEnv.getLocalTypeFromMetaService() calls get_cluster with
+    cluster_name=RESERVED_CLUSTER_NAME_FOR_SQL_SERVER and scans nodes for
+    a NodeInfoPB whose cloud_unique_id matches the FE's own cloud_unique_id.
+    It reads node_type to set the FE's role (FE_MASTER/FE_FOLLOWER/FE_OBSERVER).
+    """
+    return (
+        _field_str(1, SQL_CLUSTER_ID)      +   # cluster_id
+        _field_str(2, SQL_CLUSTER_NAME)    +   # cluster_name
+        _field_varint(3, 0)                +   # type = SQL (0)
+        _field_bytes(5, _fe_node_info_pb()) +  # nodes[0] — the FE itself
+        _field_varint(9, 1)                    # cluster_status = NORMAL (1)
     )
 
 
@@ -246,12 +284,24 @@ def _count(method: str) -> None:
 def _get_cluster(req_bytes: bytes) -> bytes:
     """
     GetClusterResponse: status=1 (OK), cluster=2 (ClusterPB).
-    The FE calls this at startup to populate CloudSystemInfoService.
+
+    Two callers:
+    1. CloudSystemInfoService — uses the compute cluster (CLUSTER_NAME / CLUSTER_ID).
+    2. CloudEnv.getLocalTypeFromMetaService — calls with cluster_name=
+       RESERVED_CLUSTER_NAME_FOR_SQL_SERVER to find the FE's own NodeInfoPB
+       and read its node_type (FE_MASTER/FE_FOLLOWER/FE_OBSERVER).
     """
-    _count("GetCluster")
+    _count("get_cluster")
     fields = _parse_fields(req_bytes)
-    req_cluster = _str_field(fields, 4) or CLUSTER_NAME
-    log.info("getCluster requested cluster_name='%s'", req_cluster)
+    req_cluster_name = _str_field(fields, 4)
+    req_cluster_id   = _str_field(fields, 3)
+    log.info("get_cluster requested cluster_name='%s' cluster_id='%s'",
+             req_cluster_name, req_cluster_id)
+
+    # FE self-identification: return the SQL-server cluster containing the FE node
+    if req_cluster_name == SQL_CLUSTER_NAME or req_cluster_id == SQL_CLUSTER_ID:
+        return _field_bytes(1, _ok_status()) + _field_bytes(2, _sql_cluster_pb())
+
     return _field_bytes(1, _ok_status()) + _field_bytes(2, _cluster_pb())
 
 
@@ -271,7 +321,7 @@ def _ok_only(method: str, _req: bytes) -> bytes:
 def _dispatch(method: str, req: bytes) -> bytes:
     if method == "get_cluster":
         return _get_cluster(req)
-    if method == "get_instance":
+    if method in ("get_instance", "get_instance_by_role"):
         return _get_instance(req)
     return _ok_only(method, req)
 
