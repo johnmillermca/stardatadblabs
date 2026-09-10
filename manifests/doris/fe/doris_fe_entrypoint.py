@@ -80,7 +80,10 @@ def _run_fe() -> int:
     Start start_fe.sh as a child process, proxy signals, return exit code.
     start_fe.sh expects the master FQDN as its first argument (same as before).
     """
-    cmd = [FE_SCRIPT] + FE_ARGS
+    # --console: runs JVM in foreground with logs to stderr (DORIS_LOG_TO_STDERR=1).
+    # Without this flag the script exits immediately after forking the JVM to background,
+    # which causes the container to exit and Kubernetes to restart it.
+    cmd = [FE_SCRIPT, "--console"] + FE_ARGS
     log.info("Starting Doris FE: %s", " ".join(cmd))
 
     proc = subprocess.Popen(
