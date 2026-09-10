@@ -758,37 +758,49 @@ warm_interval_min ≈ select_interval_min × 0.667  (within rounding)
 
 ## Phase 4 — Warm-Up Scheduling
 
-### T-17 — Manual `WARM UP CACHE … USING JOB` succeeds
+> **⚠ Community Edition note:** `WARM UP CACHE … USING JOB` and `SHOW WARM UP JOB` are
+> **Cloud Edition-only** commands.  Running them on Doris 4.0 Community Edition returns:
+> ```
+> ERROR 1105 (HY000): errCode = 2, detailMessage =
+> no viable alternative at input 'WARM UP CACHE'(line 1, pos 8)
+> ```
+> The correct manual warm-up on Community Edition is a full-scan `SELECT` with
+> `enable_file_cache=true` (see T-17 below).  T-18 (`SHOW WARM UP JOB`) is not
+> applicable on this cluster.
+
+### T-17 — Manual cache warm-up via full-scan SELECT succeeds
+
+Trigger a warm-up by running a column-projection SELECT with `enable_file_cache=true`.
+`COUNT(*)` alone resolves from Iceberg manifest metadata and generates zero scan bytes —
+use `MAX()` or `SELECT * LIMIT` to force real BE I/O that populates the file cache.
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "WARM UP CACHE ON TABLE polaris.tpcds_sf10tcl.inventory USING JOB;"
+  -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
+      MAX(ss_sales_price)
+      FROM polaris.tpcds_sf10tcl.store_sales;"
 ```
 
-**Expected:** query returns without error (Doris responds immediately; the job runs async).
+**Expected:** query returns a result (no error). The BE reads data blocks from S3 and
+writes them into `file_cache_path` as a side-effect.
 
-✅ Pass: no SQL error.  
-❌ Fail: `Syntax error` → Doris version does not support the segment cache command (requires Doris 2.1+).
+✅ Pass: query returns a value without error.
+❌ Fail: `errCode` on SELECT → check catalog connectivity (T-03) and BE health (T-02).
+
+> **Why not `COUNT(*)`?**  Iceberg stores row counts in snapshot metadata.  Doris resolves
+> `COUNT(*)` from metadata without touching data files — so no bytes land in the BE file
+> cache.  Any aggregate that requires reading data values (`MAX`, `MIN`, `SUM`, `AVG`) or a
+> `SELECT * LIMIT N` forces a real data scan.
 
 ---
 
-### T-18 — `SHOW WARM UP JOB` transitions to FINISHED
+### T-18 — `SHOW WARM UP JOB` — not applicable (Community Edition)
 
-Poll every 15 seconds until the job finishes (typically < 2 minutes for a small table):
+`SHOW WARM UP JOB` is a Cloud Edition command and raises a syntax error on this cluster.
+Skip this test.  Cache warm-up status is tracked via `platform_meta.table_query_stats`
+(`cache_state`, `last_warmed_ts`) populated by the daemon after each `_run_warmup` call.
 
-```bash
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SHOW WARM UP JOB WHERE TableName = 'inventory';"
-```
-
-**Expected column values:**
-| Column | Expected |
-|---|---|
-| `State` | `FINISHED` (may pass through `PENDING` → `RUNNING`) |
-| `Progress` | `100%` when FINISHED |
-
-✅ Pass: `State = FINISHED`.  
-❌ Fail: `State = FAILED` → check Doris BE logs. `State = RUNNING` after 5+ minutes → stale job; check §7.4 of RB-25.
+To confirm the manual T-17 warm-up was effective, proceed directly to T-19.
 
 ---
 
