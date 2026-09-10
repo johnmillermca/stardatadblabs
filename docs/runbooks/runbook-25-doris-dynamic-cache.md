@@ -385,6 +385,40 @@ SWITCH polaris;
 SHOW DATABASES;
 ```
 
+### 3.5a Grant `CATALOG_MANAGE_CONTENT` to Polaris Catalog Roles
+
+> ⚠️ **Required.** Without this, Doris can discover catalog metadata but fails
+> on every SELECT with:
+> `errCode = 2, detailMessage = Failed to check view exist, error message is: Error occurred while processing HEAD request`
+>
+> Root cause: `CATALOG_MANAGE_METADATA` alone is not sufficient — Doris needs
+> `CATALOG_MANAGE_CONTENT` to read table data via the Polaris REST catalog.
+
+```bash
+bash manifests/doris/setup/04_grant_polaris_catalog_content.sh
+```
+
+The script is idempotent (safe to re-run on any re-setup).
+Expected output:
+
+```
+Obtained Polaris management token.
+  [GRANTED]    star_lakehouse/catalog_admin ← CATALOG_MANAGE_CONTENT
+  [GRANTED]    pg_lakehouse/catalog_admin ← CATALOG_MANAGE_CONTENT
+  [GRANTED]    ora_lakehouse/catalog_admin ← CATALOG_MANAGE_CONTENT
+  [GRANTED]    mgo_lakehouse/catalog_admin ← CATALOG_MANAGE_CONTENT
+  [ALREADY OK] IcebergCatalog/catalog_admin — CATALOG_MANAGE_CONTENT already present
+
+Verifying grants...
+  IcebergCatalog: CATALOG_MANAGE_CONTENT = OK
+  star_lakehouse: CATALOG_MANAGE_CONTENT = OK
+  pg_lakehouse:   CATALOG_MANAGE_CONTENT = OK
+  ora_lakehouse:  CATALOG_MANAGE_CONTENT = OK
+  mgo_lakehouse:  CATALOG_MANAGE_CONTENT = OK
+
+All grants applied successfully.
+```
+
 ### 3.6 Create Metadata Tables
 
 ```bash
@@ -1196,6 +1230,71 @@ DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "SWITCH polaris; SHOW DATABASES;"
 # Expected: tpcds, tpcds_sf10tcl, information_schema, mysql
+```
+
+---
+
+### 7.11 4 of 5 Catalogs Fail — `Failed to check view exist: Error occurred while processing HEAD request`
+
+**Symptom:** `polaris` catalog works, but `databricks`, `postgres`, `oracle`, `mongodb` all return:
+
+```
+ERROR 1105 (HY000): errCode = 2, detailMessage = Failed to check view exist,
+  error message is: Error occurred while processing HEAD request
+```
+
+**Root cause:** `CATALOG_MANAGE_CONTENT` is missing from the `catalog_admin` role in the
+4 failing Polaris catalogs.  Polaris returns an error on the `HEAD .../tables/{table}`
+request Doris issues to verify table existence.  `IcebergCatalog` (the `polaris` catalog)
+already had all three privileges; the other 4 were provisioned with only
+`CATALOG_MANAGE_ACCESS` + `CATALOG_MANAGE_METADATA`.
+
+**Fix:**
+
+```bash
+bash manifests/doris/setup/04_grant_polaris_catalog_content.sh
+```
+
+This script is idempotent — safe to re-run on any re-setup (see §3.5a).
+
+**Verify the grant is present:**
+
+```bash
+BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+POLARIS_ID=$(curl -s -H "X-Vault-Token: ${BAO_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/platform/polaris \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['spark_svc_id'])")
+POLARIS_SECRET=$(curl -s -H "X-Vault-Token: ${BAO_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/platform/polaris \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['spark_svc_secret'])")
+POLARIS_IP=$(kubectl get svc polaris-rest -n prod -o jsonpath='{.spec.clusterIP}')
+TOKEN=$(curl -s -X POST "http://${POLARIS_IP}:8181/api/catalog/v1/oauth/tokens" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=${POLARIS_ID}&client_secret=${POLARIS_SECRET}&scope=PRINCIPAL_ROLE:ALL" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+for CAT in IcebergCatalog star_lakehouse pg_lakehouse ora_lakehouse mgo_lakehouse; do
+  curl -s \
+    "http://${POLARIS_IP}:8181/api/management/v1/catalogs/${CAT}/catalog-roles/catalog_admin/grants" \
+    -H "Authorization: Bearer $TOKEN" \
+  | python3 -c "
+import json, sys
+privs = [g['privilege'] for g in json.load(sys.stdin).get('grants', [])]
+print('${CAT}:', 'OK' if 'CATALOG_MANAGE_CONTENT' in privs else 'MISSING')
+"
+done
+# Expected: all catalogs print OK
+```
+
+**Verify queries now work:**
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) FROM databricks.lakehouse_db.customers;"
+# Expected: 10005
 ```
 
 ---

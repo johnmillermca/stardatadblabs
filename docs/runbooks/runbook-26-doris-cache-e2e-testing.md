@@ -542,6 +542,30 @@ The script ends with `SHOW CATALOGS` — verify all 5 appear.
 
 ---
 
+### T-11b — Fix: `CATALOG_MANAGE_CONTENT` missing from Polaris catalog roles
+
+> **Root cause (confirmed 2026-09-10):** Doris queries work for `polaris`
+> (`IcebergCatalog`) but 4 of 5 catalogs fail with:
+> `Failed to check view exist, error message is: Error occurred while processing HEAD request`
+>
+> `CATALOG_MANAGE_ACCESS` + `CATALOG_MANAGE_METADATA` are necessary for schema
+> discovery, but `CATALOG_MANAGE_CONTENT` is additionally required for Doris to
+> read table data.  `IcebergCatalog` had all three; the other 4 were missing it.
+
+**Fix — run the idempotent grant script:**
+
+```bash
+bash manifests/doris/setup/04_grant_polaris_catalog_content.sh
+```
+
+Expected output: all 5 catalogs print `CATALOG_MANAGE_CONTENT = OK`.
+
+**Re-run T-11 queries** to confirm each returns a numeric `cnt`.
+
+See RB-25 §3.5a and §7.11 for the full diagnosis.
+
+---
+
 ### T-12 — Doris audit log records those queries
 
 Run immediately after T-11 (no need to wait).
