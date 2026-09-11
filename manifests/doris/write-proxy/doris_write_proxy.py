@@ -198,16 +198,25 @@ def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     conf.set("spark.dynamicAllocation.executorIdleTimeout",        "120s")  # scale back to min after 2min idle
     conf.set("spark.dynamicAllocation.cachedExecutorIdleTimeout",  "300s")  # hold cached data 5min
 
-    # ── Gluten / Velox — DISABLED for write-proxy ────────────────────────────
-    # Gluten/Velox is a columnar read-acceleration layer.  The write-proxy
-    # only executes writes (writeTo().append()) — Gluten provides no benefit
-    # and actively breaks task scheduling: Velox-enabled executors stall task
-    # acceptance for partitioned Iceberg writes dispatched from a remote driver,
-    # causing "Initial job has not accepted any resources" indefinitely.
-    # Gluten is intentionally left out here; it runs on the Spark workers for
-    # all read queries submitted by Doris and starpump as normal.
-    conf.set("spark.plugins", "")          # clear any cluster-default plugin list
-    conf.set("spark.memory.offHeap.enabled", "false")
+    # ── Gluten / Velox — load plugin but disable columnar engine ─────────────
+    # The Spark workers have GlutenPlugin baked into spark-defaults.conf.
+    # Executors load it unconditionally from their local conf — setting
+    # spark.plugins="" on the driver does NOT prevent executor-side loading.
+    # When the driver sends a non-columnar write plan to a Velox executor,
+    # the executor stalls task acceptance indefinitely.
+    #
+    # Solution: load GlutenPlugin on the driver (matching the executor) but
+    # disable the columnar/whole-stage-codegen substitution so Gluten falls
+    # back to vanilla row-based Spark for every operator — including the
+    # Iceberg partitioned write.  This is the supported Gluten fallback path.
+    conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
+    conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
+    conf.set("spark.memory.offHeap.enabled",          "true")
+    conf.set("spark.memory.offHeap.size",             "2g")
+    # Disable columnar execution globally for this session — forces vanilla
+    # row-based plans that execute correctly on Velox executors without stalling.
+    conf.set("spark.gluten.sql.columnar.wholeStageEnabled",  "false")
+    conf.set("spark.gluten.enabled",                         "false")
 
     # ── Executor heartbeat / network ─────────────────────────────────────────
     conf.set("spark.executor.heartbeatInterval",        "10s")
