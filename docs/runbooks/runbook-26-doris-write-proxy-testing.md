@@ -223,7 +223,7 @@ sql = ('INSERT INTO polaris.tpcds_sf10tcl.customer_address '
        '(ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country) '
        'VALUES ' + ', '.join(rows) + ';')
 print(sql)
-" | time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60
+" | { time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60; } 2>&1
 ```
 
 ---
@@ -303,7 +303,7 @@ sql = ('INSERT INTO polaris.tpcds_sf10tcl.customer_address '
        '(ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country) '
        'VALUES ' + ', '.join(rows) + ';')
 print(sql)
-" | time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60
+" | { time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60; } 2>&1
 ```
 
 **Expected elapsed: <5 s** (1000 rows, schema cached, cleanup included).
