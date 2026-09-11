@@ -76,7 +76,7 @@ spec:
               value: "9040"
             # ── Spark ────────────────────────────────────────────────────────
             - name: SPARK_MASTER_URL
-              value: "spark://spark-master-internal.prod.svc.cluster.local:17077"
+              value: "local[*]"
             # Timeout for the SparkSession background init (first pod start)
             - name: SPARK_INIT_TIMEOUT_S
               value: "120"
