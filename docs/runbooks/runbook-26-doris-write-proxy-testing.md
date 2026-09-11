@@ -377,7 +377,123 @@ No `FAILED` lines should appear. If any write fails, see §7 below.
 
 ---
 
-## 7. Troubleshooting
+## 7. Confirming pushdown is happening
+
+Every DML statement that targets a managed catalog goes through four observable
+checkpoints.  Check them in order to confirm the full pushdown path is working.
+
+### Checkpoint 1 — Proxy intercepts the statement
+
+The proxy logs this **before** calling Spark, the instant it receives the SQL from
+the MySQL client:
+
+```bash
+kubectl logs -n prod -l app=doris-write-proxy --tail=5 2>&1 \
+  | grep -v "^26/\|WARNING\|execstack"
+```
+
+```
+WriteProxy: intercepted polaris.tpcds_sf10tcl.customer_address DML from 10.x.x.x:PORT — routing to Spark.
+```
+
+If this line is **absent**, the proxy did not see the statement as a managed-catalog
+DML.  Possible causes:
+- Statement was sent directly to Doris port **30090**, bypassing the proxy (port **30091**)
+- The catalog name is not in the proxy's managed list (`polaris`, `databricks`, `postgres`, `oracle`, `mongodb`)
+- The statement is a SELECT, DDL, or USE — those are forwarded to Doris unchanged
+
+### Checkpoint 2 — Spark receives and executes the job
+
+For `INSERT … VALUES`, look for the schema resolution + write log lines:
+
+```bash
+kubectl logs -n prod -l app=doris-write-proxy --tail=10 2>&1 \
+  | grep -E "Schema cache|write_append:|write_append SUCCESS|Spark SQL SUCCESS|Spark DML FAILED" \
+  | grep -v "^26/"
+```
+
+**INSERT … VALUES path:**
+```
+Schema cache MISS for polaris.tpcds_sf10tcl.customer_address — 15 fields  ← first call only
+write_append: polaris.tpcds_sf10tcl.customer_address — 13 col(s), 5 row(s) [schema cached]
+IcebergTableBuilder initialised for user 'admin'.
+[admin] write_append → polaris.tpcds_sf10tcl.customer_address: 5 rows
+write_append SUCCESS: polaris.tpcds_sf10tcl.customer_address elapsed=1.60s rows=5
+```
+
+**UPDATE / DELETE / MERGE path** (falls back to `spark.sql()`):
+```
+Spark SQL SUCCESS: polaris.tpcds_sf10tcl elapsed=3.2s rows=0
+```
+
+If you see `Spark DML FAILED` instead, the error message is on the same line — copy
+it and check §8 (Troubleshooting).
+
+### Checkpoint 3 — Client receives MySQL OK
+
+The proxy returns a MySQL `OK` packet to the client on success.  Your `mysql` session
+should exit cleanly with **no error printed** and `time` showing a non-zero elapsed.
+
+If you see a MySQL error like `ERROR 1105 (HY000): ...`, the proxy returned an ERR
+packet — the Spark job failed.  The error text is the Spark exception message (first
+400 chars).
+
+To watch the exact OK/ERR packet flow in real time:
+
+```bash
+# Stream proxy logs live while you run the INSERT in another terminal
+kubectl logs -n prod -l app=doris-write-proxy -f 2>&1 \
+  | grep -v "^26/\|WARNING\|execstack"
+```
+
+### Checkpoint 4 — Data is visible in Iceberg
+
+After the write, refresh the Doris catalog metadata and query directly:
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "REFRESH CATALOG polaris;
+      SELECT ca_address_sk, ca_city, ca_state, snap_timestamp
+      FROM polaris.tpcds_sf10tcl.customer_address
+      WHERE ca_address_sk >= 9200001
+      ORDER BY ca_address_sk
+      LIMIT 10;"
+```
+
+`snap_timestamp` is injected by `write_append()` at the moment the Iceberg snapshot
+is committed — seeing it populated confirms the data went through Spark, not Doris.
+
+> **Why `REFRESH CATALOG` is needed:** Doris caches Iceberg table metadata locally.
+> Writes go directly to S3 via the Spark/Polaris path — Doris has no notification
+> that new snapshots exist until `REFRESH CATALOG` is issued.
+
+### Quick one-liner: all 4 checkpoints in one go
+
+Run this immediately after any write to see the entire pushdown trail in the log:
+
+```bash
+kubectl logs -n prod -l app=doris-write-proxy --tail=15 2>&1 \
+  | grep -E "intercepted|Schema cache|write_append|Spark SQL|post-write cleanup|FAILED" \
+  | grep -v "^26/"
+```
+
+Expected output for a successful INSERT:
+```
+WriteProxy: intercepted polaris.tpcds_sf10tcl.customer_address DML from ... — routing to Spark.
+Schema cache HIT  for polaris.tpcds_sf10tcl.customer_address          ← or MISS on first call
+write_append: polaris.tpcds_sf10tcl.customer_address — 13 col(s), N row(s) [schema cached]
+write_append SUCCESS: polaris.tpcds_sf10tcl.customer_address elapsed=X.XXs rows=N
+post-write cleanup: df unpersisted, catalog cache cleared, GC requested
+```
+
+All 4 lines present = pushdown confirmed end-to-end.
+
+---
+
+## 8. Troubleshooting
 
 ### Write returns error: `SparkSession unavailable`
 
