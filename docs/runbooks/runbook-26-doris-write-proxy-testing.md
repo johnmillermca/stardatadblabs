@@ -326,7 +326,7 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
           WHEN ca_address_sk BETWEEN 9202000 AND 9202999 THEN 'write 10'
           ELSE 'other'
         END                     AS batch,
-        COUNT(*)                AS rows,
+        COUNT(*)                AS row_count,
         MIN(snap_timestamp)     AS first_snap,
         MAX(snap_timestamp)     AS last_snap
       FROM polaris.tpcds_sf10tcl.customer_address
