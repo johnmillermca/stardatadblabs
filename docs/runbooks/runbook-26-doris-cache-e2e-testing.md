@@ -585,56 +585,66 @@ See RB-25 §3.5a and §7.11 for the full diagnosis.
 Run immediately after T-11 (no need to wait).
 
 > **Note:** Doris always records `catalog = 'internal'` in `audit_log` regardless
-> of which external catalog a query targets. The correct way to find external
-> catalog queries is to match the catalog name inside the `stmt` column.
-> The window is `INTERVAL 15 MINUTE` to give buffer if T-11 took a few minutes.
-> `return_rows = 1` selects only the scalar COUNT queries (each returns exactly
-> 1 row) and excludes the T-12 meta-query itself (which returns many rows).
+> of which external catalog a query targets. The correct way to find external-catalog
+> queries is to match the catalog name inside the `stmt` column.
+>
+> **Why the previous hardcoded CASE version was wrong:**
+> - `return_rows = 1` excluded any SELECT that returned more than 1 row (e.g. a LIMIT
+>   query returning 10 rows would not be counted).
+> - Hardcoded catalog names (`polaris`, `databricks`, …) silently drop queries against
+>   any catalog auto-registered by `CatalogSyncer` — new catalogs fell through the CASE
+>   as `NULL` and were discarded by `GROUP BY`.
+>
+> **The corrected query** joins against `information_schema.catalogs` so it automatically
+> covers every registered catalog — including those created at runtime by `CatalogSyncer` —
+> without any code or SQL change.
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT
-    CASE
-      WHEN LOWER(stmt) LIKE '%polaris.%'    THEN 'polaris'
-      WHEN LOWER(stmt) LIKE '%databricks.%' THEN 'databricks'
-      WHEN LOWER(stmt) LIKE '%postgres.%'   THEN 'postgres'
-      WHEN LOWER(stmt) LIKE '%oracle.%'     THEN 'oracle'
-      WHEN LOWER(stmt) LIKE '%mongodb.%'    THEN 'mongodb'
-    END AS catalog,
-    COUNT(*) AS hits
-FROM __internal_schema.audit_log
-WHERE
-    time >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
-    AND is_query = 1
-    AND return_rows = 1
-    AND (LOWER(TRIM(stmt)) LIKE 'select%' OR LOWER(TRIM(stmt)) LIKE 'with%')
-    AND (
-        LOWER(stmt) LIKE '%polaris.%'
-     OR LOWER(stmt) LIKE '%databricks.%'
-     OR LOWER(stmt) LIKE '%postgres.%'
-     OR LOWER(stmt) LIKE '%oracle.%'
-     OR LOWER(stmt) LIKE '%mongodb.%'
-    )
-GROUP BY 1
-ORDER BY 1;
+    c.CatalogName                  AS catalog,
+    COUNT(a.stmt)                  AS hits
+FROM (
+    -- Source of truth: every catalog currently registered in Doris,
+    -- including any auto-synced by CatalogSyncer. Excludes built-ins.
+    SELECT CatalogName
+    FROM information_schema.catalogs
+    WHERE CatalogName NOT IN ('internal', 'hive_metastore')
+) c
+LEFT JOIN __internal_schema.audit_log a
+    ON  a.time >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+    AND a.is_query = 1
+    AND (LOWER(TRIM(a.stmt)) LIKE 'select%' OR LOWER(TRIM(a.stmt)) LIKE 'with%')
+    AND LOWER(a.stmt) LIKE CONCAT('%', LOWER(c.CatalogName), '.%')
+GROUP BY c.CatalogName
+ORDER BY hits DESC, c.CatalogName ASC;
 "
 ```
 
-**Expected — 5 rows, one per catalog:**
+**Expected — one row per registered external catalog, all with `hits ≥ 1`:**
 
 ```
 catalog     | hits
 ------------|-----
-databricks  |   1
-mongodb     |   1
-oracle      |   1
-polaris     |   1
-postgres    |   1
+polaris     |    1
+databricks  |    1
+postgres    |    1
+oracle      |    1
+mongodb     |    1
 ```
 
-✅ Pass: all 5 catalogs appear with `hits ≥ 1`.
-❌ Fail: 0 rows → audit log plugin not enabled. Check `SHOW VARIABLES LIKE 'enable_audit_plugin'`; if `false`, set `enable_audit_plugin=true` in `fe.conf` and restart FE.
-❌ Fail: fewer than 5 rows → re-run the missing catalog's T-11 query; audit log flushes every 60 s so wait up to 1 minute, then re-run T-12.
+> If `CatalogSyncer` has auto-registered additional catalogs they will appear as
+> extra rows automatically — no SQL change required.
+
+✅ Pass: every external catalog appears with `hits ≥ 1`.
+❌ Fail: `hits = 0` for all rows → audit log plugin not enabled or queries have not flushed yet (audit log flushes every 60 s). Check:
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SHOW VARIABLES LIKE 'enable_audit_plugin';"
+# If Value = false: set enable_audit_plugin=true in fe.conf and restart FE.
+```
+❌ Fail: a catalog row shows `hits = 0` → re-run that catalog's T-11 query, wait up to 60 s for the audit log to flush, then re-run T-12.
+❌ Fail: an auto-synced catalog is missing entirely → `CatalogSyncer` has not yet run a cycle; wait one `SCAN_INTERVAL_S` (300 s) and re-check `SHOW CATALOGS`.
 
 ---
 
