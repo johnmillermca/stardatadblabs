@@ -14,25 +14,29 @@
 # =============================================================================
 
 # ── Stage 1: extract the Gluten JAR + Temurin JDK from the cluster Spark image
-# The Spark cluster runs Temurin 17.  libvelox.so has PT_GNU_STACK RWE set;
-# JDK 21 refuses to load such a library (UnsatisfiedLinkError: cannot enable
-# executable stack), while JDK 17 (Temurin) warns and continues — matching the
-# behaviour on every Spark worker node.
 FROM 192.168.1.50:30500/spark-gluten-velox:3.5.1-5 AS spark-jars
 
 # ── Stage 2: the actual proxy image ──────────────────────────────────────────
-FROM python:3.11-slim
+# Must be Ubuntu 22.04 (glibc 2.35) — same OS as the Spark cluster image.
+# libvelox.so has PT_GNU_STACK RWE (executable-stack flag).  glibc ≥ 2.39
+# (Debian 13 / trixie) hard-fails dlopen with EINVAL when the kernel rejects
+# mprotect(PROT_EXEC) on that mapping.  glibc 2.35 (Ubuntu 22.04) only warns
+# and continues loading — matching behaviour on all Spark worker nodes.
+FROM ubuntu:22.04
 
 WORKDIR /app
 
-# Runtime deps for pyspark spark-submit (no JRE from apt — we bring Temurin 17)
+# Python 3.11 + pip + Temurin 17 (from Spark stage) — no apt java needed
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends binutils && \
-    pip install --no-cache-dir pyspark==3.5.1 && \
+    apt-get install -y --no-install-recommends \
+        python3.11 python3.11-dev python3-pip \
+        libpython3.11 && \
+    ln -sf python3.11 /usr/bin/python3 && \
+    ln -sf python3 /usr/bin/python && \
+    pip3 install --no-cache-dir pyspark==3.5.1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy Temurin 17 JDK from the Spark stage — must match the cluster JVM so
-# that libvelox.so (PT_GNU_STACK RWE) loads without UnsatisfiedLinkError.
+# Copy Temurin 17 JDK from the Spark stage
 COPY --from=spark-jars /opt/java/openjdk /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
