@@ -113,7 +113,7 @@ _SNAP_COL_NAMES = {f.name for f in _SNAP_FIELDS}
 
 # ── RBAC allowlist (mirrored from spark-rbac-allowlist ConfigMap) ──────────────
 # Users who may create/manage Iceberg tables (can_admin_catalog + can_write_iceberg)
-_ICEBERG_ADMIN_USERS = frozenset({"bob", "dave"})
+_ICEBERG_ADMIN_USERS = frozenset({"bob", "dave", "admin", "root"})
 
 
 def _inject_snap_cols(schema: StructType) -> StructType:

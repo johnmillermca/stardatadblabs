@@ -14,7 +14,7 @@
 # =============================================================================
 
 # ── Stage 1: extract the Gluten JAR + Temurin JDK from the cluster Spark image
-FROM 192.168.1.50:30500/spark-gluten-velox:3.5.1-5 AS spark-jars
+FROM 192.168.1.50:30500/spark-gluten-velox:3.5.1-6 AS spark-jars
 
 # ── Stage 2: the actual proxy image ──────────────────────────────────────────
 # Must be Ubuntu 22.04 (glibc 2.35) — same OS as the Spark cluster image.
