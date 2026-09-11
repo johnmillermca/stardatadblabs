@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS cache_system.catalog_sync_log (
     synced_at       DATETIME      NOT NULL,
     action          VARCHAR(32)   NOT NULL DEFAULT 'CREATED'
 )
-DUPLICATE KEY(catalog_name, synced_at)
+DUPLICATE KEY(catalog_name, warehouse_name, synced_at)
 DISTRIBUTED BY HASH(catalog_name) BUCKETS 4
 PROPERTIES (
     "replication_num" = "1"
