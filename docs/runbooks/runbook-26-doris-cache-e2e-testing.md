@@ -1049,30 +1049,54 @@ unsupported was incorrect.  The failures were pure connection-pressure transient
 
 `COLD_DOWN` does not exist on this cluster.  To simulate eviction for testing purposes,
 directly update `cache_state` in the metadata table so the daemon's `LRUEvictionChecker`
-logic can be exercised:
+logic can be exercised.
+
+> **Why the daemon must be scaled to 0 first:**
+> `table_query_stats` uses a `UNIQUE KEY` model with `merge_on_write`.  Any `INSERT` on
+> the same key (`catalog_name, db_name, table_name`) replaces the entire row — including
+> `cache_state`.  The daemon calls `upsert_stats()` via `INSERT` every `SCAN_INTERVAL_S`
+> seconds, so an `UPDATE` you apply is silently overwritten at the next cycle.
+> Scaling to 0 replicas freezes the state long enough to run the test.
+>
+> **Which table to use:**
+> Only tables already in `table_query_stats` can be marked `COLD` this way.
+> As of the last confirmed live run, the 6 tracked tables are:
+> `polaris.tpcds_sf10tcl.inventory`, `polaris.tpcds_sf10tcl.customer_address`,
+> `databricks.lakehouse_db.customers`, `oracle.tpcds.income_band`,
+> `postgres.public.products`, `mongodb.cache_testing.products`.
+> Use `polaris.tpcds_sf10tcl.inventory` — it is the largest and most reliably present.
 
 ```bash
 DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
 
-# Manually mark a table COLD to test the eviction path
+# Step 1 — Stop the daemon so it cannot overwrite the UPDATE before the test runs
+kubectl scale deployment/doris-cache-manager -n prod --replicas=0
+
+# Step 2 — Mark the table COLD
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 UPDATE cache_system.table_query_stats
 SET cache_state = 'COLD', updated_at = NOW()
 WHERE catalog_name = 'polaris'
   AND db_name      = 'tpcds_sf10tcl'
-  AND table_name   = 'store_sales';"
+  AND table_name   = 'inventory';"
 
-# Confirm
+# Step 3 — Confirm the UPDATE stuck (daemon is down, nothing will overwrite it)
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state FROM cache_system.table_query_stats
-WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
+WHERE catalog_name = 'polaris' AND table_name = 'inventory';"
 ```
 
 **Expected:** `cache_state = COLD`.
 
-✅ Pass: UPDATE succeeds and SELECT returns `COLD`.
-❌ Fail: row not found → table has not been seeded yet; run T-11 first.
+> After confirming, bring the daemon back up before moving to T-23:
+> ```bash
+> kubectl scale deployment/doris-cache-manager -n prod --replicas=1
+> kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+> ```
+
+✅ Pass: SELECT returns `COLD` while daemon is scaled to 0.
+❌ Fail: row not found → table has not been seeded yet; run T-11 and T-15 first to get `polaris.tpcds_sf10tcl.inventory` into `table_query_stats`.
 
 ---
 
@@ -1148,9 +1172,14 @@ kubectl exec -n prod \
   -- printenv LRU_EVICT_HOURS
 # Expected: 24
 
-# Lower eviction threshold to 0 (evict all tables immediately)
-# NOTE: ArgoCD will overwrite kubectl set env — edit the deployment YAML in git instead,
-# or use a temporary patch that ArgoCD will reconcile away on next sync.
+# Lower eviction threshold to 0 (evict all tables immediately).
+# NOTE: ArgoCD reconciles env vars back from git on its next sync cycle (~3 min).
+# Suspend auto-sync first so the patch sticks long enough to complete the test.
+ARGOCD_APP=$(kubectl get applications -n argocd --no-headers \
+  -o custom-columns=NAME:.metadata.name | grep -i doris-cache)
+kubectl patch application ${ARGOCD_APP} -n argocd \
+  --type merge -p '{"spec":{"syncPolicy":null}}'
+
 kubectl set env deployment/doris-cache-manager -n prod LRU_EVICT_HOURS=0
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 
@@ -1169,7 +1198,7 @@ sleep 15  # allow one cycle to complete (SCAN_INTERVAL_S=300; daemon runs one cy
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state
 FROM cache_system.table_query_stats
-WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
+WHERE catalog_name = 'polaris' AND table_name = 'inventory';"
 ```
 
 **Expected:** `cache_state = COLD`.
@@ -1179,6 +1208,11 @@ WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 ```bash
 kubectl set env deployment/doris-cache-manager -n prod LRU_EVICT_HOURS=24
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+
+# Re-enable ArgoCD auto-sync
+kubectl patch application ${ARGOCD_APP} -n argocd \
+  --type merge \
+  -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
 
 # Confirm restored
 kubectl exec -n prod \
@@ -1203,7 +1237,7 @@ LIMIT 5;
 "
 ```
 
-**Expected:** at least one row for `polaris / tpcds_sf10tcl / store_sales` with `reason = 'no_select_0h'` (or `no_select_24h` if the 24-hour path was used).
+**Expected:** at least one row for `polaris / tpcds_sf10tcl / inventory` with `reason = 'no_select_0h'` (or `no_select_24h` if the 24-hour path was used).
 
 ✅ Pass: row present with the correct table and reason.  
 ❌ Fail: no rows → the daemon's `LRUEvictionChecker` did not fire; confirm `cache_state` was `WARM` or `WARMING` before lowering the threshold (eviction only fires on those states).
