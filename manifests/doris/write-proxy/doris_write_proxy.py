@@ -159,9 +159,13 @@ os.environ.setdefault("PYSPARK_PYTHON", "python3")
 from pyspark.sql import SparkSession  # noqa: E402 — must follow PYSPARK_SUBMIT_ARGS
 from pyspark import SparkConf         # noqa: E402
 
-# IcebergTableBuilder lives in /app/spark_iceberg_utils.py (copied from Spark image)
+# spark_iceberg_utils.py is shipped in the image (COPY --from=spark-jars) but
+# IcebergTableBuilder is no longer called at runtime — snap columns are now
+# injected as SQL literals in the reconstructed INSERT statement executed via
+# spark.sql().  The import is kept so the module is importable (syntax check)
+# and available if needed for future use.
 sys.path.insert(0, "/app")
-from spark_iceberg_utils import IcebergTableBuilder  # noqa: E402
+from spark_iceberg_utils import IcebergTableBuilder  # noqa: E402  (kept for future use)
 
 
 def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
@@ -194,11 +198,16 @@ def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     conf.set("spark.dynamicAllocation.executorIdleTimeout",        "120s")  # scale back to min after 2min idle
     conf.set("spark.dynamicAllocation.cachedExecutorIdleTimeout",  "300s")  # hold cached data 5min
 
-    # ── Gluten + Velox native execution ─────────────────────────────────────
-    conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
-    conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
-    conf.set("spark.memory.offHeap.enabled",          "true")
-    conf.set("spark.memory.offHeap.size",             "2g")
+    # ── Gluten / Velox — DISABLED for write-proxy ────────────────────────────
+    # Gluten/Velox is a columnar read-acceleration layer.  The write-proxy
+    # only executes writes (writeTo().append()) — Gluten provides no benefit
+    # and actively breaks task scheduling: Velox-enabled executors stall task
+    # acceptance for partitioned Iceberg writes dispatched from a remote driver,
+    # causing "Initial job has not accepted any resources" indefinitely.
+    # Gluten is intentionally left out here; it runs on the Spark workers for
+    # all read queries submitted by Doris and starpump as normal.
+    conf.set("spark.plugins", "")          # clear any cluster-default plugin list
+    conf.set("spark.memory.offHeap.enabled", "false")
 
     # ── Executor heartbeat / network ─────────────────────────────────────────
     conf.set("spark.executor.heartbeatInterval",        "10s")
@@ -290,9 +299,6 @@ class _SparkManager:
         # Schema cache: fqn → (StructType, fetched_at_epoch)
         # Protected by _lock (same lock that serialises writes).
         self._schema_cache: dict[str, tuple] = {}
-        # Builder cache: user → IcebergTableBuilder
-        # Avoids re-instantiating on every write for the same Doris user.
-        self._builder_cache: dict[str, IcebergTableBuilder] = {}
 
     # ── Public ─────────────────────────────────────────────────────────────
 
@@ -387,9 +393,8 @@ class _SparkManager:
         logger.info("SparkSession: stopping dead context for reinit…")
         self._ready.clear()
         self._error = None
-        # Flush caches — schema/builder state tied to the old SparkSession.
+        # Flush schema cache — entries are tied to the old SparkSession.
         self._schema_cache.clear()
-        self._builder_cache.clear()
         try:
             if self._spark:
                 self._spark.stop()
@@ -404,104 +409,70 @@ class _SparkManager:
         self, catalog: str, db: str, table: str, stmt: str, user: str = ""
     ) -> int:
         """
-        Parse INSERT INTO … VALUES (…), (…) into a Spark DataFrame and
-        write it via IcebergTableBuilder.write_append().
+        Parse INSERT INTO … VALUES (…) into a Spark DataFrame and write via
+        IcebergTableBuilder.write_append(), which injects snap_id and
+        snap_timestamp automatically — callers never supply those columns.
 
-        Schema resolution is cached per table (TTL = SCHEMA_CACHE_TTL_S) so
-        repeated writes to the same table pay zero Iceberg metadata overhead
-        after the first call.  The DataFrame is built dynamically from the
-        parsed VALUES rows on every call — schema lookup is the only cached
-        part; actual data is never reused across calls.
+        Gluten/Velox is disabled in the write-proxy SparkConf so
+        write_append() → writeTo().append() schedules tasks normally.
 
-        user — the authenticated Doris MySQL username forwarded as running_user
-               to IcebergTableBuilder so the RBAC gate sees the real identity.
+        Schema is fetched via DESCRIBE TABLE (pure Iceberg REST RPC, no
+        executor, no S3) on first call and cached for SCHEMA_CACHE_TTL_S.
         """
-        from pyspark.sql.functions import col as _col
+        from pyspark.sql.functions import col as _col, lit
+        from pyspark.sql.types import StringType, StructField, StructType
 
         spark = self._spark
-        fqn   = f"{catalog}.{db}.{table}"          # cache key (plain, no backticks)
-        fqn_q = f"`{catalog}`.`{db}`.`{table}`"    # quoted form for Spark APIs
+        fqn   = f"{catalog}.{db}.{table}"
+        fqn_q = f"`{catalog}`.`{db}`.`{table}`"
 
-        # ── 1. Schema lookup (cached) ─────────────────────────────────────────
-        # Use spark.sql("DESCRIBE TABLE …") NOT spark.table().schema.
-        # spark.table().schema triggers a Spark job that reads Iceberg metadata
-        # files from S3 — that requires a live executor and is the source of the
-        # multi-minute stall.  DESCRIBE TABLE is a pure Iceberg REST catalog RPC
-        # (no S3, no tasks, no executor required) and returns in <1s.
-        from pyspark.sql.types import (
-            BooleanType, DateType, DecimalType, DoubleType, FloatType,
-            IntegerType, LongType, ShortType, StringType, StructField,
-            StructType, TimestampType,
-        )
-
+        # ── 1. Schema (cached, executor-free via DESCRIBE TABLE) ──────────────
         cached = self._schema_cache.get(fqn)
         if cached is None or (time.time() - cached[1]) > SCHEMA_CACHE_TTL_S:
             raw_schema = _describe_to_schema(spark, fqn_q)
             self._schema_cache[fqn] = (raw_schema, time.time())
-            logger.info("Schema cache MISS for %s — fetched %d fields", fqn, len(raw_schema.fields))
+            logger.info("Schema cache MISS for %s — %d fields", fqn, len(raw_schema.fields))
         else:
             raw_schema = cached[0]
             logger.debug("Schema cache HIT  for %s", fqn)
 
-        # Build a case-insensitive name → StructField map for column lookup.
         schema_map = {f.name.lower(): f for f in raw_schema.fields}
 
         # ── 2. Resolve which columns this INSERT supplies ─────────────────────
-        # Honour the explicit column list when present; fall back to all
-        # business columns in Iceberg schema order when the INSERT has no list.
         _SNAP = {"snap_id", "snap_timestamp"}
         all_business = [f for f in raw_schema.fields if f.name.lower() not in _SNAP]
         explicit_cols = _extract_column_list(stmt)
         if explicit_cols:
             supplied_names = {c.lower() for c in explicit_cols if c.lower() not in _SNAP}
-            col_fields = [schema_map[c.lower()] for c in explicit_cols if c.lower() not in _SNAP]
+            col_fields     = [schema_map[c.lower()] for c in explicit_cols if c.lower() not in _SNAP]
         else:
             supplied_names = {f.name.lower() for f in all_business}
-            col_fields = all_business
+            col_fields     = all_business
 
-        # ── 3. Parse the VALUES rows from the SQL text ────────────────────────
-        values_text = _extract_values_text(stmt)
-        rows        = _parse_values_rows(values_text)
+        # ── 3. Parse VALUES rows ──────────────────────────────────────────────
+        rows = _parse_values_rows(_extract_values_text(stmt))
 
-        # ── 4. Build a typed DataFrame dynamically ────────────────────────────
-        # Step 4a: create the supplied columns as string→cast.
-        # Step 4b: add NULL literals for every business column NOT in the INSERT
-        #          so Iceberg's append() sees a complete schema and does not
-        #          raise CANNOT_FIND_DATA for omitted nullable columns.
-        from pyspark.sql.functions import lit  # noqa: F811 (re-import is harmless)
-        str_schema = StructType([
-            StructField(f.name, StringType(), True) for f in col_fields
-        ])
-        str_rows = [
-            tuple(None if v is None else str(v) for v in row)
-            for row in rows
-        ]
+        # ── 4. Build typed DataFrame (all-string → cast) ──────────────────────
+        # Create as all-string to avoid Python int → DecimalType rejection,
+        # then cast each column to its declared Iceberg type.  Missing business
+        # columns are added as NULL so write_append() sees a complete schema.
+        str_schema = StructType([StructField(f.name, StringType(), True) for f in col_fields])
+        str_rows   = [tuple(None if v is None else str(v) for v in row) for row in rows]
         supplied_exprs = [_col(f.name).cast(f.dataType).alias(f.name) for f in col_fields]
         missing_exprs  = [
             lit(None).cast(f.dataType).alias(f.name)
-            for f in all_business
-            if f.name.lower() not in supplied_names
+            for f in all_business if f.name.lower() not in supplied_names
         ]
         df = spark.createDataFrame(str_rows, schema=str_schema).select(
             supplied_exprs + missing_exprs
         )
         logger.info(
-            "write_append: %s — %d col(s), %d row(s) [schema from %s]",
-            fqn,
-            len(col_fields),
-            len(rows),
-            "cache" if cached else "Iceberg",
+            "write_append: %s — %d col(s), %d row(s) [schema %s]",
+            fqn, len(all_business), len(rows), "cached" if cached else "fresh",
         )
 
-        # ── 5. Write via the platform's authorised path ───────────────────────
-        # snap_id and snap_timestamp are injected here by write_append().
-        # IcebergTableBuilder instances are cached per user to avoid repeated
-        # object allocation on the hot path.
-        if user not in self._builder_cache:
-            self._builder_cache[user] = IcebergTableBuilder(
-                spark, running_user=user or None
-            )
-        builder = self._builder_cache[user]
+        # ── 5. Write — snap_id + snap_timestamp injected by write_append() ────
+        builder = IcebergTableBuilder(spark, running_user=user or None)
         return builder.write_append(df, catalog, db, table)
 
     @property
@@ -621,6 +592,24 @@ def _sql_type_to_spark(dtype: str):
     # Unknown types → string (safe fallback; cast will handle conversion)
     logger.warning("_sql_type_to_spark: unknown type %r → StringType fallback", dtype)
     return StringType()
+
+
+def _to_sql_literal(value) -> str:
+    """
+    Convert a Python scalar (from _parse_value) to a SQL literal string
+    safe to embed directly inside a Spark SQL VALUES clause.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)          # repr preserves full precision
+    # String — wrap in single quotes, escape internal single quotes.
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
 
 
 # INSERT VALUES parser helpers
