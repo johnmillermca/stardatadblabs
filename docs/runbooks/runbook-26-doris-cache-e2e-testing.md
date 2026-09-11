@@ -1701,6 +1701,8 @@ Run the target query, then wait up to one `SCAN_INTERVAL_S` window and query the
 
 ```bash
 # Step 1 — run the query as any user (no hints needed)
+# IMPORTANT: use LIMIT 1000 or higher — LIMIT 10 resolves from Doris metadata
+# (0 BE scan bytes, 6 ms latency) and will show total=0 MB in the metrics table.
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "SELECT * FROM databricks.lakehouse_db.customers LIMIT 1000;"
 
@@ -1745,7 +1747,36 @@ LIMIT 5;"
 > so they show `total_scan_bytes = 0`.  Use a column projection like
 > `SELECT * … LIMIT 1000` or `SELECT MAX(salary) …` to generate real scan bytes.
 
-**Observed (2026-09-10 live run):**
+#### Why `cache_state = UNKNOWN` and `total = 0 MB` on first observation
+
+This is the expected result when **all three of the following are true at once**:
+
+| Condition | What you see | Why |
+|---|---|---|
+| Table was just seen for the first time by the daemon | `cache_state = UNKNOWN` | Default state on first `table_query_stats` insert — overwritten with `WARM` only after a warm-up scan completes |
+| Query used `LIMIT 10` (or any small LIMIT) | `total = 0 MB`, `avg_latency = 6 ms` | Doris resolves small LIMITs from Iceberg metadata / FE-side filter — the BE never reads a data file, so `scan_bytes = 0` in `audit_log` |
+| First daemon cycle after the query | `local_NVMe = 0 MB`, `remote_S3 = 0 MB` | BE Prometheus scan byte counters are deltas between consecutive cycles. On the first cycle the baseline snapshot is initialised to the current counter — delta is always 0 regardless of scan bytes |
+
+**This output is therefore correct and expected:**
+```
+catalog_name  db_name       table_name  sampled_at            local_NVMe  remote_S3  total   cache_hit_pct  query_count  avg_latency  cache_state  warmup_count
+databricks    lakehouse_db  customers   2026-09-11 03:xx:xx   0 MB        0 MB        0 MB    0%             1            6 ms         UNKNOWN      0
+```
+
+**To get meaningful byte metrics, run a full-scan query instead:**
+
+```bash
+# Forces BE to read actual Parquet files — generates real scan_bytes in audit_log
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT MAX(salary), MIN(salary), COUNT(*) FROM databricks.lakehouse_db.customers;"
+```
+
+Then wait one cycle and re-check `table_cache_metrics` — you will see:
+- `cache_state` will have advanced to `WARM` after the daemon warm-up runs
+- `remote_S3 > 0` (first run, blocks not yet cached)
+- `local_NVMe > 0` on the second run (blocks now served from BE NVMe)
+
+**Observed (2026-09-10 live run — full scan query):**
 ```
 catalog    db           table      sampled_at            local_NVMe  remote_S3  total     hit_pct  queries  avg_latency  state  warmups
 databricks lakehouse_db customers  2026-09-10 00:21:13   0 MB        0.98 MB    0.98 MB   0.00%    1        678 ms       WARM   1
