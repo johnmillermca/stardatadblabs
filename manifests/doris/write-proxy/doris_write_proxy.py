@@ -89,7 +89,23 @@ _BAO_K8S_SA_JWT     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _BAO_ROLE           = os.environ.get("BAO_ROLE", "platform-secrets-read")
 _PATH_POLARIS       = "secret/data/platform/polaris"
 _PATH_S3            = "secret/data/platform/s3"
-_POLARIS_URI        = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+
+# ── Polaris URI for Spark catalogs ────────────────────────────────────────────
+# MUST point to polaris-auth-proxy (port 8283), NOT polaris-rest directly.
+# The auth-proxy runs a background thread that refreshes the OAuth2 token
+# 300 s before expiry, so every request Spark makes carries a valid Bearer token.
+# Pointing directly at polaris-rest would bypass that refresh and tokens would
+# expire after 1 hour with no way for Spark to renew them.
+_POLARIS_URI = os.environ.get(
+    "POLARIS_URI",
+    "http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog",
+)
+
+# How often (seconds) the background token-keepalive thread rebuilds the
+# SparkSession to pick up fresh OAuth2 credentials from OpenBao.
+# Set to 50 min (3000 s) — safely before the 1-hour Polaris token TTL.
+# Override via TOKEN_REFRESH_INTERVAL_S env var.
+_TOKEN_REFRESH_INTERVAL_S = int(os.environ.get("TOKEN_REFRESH_INTERVAL_S", "3000"))
 
 # JAR names baked into the image at /opt/spark-jars/
 _LOCAL_JARS_DIR = "/opt/spark-jars"
@@ -205,18 +221,28 @@ def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 
     # ── Wire every managed catalog ────────────────────────────────────────────
-    polaris_uri = pol.get("url") or _POLARIS_URI
+    # Use polaris-auth-proxy URI — the proxy carries a perpetually-fresh Bearer
+    # token so Spark never sees an expired credential, regardless of how long
+    # the SparkSession has been alive.
+    polaris_uri = _POLARIS_URI
     credential  = f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}"
 
     for cat, warehouse in MANAGED_CATALOGS.items():
         conf.set(f"spark.sql.catalog.{cat}", "org.apache.iceberg.spark.SparkCatalog")
         conf.set(f"spark.sql.catalog.{cat}.type",              "rest")
         conf.set(f"spark.sql.catalog.{cat}.uri",               polaris_uri)
+        # Explicit oauth2-server-uri suppresses the Iceberg deprecation warning and
+        # ensures OAuth2Manager knows where to fetch/refresh tokens.
         conf.set(f"spark.sql.catalog.{cat}.oauth2-server-uri", f"{polaris_uri}/v1/oauth/tokens")
         conf.set(f"spark.sql.catalog.{cat}.credential",        credential)
         conf.set(f"spark.sql.catalog.{cat}.scope",             "PRINCIPAL_ROLE:ALL")
         conf.set(f"spark.sql.catalog.{cat}.warehouse",         warehouse)
         conf.set(f"spark.sql.catalog.{cat}.rest.auth.type",    "oauth2")
+        # Tell Iceberg's OAuth2Manager to refresh the token 5 minutes before
+        # expiry instead of waiting until it has actually expired.
+        conf.set(f"spark.sql.catalog.{cat}.token-refresh-enabled",  "true")
+        conf.set(f"spark.sql.catalog.{cat}.token-expiration-ms",    "3600000")   # 1 h Polaris TTL
+        conf.set(f"spark.sql.catalog.{cat}.min-token-refresh-wait-ms", "300000") # refresh ≥5 min early
         # S3FileIO credentials per-catalog
         conf.set(f"spark.sql.catalog.{cat}.s3.access-key-id",     s3["access_key"])
         conf.set(f"spark.sql.catalog.{cat}.s3.secret-access-key", s3["secret_key"])
@@ -262,7 +288,34 @@ class _SparkManager:
     Thread safety: a reentrant lock serialises concurrent INSERTs.  asyncio
     callers must run _execute() via loop.run_in_executor() to avoid blocking
     the event loop.
+
+    Token expiry — three-layer defence
+    ------------------------------------
+    Layer 1 — polaris-auth-proxy URI:
+        Spark catalogs point to polaris-auth-proxy:8283 (not polaris-rest:8181
+        directly).  The auth-proxy runs a background thread that renews its
+        Bearer token 300 s before expiry, so every Iceberg REST request the
+        SparkSession makes is already authenticated — no token logic needed
+        in Spark at all.
+
+    Layer 2 — Iceberg OAuth2Manager proactive refresh:
+        SparkConf sets token-refresh-enabled=true and min-token-refresh-wait-ms=300000
+        so Iceberg's built-in OAuth2Manager refreshes the token ≥5 min before
+        the declared expiry (token-expiration-ms=3600000).
+
+    Layer 3 — background keepalive thread:
+        A daemon thread rebuilds the SparkSession every TOKEN_REFRESH_INTERVAL_S
+        (default 3000 s = 50 min) while idle (no write in progress).  This is the
+        hard backstop: even if layers 1 and 2 somehow fail, the session is never
+        more than 50 minutes old and a fresh token is always loaded.
     """
+
+    # Error substrings that indicate the Polaris OAuth2 token has expired.
+    _TOKEN_EXPIRY_HINTS = (
+        "NotAuthorizedException",
+        "Not authorized",
+        "No content to map due to end-of-input",  # empty 401 body → Jackson parse fail
+    )
 
     def __init__(self) -> None:
         self._spark: Optional[SparkSession] = None
@@ -272,13 +325,15 @@ class _SparkManager:
         # Schema cache: fqn → (StructType, fetched_at_epoch)
         # Protected by _lock (same lock that serialises writes).
         self._schema_cache: dict[str, tuple] = {}
+        # Timestamp of the last successful _init_spark — used by keepalive.
+        self._session_built_at: float = 0.0
 
     # ── Public ─────────────────────────────────────────────────────────────
 
     def start_background_init(self) -> None:
-        """Kick off SparkSession init in a daemon thread. Returns immediately."""
-        t = threading.Thread(target=self._init_spark, daemon=True, name="spark-init")
-        t.start()
+        """Kick off SparkSession init + keepalive thread. Returns immediately."""
+        threading.Thread(target=self._init_spark, daemon=True, name="spark-init").start()
+        threading.Thread(target=self._keepalive_loop, daemon=True, name="spark-token-keepalive").start()
 
     def execute(self, catalog: str, db: str, table: str, stmt: str, user: str = "") -> Tuple[bool, str]:
         """
@@ -303,35 +358,73 @@ class _SparkManager:
             return False, f"SparkSession unavailable: {self._error}"
 
         with self._lock:
-            t0 = time.time()
-            try:
-                if _is_insert_values(stmt):
-                    rows_written = self._write_via_append(catalog, db, table, stmt, user)
-                    elapsed = time.time() - t0
-                    logger.info(
-                        "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
-                        catalog, db, table, elapsed, rows_written,
-                    )
-                    return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
-                # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
-                self._spark.sql(f"USE `{catalog}`.`{db}`")
-                result = self._spark.sql(stmt)
-                rows = result.count() if result is not None else 0
+            return self._execute_with_token_refresh(catalog, db, table, stmt, user)
+
+    def _execute_with_token_refresh(
+        self,
+        catalog: str, db: str, table: str, stmt: str, user: str,
+        _retry: bool = False,
+    ) -> Tuple[bool, str]:
+        """
+        Inner execute — called inside self._lock.
+        On first NotAuthorizedException, rebuilds the SparkSession (fresh
+        OpenBao credentials + fresh Polaris token) and retries once.
+        """
+        t0 = time.time()
+        try:
+            if _is_insert_values(stmt):
+                rows_written = self._write_via_append(catalog, db, table, stmt, user)
                 elapsed = time.time() - t0
                 logger.info(
-                    "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
-                    catalog, db, elapsed, rows,
+                    "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
+                    catalog, db, table, elapsed, rows_written,
                 )
-                return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
-            except Exception as exc:
-                elapsed = time.time() - t0
-                cause = getattr(exc, "java_exception", None)
-                msg = str(cause if cause is not None else exc).split("\n")[0][:400]
-                logger.error(
-                    "Spark DML FAILED: %s.%s.%s elapsed=%.2fs error=%s",
-                    catalog, db, table, elapsed, msg,
+                return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
+            # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
+            self._spark.sql(f"USE `{catalog}`.`{db}`")
+            result = self._spark.sql(stmt)
+            rows = result.count() if result is not None else 0
+            elapsed = time.time() - t0
+            logger.info(
+                "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
+                catalog, db, elapsed, rows,
+            )
+            return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
+        except Exception as exc:
+            elapsed = time.time() - t0
+            cause = getattr(exc, "java_exception", None)
+            full_msg = str(cause if cause is not None else exc)
+            short_msg = full_msg.split("\n")[0][:400]
+
+            # ── Token expiry: rebuild session and retry once ───────────────
+            if not _retry and any(h in full_msg for h in self._TOKEN_EXPIRY_HINTS):
+                logger.warning(
+                    "SparkSession: Polaris token expired after %.1fs — "
+                    "rebuilding session with fresh credentials and retrying.",
+                    elapsed,
                 )
-                return False, msg
+                self._schema_cache.clear()   # schema cache may hold stale catalog refs
+                try:
+                    if self._spark:
+                        self._spark.stop()
+                except Exception:
+                    pass
+                self._spark = None
+                self._error = None
+                self._ready.clear()
+                self._init_spark()           # synchronous rebuild inside the lock
+                if self._error:
+                    return False, f"SparkSession rebuild failed: {self._error}"
+                logger.info("SparkSession: rebuilt successfully — retrying statement.")
+                return self._execute_with_token_refresh(
+                    catalog, db, table, stmt, user, _retry=True
+                )
+
+            logger.error(
+                "Spark DML FAILED: %s.%s.%s elapsed=%.2fs error=%s",
+                catalog, db, table, elapsed, short_msg,
+            )
+            return False, short_msg
 
     # ── Private helpers ─────────────────────────────────────────────────────
 
@@ -422,6 +515,84 @@ class _SparkManager:
 
     # ── Private ─────────────────────────────────────────────────────────────
 
+    def _keepalive_loop(self) -> None:
+        """
+        Background daemon thread — rebuilds the SparkSession every
+        TOKEN_REFRESH_INTERVAL_S (default 3000 s = 50 min) while no write
+        is in progress.
+
+        This is Layer 3 of the token-expiry defence: even if polaris-auth-proxy
+        and Iceberg's built-in OAuth2Manager both somehow fail to refresh the
+        token, the session is never more than 50 minutes old, so a fresh Polaris
+        credential is always loaded before the 60-minute TTL expires.
+
+        The loop:
+          1. Waits until the initial SparkSession is ready (up to
+             SPARK_INIT_TIMEOUT_S seconds).
+          2. Sleeps in small increments until TOKEN_REFRESH_INTERVAL_S seconds
+             have elapsed since _session_built_at.
+          3. Acquires _lock (waits for any in-flight write to finish first).
+          4. Tears down the old session and calls _init_spark() synchronously.
+          5. Loops back to step 2.
+        """
+        logger.info(
+            "SparkSession keepalive: thread started (interval=%ds).",
+            _TOKEN_REFRESH_INTERVAL_S,
+        )
+        # Wait for the initial session to be ready before entering the loop.
+        if not self._ready.wait(timeout=SPARK_INIT_TIMEOUT_S):
+            logger.warning(
+                "SparkSession keepalive: initial session never became ready — "
+                "keepalive thread exiting."
+            )
+            return
+
+        while True:
+            # Sleep until it is time to rebuild.  Poll every 30 s so we react
+            # promptly if the process is shutting down or the interval is short.
+            while True:
+                age = time.time() - self._session_built_at
+                remaining = _TOKEN_REFRESH_INTERVAL_S - age
+                if remaining <= 0:
+                    break
+                time.sleep(min(30, remaining))
+
+            logger.info(
+                "SparkSession keepalive: session age %.0fs ≥ interval %ds — "
+                "rebuilding to pick up fresh Polaris credentials.",
+                time.time() - self._session_built_at,
+                _TOKEN_REFRESH_INTERVAL_S,
+            )
+
+            with self._lock:
+                # Tear down the current session cleanly.
+                try:
+                    if self._spark:
+                        self._spark.stop()
+                except Exception as exc:
+                    logger.warning("SparkSession keepalive: stop() raised %s (ignored)", exc)
+                self._spark = None
+                self._error = None
+                self._ready.clear()
+                self._schema_cache.clear()
+
+                # Rebuild synchronously inside the lock so no write can start
+                # until the new session is fully initialised.
+                self._init_spark()
+
+                if self._error:
+                    logger.error(
+                        "SparkSession keepalive: rebuild failed — %s. "
+                        "Will retry in %ds.",
+                        self._error,
+                        _TOKEN_REFRESH_INTERVAL_S,
+                    )
+                else:
+                    logger.info(
+                        "SparkSession keepalive: session rebuilt successfully "
+                        "(fresh Polaris token loaded)."
+                    )
+
     def _init_spark(self) -> None:
         t0 = time.time()
         logger.info("SparkSession: initialising (JVM + Gluten + executor launch)…")
@@ -441,6 +612,7 @@ class _SparkManager:
                 except Exception:
                     pass
             self._spark = spark
+            self._session_built_at = time.time()   # keepalive uses this as the age baseline
             elapsed = time.time() - t0
             logger.info(
                 "SparkSession: READY — Gluten/Velox active, executors up, "
