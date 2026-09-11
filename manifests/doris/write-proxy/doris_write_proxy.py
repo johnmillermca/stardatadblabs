@@ -403,7 +403,18 @@ class _SparkManager:
 
         # ── 5. Write — snap_id + snap_timestamp injected by write_append() ────
         builder = IcebergTableBuilder(spark, running_user=user or None)
-        return builder.write_append(df, catalog, db, table)
+        try:
+            return builder.write_append(df, catalog, db, table)
+        finally:
+            # Release DataFrame / RDD memory and any broadcast/shuffle state
+            # immediately so the JVM heap is available for the next write job.
+            try:
+                df.unpersist()
+                spark.catalog.clearCache()
+                spark.sparkContext._jvm.System.gc()  # type: ignore[attr-defined]
+                logger.debug("post-write cleanup: df unpersisted, catalog cache cleared, GC requested")
+            except Exception:
+                pass  # cleanup is best-effort — never fail the write because of it
 
     @property
     def is_ready(self) -> bool:
