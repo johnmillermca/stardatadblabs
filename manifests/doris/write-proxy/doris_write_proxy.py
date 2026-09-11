@@ -416,7 +416,6 @@ class _SparkManager:
         user — the authenticated Doris MySQL username forwarded as running_user
                to IcebergTableBuilder so the RBAC gate sees the real identity.
         """
-        from pyspark.sql.types import StringType, StructField, StructType
         from pyspark.sql.functions import col as _col
 
         spark = self._spark
@@ -424,14 +423,22 @@ class _SparkManager:
         fqn_q = f"`{catalog}`.`{db}`.`{table}`"    # quoted form for Spark APIs
 
         # ── 1. Schema lookup (cached) ─────────────────────────────────────────
-        # On first call for a table, fetch from Iceberg and cache it.
-        # On subsequent calls, return the cached schema unless the TTL has
-        # expired — then re-fetch transparently and refresh the cache entry.
+        # Use spark.sql("DESCRIBE TABLE …") NOT spark.table().schema.
+        # spark.table().schema triggers a Spark job that reads Iceberg metadata
+        # files from S3 — that requires a live executor and is the source of the
+        # multi-minute stall.  DESCRIBE TABLE is a pure Iceberg REST catalog RPC
+        # (no S3, no tasks, no executor required) and returns in <1s.
+        from pyspark.sql.types import (
+            BooleanType, DateType, DecimalType, DoubleType, FloatType,
+            IntegerType, LongType, ShortType, StringType, StructField,
+            StructType, TimestampType,
+        )
+
         cached = self._schema_cache.get(fqn)
         if cached is None or (time.time() - cached[1]) > SCHEMA_CACHE_TTL_S:
-            raw_schema = spark.table(fqn_q).schema
+            raw_schema = _describe_to_schema(spark, fqn_q)
             self._schema_cache[fqn] = (raw_schema, time.time())
-            logger.debug("Schema cache MISS for %s — fetched %d fields", fqn, len(raw_schema.fields))
+            logger.info("Schema cache MISS for %s — fetched %d fields", fqn, len(raw_schema.fields))
         else:
             raw_schema = cached[0]
             logger.debug("Schema cache HIT  for %s", fqn)
@@ -461,7 +468,7 @@ class _SparkManager:
         # Step 4b: add NULL literals for every business column NOT in the INSERT
         #          so Iceberg's append() sees a complete schema and does not
         #          raise CANNOT_FIND_DATA for omitted nullable columns.
-        from pyspark.sql.functions import lit
+        from pyspark.sql.functions import lit  # noqa: F811 (re-import is harmless)
         str_schema = StructType([
             StructField(f.name, StringType(), True) for f in col_fields
         ])
@@ -541,6 +548,81 @@ _spark_manager = _SparkManager()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _describe_to_schema(spark, fqn_q: str):
+    """
+    Return a StructType for *fqn_q* using DESCRIBE TABLE — a pure Iceberg REST
+    catalog RPC that requires no executor and no S3 access.
+
+    spark.table(fqn).schema would also work but it reads Iceberg metadata files
+    from S3, which needs a live executor and causes multi-second stalls when
+    the executor hasn't been allocated yet (the first INSERT of a session).
+
+    DESCRIBE TABLE output columns: col_name, data_type, comment.
+    Rows after the first blank col_name are partition/metadata — stop there.
+    """
+    from pyspark.sql.types import (
+        BooleanType, DateType, DecimalType, DoubleType, FloatType,
+        IntegerType, LongType, ShortType, StringType, StructField,
+        StructType, TimestampType,
+    )
+
+    rows = spark.sql(f"DESCRIBE TABLE {fqn_q}").collect()
+    fields = []
+    for r in rows:
+        name = r["col_name"].strip()
+        if not name or name.startswith("#"):
+            break                          # stop at partition info section
+        dtype_str = r["data_type"].strip().lower()
+        fields.append(StructField(name, _sql_type_to_spark(dtype_str), nullable=True))
+    return StructType(fields)
+
+
+def _sql_type_to_spark(dtype: str):
+    """
+    Map a Spark/Iceberg SQL type string from DESCRIBE TABLE to a StructField
+    DataType.  Covers all types used in TPC-DS and standard Iceberg tables.
+    """
+    from pyspark.sql.types import (
+        BooleanType, DateType, DecimalType, DoubleType, FloatType,
+        IntegerType, LongType, ShortType, StringType, TimestampType,
+    )
+    dtype = dtype.strip().lower()
+    if dtype in ("string", "varchar", "char", "text"):
+        return StringType()
+    if dtype in ("bigint", "int8", "long"):
+        return LongType()
+    if dtype in ("int", "integer", "int4"):
+        return IntegerType()
+    if dtype in ("smallint", "int2", "short"):
+        return ShortType()
+    if dtype in ("boolean", "bool"):
+        return BooleanType()
+    if dtype in ("float", "real", "float4"):
+        return FloatType()
+    if dtype in ("double", "float8", "double precision"):
+        return DoubleType()
+    if dtype in ("date",):
+        return DateType()
+    if dtype in ("timestamp", "timestamp_ntz", "timestamp with time zone",
+                 "timestamp without time zone"):
+        return TimestampType()
+    if dtype.startswith("decimal("):
+        # decimal(precision,scale)
+        inner = dtype[8:-1]
+        parts = inner.split(",")
+        p, s = int(parts[0].strip()), int(parts[1].strip()) if len(parts) > 1 else 0
+        return DecimalType(p, s)
+    if dtype.startswith("decimal"):
+        return DecimalType(38, 18)
+    # Unknown types → string (safe fallback; cast will handle conversion)
+    logger.warning("_sql_type_to_spark: unknown type %r → StringType fallback", dtype)
+    return StringType()
+
+
 # INSERT VALUES parser helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
