@@ -128,5 +128,55 @@ PROPERTIES (
     "replication_num" = "1"
 );
 
+-- ── catalog_sync_log ─────────────────────────────────────────────────────────
+-- Audit log for automatic catalog registration events produced by CatalogSyncer.
+-- One row is written each time a new Polaris warehouse is discovered and a
+-- matching Doris external catalog is created automatically.
+--
+-- Columns:
+--   catalog_name   — Doris catalog name that was created (derived from warehouse)
+--   warehouse_name — Original Polaris warehouse name
+--   synced_at      — Timestamp when the CREATE CATALOG was issued
+--   action         — Always 'CREATED' for now; reserved for future DROPPED / UPDATED
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cache_system.catalog_sync_log (
+    catalog_name    VARCHAR(128)  NOT NULL,
+    warehouse_name  VARCHAR(256)  NOT NULL,
+    synced_at       DATETIME      NOT NULL,
+    action          VARCHAR(32)   NOT NULL DEFAULT 'CREATED'
+)
+DUPLICATE KEY(catalog_name, synced_at)
+DISTRIBUTED BY HASH(catalog_name) BUCKETS 4
+PROPERTIES (
+    "replication_num" = "1"
+);
+
+-- ── query_block_log ───────────────────────────────────────────────────────────
+-- Written by CacheGuard whenever a SELECT references external-catalog tables
+-- that are not yet in the Doris segment cache.  Users can query this table to
+-- understand why a query was slow and whether warm-up has been triggered.
+--
+-- Columns:
+--   query_id      — Doris audit_log query_id of the offending SELECT
+--   detected_at   — Timestamp when the guard detected the cold-table hit
+--   user_name     — Database user who issued the SELECT
+--   cold_tables   — Comma-separated list of cold table FQNs (catalog.db.table)
+--   stmt_preview  — First 500 characters of the original SQL statement
+--   message       — Human-readable explanation + retry advice shown to the user
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cache_system.query_block_log (
+    query_id      VARCHAR(64)   NOT NULL,
+    detected_at   DATETIME      NOT NULL,
+    user_name     VARCHAR(128)  NOT NULL DEFAULT '',
+    cold_tables   TEXT          NOT NULL,
+    stmt_preview  TEXT          NOT NULL,
+    message       TEXT          NOT NULL
+)
+DUPLICATE KEY(query_id, detected_at)
+DISTRIBUTED BY HASH(query_id) BUCKETS 4
+PROPERTIES (
+    "replication_num" = "1"
+);
+
 -- Verify
 SHOW TABLES FROM cache_system;

@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-09 (polaris-auth-proxy auto-refresh) |
+| **Last Updated** | 2026-09-11 (v1.6.0 — CatalogSyncer + CacheGuard) |
 | **Related** | RB-05 (Doris & Analytics), RB-11 (Kerberos), RB-13 (RBAC) |
 
 ---
@@ -145,8 +145,8 @@ is only a mount point — the backing device is `rhel-home`, not `rhel-root`.
 |---|---|
 | `manifests/doris/setup/01_drop_catalogs.sql` | Drop all existing Doris external catalogs |
 | `manifests/doris/setup/02_create_catalogs.sql` | Create 5 Iceberg catalogs — points to `polaris-auth-proxy:8283` (no credentials needed) |
-| `manifests/doris/setup/03_create_metadata_tables.sql` | Create `cache_system` database and tracking tables |
-| `manifests/doris/cache_manager/doris_cache_manager.py` | Python daemon — monitoring, warm-up, LRU eviction |
+| `manifests/doris/setup/03_create_metadata_tables.sql` | Create `cache_system` database and all tracking tables |
+| `manifests/doris/cache_manager/doris_cache_manager.py` | Python daemon — monitoring, warm-up, LRU eviction, CatalogSyncer, CacheGuard |
 | `manifests/doris/cache_manager/Dockerfile` | Container image build |
 | `manifests/doris/cache_manager/spark_iceberg_write.py` | PySpark job executed on Spark workers for write pushdown |
 | `manifests/doris/cache_manager/doris-cache-manager-deployment.yaml` | Kubernetes Deployment in `prod` namespace |
@@ -186,11 +186,13 @@ All credentials are read from OpenBao at runtime — nothing is hard-coded.
 
 Created in `cache_system` (Doris internal database):
 
-| Table | Purpose |
-|---|---|
-| `cache_system.table_query_stats` | Per-table SELECT count, timing, warm state |
-| `cache_system.cache_eviction_log` | Audit log of every LRU eviction |
-| `cache_system.table_cache_metrics` | Per-table, per-BE cache I/O metrics written each cycle by `CacheMetricsCollector` (v1.4.0+) |
+| Table | Written by | Purpose |
+|---|---|---|
+| `cache_system.table_query_stats` | `MetaStore` (every cycle) | Per-table SELECT count, timing, warm-up schedule, cache state |
+| `cache_system.cache_eviction_log` | `LRUEvictionChecker` | Append-only audit log of every LRU eviction event |
+| `cache_system.table_cache_metrics` | `CacheMetricsCollector` (async, v1.4.0+) | Per-table, per-BE cache I/O bytes, hit rate, query count |
+| `cache_system.catalog_sync_log` | `CatalogSyncer` (v1.6.0+) | One row per auto-created Doris catalog (warehouse → catalog registration audit) |
+| `cache_system.query_block_log` | `CacheGuard` (v1.6.0+) | One row per SELECT against a cold external-catalog table — user-visible diagnostics |
 
 ### 2.4 Warm-Up Scheduling Logic
 
@@ -264,12 +266,125 @@ doris-write-proxy  (pod, port 9040)
 > as a fallback — it catches any DML that reaches Doris directly (e.g. connections
 > that bypass the proxy and connect to Doris on `:9030` directly).
 
-### 2.6 LRU Eviction Logic
+### 2.6 LRU Eviction Logic (existing)
 
 - After every scan cycle, any table with `last_select_ts` older than **24 hours** that
   is currently in state `WARM`, `WARMING`, or `UNKNOWN` receives a `COLD_DOWN`.
 - The eviction is recorded in `cache_system.cache_eviction_log` with reason
   `no_select_24h`.
+
+### 2.7 Auto-Catalog Sync Logic (v1.6.0 — `CatalogSyncer`)
+
+When a new Iceberg warehouse is added to Polaris, the daemon **automatically creates the
+matching Doris external catalog** — no manual `CREATE CATALOG` DDL or image rebuild required.
+
+```
+Polaris REST catalog
+  GET /api/catalog/v1/warehouses
+      ↓  list: [IcebergCatalog, star_lakehouse, pg_lakehouse, …, new_warehouse]
+CatalogSyncer (runs every daemon cycle)
+      ↓  compare against SHOW CATALOGS in Doris
+      ↓  new_warehouse not yet registered → CREATE CATALOG IF NOT EXISTS
+Apache Doris
+  new_warehouse now queryable as  doris-catalog-name.db.table
+      ↓
+MANAGED_CATALOGS list updated in-memory (no restart needed)
+      ↓
+cache_system.catalog_sync_log  ← one audit row written
+```
+
+**Warehouse → catalog name derivation:**
+
+| Polaris warehouse | Derived Doris catalog name |
+|---|---|
+| `IcebergCatalog` | `icebergcatalog` |
+| `star_lakehouse` | `star_lakehouse` |
+| `My Warehouse-2` | `my_warehouse_2` |
+
+Rule: lower-case → replace spaces/hyphens with `_` → strip non-alphanumeric/underscore characters.
+
+**Credentials injected into auto-created catalog DDL:**
+
+| Property | Source |
+|---|---|
+| `s3.access-key-id` / `s3.secret-access-key` | OpenBao `secret/data/platform/s3` |
+| `uri` | `POLARIS_URI` env var (default: `polaris-auth-proxy:8283`) |
+| `s3.endpoint` / `s3.region` | `S3_ENDPOINT` / `S3_REGION` env vars |
+
+**Idempotency:** `CREATE CATALOG IF NOT EXISTS` is safe to run repeatedly. The audit log row
+(`catalog_sync_log`) is only written when a *new* catalog is actually created. Catalogs
+removed from Polaris are **not** auto-deleted — removal is a deliberate administrative action.
+
+**Inspect auto-created catalogs:**
+
+```sql
+-- See every catalog the syncer has ever created
+SELECT catalog_name, warehouse_name, synced_at, action
+FROM cache_system.catalog_sync_log
+ORDER BY synced_at DESC;
+```
+
+---
+
+### 2.8 Cache Guard Logic (v1.6.0 — `CacheGuard`)
+
+The **CacheGuard** is a background thread that detects SELECT statements hitting
+external-catalog tables whose segment cache is not yet warm, logs a user-visible
+diagnostic, and triggers immediate warm-up so the *next* execution of the same
+query benefits from the cache.
+
+```
+CacheGuard background thread  (polls every CACHE_GUARD_POLL_S = 60 s)
+      │
+      ├─ SELECT audit_log WHERE time >= NOW() - CACHE_GUARD_LOOKBACK_S (120 s)
+      │         AND stmt targets a managed catalog
+      │
+      ├─ For each query_id not yet seen:
+      │     Extract ALL table references (FROM + every JOIN)
+      │     Check cache_state of each table in table_query_stats
+      │
+      ├─ Any table not WARM?
+      │     YES ──────────────────────────────────────────────────────────────────┐
+      │           Write row to cache_system.query_block_log                       │
+      │             cold_tables  = "catalog.db.table, …"                          │
+      │             message      = "Table(s) … are not in the segment cache.      │
+      │                             Automatic warm-up triggered — retry in a few  │
+      │                             minutes."                                      │
+      │           Submit WarmupExecutor.submit() for each cold table × alive BE   │
+      │             (same path as hourly scheduler — on-demand, not hourly)       │
+      └─ All tables WARM → no action                                              │
+                                                                            warm-up
+                                                                            running
+```
+
+**Key design decisions:**
+
+| Decision | Rationale |
+|---|---|
+| **Audit-log based (near-real-time, not synchronous)** | Doris has no before-execution hook accessible from outside the FE. The guard fires within `CACHE_GUARD_POLL_S` seconds of a query being logged — the first execution may be slow (reads from S3), but subsequent executions are fast. |
+| **All JOIN tables checked** | A query joining 3 tables where 2 are warm and 1 is cold will still be flagged and the cold table warmed immediately. |
+| **Shared `WarmupExecutor` slot pool** | Warm-up jobs submitted by the guard count against `MAX_CONCURRENT` — the guard cannot overload the cluster. |
+| **Duplicate suppression** | `query_id` is tracked in a bounded in-memory set (pruned every `CACHE_GUARD_LOOKBACK_S × 10` seconds). No query is processed twice. |
+| **Own `DorisClient` connection** | The guard thread uses a dedicated connection — never shares with the main cycle thread. |
+
+**User workflow — inspect cold-table hits:**
+
+```sql
+-- Recent cold-table SELECT events (most recent first)
+SELECT detected_at, user_name, cold_tables, message
+FROM cache_system.query_block_log
+ORDER BY detected_at DESC
+LIMIT 20;
+```
+
+```sql
+-- How many cold-table hits per table in the last 24 hours?
+SELECT cold_tables, COUNT(*) AS hit_count, MAX(detected_at) AS last_hit
+FROM cache_system.query_block_log
+WHERE detected_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+GROUP BY cold_tables
+ORDER BY hit_count DESC;
+```
 
 ---
 
@@ -430,7 +545,8 @@ Verify:
 
 ```sql
 SHOW TABLES FROM cache_system;
--- Expected: cache_eviction_log, table_cache_metrics, table_query_stats
+-- Expected (v1.6.0+): cache_eviction_log, catalog_sync_log, query_block_log,
+--                     table_cache_metrics, table_query_stats
 ```
 
 ### 3.7 Build the Cache Manager Container Image
@@ -895,18 +1011,35 @@ kubectl rollout status deployment/doris-cache-manager -n prod
 The following environment variables control daemon behaviour. Edit
 `doris-cache-manager-deployment.yaml` and re-apply to change them.
 
+**Core daemon:**
+
 | Variable | Default | Description |
 |---|---|---|
 | `SCAN_INTERVAL_S` | `3600` | Seconds between audit log scans (1 hour) |
-| `LRU_EVICT_HOURS` | `24` | Inactivity hours before COLD_DOWN |
-| `MAX_CONCURRENT` | `32` | Max simultaneous WARM_UP jobs |
-| `WARMUP_STALE_MIN` | `5` | Minutes before a running warm-up is considered stale |
+| `LRU_EVICT_HOURS` | `24` | Inactivity hours before LRU eviction is recorded |
+| `MAX_CONCURRENT` | `32` | Max simultaneous WARM_UP jobs across all tables and BEs |
+| `WARMUP_STALE_MIN` | `5` | Minutes before a running warm-up is considered stale and skipped |
 | `DORIS_HOST` | `doris-fe.prod.svc.cluster.local` | Doris FE host |
 | `DORIS_PORT` | `9030` | Doris FE MySQL port (direct, not via krb-guard) |
 | `BAO_ROLE` | `platform-secrets-read` | OpenBao Kubernetes auth role |
 | `ADDR` | `http://openbao.prod.svc.cluster.local:8200` | OpenBao address |
 | `SPARK_REST_URL` | `http://spark-master-svc.prod.svc.cluster.local:6066` | Spark REST submission endpoint for write pushdown |
 | `SPARK_MASTER_URL` | `spark://spark-master-internal.prod.svc.cluster.local:17077` | Spark master URL passed to submitted write jobs |
+
+**CatalogSyncer (v1.6.0+):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `POLARIS_URI` | `http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog` | Polaris REST API base URL — used to enumerate warehouses and issue OAuth2 token requests |
+| `S3_ENDPOINT` | `https://s3.us-east-2.amazonaws.com` | S3 endpoint written into auto-created catalog DDL |
+| `S3_REGION` | `us-east-2` | S3 region written into auto-created catalog DDL |
+
+**CacheGuard (v1.6.0+):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `CACHE_GUARD_POLL_S` | `60` | How often (seconds) the guard polls `audit_log` for cold-table SELECTs |
+| `CACHE_GUARD_LOOKBACK_S` | `120` | How far back (seconds) the guard scans `audit_log` each tick |
 
 ---
 
@@ -1534,6 +1667,11 @@ kubectl exec -n prod openbao-0 -- \
 
 ## 8. Catalog Reference
 
+### 8.1 Statically-configured catalogs (seed set)
+
+These 5 catalogs are pre-configured in `02_create_catalogs.sql` and listed in the
+`MANAGED_CATALOGS` deployment env var.
+
 | Doris Catalog | Polaris Warehouse | Spark Catalog Name | Source |
 |---|---|---|---|
 | `polaris` | `IcebergCatalog` | `polaris` | Primary Iceberg lakehouse |
@@ -1542,7 +1680,29 @@ kubectl exec -n prod openbao-0 -- \
 | `oracle` | `ora_lakehouse` | `oracle` | Oracle Iceberg tables |
 | `mongodb` | `mgo_lakehouse` | `mongodb` | MongoDB Iceberg tables |
 
-All catalogs share the same Polaris REST endpoint:
-`http://polaris-rest.prod.svc.cluster.local:8181/api/catalog`
+All catalogs share the same Polaris REST endpoint via `polaris-auth-proxy`:
+`http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog`
 
-OAuth2 credentials: `secret/data/platform/polaris` → `spark_svc_id` + `spark_svc_secret`
+OAuth2 credentials (for Spark jobs): `secret/data/platform/polaris` → `spark_svc_id` + `spark_svc_secret`
+
+### 8.2 Auto-synced catalogs (CatalogSyncer — v1.6.0+)
+
+Any Polaris warehouse **not** in the table above is automatically registered as a Doris
+external catalog by `CatalogSyncer` each daemon cycle.  The derived catalog name follows
+the naming rules in §2.7.
+
+To see the current live list including auto-synced catalogs:
+
+```bash
+# Full list of catalogs currently registered in Doris
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW CATALOGS;"
+```
+
+```sql
+-- Sync audit log — when was each catalog auto-created?
+SELECT catalog_name, warehouse_name, synced_at
+FROM cache_system.catalog_sync_log
+ORDER BY synced_at;
+```

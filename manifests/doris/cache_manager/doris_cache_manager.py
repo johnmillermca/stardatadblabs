@@ -64,6 +64,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -149,6 +150,24 @@ _SPARK_WRITE_SCRIPT = os.environ.get(
 )
 # How frequently the write-interceptor background thread polls audit_log (seconds).
 WRITE_POLL_INTERVAL_S = int(os.environ.get("WRITE_POLL_INTERVAL_S", "10"))
+
+# ── CatalogSyncer settings ────────────────────────────────────────────────────
+# Polaris REST API base URL — used to enumerate warehouses and auto-create catalogs.
+POLARIS_URI = os.environ.get(
+    "POLARIS_URI",
+    "http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog",
+)
+# S3 endpoint / region written into auto-created Doris catalog DDL.
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "https://s3.us-east-2.amazonaws.com")
+S3_REGION   = os.environ.get("S3_REGION",   "us-east-2")
+
+# ── CacheGuard settings ───────────────────────────────────────────────────────
+# How far back (seconds) the guard looks in audit_log for recent SELECT hits.
+# Default 120 s — matches the liveness-probe period so every new query is seen
+# within at most two guard ticks.
+CACHE_GUARD_LOOKBACK_S = int(os.environ.get("CACHE_GUARD_LOOKBACK_S", "120"))
+# CacheGuard poll interval — how often to scan audit_log for cold-table SELECTs.
+CACHE_GUARD_POLL_S     = int(os.environ.get("CACHE_GUARD_POLL_S",     "60"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataclasses
@@ -1523,6 +1542,489 @@ class CacheMetricsCollector:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Catalog syncer  (feature a)
+# ─────────────────────────────────────────────────────────────────────────────
+class CatalogSyncer:
+    """
+    Automatically registers new Iceberg warehouses as Doris external catalogs.
+
+    How it works
+    ------------
+    Each daemon cycle CatalogSyncer calls the Polaris REST API to list all
+    warehouses known to Polaris.  It then compares that list against the
+    catalogs already registered in Doris (``SHOW CATALOGS``).  For every
+    warehouse that does NOT yet have a matching Doris catalog the syncer:
+
+    1. Derives a safe catalog name from the warehouse name
+       (lower-case, alphanumeric + underscore; spaces → underscores).
+    2. Issues ``CREATE CATALOG IF NOT EXISTS`` with the same Iceberg/REST
+       properties used in ``02_create_catalogs.sql``.
+    3. Adds the new catalog to the in-memory ``MANAGED_CATALOGS`` list so the
+       cache daemon immediately starts tracking SELECTs against it.
+    4. Logs one row to ``cache_system.catalog_sync_log`` for auditability.
+
+    Credentials
+    -----------
+    * S3 credentials are read from OpenBao ``secret/data/platform/s3`` (already
+      held by the daemon's ``BaoClient``) and injected into the DDL.
+    * The Polaris OAuth2 token used to list warehouses is fetched from the same
+      ``secret/data/platform/polaris`` secret.
+
+    The Polaris ``/api/catalog/v1/warehouses`` endpoint returns a JSON object:
+      { "warehouses": [ { "name": "IcebergCatalog", ... }, ... ] }
+
+    Idempotency
+    -----------
+    ``CREATE CATALOG IF NOT EXISTS`` is idempotent — running the syncer when
+    the catalog already exists is a no-op.  The sync log row is only written
+    when a *new* catalog is actually created.
+
+    The syncer does NOT delete catalogs that are removed from Polaris —
+    removal is a deliberate administrative action that should not be automated.
+    """
+
+    # Polaris endpoint to list warehouses.
+    _WAREHOUSES_PATH = "/v1/warehouses"
+
+    def __init__(self, bao: BaoClient) -> None:
+        self._bao = bao
+        # Cache the Polaris OAuth token; refreshed on 401.
+        self._polaris_token: str | None = None
+
+    # ── Public ─────────────────────────────────────────────────────────────────
+
+    def sync(self, doris: DorisClient) -> None:
+        """
+        Compare Polaris warehouses to registered Doris catalogs and create any
+        that are missing.  Called once per daemon cycle.
+        """
+        try:
+            self._do_sync(doris)
+        except Exception as exc:
+            logger.error("CatalogSyncer: sync failed: %s", exc, exc_info=True)
+
+    # ── Internal ───────────────────────────────────────────────────────────────
+
+    def _do_sync(self, doris: DorisClient) -> None:
+        warehouses = self._list_polaris_warehouses()
+        if not warehouses:
+            logger.debug("CatalogSyncer: no warehouses returned from Polaris — nothing to sync.")
+            return
+
+        existing = self._list_doris_catalogs(doris)
+        logger.debug(
+            "CatalogSyncer: Polaris warehouses=%s  Doris catalogs=%s",
+            warehouses, existing,
+        )
+
+        try:
+            s3 = self._bao.read_secret(_PATH_S3)
+        except Exception as exc:
+            logger.error("CatalogSyncer: cannot read S3 credentials from OpenBao: %s", exc)
+            return
+
+        created = 0
+        for warehouse in warehouses:
+            catalog_name = self._warehouse_to_catalog_name(warehouse)
+            if catalog_name in existing:
+                logger.debug("CatalogSyncer: catalog '%s' already registered — skip.", catalog_name)
+                continue
+
+            logger.info(
+                "CatalogSyncer: new warehouse '%s' detected → creating Doris catalog '%s'.",
+                warehouse, catalog_name,
+            )
+            if self._create_doris_catalog(doris, catalog_name, warehouse, s3):
+                # Update the global in-memory catalog list so this catalog is
+                # tracked immediately — no daemon restart needed.
+                if catalog_name not in MANAGED_CATALOGS:
+                    MANAGED_CATALOGS.append(catalog_name)
+                    CATALOG_WAREHOUSE[catalog_name] = warehouse
+                    logger.info(
+                        "CatalogSyncer: '%s' added to MANAGED_CATALOGS (now %d catalogs).",
+                        catalog_name, len(MANAGED_CATALOGS),
+                    )
+                self._log_sync_event(doris, catalog_name, warehouse)
+                created += 1
+
+        if created:
+            logger.info("CatalogSyncer: %d new catalog(s) registered in Doris.", created)
+        else:
+            logger.debug("CatalogSyncer: all Polaris warehouses already registered.")
+
+    def _list_polaris_warehouses(self) -> list[str]:
+        """
+        Call the Polaris REST API to list all warehouses.
+        Returns warehouse names.  Fetches a fresh OAuth2 token if needed.
+        """
+        token = self._get_polaris_token()
+        url   = f"{POLARIS_URI}{self._WAREHOUSES_PATH}"
+        req   = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type":  "application/json",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                # Token expired — refresh and retry once.
+                logger.warning("CatalogSyncer: Polaris 401 — refreshing OAuth token.")
+                self._polaris_token = None
+                token = self._get_polaris_token()
+                req.add_unredirected_header("Authorization", f"Bearer {token}")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+            else:
+                raise
+
+        # Polaris returns { "warehouses": [ { "name": "...", ... }, ... ] }
+        return [w["name"] for w in data.get("warehouses", []) if w.get("name")]
+
+    def _get_polaris_token(self) -> str:
+        """Fetch (or return cached) an OAuth2 bearer token from Polaris."""
+        if self._polaris_token:
+            return self._polaris_token
+        pol = self._bao.read_secret(_PATH_POLARIS)
+        token_url = f"{POLARIS_URI}/v1/oauth/tokens"
+        payload = (
+            f"grant_type=client_credentials"
+            f"&client_id={pol['spark_svc_id']}"
+            f"&client_secret={pol['spark_svc_secret']}"
+            f"&scope=PRINCIPAL_ROLE:ALL"
+        ).encode()
+        req = urllib.request.Request(
+            token_url,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self._polaris_token = json.loads(resp.read())["access_token"]
+        return self._polaris_token
+
+    @staticmethod
+    def _warehouse_to_catalog_name(warehouse: str) -> str:
+        """
+        Derive a valid Doris catalog name from a Polaris warehouse name.
+        Rules: lower-case; replace spaces/hyphens with underscores;
+        strip any character that is not alphanumeric or underscore.
+        Examples:
+          "IcebergCatalog"  → "icebergcatalog"
+          "star_lakehouse"  → "star_lakehouse"
+          "My Warehouse-2"  → "my_warehouse_2"
+        """
+        name = warehouse.lower()
+        name = re.sub(r"[\s\-]+", "_", name)
+        name = re.sub(r"[^\w]", "", name)
+        return name
+
+    def _create_doris_catalog(
+        self,
+        doris: DorisClient,
+        catalog_name: str,
+        warehouse: str,
+        s3: dict[str, str],
+    ) -> bool:
+        """Issue CREATE CATALOG IF NOT EXISTS … in Doris.  Returns True on success."""
+        ddl = f"""
+            CREATE CATALOG IF NOT EXISTS `{catalog_name}` PROPERTIES (
+                "type"                 = "iceberg",
+                "iceberg.catalog.type" = "rest",
+                "uri"                  = "{POLARIS_URI}",
+                "warehouse"            = "{warehouse}",
+                "s3.access-key-id"     = "{s3['access_key']}",
+                "s3.secret-access-key" = "{s3['secret_key']}",
+                "s3.endpoint"          = "{S3_ENDPOINT}",
+                "s3.region"            = "{S3_REGION}",
+                "s3.path-style-access" = "false"
+            )
+        """
+        try:
+            doris.execute(ddl)
+            logger.info("CatalogSyncer: CREATE CATALOG '%s' succeeded.", catalog_name)
+            return True
+        except Exception as exc:
+            logger.error(
+                "CatalogSyncer: CREATE CATALOG '%s' failed: %s", catalog_name, exc
+            )
+            return False
+
+    @staticmethod
+    def _list_doris_catalogs(doris: DorisClient) -> set[str]:
+        """Return the set of catalog names currently registered in Doris."""
+        rows = doris.execute("SHOW CATALOGS")
+        # SHOW CATALOGS returns rows where column index 1 is CatalogName.
+        return {str(row[1]).lower() for row in rows if len(row) > 1}
+
+    @staticmethod
+    def _log_sync_event(doris: DorisClient, catalog_name: str, warehouse: str) -> None:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            doris.execute(
+                "INSERT INTO cache_system.catalog_sync_log "
+                "(catalog_name, warehouse_name, synced_at, action) "
+                "VALUES (%s, %s, %s, %s)",
+                (catalog_name, warehouse, now, "CREATED"),
+            )
+        except Exception as exc:
+            logger.warning("CatalogSyncer: could not write to catalog_sync_log: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cache guard  (feature b)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# All table references extracted from a SELECT (handles JOIN with multiple tables).
+_FROM_JOIN_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+([`\w.\-]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_all_keys_from_stmt(stmt: str) -> list["TableKey"]:
+    """
+    Extract ALL fully-qualified external-catalog table references from a SELECT.
+    Returns every TableKey whose catalog is in MANAGED_CATALOGS.
+    Handles multi-table queries: SELECT … FROM a JOIN b ON … JOIN c ON …
+    """
+    keys: list[TableKey] = []
+    seen: set[tuple[str, str, str]] = set()
+    for m in _FROM_JOIN_RE.finditer(stmt or ""):
+        ref   = m.group(1).strip("`")
+        parts = [p.strip("`") for p in ref.split(".")]
+        if len(parts) == 3:
+            catalog, db, table = parts
+            catalog = catalog.lower()
+            if catalog in MANAGED_CATALOGS:
+                k = (catalog, db, table)
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(TableKey(catalog=catalog, db=db, table=table))
+    return keys
+
+
+class CacheGuard:
+    """
+    Guards SELECT queries against external catalog tables that are not yet in
+    the Doris segment cache (cache_state != 'WARM').
+
+    What it does
+    ------------
+    A background thread polls the Doris audit log every CACHE_GUARD_POLL_S
+    seconds for recent SELECT statements that target managed external catalogs.
+
+    For each such SELECT it checks the cache_state of every table involved
+    (including all tables in a JOIN).  If any table is not WARM:
+
+    1. The original query's query_id is flagged and a user-visible error row is
+       written to ``cache_system.query_block_log`` — clients can query this
+       table to find out why their query was slow or rejected.
+
+    2. A friendly diagnostic message is appended to the log:
+           "Table(s) polaris.tpcds_sf10tcl.inventory are not in the segment
+            cache. Warm-up has been triggered automatically — please retry
+            your query in a few minutes."
+
+    3. Warm-up is triggered immediately for every cold table by calling
+       ``WarmupExecutor.submit()`` — the same mechanism used by the hourly
+       scheduler, but fired on-demand so the user does not have to wait for
+       the next hourly cycle.
+
+    Why the guard cannot block queries at the SQL level
+    ---------------------------------------------------
+    Apache Doris does not support user-defined query interceptors or
+    before-execution hooks accessible from outside the FE.  The only hook
+    point the daemon has is the *after-the-fact* audit log.
+
+    The guard therefore works in near-real-time rather than synchronously:
+    queries do execute (usually slowly, reading from S3) and the guard writes
+    the diagnostic within CACHE_GUARD_POLL_S seconds of the query being logged.
+    The immediate warm-up trigger ensures the *next* execution of the same
+    query will be fast.
+
+    For the "error-out" user experience at the SQL level, clients should connect
+    via the write-proxy (port 30091) which can check cache state before forwarding
+    a SELECT — that path is a future enhancement; the guard handles the audit side.
+
+    Duplicate suppression
+    ---------------------
+    Already-processed query_ids are kept in a bounded in-memory set (pruned
+    every CACHE_GUARD_POLL_S seconds to the last lookback window) so no query
+    is flagged twice.
+    """
+
+    def __init__(
+        self,
+        meta: MetaStore,
+        executor: WarmupExecutor,
+        be_nodes_ref: "list[BeNode]",
+        doris_creds: dict[str, str],
+    ) -> None:
+        self._meta             = meta
+        self._executor         = executor
+        self._be_nodes         = be_nodes_ref   # reference — main loop updates this list in-place
+        self._creds            = doris_creds
+        self._seen: set[str]   = set()
+        self._seen_ts: dict[str, datetime] = {}
+        self._stop             = threading.Event()
+        self._current_stats: dict[TableKey, dict] = {}
+        self._stats_lock       = threading.Lock()
+
+    # ── Public ─────────────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Launch the guard background thread.  Returns immediately."""
+        t = threading.Thread(
+            target=self._loop,
+            name="cache-guard",
+            daemon=True,
+        )
+        t.start()
+        logger.info(
+            "CacheGuard started (poll_interval=%ds lookback=%ds).",
+            CACHE_GUARD_POLL_S, CACHE_GUARD_LOOKBACK_S,
+        )
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def update_be_nodes(self, be_nodes: "list[BeNode]") -> None:
+        """Called by main loop after BE discovery refreshes the node list."""
+        self._be_nodes = be_nodes
+
+    def update_stats(self, stats: "dict[TableKey, dict]") -> None:
+        """Called by main loop after each cycle to push fresh cache_state data."""
+        with self._stats_lock:
+            self._current_stats = dict(stats)
+
+    # ── Internal ───────────────────────────────────────────────────────────────
+
+    def _loop(self) -> None:
+        conn = DorisClient(
+            host=DORIS_HOST,
+            port=DORIS_PORT,
+            user=DORIS_USER,
+            password=self._creds["admin_password"],
+        )
+        while not self._stop.is_set():
+            try:
+                self._tick(conn)
+            except Exception as exc:
+                logger.error("CacheGuard tick error: %s", exc, exc_info=True)
+            self._stop.wait(timeout=CACHE_GUARD_POLL_S)
+
+    def _tick(self, conn: DorisClient) -> None:
+        self._prune_seen()
+        recent_selects = self._fetch_recent_selects(conn)
+        if not recent_selects:
+            return
+
+        with self._stats_lock:
+            stats_snap = dict(self._current_stats)
+
+        for query_id, stmt, user in recent_selects:
+            if query_id in self._seen:
+                continue
+            self._seen.add(query_id)
+            self._seen_ts[query_id] = datetime.now(timezone.utc)
+
+            keys = _extract_all_keys_from_stmt(stmt)
+            if not keys:
+                continue
+
+            cold_keys   = [k for k in keys if stats_snap.get(k, {}).get("cache_state") not in ("WARM",)]
+            # Tables not yet in stats at all also count as cold / uncached.
+            unseen_keys = [k for k in keys if k not in stats_snap]
+            all_cold    = list({str(k): k for k in cold_keys + unseen_keys}.values())
+
+            if not all_cold:
+                continue  # All tables are WARM — no action needed.
+
+            cold_names = ", ".join(str(k) for k in all_cold)
+            msg = (
+                f"The following table(s) referenced in your query are not in the "
+                f"Doris segment cache: {cold_names}. "
+                f"Automatic warm-up has been triggered — please retry your query "
+                f"in a few minutes once warm-up completes."
+            )
+            logger.info(
+                "CacheGuard: query_id=%s user=%s — cold tables detected: %s",
+                query_id, user, cold_names,
+            )
+
+            # Write the diagnostic to query_block_log so users can inspect it.
+            self._write_block_log(conn, query_id, stmt, user, cold_names, msg)
+
+            # Trigger immediate warm-up for every cold table on every alive BE.
+            be_nodes = self._be_nodes
+            for key in all_cold:
+                for be in be_nodes:
+                    if not self._executor.is_running(key, be):
+                        self._executor.submit(key, be, self._creds, conn)
+                        logger.info(
+                            "CacheGuard: triggered warm-up for %s on BE %s.", key, be
+                        )
+
+    def _fetch_recent_selects(self, conn: DorisClient) -> list[tuple[str, str, str]]:
+        """Return (query_id, stmt, user) for SELECT statements in the lookback window."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=CACHE_GUARD_LOOKBACK_S)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        stmt_filters = " OR ".join(
+            f"LOWER(stmt) LIKE '%{c}.%'" for c in MANAGED_CATALOGS
+        )
+        sql = f"""
+            SELECT query_id, stmt, user
+            FROM __internal_schema.audit_log
+            WHERE
+                time >= '{cutoff}'
+                AND is_query = 1
+                AND (LOWER(TRIM(stmt)) LIKE 'select%'
+                     OR LOWER(TRIM(stmt)) LIKE 'with%')
+                AND ({stmt_filters})
+        """
+        try:
+            rows = conn.execute(sql)
+        except Exception as exc:
+            logger.error("CacheGuard: audit log fetch failed: %s", exc)
+            return []
+        return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+    @staticmethod
+    def _write_block_log(
+        conn: DorisClient,
+        query_id: str,
+        stmt: str,
+        user: str,
+        cold_tables: str,
+        message: str,
+    ) -> None:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            conn.execute(
+                "INSERT INTO cache_system.query_block_log "
+                "(query_id, detected_at, user_name, cold_tables, stmt_preview, message) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (query_id, now, user, cold_tables, stmt[:500], message),
+            )
+        except Exception as exc:
+            logger.warning("CacheGuard: could not write to query_block_log: %s", exc)
+
+    def _prune_seen(self) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=CACHE_GUARD_LOOKBACK_S * 10)
+        stale  = [qid for qid, ts in self._seen_ts.items() if ts < cutoff]
+        for qid in stale:
+            self._seen.discard(qid)
+            del self._seen_ts[qid]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main daemon loop
 # ─────────────────────────────────────────────────────────────────────────────
 class CacheManagerDaemon:
@@ -1574,6 +2076,25 @@ class CacheManagerDaemon:
         self._write_interceptor = WriteInterceptor(self._metrics)
         self._be_discovery      = BeDiscovery()
 
+        # ── Feature (a): auto-catalog syncer ──────────────────────────────────
+        # Discovers Polaris warehouses each cycle and creates missing Doris
+        # catalogs automatically — no manual CREATE CATALOG or image rebuild needed.
+        self._catalog_syncer    = CatalogSyncer(self._bao)
+
+        # ── Feature (b): cache guard ──────────────────────────────────────────
+        # Background thread that watches audit_log for SELECTs against cold tables,
+        # writes a user-visible diagnostic to query_block_log, and triggers
+        # immediate warm-up so the next execution of the same query is fast.
+        # Initialised with an empty BE list; updated at the start of each cycle.
+        self._be_nodes: list[BeNode] = []
+        self._cache_guard = CacheGuard(
+            meta=self._meta,
+            executor=self._executor,
+            be_nodes_ref=self._be_nodes,
+            doris_creds=self._doris_creds,
+        )
+        self._cache_guard.start()
+
     def run(self) -> None:
         logger.info(
             "Cache Manager daemon running. "
@@ -1595,6 +2116,9 @@ class CacheManagerDaemon:
         # 1. Discover alive BE nodes — refreshed every cycle so new BEs are
         #    picked up automatically without restarting the daemon.
         be_nodes = self._be_discovery.discover(self._meta_doris)
+        # Push the fresh node list into the cache guard so it targets current BEs.
+        self._cache_guard.update_be_nodes(be_nodes)
+        self._be_nodes[:] = be_nodes   # update the shared reference in-place
 
         # 2. Scrape audit log for SELECT counts
         fresh_counts = self._scraper.scrape(self._meta_doris)
@@ -1663,6 +2187,15 @@ class CacheManagerDaemon:
         #    Fires in a separate daemon thread; returns immediately so it
         #    cannot block or delay any warm-up or write-pushdown work.
         self._metrics.collect(be_nodes, updated_stats, self._doris_creds, now)
+
+        # 9. Push fresh stats to the cache guard so its next tick uses current
+        #    cache_state values without needing a database round-trip.
+        self._cache_guard.update_stats(updated_stats)
+
+        # 10. Auto-catalog sync — register any new Polaris warehouses as Doris
+        #     external catalogs.  Idempotent; runs in the main cycle thread so
+        #     failures are logged but do not abort the rest of the cycle.
+        self._catalog_syncer.sync(self._meta_doris)
 
         # Touch heartbeat file for liveness probe
         try:

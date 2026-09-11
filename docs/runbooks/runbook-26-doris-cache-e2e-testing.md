@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-11 (v1.5.0 — write pushdown: random INSERT VALUES, performance tuning section) |
+| **Last Updated** | 2026-09-11 (v1.6.0 — Phase 8: CatalogSyncer + CacheGuard E2E tests) |
 | **Related** | RB-25 (Cache Manager Setup & Operations) · RB-05 (Doris & Analytics) |
 
 ---
@@ -17,7 +17,7 @@ This runbook is a single, ordered end-to-end test script for the Doris Dynamic S
 Manager. Run each section from top to bottom on a live cluster. Every test includes the exact
 command, expected output, and a ✅ / ❌ pass/fail criterion.
 
-The test covers seven phases in order:
+The test covers eight phases in order:
 
 | Phase | Tests | What it validates |
 |---|---|---|
@@ -28,6 +28,7 @@ The test covers seven phases in order:
 | **P-5** | T-22 – T-25 | LRU eviction — COLD_DOWN and eviction log (+ T-22a env-var check) |
 | **P-6** | T-26 – T-33 | Write pushdown — DML interception and Spark execution |
 | **P-7** | T-34 – T-38 | Cache metrics — `table_cache_metrics` I/O tracking and hit-rate validation |
+| **P-8** | T-39 – T-46 | Auto-catalog sync + Cache Guard — CatalogSyncer and CacheGuard E2E validation |
 
 ---
 
@@ -76,6 +77,14 @@ The test covers seven phases in order:
 | T-36 | P-7 | Metrics | Second run of same query shows 100% `cache_hit_pct` |
 | T-37 | P-7 | Metrics | `warmup_count` increments after daemon warms a table |
 | T-38 | P-7 | Metrics | Metrics update does not block or delay concurrent SELECT workload |
+| T-39 | P-8 | AutoCatalog | `catalog_sync_log` and `query_block_log` tables exist |
+| T-40 | P-8 | AutoCatalog | CatalogSyncer startup log confirms Polaris warehouse enumeration |
+| T-41 | P-8 | AutoCatalog | All 5 known warehouses already registered — syncer emits "already registered" for each |
+| T-42 | P-8 | AutoCatalog | Simulate new warehouse → verify `CREATE CATALOG` is issued and `catalog_sync_log` row written |
+| T-43 | P-8 | AutoCatalog | Auto-created catalog is immediately queryable via Doris |
+| T-44 | P-8 | CacheGuard | CacheGuard thread is running (log confirms startup) |
+| T-45 | P-8 | CacheGuard | SELECT against a cold table creates a row in `query_block_log` within 60 s |
+| T-46 | P-8 | CacheGuard | JOIN query where one table is cold flags all cold tables and triggers warm-up for each |
 
 ---
 
@@ -258,14 +267,18 @@ definition (see T-11a).
 doris-mysql -e "SHOW TABLES FROM cache_system;"
 ```
 
-**Expected:**
+**Expected (v1.6.0+):**
 ```
 cache_eviction_log
+catalog_sync_log
+query_block_log
+table_cache_metrics
 table_query_stats
 ```
 
-✅ Pass: both tables listed.  
+✅ Pass: all 5 tables listed.
 ❌ Fail: `Unknown database 'cache_system'` — apply `manifests/doris/setup/03_create_metadata_tables.sql` (RB-25 §3.6).
+❌ Fail: `catalog_sync_log` or `query_block_log` missing — the SQL script is from a pre-v1.6.0 run; re-apply the latest version of `03_create_metadata_tables.sql`.
 
 ---
 
@@ -1898,6 +1911,388 @@ kubectl logs -n prod -l app=doris-cache-manager --tail=30 \
 > threads or the main cycle thread.  The only shared state is two `threading.Lock()`-protected
 > integer counters (`_warmup_counts`, `_spark_counts`) which increment in O(1) and never block
 > a warm-up thread for more than a few microseconds.
+
+---
+
+## Phase 8 — Auto-Catalog Sync + Cache Guard
+
+> **Goal:** Validate that `CatalogSyncer` automatically registers new Polaris warehouses in Doris
+> and that `CacheGuard` detects SELECT statements against cold tables, writes user-visible
+> diagnostics to `query_block_log`, and triggers immediate warm-up within 60 seconds.
+>
+> **Prerequisites:** Phase 1 (T-01 – T-07) must pass. Image must be `1.6.0+`.
+> Run these tests in order — T-42 requires a temporary warehouse created in T-42 and cleaned up after T-43.
+
+---
+
+### T-39 — `catalog_sync_log` and `query_block_log` tables exist
+
+Verify both v1.6.0 metadata tables were created by `03_create_metadata_tables.sql`.
+
+```bash
+doris-mysql -e "SHOW TABLES FROM cache_system;" | grep -E "catalog_sync_log|query_block_log"
+```
+
+**Expected:**
+```
+catalog_sync_log
+query_block_log
+```
+
+✅ Pass: both table names appear.
+❌ Fail: either table missing → re-apply the metadata SQL:
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  < manifests/doris/setup/03_create_metadata_tables.sql
+```
+
+---
+
+### T-40 — CatalogSyncer startup log confirms Polaris warehouse enumeration
+
+Verify the daemon logs a `CatalogSyncer` sync entry on each cycle.
+
+```bash
+kubectl logs -n prod deployment/doris-cache-manager --tail=200 \
+  | grep "CatalogSyncer" | head -20
+```
+
+**Expected (first cycle after deployment):**
+```
+CatalogSyncer: Polaris warehouses=['IcebergCatalog','star_lakehouse','pg_lakehouse','ora_lakehouse','mgo_lakehouse']  Doris catalogs={...}
+CatalogSyncer: all Polaris warehouses already registered.
+```
+
+**Expected (any subsequent cycle):**
+```
+CatalogSyncer: all Polaris warehouses already registered.
+```
+
+✅ Pass: at least one `CatalogSyncer:` log line present and no `CatalogSyncer: sync failed` error.
+❌ Fail: `CatalogSyncer: sync failed` or no CatalogSyncer lines → check `POLARIS_URI` env var and Polaris auth-proxy health:
+```bash
+kubectl get pod -n prod -l app=polaris-auth-proxy
+kubectl logs -n prod deployment/polaris-auth-proxy --tail=20
+```
+
+---
+
+### T-41 — All 5 known warehouses already registered — syncer skips them
+
+Confirm that the syncer correctly identifies the 5 seed warehouses as already present
+and does **not** attempt to re-create them.
+
+```bash
+kubectl logs -n prod deployment/doris-cache-manager --tail=500 \
+  | grep "CatalogSyncer.*already registered" | sort | uniq -c
+```
+
+**Expected:** At least 5 unique "already registered" lines (one per known warehouse),
+with no `CREATE CATALOG` log lines for the 5 known names.
+
+```bash
+# Confirm no spurious CREATE CATALOG was issued for existing catalogs
+kubectl logs -n prod deployment/doris-cache-manager --tail=500 \
+  | grep "CREATE CATALOG" | grep -E "polaris|databricks|postgres|oracle|mongodb"
+# Expected: no output
+```
+
+✅ Pass: 5+ "already registered" lines, zero CREATE CATALOG lines for known names.
+❌ Fail: `CREATE CATALOG 'polaris'` appears → SHOW CATALOGS returned an unexpected result; check `SHOW CATALOGS` manually.
+
+---
+
+### T-42 — Simulate new warehouse → verify `CREATE CATALOG` and `catalog_sync_log` row
+
+> ⚠️ **This test creates a real Polaris warehouse and a real Doris catalog.**
+> Clean up after T-43 using the teardown commands at the bottom of this section.
+
+**Step 1 — Create a test warehouse in Polaris:**
+
+```bash
+BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+
+POLARIS_ID=$(curl -s -H "X-Vault-Token: ${BAO_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/platform/polaris \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['spark_svc_id'])")
+
+POLARIS_SECRET=$(curl -s -H "X-Vault-Token: ${BAO_TOKEN}" \
+  http://192.168.1.50:30820/v1/secret/data/platform/polaris \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['spark_svc_secret'])")
+
+POLARIS_IP=$(kubectl get svc polaris-rest -n prod -o jsonpath='{.spec.clusterIP}')
+
+TOKEN=$(curl -s -X POST "http://${POLARIS_IP}:8181/api/catalog/v1/oauth/tokens" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=${POLARIS_ID}&client_secret=${POLARIS_SECRET}&scope=PRINCIPAL_ROLE:ALL" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+# Create the test warehouse (storage-profile uses the existing S3 bucket — no data written)
+curl -s -X POST "http://${POLARIS_IP}:8181/api/management/v1/catalogs" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "catalog": {
+      "name": "test_autosync_warehouse",
+      "type": "INTERNAL",
+      "properties": {},
+      "storageConfigInfo": {
+        "storageType": "S3",
+        "allowedLocations": ["s3://xdatatoiceberg1/test-autosync/"],
+        "roleArn": ""
+      }
+    }
+  }' | python3 -m json.tool
+```
+
+**Expected:** JSON response with `"name": "test_autosync_warehouse"`.
+
+**Step 2 — Wait for the next daemon cycle (up to `SCAN_INTERVAL_S` = 300 s) and check logs:**
+
+```bash
+# Watch for the CatalogSyncer to pick up the new warehouse
+kubectl logs -n prod deployment/doris-cache-manager -f \
+  | grep -E "CatalogSyncer|test_autosync"
+```
+
+**Expected log sequence:**
+```
+CatalogSyncer: new warehouse 'test_autosync_warehouse' detected → creating Doris catalog 'test_autosync_warehouse'.
+CatalogSyncer: CREATE CATALOG 'test_autosync_warehouse' succeeded.
+CatalogSyncer: 'test_autosync_warehouse' added to MANAGED_CATALOGS (now 6 catalogs).
+CatalogSyncer: 1 new catalog(s) registered in Doris.
+```
+
+**Step 3 — Verify the Doris catalog was created:**
+
+```bash
+doris-mysql -e "SHOW CATALOGS;" | grep test_autosync_warehouse
+# Expected: test_autosync_warehouse
+```
+
+**Step 4 — Verify the audit row in `catalog_sync_log`:**
+
+```bash
+doris-mysql -e "
+SELECT catalog_name, warehouse_name, synced_at, action
+FROM cache_system.catalog_sync_log
+WHERE catalog_name = 'test_autosync_warehouse';"
+```
+
+**Expected:**
+```
++---------------------------+-------------------------+---------------------+---------+
+| catalog_name              | warehouse_name          | synced_at           | action  |
++---------------------------+-------------------------+---------------------+---------+
+| test_autosync_warehouse   | test_autosync_warehouse | 2026-09-11 HH:MM:SS | CREATED |
++---------------------------+-------------------------+---------------------+---------+
+```
+
+✅ Pass: Doris catalog present, `catalog_sync_log` row exists with action=`CREATED`.
+❌ Fail: No log line after 2 cycles → check `POLARIS_URI` and confirm `test_autosync_warehouse` is visible from the proxy:
+```bash
+kubectl exec -n prod deployment/doris-cache-manager -- \
+  python3 -c "
+import urllib.request, json, os
+r = urllib.request.urlopen('${POLARIS_URI}/v1/warehouses')
+print([w['name'] for w in json.loads(r.read())['warehouses']])
+"
+```
+
+---
+
+### T-43 — Auto-created catalog is immediately queryable via Doris
+
+After T-42, the new catalog should be in `MANAGED_CATALOGS` in-memory and queryable.
+
+```bash
+# List databases in the auto-created catalog (warehouse is empty — expect 0 databases or information_schema only)
+doris-mysql -e "SHOW DATABASES FROM test_autosync_warehouse;"
+```
+
+**Expected:** A result set (even if empty), with no `Catalog not found` error.
+
+✅ Pass: SQL executes without `Catalog not found` or `Access denied` errors.
+❌ Fail: `Catalog not found` → the daemon did not add the catalog to memory; verify T-42 pass first.
+
+**Teardown — remove the test warehouse and catalog:**
+
+```bash
+# 1. Drop the Doris catalog
+doris-mysql -e "DROP CATALOG IF EXISTS test_autosync_warehouse;"
+
+# 2. Delete the Polaris warehouse
+curl -s -X DELETE "http://${POLARIS_IP}:8181/api/management/v1/catalogs/test_autosync_warehouse" \
+  -H "Authorization: Bearer ${TOKEN}"
+echo "Polaris warehouse deleted"
+
+# 3. Verify Doris catalog is gone
+doris-mysql -e "SHOW CATALOGS;" | grep test_autosync_warehouse
+# Expected: no output
+```
+
+---
+
+### T-44 — CacheGuard thread is running
+
+Confirm the CacheGuard background thread started successfully at daemon startup.
+
+```bash
+kubectl logs -n prod deployment/doris-cache-manager | grep "CacheGuard"
+```
+
+**Expected:**
+```
+CacheGuard started (poll_interval=60s lookback=120s).
+```
+
+✅ Pass: the startup line is present.
+❌ Fail: missing → image is pre-v1.6.0; rebuild and redeploy (`doris-cache-manager:1.6.0`).
+
+---
+
+### T-45 — SELECT against a cold table writes a `query_block_log` row within 60 s
+
+> **Setup:** Choose a table that is currently in state `COLD` or `UNKNOWN`.
+> If all tables are `WARM`, patch `LRU_EVICT_HOURS=0` briefly to force eviction, then restore.
+
+**Step 1 — Identify a cold table:**
+
+```bash
+doris-mysql -e "
+SELECT catalog_name, db_name, table_name, cache_state, last_warmed_ts
+FROM cache_system.table_query_stats
+WHERE cache_state IN ('COLD','UNKNOWN')
+LIMIT 5;"
+```
+
+Note one row — e.g. `polaris.tpcds_sf10tcl.income_band`.
+
+**Step 2 — Run a SELECT against that cold table:**
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.income_band;"
+```
+
+**Step 3 — Wait up to 60 s (one CacheGuard poll cycle) and check `query_block_log`:**
+
+```bash
+sleep 65
+
+doris-mysql -e "
+SELECT query_id, detected_at, user_name, cold_tables, message
+FROM cache_system.query_block_log
+ORDER BY detected_at DESC
+LIMIT 5;"
+```
+
+**Expected:** At least one row with:
+- `cold_tables` containing `polaris.tpcds_sf10tcl.income_band`
+- `message` beginning: `The following table(s) referenced in your query are not in the Doris segment cache`
+
+```bash
+# Also confirm warm-up was triggered by the guard
+kubectl logs -n prod deployment/doris-cache-manager --tail=100 \
+  | grep "CacheGuard.*triggered warm-up"
+```
+
+**Expected log:**
+```
+CacheGuard: query_id=<id> user=root — cold tables detected: polaris.tpcds_sf10tcl.income_band
+CacheGuard: triggered warm-up for polaris.tpcds_sf10tcl.income_band on BE <ip>:8040.
+```
+
+✅ Pass: `query_block_log` row exists within 65 s of the SELECT, warm-up triggered in logs.
+❌ Fail: No row after 120 s → check that `CACHE_GUARD_POLL_S` env var is set (default 60) and no `CacheGuard tick error` in logs:
+```bash
+kubectl logs -n prod deployment/doris-cache-manager | grep "CacheGuard tick error"
+```
+
+---
+
+### T-46 — JOIN query with one cold table flags all cold tables and triggers warm-up
+
+> **Goal:** Verify that `_extract_all_keys_from_stmt` detects all `FROM`/`JOIN` tables,
+> not just the first one, so a multi-table query where only some tables are cold still
+> triggers warm-up for every cold table.
+
+**Step 1 — Identify two tables in different cache states:**
+
+```bash
+doris-mysql -e "
+SELECT catalog_name, db_name, table_name, cache_state
+FROM cache_system.table_query_stats
+WHERE catalog_name = 'polaris' AND db_name = 'tpcds_sf10tcl'
+ORDER BY cache_state
+LIMIT 10;"
+```
+
+Find one `WARM` table (e.g. `inventory`) and one `COLD`/`UNKNOWN` table (e.g. `income_band`).
+
+**Step 2 — Run a JOIN across both:**
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*)
+      FROM polaris.tpcds_sf10tcl.inventory i
+      JOIN polaris.tpcds_sf10tcl.income_band ib ON i.inv_item_sk = ib.ib_income_band_sk
+      LIMIT 1;"
+```
+
+> The JOIN itself will likely return 0 rows (unrelated keys) — that is fine; we only
+> care that the audit log records the statement and the guard processes it.
+
+**Step 3 — Wait 65 s and check `query_block_log`:**
+
+```bash
+sleep 65
+
+doris-mysql -e "
+SELECT detected_at, user_name, cold_tables, stmt_preview
+FROM cache_system.query_block_log
+WHERE cold_tables LIKE '%income_band%'
+ORDER BY detected_at DESC
+LIMIT 3;"
+```
+
+**Expected:**
+- `cold_tables` lists `polaris.tpcds_sf10tcl.income_band` (cold)
+- `cold_tables` does **NOT** list `polaris.tpcds_sf10tcl.inventory` (already WARM — guard skips warm tables)
+- `stmt_preview` contains `JOIN`
+
+```bash
+# Confirm warm-up was triggered only for the cold table, not the warm one
+kubectl logs -n prod deployment/doris-cache-manager --tail=100 \
+  | grep -E "CacheGuard.*triggered warm-up|CacheGuard.*cold tables"
+```
+
+**Expected:**
+```
+CacheGuard: query_id=<id> user=root — cold tables detected: polaris.tpcds_sf10tcl.income_band
+CacheGuard: triggered warm-up for polaris.tpcds_sf10tcl.income_band on BE <ip>:8040.
+```
+(No warm-up line for `inventory` since it is already `WARM`.)
+
+✅ Pass: `query_block_log` row exists, only the cold table is in `cold_tables`, and warm-up was triggered for it.
+❌ Fail: `cold_tables` also lists the `WARM` table → `_extract_all_keys_from_stmt` is not filtering by `cache_state`; check daemon version is `1.6.0+`.
+❌ Fail: No row at all → guard may not have seen the query; try increasing `CACHE_GUARD_LOOKBACK_S` to `300` for diagnosis.
+
+---
+
+## Summary Scorecard (Phase 8)
+
+| Test | Description | Pass Criterion |
+|---|---|---|
+| T-39 | New metadata tables exist | `catalog_sync_log` and `query_block_log` both present in `cache_system` |
+| T-40 | CatalogSyncer polling Polaris | `CatalogSyncer:` log lines appear each cycle, no sync failed errors |
+| T-41 | Idempotency — known warehouses skipped | "already registered" for all 5 seed catalogs; no spurious CREATE |
+| T-42 | New warehouse auto-registration | Log + `SHOW CATALOGS` + `catalog_sync_log` row all consistent |
+| T-43 | Auto-catalog queryable immediately | `SHOW DATABASES FROM <new_catalog>` executes without error |
+| T-44 | CacheGuard thread started | Startup log line confirms `poll_interval=60s lookback=120s` |
+| T-45 | Single-table cold SELECT detected | `query_block_log` row within 65 s; warm-up triggered in logs |
+| T-46 | JOIN cold table detected; warm table skipped | Only cold tables in `cold_tables`; warm-up fired for cold table only |
 
 ---
 

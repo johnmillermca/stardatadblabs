@@ -15,7 +15,7 @@
 #   • Evicts cold tables after 24 h of inactivity
 #   • Runs up to 32 concurrent warm-up jobs
 #
-# Image: 192.168.1.50:30500/doris-cache-manager:1.4.0
+# Image: 192.168.1.50:30500/doris-cache-manager:1.6.0
 #   Built from manifests/doris/cache_manager/ — see runbook-25 for build steps.
 #   1.1.0 — fix audit_log catalog detection (use stmt LIKE, not catalog IN);
 #            make MANAGED_CATALOGS and CATALOG_WAREHOUSES env-var driven.
@@ -33,14 +33,25 @@
 #            Also: ghost-row auto-deletion (table/db does not exist errors),
 #            per-thread meta DorisClient to fix concurrent update_last_warmed
 #            connection corruption, DORIS_USER and SPARK_VERSION env vars.
-#   1.5.0 — rename metadata database from platform_meta / system to cache_system
-#            (system is a reserved keyword in Doris; all SQL references updated).
 #   1.4.0 — CacheMetricsCollector: new background thread per cycle writes
 #            per-table, per-BE I/O metrics to cache_system.table_cache_metrics.
 #            Tracks local_scan_bytes, remote_scan_bytes, cache_hit_pct,
 #            query_count, avg_query_time_ms, warmup_count, spark_pushdown_count.
 #            Runs in its own daemon thread with its own DorisClient — zero
 #            impact on warm-up or write-pushdown concurrency.
+#   1.5.0 — rename metadata database from platform_meta / system to cache_system
+#            (system is a reserved keyword in Doris; all SQL references updated).
+#   1.6.0 — CatalogSyncer: auto-registers new Polaris warehouses as Doris external
+#            catalogs each cycle (CREATE CATALOG IF NOT EXISTS); writes audit rows
+#            to cache_system.catalog_sync_log.  No manual DDL or restart needed
+#            when a new warehouse is added to Polaris.
+#            CacheGuard: background thread (poll every CACHE_GUARD_POLL_S=60s)
+#            detects SELECT statements against cold external-catalog tables, writes
+#            a user-visible diagnostic to cache_system.query_block_log, and
+#            triggers immediate warm-up for every cold table + BE combination so
+#            the next execution of the same query hits the segment cache.
+#            New env vars: POLARIS_URI, S3_ENDPOINT, S3_REGION,
+#            CACHE_GUARD_LOOKBACK_S, CACHE_GUARD_POLL_S.
 # =============================================================================
 ---
 apiVersion: v1
@@ -81,7 +92,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: cache-manager
-          image: 192.168.1.50:30500/doris-cache-manager:1.5.6
+          image: 192.168.1.50:30500/doris-cache-manager:1.6.0
           imagePullPolicy: Always
           command: ["python", "/app/doris_cache_manager.py"]
           env:
@@ -119,6 +130,8 @@ spec:
             - name: WARMUP_STALE_MIN
               value: "5"
             # ── Catalog list (env-driven — no image rebuild needed to add catalogs) ─
+            # CatalogSyncer dynamically extends this list at runtime when it discovers
+            # new Polaris warehouses; the seed list here covers the 5 known catalogs.
             - name: MANAGED_CATALOGS
               value: "polaris,databricks,postgres,oracle,mongodb"
             - name: CATALOG_WAREHOUSES
@@ -133,6 +146,23 @@ spec:
               value: "spark://spark-master-internal.prod.svc.cluster.local:17077"
             - name: SPARK_VERSION
               value: "3.5.1"
+            # ── CatalogSyncer (feature a) ───────────────────────────────────
+            # Polaris REST API endpoint used to enumerate warehouses.
+            # Uses the read-principal auth-proxy port :8283 (same as Doris catalogs).
+            - name: POLARIS_URI
+              value: "http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog"
+            # S3 endpoint + region injected into auto-created Doris catalog DDL.
+            - name: S3_ENDPOINT
+              value: "https://s3.us-east-2.amazonaws.com"
+            - name: S3_REGION
+              value: "us-east-2"
+            # ── CacheGuard (feature b) ──────────────────────────────────────
+            # How far back (seconds) the guard looks in audit_log each tick.
+            - name: CACHE_GUARD_LOOKBACK_S
+              value: "120"
+            # How often (seconds) the guard polls audit_log for cold-table SELECTs.
+            - name: CACHE_GUARD_POLL_S
+              value: "60"
           resources:
             requests:
               memory: 128Mi
