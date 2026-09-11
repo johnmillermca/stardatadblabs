@@ -384,17 +384,28 @@ class _SparkManager:
             col_fields = [f for f in raw_schema.fields
                           if f.name.lower() not in ("snap_id", "snap_timestamp")]
 
-        from pyspark.sql.types import StructType
-        insert_schema = StructType(col_fields)
+        from pyspark.sql.types import StringType, StructField, StructType
+        from pyspark.sql.functions import col as _col, lit
 
         # 3. Extract VALUES rows from the SQL text.
         values_text = _extract_values_text(stmt)
         rows = _parse_values_rows(values_text)
 
-        # 4. Build a DataFrame with only the supplied columns.
-        #    Columns absent from the INSERT stay NULL in Iceberg (nullable).
-        #    snap_id and snap_timestamp are injected by write_append().
-        df = spark.createDataFrame(rows, schema=insert_schema)
+        # 4. Build the DataFrame as all-string first, then cast each column to
+        #    its declared Iceberg type.  createDataFrame with the target schema
+        #    fails for int→Decimal coercions; the cast() approach is universal.
+        str_fields = [StructField(f.name, StringType(), True) for f in col_fields]
+        str_schema = StructType(str_fields)
+        # Convert each row value to str (None stays None for NULL).
+        str_rows = [
+            tuple(None if v is None else str(v) for v in row)
+            for row in rows
+        ]
+        df_str = spark.createDataFrame(str_rows, schema=str_schema)
+        # Cast each column to the declared type from the Iceberg schema.
+        df = df_str.select(
+            [_col(f.name).cast(f.dataType).alias(f.name) for f in col_fields]
+        )
 
         # 4. Write via the platform's authorised path — snap columns injected here.
         #    Pass the Doris connection user as running_user so the platform RBAC
