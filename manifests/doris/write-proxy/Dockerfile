@@ -41,12 +41,19 @@ COPY --from=spark-jars /opt/java/openjdk /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-# Copy the Gluten JAR from the Spark stage so the driver classloader can find
-# it locally — required for --driver-class-path at SparkContext init time.
-RUN mkdir -p /opt/gluten
+# Copy required JARs from the Spark stage so the driver classloader can find
+# them locally.  --jars (HTTP URLs) are only staged onto executor classpaths;
+# the driver needs them present on disk before SparkContext init:
+#   - Gluten JAR:  spark.plugins loads GlutenPlugin at SparkContext init
+#   - Iceberg JAR: spark.sql.catalog.* is resolved at first catalog USE
+RUN mkdir -p /opt/spark-jars
 COPY --from=spark-jars \
     /opt/spark/jars/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
-    /opt/gluten/gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar
+    /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar \
+    /opt/spark/jars/iceberg-aws-bundle-1.9.2.jar \
+    /opt/spark/jars/hadoop-aws-3.3.4.jar \
+    /opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar \
+    /opt/spark-jars/
 
 # Copy proxy script and the Spark write-pushdown job
 COPY doris_write_proxy.py   /app/doris_write_proxy.py

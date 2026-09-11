@@ -313,39 +313,29 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
         "stmt":      stmt,
     })
 
-    # JARs for executors: fetched from the Spark master's HTTP file server.
-    # Gluten JAR for the DRIVER must be a local file path — the driver JVM
-    # classloader cannot load from HTTP URLs.  The JAR is baked into this image
-    # at /opt/gluten/ (copied from the Spark cluster image at Docker build time).
-    # spark.plugins loads GlutenPlugin at SparkContext init, before --jars are
-    # staged onto the classpath, so --driver-class-path must be a local path.
-    _SPARK_MASTER_HTTP = os.environ.get(
-        "SPARK_MASTER_HTTP", "http://spark-master-svc.prod.svc.cluster.local:8080"
-    )
-    _GLUTEN_JAR_NAME = "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
-    # Local path baked into the image (used for --driver-class-path)
-    _GLUTEN_JAR_LOCAL = f"/opt/gluten/{_GLUTEN_JAR_NAME}"
-    # Remote URL for executor classpaths (workers already have it in /opt/spark/jars)
-    _GLUTEN_JAR_REMOTE = f"{_SPARK_MASTER_HTTP}/static/../jars/{_GLUTEN_JAR_NAME}"
-    _EXTRA_JARS = ",".join([
-        f"{_SPARK_MASTER_HTTP}/static/../jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
-        f"{_SPARK_MASTER_HTTP}/static/../jars/iceberg-aws-bundle-1.9.2.jar",
-        f"{_SPARK_MASTER_HTTP}/static/../jars/hadoop-aws-3.3.4.jar",
-        f"{_SPARK_MASTER_HTTP}/static/../jars/aws-java-sdk-bundle-1.12.262.jar",
-        _GLUTEN_JAR_REMOTE,
-    ])
+    # All required JARs are baked into this image at /opt/spark-jars/ (copied
+    # from the Spark cluster image at Docker build time).  The driver JVM
+    # classloader cannot load from HTTP URLs, and both spark.plugins (Gluten)
+    # and spark.sql.catalog.* (Iceberg) are resolved before --jars are staged.
+    # Executors already have all JARs in /opt/spark/jars/ on the worker image.
+    _LOCAL_JARS_DIR = "/opt/spark-jars"
+    _JAR_NAMES = [
+        "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar",
+        "iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
+        "iceberg-aws-bundle-1.9.2.jar",
+        "hadoop-aws-3.3.4.jar",
+        "aws-java-sdk-bundle-1.12.262.jar",
+    ]
+    _DRIVER_CP  = ":".join(f"{_LOCAL_JARS_DIR}/{j}" for j in _JAR_NAMES)
+    _EXECUTOR_CP = ":".join(f"/opt/spark/jars/{j}" for j in _JAR_NAMES)
 
     cmd = [
         _SPARK_SUBMIT,
         "--master",            SPARK_MASTER_URL,
         "--deploy-mode",       "client",
         "--name",              f"doris-write-proxy-{catalog}-{table}",
-        "--jars",              _EXTRA_JARS,
-        # Local file path — driver JVM classloader requires a file:// or bare
-        # local path; HTTP URLs are not resolvable at SparkContext init time.
-        "--driver-class-path", _GLUTEN_JAR_LOCAL,
-        # Executors already have the JAR in /opt/spark/jars on the worker image
-        "--conf", f"spark.executor.extraClassPath=/opt/spark/jars/{_GLUTEN_JAR_NAME}",
+        "--driver-class-path", _DRIVER_CP,
+        "--conf", f"spark.executor.extraClassPath={_EXECUTOR_CP}",
         _SPARK_WRITE_SCRIPT,
         job_args,
     ]
