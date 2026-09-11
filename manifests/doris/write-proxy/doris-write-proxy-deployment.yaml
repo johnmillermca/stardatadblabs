@@ -75,8 +75,6 @@ spec:
             - name: LISTEN_PORT
               value: "9040"
             # ── Spark ────────────────────────────────────────────────────────
-            - name: SPARK_MASTER_URL
-              value: "local[*]"
             # Timeout for the SparkSession background init (first pod start)
             - name: SPARK_INIT_TIMEOUT_S
               value: "120"
