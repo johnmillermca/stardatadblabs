@@ -79,6 +79,9 @@ SPARK_MASTER_URL    = os.environ.get(
 )
 SPARK_SQL_TIMEOUT_S   = int(os.environ.get("SPARK_SQL_TIMEOUT_S",   "300"))
 SPARK_INIT_TIMEOUT_S  = int(os.environ.get("SPARK_INIT_TIMEOUT_S",  "120"))
+# How long (seconds) to cache a table's Iceberg schema before re-fetching.
+# Increase for stable schemas; lower if DDL changes must propagate faster.
+SCHEMA_CACHE_TTL_S    = int(os.environ.get("SCHEMA_CACHE_TTL_S",    "3600"))
 
 BAO_ADDR            = os.environ.get("ADDR") or os.environ.get("BAO_ADDR",
     "http://openbao.prod.svc.cluster.local:8200")
@@ -284,6 +287,12 @@ class _SparkManager:
         self._error: Optional[str] = None
         self._lock  = threading.Lock()
         self._ready = threading.Event()
+        # Schema cache: fqn → (StructType, fetched_at_epoch)
+        # Protected by _lock (same lock that serialises writes).
+        self._schema_cache: dict[str, tuple] = {}
+        # Builder cache: user → IcebergTableBuilder
+        # Avoids re-instantiating on every write for the same Doris user.
+        self._builder_cache: dict[str, IcebergTableBuilder] = {}
 
     # ── Public ─────────────────────────────────────────────────────────────
 
@@ -357,60 +366,90 @@ class _SparkManager:
         Parse INSERT INTO … VALUES (…), (…) into a Spark DataFrame and
         write it via IcebergTableBuilder.write_append().
 
-        The table schema (without snap columns) is read from Iceberg metadata
-        so that column types are matched exactly. snap_id and snap_timestamp
-        are injected by write_append() and must NOT be present in the values.
+        Schema resolution is cached per table (TTL = SCHEMA_CACHE_TTL_S) so
+        repeated writes to the same table pay zero Iceberg metadata overhead
+        after the first call.  The DataFrame is built dynamically from the
+        parsed VALUES rows on every call — schema lookup is the only cached
+        part; actual data is never reused across calls.
 
-        user — the authenticated Doris MySQL username, passed as running_user
+        user — the authenticated Doris MySQL username forwarded as running_user
                to IcebergTableBuilder so the RBAC gate sees the real identity.
         """
-        spark = self._spark
+        from pyspark.sql.types import StringType, StructField, StructType
+        from pyspark.sql.functions import col as _col
 
-        # 1. Discover the table schema from Iceberg — exclude snap columns.
-        #    Build a name→field map for case-insensitive lookup.
-        fqn = f"`{catalog}`.`{db}`.`{table}`"
-        raw_schema = spark.table(fqn).schema
+        spark = self._spark
+        fqn   = f"{catalog}.{db}.{table}"          # cache key (plain, no backticks)
+        fqn_q = f"`{catalog}`.`{db}`.`{table}`"    # quoted form for Spark APIs
+
+        # ── 1. Schema lookup (cached) ─────────────────────────────────────────
+        # On first call for a table, fetch from Iceberg and cache it.
+        # On subsequent calls, return the cached schema unless the TTL has
+        # expired — then re-fetch transparently and refresh the cache entry.
+        cached = self._schema_cache.get(fqn)
+        if cached is None or (time.time() - cached[1]) > SCHEMA_CACHE_TTL_S:
+            raw_schema = spark.table(fqn_q).schema
+            self._schema_cache[fqn] = (raw_schema, time.time())
+            logger.debug("Schema cache MISS for %s — fetched %d fields", fqn, len(raw_schema.fields))
+        else:
+            raw_schema = cached[0]
+            logger.debug("Schema cache HIT  for %s", fqn)
+
+        # Build a case-insensitive name → StructField map for column lookup.
         schema_map = {f.name.lower(): f for f in raw_schema.fields}
 
-        # 2. Determine which columns are being supplied by the INSERT.
-        #    If the statement has an explicit column list, use it.
-        #    Otherwise fall back to all business columns in schema order.
+        # ── 2. Resolve which columns this INSERT supplies ─────────────────────
+        # Honour the explicit column list when present; fall back to all
+        # business columns in Iceberg schema order when the INSERT has no list.
+        _SNAP = {"snap_id", "snap_timestamp"}
         explicit_cols = _extract_column_list(stmt)
         if explicit_cols:
-            # Use the columns named in the INSERT, in the order given.
-            col_fields = [schema_map[c.lower()] for c in explicit_cols
-                          if c.lower() not in ("snap_id", "snap_timestamp")]
+            col_fields = [
+                schema_map[c.lower()] for c in explicit_cols
+                if c.lower() not in _SNAP
+            ]
         else:
-            col_fields = [f for f in raw_schema.fields
-                          if f.name.lower() not in ("snap_id", "snap_timestamp")]
+            col_fields = [
+                f for f in raw_schema.fields
+                if f.name.lower() not in _SNAP
+            ]
 
-        from pyspark.sql.types import StringType, StructField, StructType
-        from pyspark.sql.functions import col as _col, lit
-
-        # 3. Extract VALUES rows from the SQL text.
+        # ── 3. Parse the VALUES rows from the SQL text ────────────────────────
         values_text = _extract_values_text(stmt)
-        rows = _parse_values_rows(values_text)
+        rows        = _parse_values_rows(values_text)
 
-        # 4. Build the DataFrame as all-string first, then cast each column to
-        #    its declared Iceberg type.  createDataFrame with the target schema
-        #    fails for int→Decimal coercions; the cast() approach is universal.
-        str_fields = [StructField(f.name, StringType(), True) for f in col_fields]
-        str_schema = StructType(str_fields)
-        # Convert each row value to str (None stays None for NULL).
+        # ── 4. Build a typed DataFrame dynamically ────────────────────────────
+        # Strategy: create as all-string (avoids Python-type vs Spark-type
+        # mismatches such as int→DecimalType), then cast every column to its
+        # declared Iceberg type in a single .select() transformation.
+        # This is fully dynamic — works for any schema without code changes.
+        str_schema = StructType([
+            StructField(f.name, StringType(), True) for f in col_fields
+        ])
         str_rows = [
             tuple(None if v is None else str(v) for v in row)
             for row in rows
         ]
-        df_str = spark.createDataFrame(str_rows, schema=str_schema)
-        # Cast each column to the declared type from the Iceberg schema.
-        df = df_str.select(
+        df = spark.createDataFrame(str_rows, schema=str_schema).select(
             [_col(f.name).cast(f.dataType).alias(f.name) for f in col_fields]
         )
+        logger.info(
+            "write_append: %s — %d col(s), %d row(s) [schema from %s]",
+            fqn,
+            len(col_fields),
+            len(rows),
+            "cache" if cached else "Iceberg",
+        )
 
-        # 4. Write via the platform's authorised path — snap columns injected here.
-        #    Pass the Doris connection user as running_user so the platform RBAC
-        #    gate sees the actual identity, not a hardcoded service account.
-        builder = IcebergTableBuilder(spark, running_user=user or None)
+        # ── 5. Write via the platform's authorised path ───────────────────────
+        # snap_id and snap_timestamp are injected here by write_append().
+        # IcebergTableBuilder instances are cached per user to avoid repeated
+        # object allocation on the hot path.
+        if user not in self._builder_cache:
+            self._builder_cache[user] = IcebergTableBuilder(
+                spark, running_user=user or None
+            )
+        builder = self._builder_cache[user]
         return builder.write_append(df, catalog, db, table)
 
     @property
