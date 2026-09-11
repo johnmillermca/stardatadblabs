@@ -508,21 +508,26 @@ kubectl rollout restart deployment/doris-write-proxy -n prod
 
 Iceberg row-level UPDATE/DELETE requires the table to have been created with
 `'write.delete.mode'='merge-on-read'` or `'copy-on-write'`.
-Check table properties:
+Check table properties via `SHOW CREATE TABLE` (Doris does not support the
+`$properties` metadata table syntax — that is Spark/Trino only):
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT * FROM polaris.tpcds_sf10tcl.customer_address\$properties;"
+  -e "SHOW CREATE TABLE polaris.tpcds_sf10tcl.customer_address\G" \
+  | grep -i "write\.\(delete\|update\|merge\)"
 ```
 
-If the property is missing, run via Spark directly:
-```sql
-ALTER TABLE polaris.tpcds_sf10tcl.customer_address
-SET TBLPROPERTIES (
-  'write.update.mode' = 'merge-on-read',
-  'write.delete.mode' = 'merge-on-read',
-  'write.merge.mode'  = 'merge-on-read'
-);
+If the properties are missing, set them by sending an `ALTER TABLE` through
+the write-proxy (port **30091**) so Spark executes it:
+
+```bash
+mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  -e "ALTER TABLE polaris.tpcds_sf10tcl.customer_address
+      SET TBLPROPERTIES (
+        'write.update.mode' = 'merge-on-read',
+        'write.delete.mode' = 'merge-on-read',
+        'write.merge.mode'  = 'merge-on-read'
+      );"
 ```
 
 ### `post-write cleanup` line never appears
