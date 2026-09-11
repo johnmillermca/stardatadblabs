@@ -402,27 +402,25 @@ class _SparkManager:
         # Honour the explicit column list when present; fall back to all
         # business columns in Iceberg schema order when the INSERT has no list.
         _SNAP = {"snap_id", "snap_timestamp"}
+        all_business = [f for f in raw_schema.fields if f.name.lower() not in _SNAP]
         explicit_cols = _extract_column_list(stmt)
         if explicit_cols:
-            col_fields = [
-                schema_map[c.lower()] for c in explicit_cols
-                if c.lower() not in _SNAP
-            ]
+            supplied_names = {c.lower() for c in explicit_cols if c.lower() not in _SNAP}
+            col_fields = [schema_map[c.lower()] for c in explicit_cols if c.lower() not in _SNAP]
         else:
-            col_fields = [
-                f for f in raw_schema.fields
-                if f.name.lower() not in _SNAP
-            ]
+            supplied_names = {f.name.lower() for f in all_business}
+            col_fields = all_business
 
         # ── 3. Parse the VALUES rows from the SQL text ────────────────────────
         values_text = _extract_values_text(stmt)
         rows        = _parse_values_rows(values_text)
 
         # ── 4. Build a typed DataFrame dynamically ────────────────────────────
-        # Strategy: create as all-string (avoids Python-type vs Spark-type
-        # mismatches such as int→DecimalType), then cast every column to its
-        # declared Iceberg type in a single .select() transformation.
-        # This is fully dynamic — works for any schema without code changes.
+        # Step 4a: create the supplied columns as string→cast.
+        # Step 4b: add NULL literals for every business column NOT in the INSERT
+        #          so Iceberg's append() sees a complete schema and does not
+        #          raise CANNOT_FIND_DATA for omitted nullable columns.
+        from pyspark.sql.functions import lit
         str_schema = StructType([
             StructField(f.name, StringType(), True) for f in col_fields
         ])
@@ -430,8 +428,14 @@ class _SparkManager:
             tuple(None if v is None else str(v) for v in row)
             for row in rows
         ]
+        supplied_exprs = [_col(f.name).cast(f.dataType).alias(f.name) for f in col_fields]
+        missing_exprs  = [
+            lit(None).cast(f.dataType).alias(f.name)
+            for f in all_business
+            if f.name.lower() not in supplied_names
+        ]
         df = spark.createDataFrame(str_rows, schema=str_schema).select(
-            [_col(f.name).cast(f.dataType).alias(f.name) for f in col_fields]
+            supplied_exprs + missing_exprs
         )
         logger.info(
             "write_append: %s — %d col(s), %d row(s) [schema from %s]",
