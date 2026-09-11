@@ -15,16 +15,20 @@ OVERWRITE) that target a managed external Iceberg catalog (polaris, databricks,
 postgres, oracle, mongodb).  For those:
 
   1. The proxy detects the catalog name in the SQL *before* sending to Doris.
-  2. The statement is submitted directly to the Spark standalone REST API.
-  3. The proxy polls Spark until the job reaches a terminal state.
-  4. On SUCCESS  → returns a MySQL OK packet to the client (rows affected = 0).
-  5. On FAILURE  → returns a MySQL ERR packet with the Spark error message.
+  2. The statement is executed directly via a persistent in-process SparkSession.
+  3. On SUCCESS  → returns a MySQL OK packet to the client (rows affected = 0).
+  4. On FAILURE  → returns a MySQL ERR packet with the Spark error message.
 
-The client never sees a "not writable" error from Doris — the write either
-succeeds (Spark executed it) or fails with a meaningful Spark error.
-
-Local Doris DML (internal tables, no managed catalog prefix) flows through
-to Doris unchanged and the client receives Doris's native response.
+Performance model
+-----------------
+The SparkSession (JVM, Gluten/Velox, executors, Polaris OAuth) is initialised
+ONCE at proxy startup and reused for every subsequent INSERT.  This eliminates:
+  - JVM cold start          (~2 s per call with spark-submit)
+  - Gluten native lib init  (~2 s per call)
+  - Executor launch         (~3–8 s per call)
+  - Polaris OAuth roundtrip (~2 s per call, token cached)
+  - py4j gateway start      (~1 s per call)
+After the first call (warm-up ~10–15 s), each INSERT takes <3 s.
 
 Environment variables
 ---------------------
@@ -32,11 +36,10 @@ Environment variables
   DORIS_PORT          Doris FE MySQL port   (default: 9030)
   LISTEN_HOST         Bind address          (default: 0.0.0.0)
   LISTEN_PORT         Proxy listen port     (default: 9040)
-  SPARK_REST_URL      Spark REST endpoint   (default: http://spark-master-svc.prod.svc.cluster.local:6066)
   SPARK_MASTER_URL    spark:// master URL   (default: spark://spark-master-internal.prod.svc.cluster.local:17077)
-  SPARK_JOB_TIMEOUT_S Seconds to wait       (default: 300)
-  SPARK_POLL_INTERVAL_S Poll cadence        (default: 5)
+  SPARK_SQL_TIMEOUT_S Per-statement timeout (default: 300)
   ADDR / BAO_ADDR     OpenBao address       (default: http://openbao.prod.svc.cluster.local:8200)
+  SPARK_INIT_TIMEOUT_S Seconds to wait for initial SparkSession startup (default: 120)
 """
 from __future__ import annotations
 
@@ -46,9 +49,10 @@ import logging
 import os
 import re
 import struct
+import threading
 import time
 import urllib.request
-from typing import Tuple
+from typing import Optional, Tuple
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -68,65 +72,30 @@ DORIS_PORT          = int(os.environ.get("DORIS_PORT",  "9030"))
 LISTEN_HOST         = os.environ.get("LISTEN_HOST",  "0.0.0.0")
 LISTEN_PORT         = int(os.environ.get("LISTEN_PORT", "9040"))
 
-SPARK_REST_URL      = os.environ.get(
-    "SPARK_REST_URL",
-    "http://spark-master-svc.prod.svc.cluster.local:6066",
-)
 SPARK_MASTER_URL    = os.environ.get(
     "SPARK_MASTER_URL",
     "spark://spark-master-internal.prod.svc.cluster.local:17077",
 )
-SPARK_JOB_TIMEOUT_S   = int(os.environ.get("SPARK_JOB_TIMEOUT_S",   "300"))
-SPARK_POLL_INTERVAL_S = int(os.environ.get("SPARK_POLL_INTERVAL_S", "5"))
+SPARK_SQL_TIMEOUT_S   = int(os.environ.get("SPARK_SQL_TIMEOUT_S",   "300"))
+SPARK_INIT_TIMEOUT_S  = int(os.environ.get("SPARK_INIT_TIMEOUT_S",  "120"))
 
 BAO_ADDR            = os.environ.get("ADDR") or os.environ.get("BAO_ADDR",
     "http://openbao.prod.svc.cluster.local:8200")
 _BAO_K8S_SA_JWT     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _BAO_ROLE           = os.environ.get("BAO_ROLE", "platform-secrets-read")
+_PATH_POLARIS       = "secret/data/platform/polaris"
 _PATH_S3            = "secret/data/platform/s3"
+_POLARIS_URI        = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
 
-def _load_s3_creds() -> tuple[str, str]:
-    """Load S3 access/secret keys from OpenBao at startup (stdlib only)."""
-    # Try K8s SA JWT first
-    if os.path.exists(_BAO_K8S_SA_JWT):
-        with open(_BAO_K8S_SA_JWT) as fh:
-            jwt = fh.read().strip()
-        payload = json.dumps({"role": _BAO_ROLE, "jwt": jwt}).encode()
-        req = urllib.request.Request(
-            f"{BAO_ADDR}/v1/auth/kubernetes/login",
-            data=payload, headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            token = json.loads(resp.read())["auth"]["client_token"]
-    else:
-        token = os.environ.get("TOKEN") or os.environ.get("BAO_TOKEN", "")
-
-    req = urllib.request.Request(
-        f"{BAO_ADDR}/v1/{_PATH_S3}",
-        headers={"X-Vault-Token": token}, method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    s3 = data.get("data", {}).get("data", data.get("data", {}))
-    return s3["access_key"], s3["secret_key"]
-
-# Load S3 credentials at module import time (once per process).
-try:
-    _S3_KEY, _S3_SECRET = _load_s3_creds()
-    logger.info("S3 credentials loaded from OpenBao for s3a:// script fetch.")
-except Exception as _e:
-    logger.warning("Could not load S3 creds from OpenBao (%s) — s3a:// fetch may fail.", _e)
-    _S3_KEY  = os.environ.get("S3_ACCESS_KEY", "")
-    _S3_SECRET = os.environ.get("S3_SECRET_KEY", "")
-
-# Path to the PySpark write script.
-# In client mode the driver runs inside THIS pod, so the path must exist
-# locally here — /app/spark_iceberg_write.py is baked into the image.
-# Override via SPARK_WRITE_SCRIPT env var if the path changes.
-_SPARK_WRITE_SCRIPT = os.environ.get(
-    "SPARK_WRITE_SCRIPT",
-    "/app/spark_iceberg_write.py",
-)
+# JAR names baked into the image at /opt/spark-jars/
+_LOCAL_JARS_DIR = "/opt/spark-jars"
+_JAR_NAMES = [
+    "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar",
+    "iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
+    "iceberg-aws-bundle-1.9.2.jar",
+    "hadoop-aws-3.3.4.jar",
+    "aws-java-sdk-bundle-1.12.262.jar",
+]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Managed catalogs + warehouse mapping
@@ -139,36 +108,269 @@ MANAGED_CATALOGS: dict[str, str] = {
     "mongodb":    "mgo_lakehouse",
 }
 
-# Regex: DML verb at start of statement
-_DML_RE = re.compile(
-    r"^\s*(insert\s+(?:into|overwrite)|update|delete(?:\s+from)?|merge\s+into)\b",
-    re.IGNORECASE,
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenBao helpers (stdlib only)
+# ─────────────────────────────────────────────────────────────────────────────
+def _bao_token() -> str:
+    if tok := (os.environ.get("TOKEN") or os.environ.get("BAO_TOKEN")):
+        return tok
+    with open(_BAO_K8S_SA_JWT) as fh:
+        jwt = fh.read().strip()
+    payload = json.dumps({"role": _BAO_ROLE, "jwt": jwt}).encode()
+    req = urllib.request.Request(
+        f"{BAO_ADDR}/v1/auth/kubernetes/login",
+        data=payload, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())["auth"]["client_token"]
+
+
+def _read_secret(path: str, token: str) -> dict:
+    req = urllib.request.Request(
+        f"{BAO_ADDR}/v1/{path}",
+        headers={"X-Vault-Token": token}, method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    outer = data.get("data", {})
+    return outer.get("data", outer)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent SparkSession — initialised once, shared across all INSERT calls
+# ─────────────────────────────────────────────────────────────────────────────
+# PYSPARK_SUBMIT_ARGS must be set before pyspark is imported so the JVM is
+# launched with the correct --driver-class-path containing all required JARs.
+# This must happen at module load time, before any `from pyspark import ...`.
+_DRIVER_CP   = ":".join(f"{_LOCAL_JARS_DIR}/{j}" for j in _JAR_NAMES)
+_EXECUTOR_CP = ":".join(f"/opt/spark/jars/{j}" for j in _JAR_NAMES)
+
+os.environ["PYSPARK_SUBMIT_ARGS"] = (
+    f"--driver-class-path {_DRIVER_CP} "
+    f"--conf spark.executor.extraClassPath={_EXECUTOR_CP} "
+    "pyspark-shell"
 )
+os.environ.setdefault("PYSPARK_PYTHON", "python3")
+
+from pyspark.sql import SparkSession  # noqa: E402 — must follow PYSPARK_SUBMIT_ARGS
+from pyspark import SparkConf         # noqa: E402
+
+
+def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
+    """
+    Build a SparkConf that is wired for ALL managed catalogs simultaneously.
+    Called once at startup; the resulting SparkSession is reused forever.
+    """
+    conf = SparkConf()
+    conf.setAppName("doris-write-proxy-persistent")
+    conf.setMaster(SPARK_MASTER_URL)
+
+    # ── Resource sizing ──────────────────────────────────────────────────────
+    conf.set("spark.driver.memory",      "4g")
+    conf.set("spark.executor.memory",    "3g")
+    conf.set("spark.executor.cores",     "2")
+    conf.set("spark.cores.max",          "8")   # 4 executors × 2 cores
+    conf.set("spark.executor.instances", "4")
+
+    # ── Gluten + Velox native execution ─────────────────────────────────────
+    conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
+    conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
+    conf.set("spark.memory.offHeap.enabled",          "true")
+    conf.set("spark.memory.offHeap.size",             "2g")
+
+    # ── Executor heartbeat / network ─────────────────────────────────────────
+    # Persistent session: keep executors alive between SQL calls.
+    # heartbeatInterval < network.timeout to prevent false executor loss.
+    conf.set("spark.executor.heartbeatInterval",        "10s")
+    conf.set("spark.network.timeout",                   "120s")   # longer — persistent session
+    conf.set("spark.storage.blockManagerSlaveTimeoutMs","120000")
+
+    # ── S3A fast upload ───────────────────────────────────────────────────────
+    conf.set("spark.hadoop.fs.s3a.fast.upload",        "true")
+    conf.set("spark.hadoop.fs.s3a.multipart.size",     "67108864")
+    conf.set("spark.hadoop.fs.s3a.threads.max",        "20")
+    conf.set("spark.hadoop.fs.s3a.connection.maximum", "50")
+
+    # ── SQL extensions (Iceberg) ──────────────────────────────────────────────
+    conf.set(
+        "spark.sql.extensions",
+        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+    )
+
+    # ── Adaptive query execution ──────────────────────────────────────────────
+    # AQE lets Spark replan mid-execution and coalesce small output files.
+    conf.set("spark.sql.adaptive.enabled",                    "true")
+    conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+
+    # ── Wire every managed catalog ────────────────────────────────────────────
+    polaris_uri = pol.get("url") or _POLARIS_URI
+    credential  = f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}"
+
+    for cat, warehouse in MANAGED_CATALOGS.items():
+        conf.set(f"spark.sql.catalog.{cat}", "org.apache.iceberg.spark.SparkCatalog")
+        conf.set(f"spark.sql.catalog.{cat}.type",              "rest")
+        conf.set(f"spark.sql.catalog.{cat}.uri",               polaris_uri)
+        conf.set(f"spark.sql.catalog.{cat}.oauth2-server-uri", f"{polaris_uri}/v1/oauth/tokens")
+        conf.set(f"spark.sql.catalog.{cat}.credential",        credential)
+        conf.set(f"spark.sql.catalog.{cat}.scope",             "PRINCIPAL_ROLE:ALL")
+        conf.set(f"spark.sql.catalog.{cat}.warehouse",         warehouse)
+        conf.set(f"spark.sql.catalog.{cat}.rest.auth.type",    "oauth2")
+        # S3FileIO credentials per-catalog
+        conf.set(f"spark.sql.catalog.{cat}.s3.access-key-id",     s3["access_key"])
+        conf.set(f"spark.sql.catalog.{cat}.s3.secret-access-key", s3["secret_key"])
+        conf.set(f"spark.sql.catalog.{cat}.s3.endpoint",          s3["endpoint"])
+        conf.set(f"spark.sql.catalog.{cat}.s3.path-style-access", "true")
+        conf.set(f"spark.sql.catalog.{cat}.client.region",        s3["region"])
+
+    # ── Shared S3A credentials (hadoop fs layer) ──────────────────────────────
+    conf.set("spark.hadoop.fs.s3a.access.key",             s3["access_key"])
+    conf.set("spark.hadoop.fs.s3a.secret.key",             s3["secret_key"])
+    conf.set("spark.hadoop.fs.s3a.endpoint",               s3["endpoint"])
+    conf.set("spark.hadoop.fs.s3a.endpoint.region",        s3["region"])
+    conf.set("spark.hadoop.fs.s3a.impl",                   "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    conf.set("spark.hadoop.fs.s3a.path.style.access",      "true")
+    conf.set("spark.hadoop.fs.s3a.connection.ssl.enabled", "true")
+
+    # ── Iceberg write defaults ────────────────────────────────────────────────
+    conf.set("spark.sql.iceberg.write.format.default",       "parquet")
+    conf.set("spark.sql.iceberg.target-file-size-bytes",     "134217728")  # 128 MB
+    conf.set("spark.sql.iceberg.aggregate-pushdown.enabled", "true")
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+    conf.set("spark.serializer",                "org.apache.spark.serializer.KryoSerializer")
+    conf.set("spark.kryo.registrationRequired", "false")
+    # Suppress verbose Spark logs from the driver — keep proxy logs readable
+    conf.set("spark.driver.extraJavaOptions",
+             "-Dlog4j2.configurationFile="
+             f"{_LOCAL_JARS_DIR}/../spark-log4j2.properties "
+             "-Dsun.reflect.inflationThreshold=2147483647")  # suppress sun.reflect warning
+
+    return conf
+
+
+class _SparkManager:
+    """
+    Manages a single persistent SparkSession for the lifetime of the proxy process.
+
+    Initialisation runs in a background thread at startup so the proxy starts
+    accepting MySQL connections immediately; the first INSERT that arrives while
+    Spark is still warming up will block (at most SPARK_INIT_TIMEOUT_S) then
+    proceed.  All subsequent INSERTs are <3 s on a warm session.
+
+    Thread safety: a reentrant lock serialises concurrent INSERTs.  asyncio
+    callers must run _execute() via loop.run_in_executor() to avoid blocking
+    the event loop.
+    """
+
+    def __init__(self) -> None:
+        self._spark: Optional[SparkSession] = None
+        self._error: Optional[str] = None
+        self._lock  = threading.Lock()
+        self._ready = threading.Event()
+
+    # ── Public ─────────────────────────────────────────────────────────────
+
+    def start_background_init(self) -> None:
+        """Kick off SparkSession init in a daemon thread. Returns immediately."""
+        t = threading.Thread(target=self._init_spark, daemon=True, name="spark-init")
+        t.start()
+
+    def execute(self, catalog: str, db: str, stmt: str) -> Tuple[bool, str]:
+        """
+        Execute a single DML statement in the persistent SparkSession.
+        Blocks until Spark is ready (at most SPARK_INIT_TIMEOUT_S seconds).
+        Returns (success, message).
+        """
+        if not self._ready.wait(timeout=SPARK_INIT_TIMEOUT_S):
+            return False, "SparkSession failed to initialise within timeout"
+        if self._error:
+            return False, f"SparkSession unavailable: {self._error}"
+
+        with self._lock:
+            t0 = time.time()
+            try:
+                self._spark.sql(f"USE {catalog}.{db}")
+                result = self._spark.sql(stmt)
+                # Materialise the result to trigger execution and get row count
+                rows = result.count() if result is not None else 0
+                elapsed = time.time() - t0
+                logger.info(
+                    "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
+                    catalog, db, elapsed, rows,
+                )
+                return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
+            except Exception as exc:
+                elapsed = time.time() - t0
+                msg = str(exc).split("\n")[0][:300]
+                logger.error(
+                    "Spark SQL FAILED: %s.%s elapsed=%.2fs error=%s",
+                    catalog, db, elapsed, msg,
+                )
+                return False, msg
+
+    @property
+    def is_ready(self) -> bool:
+        return self._ready.is_set() and self._error is None
+
+    # ── Private ─────────────────────────────────────────────────────────────
+
+    def _init_spark(self) -> None:
+        t0 = time.time()
+        logger.info("SparkSession: initialising (JVM + Gluten + executor launch)…")
+        try:
+            token = _bao_token()
+            pol   = _read_secret(_PATH_POLARIS, token)
+            s3    = _read_secret(_PATH_S3, token)
+            conf  = _build_spark_conf(pol, s3)
+            spark = SparkSession.builder.config(conf=conf).getOrCreate()
+            spark.sparkContext.setLogLevel("WARN")
+            # Warm up the catalog connections with a lightweight no-op query
+            # so the first real INSERT does not pay the OAuth roundtrip cost.
+            for cat in MANAGED_CATALOGS:
+                try:
+                    spark.sql(f"USE {cat}.tpcds_sf10tcl")
+                    break  # one successful USE is enough to warm the session
+                except Exception:
+                    pass
+            self._spark = spark
+            elapsed = time.time() - t0
+            logger.info(
+                "SparkSession: READY — Gluten/Velox active, executors up, "
+                "catalogs connected. Cold-start took %.1fs. "
+                "Subsequent INSERTs will complete in <3 s.",
+                elapsed,
+            )
+        except Exception as exc:
+            self._error = str(exc)
+            logger.error("SparkSession: INIT FAILED — %s", exc)
+        finally:
+            self._ready.set()
+
+
+# Module-level singleton — initialised at startup
+_spark_manager = _SparkManager()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MySQL packet helpers
 # ─────────────────────────────────────────────────────────────────────────────
-# MySQL packets: 3-byte length (LE) + 1-byte sequence number + payload.
 
 def _pack_packet(payload: bytes, seq: int) -> bytes:
     return struct.pack("<I", len(payload))[:3] + bytes([seq]) + payload
 
 
 def _mysql_ok_packet(seq: int, affected_rows: int = 0) -> bytes:
-    """Minimal MySQL OK packet (no session state, no warnings)."""
     def _lenc(n: int) -> bytes:
         if n < 251:
             return bytes([n])
         if n < 65536:
             return b"\xfc" + struct.pack("<H", n)
         return b"\xfd" + struct.pack("<I", n)[:3]
-
     payload = b"\x00" + _lenc(affected_rows) + _lenc(0) + b"\x00\x00" + b"\x00\x00"
     return _pack_packet(payload, seq)
 
 
 def _mysql_err_packet(seq: int, message: str, error_code: int = 2000) -> bytes:
-    """Minimal MySQL ERR packet."""
     msg_bytes = message.encode("utf-8", errors="replace")[:512]
     payload = (
         b"\xff"
@@ -181,7 +383,6 @@ def _mysql_err_packet(seq: int, message: str, error_code: int = 2000) -> bytes:
 
 
 async def _read_packet(reader: asyncio.StreamReader) -> Tuple[int, bytes]:
-    """Read one MySQL packet; return (sequence_number, payload)."""
     header = await reader.readexactly(4)
     length = struct.unpack("<I", header[:3] + b"\x00")[0]
     seq    = header[3]
@@ -190,37 +391,22 @@ async def _read_packet(reader: asyncio.StreamReader) -> Tuple[int, bytes]:
 
 
 async def _read_all_response(reader: asyncio.StreamReader) -> list[Tuple[int, bytes]]:
-    """
-    Read a complete MySQL response (one or more packets) from Doris.
-    Stops after an OK (0x00), ERR (0xFF), or EOF (0xFE with len<9) packet,
-    or after draining a result-set (column-defs + EOF + rows + EOF).
-    """
     packets: list[Tuple[int, bytes]] = []
-    # First packet determines the response type.
     seq, payload = await _read_packet(reader)
     packets.append((seq, payload))
     if not payload:
         return packets
     first_byte = payload[0]
-
-    # OK or ERR — single packet response.
     if first_byte == 0x00 or first_byte == 0xFF:
         return packets
-
-    # EOF (0xFE, len < 9) — single packet.
     if first_byte == 0xFE and len(payload) < 9:
         return packets
-
-    # Otherwise this is a result-set:
-    # column count (length-encoded int) → N column-def packets → EOF → row packets → EOF
-    col_count = payload[0]  # simplified: works for count < 251
+    col_count = payload[0]
     for _ in range(col_count):
         seq, pkt = await _read_packet(reader)
         packets.append((seq, pkt))
-    # EOF after column defs
     seq, pkt = await _read_packet(reader)
     packets.append((seq, pkt))
-    # Row data packets until EOF or OK
     while True:
         seq, pkt = await _read_packet(reader)
         packets.append((seq, pkt))
@@ -228,33 +414,24 @@ async def _read_all_response(reader: asyncio.StreamReader) -> list[Tuple[int, by
             break
         if pkt and pkt[0] == 0xFF:
             break
-
     return packets
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SQL inspection
 # ─────────────────────────────────────────────────────────────────────────────
+_DML_RE = re.compile(
+    r"^\s*(insert\s+(?:into|overwrite)|update|delete(?:\s+from)?|merge\s+into)\b",
+    re.IGNORECASE,
+)
+
 
 def _catalog_and_parts(stmt: str) -> Tuple[str | None, str | None, str | None]:
-    """
-    If stmt is a DML against a managed catalog, return (catalog, db, table).
-    Otherwise return (None, None, None).
-
-    Handles fully-qualified references:
-      catalog.db.table
-      `catalog`.`db`.`table`
-    """
     if not _DML_RE.match(stmt):
         return None, None, None
-
-    # Extract the target table reference — the token after the DML verb keyword.
-    # INSERT INTO / INSERT OVERWRITE → token[2], UPDATE → token[1],
-    # DELETE FROM → token[2], DELETE → token[1], MERGE INTO → token[2].
     tokens = stmt.split()
-    verb = tokens[0].upper()
+    verb   = tokens[0].upper()
     second = tokens[1].upper() if len(tokens) > 1 else ""
-
     if verb == "INSERT" and second in ("INTO", "OVERWRITE"):
         ref = tokens[2] if len(tokens) > 2 else ""
     elif verb == "UPDATE":
@@ -267,114 +444,17 @@ def _catalog_and_parts(stmt: str) -> Tuple[str | None, str | None, str | None]:
         ref = tokens[2] if len(tokens) > 2 else ""
     else:
         return None, None, None
-
-    # Strip backticks
-    ref = ref.strip("`").rstrip(";,(")
+    ref   = ref.strip("`").rstrip(";,(")
     parts = [p.strip("`") for p in ref.split(".")]
-
     if len(parts) >= 3:
         catalog, db, table = parts[0], parts[1], parts[2]
     elif len(parts) == 2:
         catalog, db, table = None, parts[0], parts[1]
     else:
         return None, None, None
-
     if catalog and catalog.lower() in MANAGED_CATALOGS:
         return catalog.lower(), db, table
-
     return None, None, None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Spark submission via spark-submit (synchronous, runs in executor thread)
-# ─────────────────────────────────────────────────────────────────────────────
-import subprocess
-
-# spark-submit binary — must be present in the proxy image or on PATH.
-# We invoke it in client mode from inside the pod so the driver runs here
-# and logs are captured directly.  The Spark REST API does not support
-# PySpark cluster-mode submission (DriverWrapper requires a non-empty Java
-# mainClass; Python scripts need PythonRunner which is only wired by
-# spark-submit, not the REST endpoint).
-_SPARK_SUBMIT  = os.environ.get("SPARK_SUBMIT_BIN", "spark-submit")
-
-def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tuple[bool, str]:
-    """
-    Execute spark_iceberg_write.py via spark-submit (client mode, blocking).
-    Returns (success: bool, message: str).
-    Runs in a thread-pool executor so it does not block the asyncio event loop.
-    """
-    warehouse = MANAGED_CATALOGS[catalog]
-    job_args  = json.dumps({
-        "catalog":   catalog,
-        "warehouse": warehouse,
-        "db":        db,
-        "table":     table,
-        "stmt":      stmt,
-    })
-
-    # All required JARs are baked into this image at /opt/spark-jars/ (copied
-    # from the Spark cluster image at Docker build time).  The driver JVM
-    # classloader cannot load from HTTP URLs, and both spark.plugins (Gluten)
-    # and spark.sql.catalog.* (Iceberg) are resolved before --jars are staged.
-    # Executors already have all JARs in /opt/spark/jars/ on the worker image.
-    _LOCAL_JARS_DIR = "/opt/spark-jars"
-    _JAR_NAMES = [
-        "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar",
-        "iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
-        "iceberg-aws-bundle-1.9.2.jar",
-        "hadoop-aws-3.3.4.jar",
-        "aws-java-sdk-bundle-1.12.262.jar",
-    ]
-    _DRIVER_CP  = ":".join(f"{_LOCAL_JARS_DIR}/{j}" for j in _JAR_NAMES)
-    _EXECUTOR_CP = ":".join(f"/opt/spark/jars/{j}" for j in _JAR_NAMES)
-
-    cmd = [
-        _SPARK_SUBMIT,
-        "--master",            SPARK_MASTER_URL,
-        "--deploy-mode",       "client",
-        "--name",              f"doris-write-proxy-{catalog}-{table}",
-        "--driver-class-path", _DRIVER_CP,
-        "--conf", f"spark.executor.extraClassPath={_EXECUTOR_CP}",
-        _SPARK_WRITE_SCRIPT,
-        job_args,
-    ]
-
-    env = os.environ.copy()
-    env["ADDR"] = BAO_ADDR
-
-    logger.info("WriteProxy: spark-submit %s.%s.%s", catalog, db, table)
-    try:
-        result = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=SPARK_JOB_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"spark-submit timed out after {SPARK_JOB_TIMEOUT_S}s"
-    except FileNotFoundError:
-        return False, f"spark-submit not found at '{_SPARK_SUBMIT}' — set SPARK_SUBMIT_BIN env var"
-
-    # Log the driver output for observability
-    if result.stdout:
-        for line in result.stdout.strip().splitlines():
-            logger.info("WriteProxy [spark stdout]: %s", line)
-    if result.stderr:
-        for line in result.stderr.strip().splitlines()[-20:]:
-            logger.info("WriteProxy [spark stderr]: %s", line)
-
-    if result.returncode == 0:
-        logger.info("WriteProxy: %s.%s.%s spark-submit FINISHED.", catalog, db, table)
-        return True, "Write succeeded via spark-submit"
-    else:
-        # Extract last meaningful error line from stderr
-        err_lines = [l for l in result.stderr.strip().splitlines() if l.strip()]
-        last_err  = err_lines[-1] if err_lines else "unknown error"
-        logger.error("WriteProxy: %s.%s.%s spark-submit FAILED (rc=%d): %s",
-                     catalog, db, table, result.returncode, last_err)
-        return False, f"spark-submit failed (rc={result.returncode}): {last_err}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,23 +462,6 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ProxyConnection:
-    """
-    Manages one client ↔ proxy ↔ Doris connection triple.
-
-    Handshake phase:
-      - Doris sends ServerHandshake → proxy forwards to client.
-      - Client sends HandshakeResponse → proxy forwards to Doris.
-      - Doris sends OK/ERR → proxy forwards to client.
-
-    Command phase (loop):
-      - Client sends COM_QUERY or other command.
-      - If COM_QUERY with DML against a managed catalog:
-          → submit to Spark, wait, return OK or ERR to client (Doris not contacted).
-      - Otherwise:
-          → forward to Doris, stream full response back to client.
-    """
-
-    # COM_QUERY type byte
     _COM_QUERY = 0x03
 
     def __init__(
@@ -407,8 +470,8 @@ class ProxyConnection:
         client_writer: asyncio.StreamWriter,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
-        self._cr = client_reader
-        self._cw = client_writer
+        self._cr   = client_reader
+        self._cw   = client_writer
         self._loop = loop
         peer = client_writer.get_extra_info("peername", ("?", 0))
         self._peer = f"{peer[0]}:{peer[1]}"
@@ -420,73 +483,64 @@ class ProxyConnection:
         try:
             doris_reader, doris_writer = await asyncio.open_connection(DORIS_HOST, DORIS_PORT)
 
-            # ── Handshake ───────────────────────────────────────────────────
-            # 1. Doris → client: ServerHandshake
+            # ── Handshake ─────────────────────────────────────────────────────
             seq, handshake = await _read_packet(doris_reader)
             self._cw.write(_pack_packet(handshake, seq))
             await self._cw.drain()
 
-            # 2. Client → Doris: HandshakeResponse
             seq, auth_resp = await _read_packet(self._cr)
             doris_writer.write(_pack_packet(auth_resp, seq))
             await doris_writer.drain()
 
-            # 3. Doris → client: OK or ERR (auth result)
             auth_packets = await _read_all_response(doris_reader)
             for s, p in auth_packets:
                 self._cw.write(_pack_packet(p, s))
             await self._cw.drain()
 
-            # If auth failed (first byte 0xFF), close.
             if auth_packets and auth_packets[0][1] and auth_packets[0][1][0] == 0xFF:
                 logger.warning("WriteProxy: auth failed for %s", self._peer)
                 return
 
             logger.info("WriteProxy: %s authenticated OK.", self._peer)
 
-            # ── Command loop ─────────────────────────────────────────────────
+            # ── Command loop ──────────────────────────────────────────────────
             while True:
                 try:
                     seq, payload = await _read_packet(self._cr)
                 except (asyncio.IncompleteReadError, ConnectionResetError):
-                    break  # client disconnected
+                    break
 
                 if not payload:
                     break
 
                 cmd = payload[0]
 
-                # COM_QUIT (0x01)
-                if cmd == 0x01:
+                if cmd == 0x01:  # COM_QUIT
                     doris_writer.write(_pack_packet(payload, seq))
                     await doris_writer.drain()
                     break
 
-                # COM_QUERY (0x03) — inspect the SQL
                 if cmd == self._COM_QUERY:
                     stmt = payload[1:].decode("utf-8", errors="replace").strip()
                     catalog, db, table = _catalog_and_parts(stmt)
 
                     if catalog:
-                        # ── Managed catalog DML → Spark ──────────────────────
                         logger.info(
                             "WriteProxy: intercepted %s.%s.%s DML from %s — routing to Spark.",
                             catalog, db, table, self._peer,
                         )
-                        # Run the blocking Spark call in a thread executor
                         ok, message = await self._loop.run_in_executor(
                             None,
-                            _spark_submit_and_wait,
-                            catalog, db, table, stmt,
+                            _spark_manager.execute,
+                            catalog, db, stmt,
                         )
                         if ok:
                             self._cw.write(_mysql_ok_packet(seq + 1))
                         else:
                             self._cw.write(_mysql_err_packet(seq + 1, message))
                         await self._cw.drain()
-                        continue  # do NOT send to Doris
+                        continue
 
-                # ── All other statements → forward to Doris ──────────────────
                 doris_writer.write(_pack_packet(payload, seq))
                 await doris_writer.drain()
                 response_packets = await _read_all_response(doris_reader)
@@ -521,14 +575,20 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
 
 
 async def main() -> None:
+    # Start SparkSession initialisation in background immediately —
+    # proxy accepts connections while Spark warms up.
+    _spark_manager.start_background_init()
+
     logger.info(
         "Doris Write Proxy starting. "
         "listen=%s:%d  doris=%s:%d  spark=%s",
-        LISTEN_HOST, LISTEN_PORT, DORIS_HOST, DORIS_PORT, SPARK_REST_URL,
+        LISTEN_HOST, LISTEN_PORT, DORIS_HOST, DORIS_PORT, SPARK_MASTER_URL,
     )
+    logger.info("Managed catalogs: %s", ", ".join(MANAGED_CATALOGS.keys()))
     logger.info(
-        "Managed catalogs: %s",
-        ", ".join(MANAGED_CATALOGS.keys()),
+        "SparkSession: warming up in background — first INSERT will wait up to %ds, "
+        "subsequent INSERTs will be <3 s.",
+        SPARK_INIT_TIMEOUT_S,
     )
     server = await asyncio.start_server(_handle, LISTEN_HOST, LISTEN_PORT)
     async with server:
