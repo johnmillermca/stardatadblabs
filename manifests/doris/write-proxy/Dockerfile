@@ -13,7 +13,11 @@
 # work.  We copy the JAR from the cluster Spark image via a multi-stage build.
 # =============================================================================
 
-# ── Stage 1: extract the Gluten JAR from the cluster Spark image ─────────────
+# ── Stage 1: extract the Gluten JAR + Temurin JDK from the cluster Spark image
+# The Spark cluster runs Temurin 17.  libvelox.so has PT_GNU_STACK RWE set;
+# JDK 21 refuses to load such a library (UnsatisfiedLinkError: cannot enable
+# executable stack), while JDK 17 (Temurin) warns and continues — matching the
+# behaviour on every Spark worker node.
 FROM 192.168.1.50:30500/spark-gluten-velox:3.5.1-5 AS spark-jars
 
 # ── Stage 2: the actual proxy image ──────────────────────────────────────────
@@ -21,12 +25,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# pyspark provides spark-submit; version must match the cluster (3.5.1)
-# Install Java (required by spark-submit) and pyspark
+# Runtime deps for pyspark spark-submit (no JRE from apt — we bring Temurin 17)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends default-jre-headless && \
+    apt-get install -y --no-install-recommends binutils && \
     pip install --no-cache-dir pyspark==3.5.1 && \
     rm -rf /var/lib/apt/lists/*
+
+# Copy Temurin 17 JDK from the Spark stage — must match the cluster JVM so
+# that libvelox.so (PT_GNU_STACK RWE) loads without UnsatisfiedLinkError.
+COPY --from=spark-jars /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Copy the Gluten JAR from the Spark stage so the driver classloader can find
 # it locally — required for --driver-class-path at SparkContext init time.
