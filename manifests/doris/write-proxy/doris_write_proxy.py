@@ -313,24 +313,26 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
         "stmt":      stmt,
     })
 
-    # JARs required by the driver (client mode — driver runs in this pod).
-    # These are fetched from the Spark master's HTTP file server at job launch.
-    # Gluten JAR must be on --driver-class-path (not just --jars) because
-    # spark.plugins loads GlutenPlugin at SparkContext init, before --jars
-    # are placed on the classpath.
+    # JARs for executors: fetched from the Spark master's HTTP file server.
+    # Gluten JAR for the DRIVER must be a local file path — the driver JVM
+    # classloader cannot load from HTTP URLs.  The JAR is baked into this image
+    # at /opt/gluten/ (copied from the Spark cluster image at Docker build time).
+    # spark.plugins loads GlutenPlugin at SparkContext init, before --jars are
+    # staged onto the classpath, so --driver-class-path must be a local path.
     _SPARK_MASTER_HTTP = os.environ.get(
         "SPARK_MASTER_HTTP", "http://spark-master-svc.prod.svc.cluster.local:8080"
     )
-    _GLUTEN_JAR = (
-        f"{_SPARK_MASTER_HTTP}/static/../jars/"
-        "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
-    )
+    _GLUTEN_JAR_NAME = "gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar"
+    # Local path baked into the image (used for --driver-class-path)
+    _GLUTEN_JAR_LOCAL = f"/opt/gluten/{_GLUTEN_JAR_NAME}"
+    # Remote URL for executor classpaths (workers already have it in /opt/spark/jars)
+    _GLUTEN_JAR_REMOTE = f"{_SPARK_MASTER_HTTP}/static/../jars/{_GLUTEN_JAR_NAME}"
     _EXTRA_JARS = ",".join([
         f"{_SPARK_MASTER_HTTP}/static/../jars/iceberg-spark-runtime-3.5_2.12-1.9.2.jar",
         f"{_SPARK_MASTER_HTTP}/static/../jars/iceberg-aws-bundle-1.9.2.jar",
         f"{_SPARK_MASTER_HTTP}/static/../jars/hadoop-aws-3.3.4.jar",
         f"{_SPARK_MASTER_HTTP}/static/../jars/aws-java-sdk-bundle-1.12.262.jar",
-        _GLUTEN_JAR,
+        _GLUTEN_JAR_REMOTE,
     ])
 
     cmd = [
@@ -339,9 +341,11 @@ def _spark_submit_and_wait(catalog: str, db: str, table: str, stmt: str) -> Tupl
         "--deploy-mode",       "client",
         "--name",              f"doris-write-proxy-{catalog}-{table}",
         "--jars",              _EXTRA_JARS,
-        # Gluten plugin must be on driver classpath at SparkContext init time
-        "--driver-class-path", _GLUTEN_JAR,
-        "--conf", f"spark.executor.extraClassPath={_GLUTEN_JAR}",
+        # Local file path — driver JVM classloader requires a file:// or bare
+        # local path; HTTP URLs are not resolvable at SparkContext init time.
+        "--driver-class-path", _GLUTEN_JAR_LOCAL,
+        # Executors already have the JAR in /opt/spark/jars on the worker image
+        "--conf", f"spark.executor.extraClassPath=/opt/spark/jars/{_GLUTEN_JAR_NAME}",
         _SPARK_WRITE_SCRIPT,
         job_args,
     ]
