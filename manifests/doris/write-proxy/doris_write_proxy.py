@@ -179,20 +179,20 @@ def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     conf.set("spark.executor.cores",  "2")
     conf.set("spark.cores.max",       "8")   # 4 executors × 2 cores maximum
 
-    # ── Dynamic allocation — release executors when idle ─────────────────────
-    # This is the KEY setting for a persistent session: executors are acquired
-    # when a SQL statement arrives and released ~idle_timeout seconds after it
-    # completes, so workers are free between INSERTs.
-    # Without this, static executors hold worker memory permanently, causing
-    # "Initial job has not accepted any resources" on the next INSERT because
-    # minRegisteredResourcesRatio cannot be met.
+    # ── Dynamic allocation ────────────────────────────────────────────────────
+    # Keep 1 executor warm at all times (minExecutors=1, initialExecutors=1)
+    # so that every INSERT after the first runs immediately without waiting for
+    # executor re-acquisition (~5-15s cold launch from the Spark workers).
+    # The warm executor holds only 3g RAM on one worker — acceptable cost for
+    # sub-second subsequent INSERTs.  Scale up to 4 executors under load, then
+    # scale back to 1 after 60s idle (not 0 — avoids the cold-start penalty).
     conf.set("spark.dynamicAllocation.enabled",                    "true")
     conf.set("spark.dynamicAllocation.shuffleTracking.enabled",    "true")  # no ext shuffle svc needed
-    conf.set("spark.dynamicAllocation.minExecutors",               "0")     # release all when idle
+    conf.set("spark.dynamicAllocation.minExecutors",               "1")     # always keep 1 warm
     conf.set("spark.dynamicAllocation.maxExecutors",               "4")     # cap at 4
-    conf.set("spark.dynamicAllocation.initialExecutors",           "0")     # don't pre-allocate
-    conf.set("spark.dynamicAllocation.executorIdleTimeout",        "30s")   # release after 30s idle
-    conf.set("spark.dynamicAllocation.cachedExecutorIdleTimeout",  "60s")   # cached data held 60s
+    conf.set("spark.dynamicAllocation.initialExecutors",           "1")     # start with 1 immediately
+    conf.set("spark.dynamicAllocation.executorIdleTimeout",        "120s")  # scale back to min after 2min idle
+    conf.set("spark.dynamicAllocation.cachedExecutorIdleTimeout",  "300s")  # hold cached data 5min
 
     # ── Gluten + Velox native execution ─────────────────────────────────────
     conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
@@ -314,6 +314,9 @@ class _SparkManager:
 
         All other DML (UPDATE, DELETE, MERGE, INSERT … SELECT) falls back to
         spark.sql(stmt) for execution inside the correct catalog.
+
+        If the SparkContext was killed by a Spark master restart, the session
+        is transparently reinitialised before the statement is retried once.
         """
         if not self._ready.wait(timeout=SPARK_INIT_TIMEOUT_S):
             return False, "SparkSession failed to initialise within timeout"
@@ -323,41 +326,79 @@ class _SparkManager:
         with self._lock:
             t0 = time.time()
             try:
-                # Route INSERT … VALUES through write_append() so snap_id /
-                # snap_timestamp are injected by Spark rather than the client.
-                if _is_insert_values(stmt):
-                    rows_written = self._write_via_append(
-                        catalog, db, table, stmt, user
-                    )
-                    elapsed = time.time() - t0
-                    logger.info(
-                        "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
-                        catalog, db, table, elapsed, rows_written,
-                    )
-                    return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
-
-                # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
-                self._spark.sql(f"USE {catalog}.{db}")
-                result = self._spark.sql(stmt)
-                rows = result.count() if result is not None else 0
-                elapsed = time.time() - t0
-                logger.info(
-                    "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
-                    catalog, db, elapsed, rows,
-                )
-                return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
-
+                return self._run_stmt(catalog, db, table, stmt, user, t0)
             except Exception as exc:
-                elapsed = time.time() - t0
                 cause = getattr(exc, "java_exception", None)
-                msg = str(cause if cause is not None else exc).split("\n")[0][:400]
+                msg   = str(cause if cause is not None else exc)
+                # Detect Spark master restart killing our app, then recover once.
+                if "Master removed our application" in msg or "SparkContext" in msg:
+                    elapsed = time.time() - t0
+                    logger.warning(
+                        "SparkContext lost (%.1fs) — reinitialising and retrying: %s",
+                        elapsed, msg.split("\n")[0][:200],
+                    )
+                    self._reinit_spark()
+                    if not self._ready.wait(timeout=SPARK_INIT_TIMEOUT_S):
+                        return False, "SparkSession recovery timed out"
+                    if self._error:
+                        return False, f"SparkSession recovery failed: {self._error}"
+                    try:
+                        return self._run_stmt(catalog, db, table, stmt, user, time.time())
+                    except Exception as exc2:
+                        cause2 = getattr(exc2, "java_exception", None)
+                        msg2   = str(cause2 if cause2 is not None else exc2).split("\n")[0][:400]
+                        logger.error("Spark DML FAILED after recovery: %s", msg2)
+                        return False, msg2
+                elapsed = time.time() - t0
                 logger.error(
                     "Spark DML FAILED: %s.%s.%s elapsed=%.2fs error=%s",
                     catalog, db, table, elapsed, msg,
                 )
-                return False, msg
+                return False, msg.split("\n")[0][:400]
 
     # ── Private helpers ─────────────────────────────────────────────────────
+
+    def _run_stmt(
+        self, catalog: str, db: str, table: str, stmt: str, user: str, t0: float
+    ) -> Tuple[bool, str]:
+        """Inner execution — called by execute() and the recovery retry."""
+        if _is_insert_values(stmt):
+            rows_written = self._write_via_append(catalog, db, table, stmt, user)
+            elapsed = time.time() - t0
+            logger.info(
+                "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
+                catalog, db, table, elapsed, rows_written,
+            )
+            return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
+
+        # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
+        self._spark.sql(f"USE {catalog}.{db}")
+        result = self._spark.sql(stmt)
+        rows = result.count() if result is not None else 0
+        elapsed = time.time() - t0
+        logger.info(
+            "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
+            catalog, db, elapsed, rows,
+        )
+        return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
+
+    def _reinit_spark(self) -> None:
+        """Stop the dead SparkSession and kick off a fresh background init."""
+        logger.info("SparkSession: stopping dead context for reinit…")
+        self._ready.clear()
+        self._error = None
+        # Flush caches — schema/builder state tied to the old SparkSession.
+        self._schema_cache.clear()
+        self._builder_cache.clear()
+        try:
+            if self._spark:
+                self._spark.stop()
+        except Exception:
+            pass
+        self._spark = None
+        t = threading.Thread(target=self._init_spark, daemon=True, name="spark-reinit")
+        t.start()
+
 
     def _write_via_append(
         self, catalog: str, db: str, table: str, stmt: str, user: str = ""
