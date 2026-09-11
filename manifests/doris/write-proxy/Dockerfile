@@ -59,6 +59,12 @@ COPY --from=spark-jars \
 COPY doris_write_proxy.py   /app/doris_write_proxy.py
 COPY spark_iceberg_write.py /app/spark_iceberg_write.py
 
+# Copy the authorised Iceberg write wrapper from the Spark cluster image.
+# IcebergTableBuilder.write_append() is the ONLY write path — it injects
+# snap_id (monotonically_increasing_id) and snap_timestamp (current_timestamp)
+# automatically so callers never need to supply those columns.
+COPY --from=spark-jars /opt/spark/work-dir/spark_iceberg_utils.py /app/spark_iceberg_utils.py
+
 EXPOSE 9040
 
 CMD ["python", "/app/doris_write_proxy.py"]

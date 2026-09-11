@@ -49,6 +49,7 @@ import logging
 import os
 import re
 import struct
+import sys
 import threading
 import time
 import urllib.request
@@ -154,6 +155,10 @@ os.environ.setdefault("PYSPARK_PYTHON", "python3")
 
 from pyspark.sql import SparkSession  # noqa: E402 — must follow PYSPARK_SUBMIT_ARGS
 from pyspark import SparkConf         # noqa: E402
+
+# IcebergTableBuilder lives in /app/spark_iceberg_utils.py (copied from Spark image)
+sys.path.insert(0, "/app")
+from spark_iceberg_utils import IcebergTableBuilder  # noqa: E402
 
 
 def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
@@ -287,11 +292,19 @@ class _SparkManager:
         t = threading.Thread(target=self._init_spark, daemon=True, name="spark-init")
         t.start()
 
-    def execute(self, catalog: str, db: str, stmt: str) -> Tuple[bool, str]:
+    def execute(self, catalog: str, db: str, table: str, stmt: str, user: str = "") -> Tuple[bool, str]:
         """
         Execute a single DML statement in the persistent SparkSession.
         Blocks until Spark is ready (at most SPARK_INIT_TIMEOUT_S seconds).
         Returns (success, message).
+
+        INSERT INTO … VALUES rows are extracted into a Spark DataFrame and
+        written via IcebergTableBuilder.write_append(), which injects
+        snap_id (monotonically_increasing_id) and snap_timestamp
+        (current_timestamp) automatically.  Callers never supply those columns.
+
+        All other DML (UPDATE, DELETE, MERGE, INSERT … SELECT) falls back to
+        spark.sql(stmt) for execution inside the correct catalog.
         """
         if not self._ready.wait(timeout=SPARK_INIT_TIMEOUT_S):
             return False, "SparkSession failed to initialise within timeout"
@@ -301,9 +314,22 @@ class _SparkManager:
         with self._lock:
             t0 = time.time()
             try:
+                # Route INSERT … VALUES through write_append() so snap_id /
+                # snap_timestamp are injected by Spark rather than the client.
+                if _is_insert_values(stmt):
+                    rows_written = self._write_via_append(
+                        catalog, db, table, stmt, user
+                    )
+                    elapsed = time.time() - t0
+                    logger.info(
+                        "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
+                        catalog, db, table, elapsed, rows_written,
+                    )
+                    return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
+
+                # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
                 self._spark.sql(f"USE {catalog}.{db}")
                 result = self._spark.sql(stmt)
-                # Materialise the result to trigger execution and get row count
                 rows = result.count() if result is not None else 0
                 elapsed = time.time() - t0
                 logger.info(
@@ -311,19 +337,70 @@ class _SparkManager:
                     catalog, db, elapsed, rows,
                 )
                 return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
+
             except Exception as exc:
                 elapsed = time.time() - t0
-                # py4j wraps Java exceptions — unwrap to get the real Spark error.
                 cause = getattr(exc, "java_exception", None)
-                if cause is not None:
-                    msg = str(cause).split("\n")[0][:400]
-                else:
-                    msg = str(exc).split("\n")[0][:400]
+                msg = str(cause if cause is not None else exc).split("\n")[0][:400]
                 logger.error(
-                    "Spark SQL FAILED: %s.%s elapsed=%.2fs error=%s",
-                    catalog, db, elapsed, msg,
+                    "Spark DML FAILED: %s.%s.%s elapsed=%.2fs error=%s",
+                    catalog, db, table, elapsed, msg,
                 )
                 return False, msg
+
+    # ── Private helpers ─────────────────────────────────────────────────────
+
+    def _write_via_append(
+        self, catalog: str, db: str, table: str, stmt: str, user: str = ""
+    ) -> int:
+        """
+        Parse INSERT INTO … VALUES (…), (…) into a Spark DataFrame and
+        write it via IcebergTableBuilder.write_append().
+
+        The table schema (without snap columns) is read from Iceberg metadata
+        so that column types are matched exactly. snap_id and snap_timestamp
+        are injected by write_append() and must NOT be present in the values.
+
+        user — the authenticated Doris MySQL username, passed as running_user
+               to IcebergTableBuilder so the RBAC gate sees the real identity.
+        """
+        spark = self._spark
+
+        # 1. Discover the table schema from Iceberg — exclude snap columns.
+        #    Build a name→field map for case-insensitive lookup.
+        fqn = f"`{catalog}`.`{db}`.`{table}`"
+        raw_schema = spark.table(fqn).schema
+        schema_map = {f.name.lower(): f for f in raw_schema.fields}
+
+        # 2. Determine which columns are being supplied by the INSERT.
+        #    If the statement has an explicit column list, use it.
+        #    Otherwise fall back to all business columns in schema order.
+        explicit_cols = _extract_column_list(stmt)
+        if explicit_cols:
+            # Use the columns named in the INSERT, in the order given.
+            col_fields = [schema_map[c.lower()] for c in explicit_cols
+                          if c.lower() not in ("snap_id", "snap_timestamp")]
+        else:
+            col_fields = [f for f in raw_schema.fields
+                          if f.name.lower() not in ("snap_id", "snap_timestamp")]
+
+        from pyspark.sql.types import StructType
+        insert_schema = StructType(col_fields)
+
+        # 3. Extract VALUES rows from the SQL text.
+        values_text = _extract_values_text(stmt)
+        rows = _parse_values_rows(values_text)
+
+        # 4. Build a DataFrame with only the supplied columns.
+        #    Columns absent from the INSERT stay NULL in Iceberg (nullable).
+        #    snap_id and snap_timestamp are injected by write_append().
+        df = spark.createDataFrame(rows, schema=insert_schema)
+
+        # 4. Write via the platform's authorised path — snap columns injected here.
+        #    Pass the Doris connection user as running_user so the platform RBAC
+        #    gate sees the actual identity, not a hardcoded service account.
+        builder = IcebergTableBuilder(spark, running_user=user or None)
+        return builder.write_append(df, catalog, db, table)
 
     @property
     def is_ready(self) -> bool:
@@ -366,6 +443,145 @@ class _SparkManager:
 
 # Module-level singleton — initialised at startup
 _spark_manager = _SparkManager()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INSERT VALUES parser helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Matches the VALUES keyword and everything after it
+_VALUES_RE = re.compile(r"\bVALUES\s*(.+)$", re.IGNORECASE | re.DOTALL)
+
+# Matches optional column list between table ref and VALUES:
+#   INSERT INTO tbl (col1, col2, …) VALUES …
+_COL_LIST_RE = re.compile(
+    r"^\s*INSERT\s+(?:INTO|OVERWRITE)\s+"
+    r"[\w`.]+(?:\.[\w`.]+)*"   # table ref (possibly 3-part)
+    r"\s*\(([^)]+)\)"          # (col1, col2, …)
+    r"\s*VALUES\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_column_list(stmt: str) -> list[str] | None:
+    """
+    Return the explicit column name list from INSERT INTO tbl (col, …) VALUES …
+    Returns None if no column list is present (meaning positional / all columns).
+    """
+    m = _COL_LIST_RE.match(stmt)
+    if not m:
+        return None
+    return [c.strip().strip("`") for c in m.group(1).split(",")]
+
+
+def _is_insert_values(stmt: str) -> bool:
+    """Return True if the statement is INSERT … VALUES (not INSERT … SELECT)."""
+    upper = stmt.upper()
+    return (
+        re.match(r"\s*INSERT\b", upper) is not None
+        and "VALUES" in upper
+        and not re.search(r"\bSELECT\b", upper)
+    )
+
+
+def _extract_values_text(stmt: str) -> str:
+    """Return the raw text after the VALUES keyword."""
+    m = _VALUES_RE.search(stmt)
+    if not m:
+        raise ValueError(f"No VALUES clause found in statement: {stmt[:120]}")
+    return m.group(1).strip().rstrip(";")
+
+
+def _parse_values_rows(values_text: str) -> list[tuple]:
+    """
+    Parse a VALUES clause into a list of Python tuples.
+
+    Handles:
+      (1, 'hello', NULL, 3.14), (2, 'world', NULL, 2.71)
+
+    Limitations (sufficient for business INSERT usage):
+      - String literals may contain escaped single quotes (\\') but not
+        unescaped parentheses.
+      - NULL becomes Python None.
+      - Numeric literals are parsed as int or float.
+    """
+    rows: list[tuple] = []
+    # Split on top-level commas between row groups: (…), (…)
+    # We iterate character-by-character to handle nested parens if ever needed.
+    depth = 0
+    current: list[str] = []
+    buf = ""
+    in_str = False
+    escape = False
+
+    for ch in values_text:
+        if escape:
+            buf += ch
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            buf += ch
+            escape = True
+            continue
+        if ch == "'" and not in_str:
+            in_str = True
+            buf += ch
+            continue
+        if ch == "'" and in_str:
+            in_str = False
+            buf += ch
+            continue
+        if in_str:
+            buf += ch
+            continue
+        if ch == "(" and depth == 0:
+            depth = 1
+            buf = ""
+            continue
+        if ch == "(":
+            depth += 1
+            buf += ch
+            continue
+        if ch == ")" and depth == 1:
+            depth = 0
+            current.append(buf.strip())
+            buf = ""
+            rows.append(tuple(_parse_value(v.strip()) for v in current))
+            current = []
+            continue
+        if ch == ")" and depth > 1:
+            depth -= 1
+            buf += ch
+            continue
+        if ch == "," and depth == 0:
+            # separator between row groups — nothing to do
+            continue
+        if ch == "," and depth == 1:
+            current.append(buf.strip())
+            buf = ""
+            continue
+        buf += ch
+
+    return rows
+
+
+def _parse_value(token: str):
+    """Convert a SQL token string to a Python scalar."""
+    if token.upper() == "NULL":
+        return None
+    # Unquote string literals
+    if token.startswith("'") and token.endswith("'"):
+        return token[1:-1].replace("\\'", "'").replace("''", "'")
+    # Try int then float
+    try:
+        return int(token)
+    except ValueError:
+        pass
+    try:
+        return float(token)
+    except ValueError:
+        pass
+    return token
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -434,6 +650,31 @@ async def _read_all_response(reader: asyncio.StreamReader) -> list[Tuple[int, by
     return packets
 
 
+def _parse_handshake_username(auth_resp: bytes) -> str:
+    """
+    Extract the username from a MySQL HandshakeResponse41 packet payload
+    (i.e. the raw bytes after the 4-byte packet header is stripped).
+
+    HandshakeResponse41 layout:
+      4 bytes  capability flags
+      4 bytes  max packet size
+      1 byte   character set
+      23 bytes reserved (zeros)
+      n bytes  username (null-terminated)
+      ...      auth response, db name, etc.
+
+    Returns an empty string on any parse failure.
+    """
+    try:
+        offset = 4 + 4 + 1 + 23   # skip capability(4) + max_pkt(4) + charset(1) + reserved(23)
+        if len(auth_resp) <= offset:
+            return ""
+        end = auth_resp.index(b"\x00", offset)
+        return auth_resp[offset:end].decode("utf-8", errors="replace")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SQL inspection
 # ─────────────────────────────────────────────────────────────────────────────
@@ -492,6 +733,7 @@ class ProxyConnection:
         self._loop = loop
         peer = client_writer.get_extra_info("peername", ("?", 0))
         self._peer = f"{peer[0]}:{peer[1]}"
+        self._user = ""   # filled from HandshakeResponse41 during auth
 
     async def run(self) -> None:
         logger.info("WriteProxy: client connected from %s", self._peer)
@@ -506,6 +748,7 @@ class ProxyConnection:
             await self._cw.drain()
 
             seq, auth_resp = await _read_packet(self._cr)
+            self._user = _parse_handshake_username(auth_resp)
             doris_writer.write(_pack_packet(auth_resp, seq))
             await doris_writer.drain()
 
@@ -518,7 +761,7 @@ class ProxyConnection:
                 logger.warning("WriteProxy: auth failed for %s", self._peer)
                 return
 
-            logger.info("WriteProxy: %s authenticated OK.", self._peer)
+            logger.info("WriteProxy: %s authenticated as '%s'.", self._peer, self._user)
 
             # ── Command loop ──────────────────────────────────────────────────
             while True:
@@ -547,10 +790,10 @@ class ProxyConnection:
                             catalog, db, table, self._peer,
                         )
                         ok, message = await self._loop.run_in_executor(
-                            None,
-                            _spark_manager.execute,
-                            catalog, db, stmt,
-                        )
+                                None,
+                                _spark_manager.execute,
+                                catalog, db, table, stmt, self._user,
+                            )
                         if ok:
                             self._cw.write(_mysql_ok_packet(seq + 1))
                         else:
