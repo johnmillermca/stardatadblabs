@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-10 (v1.4.0 — cache metrics phase added) |
+| **Last Updated** | 2026-09-11 (v1.5.0 — write pushdown: random INSERT VALUES, performance tuning section) |
 | **Related** | RB-25 (Cache Manager Setup & Operations) · RB-05 (Doris & Analytics) |
 
 ---
@@ -25,7 +25,7 @@ The test covers seven phases in order:
 | **P-2** | T-08 – T-10 | Daemon health — pod, logs, liveness probe |
 | **P-3** | T-11 – T-16 | Audit log seeding — queries reach the daemon and stats are persisted |
 | **P-4** | T-17 – T-21 | Warm-up scheduling — automatic and manual WARM_UP jobs |
-| **P-5** | T-22 – T-25 | LRU eviction — COLD_DOWN and eviction log |
+| **P-5** | T-22 – T-25 | LRU eviction — COLD_DOWN and eviction log (+ T-22a env-var check) |
 | **P-6** | T-26 – T-33 | Write pushdown — DML interception and Spark execution |
 | **P-7** | T-34 – T-38 | Cache metrics — `table_cache_metrics` I/O tracking and hit-rate validation |
 
@@ -59,17 +59,18 @@ The test covers seven phases in order:
 | T-20 | P-4 | Warm-up | Daemon triggers automatic warm-up on second cycle |
 | T-21 | P-4 | Warm-up | `last_warmed_ts` is updated in metadata |
 | T-22 | P-5 | Eviction | Manual `COLD_DOWN` executes without error |
+| T-22a | P-5 | Eviction | Verify current `LRU_EVICT_HOURS` value before patching |
 | T-23 | P-5 | Eviction | `cache_state` returns to `COLD` after eviction |
 | T-24 | P-5 | Eviction | `cache_eviction_log` records the eviction event |
 | T-25 | P-5 | Eviction | Daemon LRU check does not re-evict an already-COLD table |
 | T-26 | P-6 | Write | Write proxy pod is running and listening |
-| T-27 | P-6 | Write | DML via proxy succeeds without error (Spark executes) |
-| T-28 | P-6 | Write | Proxy logs show interception and Spark submission |
-| T-29 | P-6 | Write | Spark REST confirms job FINISHED |
-| T-30 | P-6 | Write | Local Doris DML passes through proxy unchanged |
-| T-31 | P-6 | Write | SELECT via proxy works unchanged |
-| T-32 | P-6 | Write | Manual Spark REST submission executes successfully |
-| T-33 | P-6 | Write | Proxy does not intercept unknown catalog DML |
+| T-27 | P-6 | Write | 3 random INSERT VALUES batches succeed; timing improves batch-over-batch |
+| T-28 | P-6 | Write | Proxy logs show interception, Gluten active, resource release after each batch |
+| T-29 | P-6 | Write | Spark master UI shows all batches FINISHED; duration trending down |
+| T-30 | P-6 | Write | Local Doris DML passes through proxy unchanged (fast, no Spark) |
+| T-31 | P-6 | Write | SELECT via proxy passes through to Doris, not intercepted |
+| T-32 | P-6 | Write | Unknown catalog DML forwarded to Doris, not Spark |
+| T-33 | P-6 | Write | (Optional) 20-row benchmark INSERT with timing targets |
 | T-34 | P-7 | Metrics | `table_cache_metrics` table exists and has rows after one cycle |
 | T-35 | P-7 | Metrics | `SELECT * LIMIT 1000` is captured and shows local vs remote bytes |
 | T-36 | P-7 | Metrics | Second run of same query shows 100% `cache_hit_pct` |
@@ -1052,23 +1053,96 @@ WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 
 ---
 
+### T-22a — Check the current `LRU_EVICT_HOURS` value
+
+Before patching the eviction threshold, confirm what the daemon is currently using.
+There are three complementary checks:
+
+**1 — Live value from the running pod** (what the daemon process sees right now):
+
+```bash
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=doris-cache-manager -o jsonpath='{.items[0].metadata.name}') \
+  -- printenv LRU_EVICT_HOURS
+```
+
+Expected: `24`
+
+**2 — All tuning env vars at once** (convenient sanity check before any test patching):
+
+```bash
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=doris-cache-manager -o jsonpath='{.items[0].metadata.name}') \
+  -- printenv | grep -E 'LRU_EVICT|SCAN_INTERVAL|MAX_CONCURRENT|WARMUP_STALE'
+```
+
+Expected:
+```
+LRU_EVICT_HOURS=24
+SCAN_INTERVAL_S=300
+MAX_CONCURRENT=32
+WARMUP_STALE_MIN=5
+```
+
+**3 — Deployment spec** (what the next pod will use — source of truth after a `kubectl set env`):
+
+```bash
+kubectl get deployment doris-cache-manager -n prod \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LRU_EVICT_HOURS")].value}'
+```
+
+> **Note:** The deployment manifest [`manifests/doris/cache_manager/doris-cache-manager-deployment.yaml`](../../../manifests/doris/cache_manager/doris-cache-manager-deployment.yaml)
+> sets `LRU_EVICT_HOURS=24` as the baseline.  `kubectl set env` patches the live
+> Deployment object only — a git push / ArgoCD sync will restore the manifest value.
+> Always verify with method 1 (live pod `printenv`) after a rollout to confirm the new
+> pod picked up the patched value.
+
+✅ Pass: all three methods agree on the same value.
+❌ Fail: live pod shows old value after rollout → rollout did not complete; check
+`kubectl rollout status deployment/doris-cache-manager -n prod`.
+
+---
+
 ### T-23 — `cache_state` is recorded as `COLD` by daemon LRU eviction
 
 The daemon's `LRUEvictionChecker` marks tables `COLD` and writes a row to
 `cache_eviction_log` when `last_select_ts` is older than `LRU_EVICT_HOURS` (default 24h).
 It does **not** issue any SQL command to the BE — it only updates metadata.
 
-To trigger this path without waiting 24 hours, lower `LRU_EVICT_HOURS` to 0 and restart:
+To trigger this path without waiting 24 hours, lower `LRU_EVICT_HOURS` to 0 and restart.
+
+> **⚠ Effect of `LRU_EVICT_HOURS=0`:** The eviction condition is
+> `hours_idle >= LRU_EVICT_HOURS`.  With `0`, this is true for **every table that
+> has ever been queried** — all `WARM`, `WARMING`, and `UNKNOWN` tables are evicted
+> on the very next cycle.  Use only for testing; restore to `24` immediately after.
+
+**Step 1 — Record the current value (T-22a) then patch:**
 
 ```bash
+# Confirm current value before patching
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=doris-cache-manager -o jsonpath='{.items[0].metadata.name}') \
+  -- printenv LRU_EVICT_HOURS
+# Expected: 24
+
 # Lower eviction threshold to 0 (evict all tables immediately)
 # NOTE: ArgoCD will overwrite kubectl set env — edit the deployment YAML in git instead,
 # or use a temporary patch that ArgoCD will reconcile away on next sync.
 kubectl set env deployment/doris-cache-manager -n prod LRU_EVICT_HOURS=0
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
-sleep 15  # allow one cycle to complete
 
-# Check the state
+# Confirm the new pod has picked up the patched value
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=doris-cache-manager -o jsonpath='{.items[0].metadata.name}') \
+  -- printenv LRU_EVICT_HOURS
+# Expected: 0
+```
+
+**Step 2 — Wait for a cycle and check state:**
+
+```bash
+sleep 15  # allow one cycle to complete (SCAN_INTERVAL_S=300; daemon runs one cycle on startup)
+
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
 SELECT cache_state
 FROM cache_system.table_query_stats
@@ -1077,11 +1151,17 @@ WHERE catalog_name = 'polaris' AND table_name = 'store_sales';"
 
 **Expected:** `cache_state = COLD`.
 
-Restore immediately after the test (ArgoCD will also restore on next sync):
+**Step 3 — Restore immediately after the test:**
 
 ```bash
 kubectl set env deployment/doris-cache-manager -n prod LRU_EVICT_HOURS=24
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+
+# Confirm restored
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=doris-cache-manager -o jsonpath='{.items[0].metadata.name}') \
+  -- printenv LRU_EVICT_HOURS
+# Expected: 24
 ```
 
 ✅ Pass: `cache_state = COLD` after the cycle.
@@ -1137,196 +1217,345 @@ WHERE catalog_name = 'polaris'
 
 ## Phase 6 — Write Pushdown (via `doris-write-proxy`)
 
-Write pushdown uses the `doris-write-proxy` — a transparent MySQL protocol proxy.
-**Connect clients to port `30091` (not `30090`) for write operations.**
+Write pushdown uses the `doris-write-proxy` — a transparent MySQL protocol proxy that intercepts
+DML against managed Iceberg catalogs (`polaris`, `databricks`, `postgres`, `oracle`, `mongodb`)
+and routes them to Spark. All other SQL passes through to Doris unchanged.
 
-> **Setup:** Verify the proxy pod is running and the Spark REST endpoint is reachable.
+**Connect clients to port `30091` (not `30090`) for write operations.**
+**Use the `admin` user** (not `root`) — write-proxy authenticates against Doris with the admin account.
+
+> **Setup check before any INSERT test:**
 > ```bash
+> DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+>   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+>
+> # Proxy pod running?
 > kubectl get pod -n prod -l app=doris-write-proxy
-> kubectl logs -n prod deployment/doris-write-proxy --tail=5
+>
+> # Spark cluster free? (should show no active apps)
+> kubectl exec -n prod spark-master-6d7455fd7c-g6tkk -c spark-master -- \
+>   curl -s http://localhost:8080/json/ | python3 -c \
+>   "import json,sys; d=json.load(sys.stdin); print('Active jobs:', len(d.get('activeapps',[])))"
 > ```
+
+> **Performance note — cold vs warm start:**
+> The first INSERT after a cluster restart takes **60–120 s** (Spark driver JVM init + Gluten/Velox
+> native library load + executor launch on up to 4 workers). Subsequent INSERTs on a warm cluster
+> complete in **15–40 s**. This is expected and matches direct `spark-submit` behaviour.
+> See §"Performance Tuning" below for the full explanation.
 
 ---
 
 ### T-26 — Write proxy is running and listening
 
 ```bash
-# Pod is Running
-kubectl get pod -n prod -l app=doris-write-proxy
+# Pod is Running with image 1.0.14+
+kubectl get pod -n prod -l app=doris-write-proxy -o wide
 
-# Proxy logs show startup banner
+# Proxy startup banner lists all 5 managed catalogs
 kubectl logs -n prod deployment/doris-write-proxy | grep "Managed catalogs"
+
+# Verify glibc + JVM version (must be Ubuntu 22.04 / glibc 2.35 + Temurin 17)
+kubectl exec -n prod deployment/doris-write-proxy -- \
+  sh -c "ldd --version 2>&1 | head -1; java -version 2>&1"
 ```
 
 **Expected:**
 ```
 Managed catalogs: polaris, databricks, postgres, oracle, mongodb
+ldd (Ubuntu GLIBC 2.35-...) 2.35
+openjdk version "17.0.10" ... Temurin-17.0.10+7
 ```
 
-✅ Pass: pod is `Running` and startup log shows all 5 catalogs.
-❌ Fail: `CrashLoopBackOff` → check `kubectl logs -n prod deployment/doris-write-proxy`.
+✅ Pass: pod `Running`, startup log shows all 5 catalogs, glibc 2.35, Temurin 17.
+❌ Fail: `CrashLoopBackOff` → check `kubectl logs -n prod deployment/doris-write-proxy --tail=50`.
 
 ---
 
-### T-27 — DML via proxy succeeds without error (write intercepted, Spark executes)
+### T-27 — Random INSERT VALUES (warm-up the write path, confirm Spark executes)
 
-Connect to the **write proxy port** (`30091`), not the standard Doris port:
+These are self-contained `INSERT INTO … VALUES` statements — no SELECT, no source table dependency.
+Use the **`admin` user** on port **`30091`** and allow up to **600 s** for the first cold-start.
+
+**Run 3 batches.** The first is the cold-start baseline; each subsequent batch should be faster.
 
 ```bash
 DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
 
-# Connect via write proxy on port 30091
-mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
-  -e "INSERT INTO polaris.tpcds_sf10tcl.inventory
-      SELECT ss_sold_date_sk, ss_item_sk, ss_customer_sk, 0, 0, 0
-      FROM polaris.tpcds_sf10tcl.inventory
-      WHERE 1=0;"
+# ── Batch 1 — single row insert (cold start, ~60-120 s first time) ────────────
+time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  --connect-timeout=600 \
+  -e "SET net_read_timeout=600; SET net_write_timeout=600;
+INSERT INTO polaris.tpcds_sf10tcl.inventory
+  (inv_date_sk, inv_item_sk, inv_warehouse_sk, inv_quantity_on_hand, snap_id, snap_timestamp)
+VALUES
+  (2450820, 1001, 5, 42, 9001, '2026-09-11 00:00:00');"
+echo "Batch 1 exit: $?"
 ```
 
-**Expected:** command exits with code `0` — **no error message**.
-The proxy intercepts the DML, submits to Spark, waits for completion, and returns MySQL OK.
+```bash
+# ── Batch 2 — 5 rows (warm cluster, should be <60 s) ─────────────────────────
+time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  --connect-timeout=600 \
+  -e "SET net_read_timeout=600; SET net_write_timeout=600;
+INSERT INTO polaris.tpcds_sf10tcl.inventory
+  (inv_date_sk, inv_item_sk, inv_warehouse_sk, inv_quantity_on_hand, snap_id, snap_timestamp)
+VALUES
+  (2450820, 1002, 5,  18, 9002, '2026-09-11 01:00:00'),
+  (2450820, 1003, 2,  75, 9003, '2026-09-11 02:00:00'),
+  (2450820, 1004, 7, 130, 9004, '2026-09-11 03:00:00'),
+  (2450820, 1005, 1,   5, 9005, '2026-09-11 04:00:00'),
+  (2450820, 1006, 3,  60, 9006, '2026-09-11 05:00:00');"
+echo "Batch 2 exit: $?"
+```
 
-✅ Pass: `echo $?` returns `0`, no error output.
-❌ Fail: MySQL error returned → check proxy logs (`T-28`) for Spark submission errors.
+```bash
+# ── Batch 3 — 10 rows across 3 dates (warm cluster, should be <40 s) ─────────
+time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  --connect-timeout=600 \
+  -e "SET net_read_timeout=600; SET net_write_timeout=600;
+INSERT INTO polaris.tpcds_sf10tcl.inventory
+  (inv_date_sk, inv_item_sk, inv_warehouse_sk, inv_quantity_on_hand, snap_id, snap_timestamp)
+VALUES
+  (2450821, 2001, 4,  90, 9011, '2026-09-12 08:00:00'),
+  (2450821, 2002, 6,  25, 9012, '2026-09-12 09:00:00'),
+  (2450821, 2003, 1, 200, 9013, '2026-09-12 10:00:00'),
+  (2450821, 2004, 8,  15, 9014, '2026-09-12 11:00:00'),
+  (2450821, 2005, 2,  88, 9015, '2026-09-12 12:00:00'),
+  (2450822, 3001, 3,  33, 9016, '2026-09-13 06:00:00'),
+  (2450822, 3002, 5,  47, 9017, '2026-09-13 07:00:00'),
+  (2450822, 3003, 7,  61, 9018, '2026-09-13 08:00:00'),
+  (2450822, 3004, 9,  12, 9019, '2026-09-13 09:00:00'),
+  (2450822, 3005, 1,  99, 9020, '2026-09-13 10:00:00');"
+echo "Batch 3 exit: $?"
+```
+
+**Expected for each batch:** `exit: 0`, no MySQL error output.
+**Expected timing:** Batch 1 ≤ 120 s (cold), Batch 2 ≤ 60 s, Batch 3 ≤ 40 s.
+
+✅ Pass: all batches exit 0 and timing improves batch-over-batch.
+❌ Fail: `spark-submit failed (rc=1)` → check T-28 logs immediately.
+❌ Fail: `ERROR 2000 (HY000): Lost connection` → proxy timeout; check `SPARK_JOB_TIMEOUT_S` is `600`.
 
 ---
 
-### T-28 — Proxy logs show interception and Spark submission
+### T-28 — Proxy logs confirm interception, execution, and resource release
+
+After each batch above, immediately check:
 
 ```bash
-kubectl logs -n prod deployment/doris-write-proxy --tail=50 \
-  | grep -E "intercepted|submissionId|FINISHED|FAILED"
+kubectl logs -n prod deployment/doris-write-proxy --tail=30
 ```
 
-**Expected:**
+**Expected pattern (per batch):**
 ```
-WriteProxy: intercepted polaris.tpcds_sf10tcl.inventory DML from <ip>:<port> — routing to Spark.
-WriteProxy: polaris.tpcds_sf10tcl.inventory → Spark submissionId=driver-<timestamp>-<hash>
-WriteProxy: polaris.tpcds_sf10tcl.inventory FINISHED.
+WriteProxy: intercepted polaris.tpcds_sf10tcl.inventory DML from <ip> — routing to Spark.
+WriteProxy: spark-submit polaris.tpcds_sf10tcl.inventory
+WriteProxy [spark stdout]: Write-pushdown job: catalog=polaris ...
+WriteProxy [spark stdout]: Credentials loaded from OpenBao.
+WriteProxy [spark stderr]: Successfully loaded library libgluten.so
+WriteProxy [spark stderr]: Successfully loaded library libvelox.so       ← Gluten active
+WriteProxy [spark stdout]: Write-pushdown SUCCESS: ... affected_rows=...
+WriteProxy: polaris.tpcds_sf10tcl.inventory spark-submit FINISHED.
 ```
 
-Note the `submissionId` for T-29.
+Confirm Spark releases resources after each job:
+```bash
+# Run immediately after the batch completes — should show 0 active apps
+kubectl exec -n prod spark-master-6d7455fd7c-g6tkk -c spark-master -- \
+  curl -s http://localhost:8080/json/ | \
+  python3 -c "import json,sys; d=json.load(sys.stdin); \
+    apps=d.get('activeapps',[]); \
+    print('Active:', len(apps), '— OK' if len(apps)==0 else '— WARN: resources still held')"
+```
 
-✅ Pass: all three log lines present.
-❌ Fail: `Spark submission failed` → check T-07 (Spark REST reachable). `Timed out` → Spark job ran but didn't finish within 300s — check Spark worker logs.
+✅ Pass: `FINISHED` log line present, Gluten/Velox libraries loaded, `Active: 0` after completion.
+❌ Fail: `libvelox.so: cannot enable executable stack` → image is not `1.0.14+` (Ubuntu 22.04 base required).
+❌ Fail: `ClassNotFoundException: org.apache.iceberg.spark.SparkCatalog` → driver JARs not baked in; rebuild image.
+❌ Fail: `Active: 1` persists → executor cleanup TTL (60 s); wait and re-check. If persistent, check `spark.stop()` called in script.
 
 ---
 
-### T-29 — Spark REST confirms job FINISHED
+### T-29 — Confirm Spark app is FINISHED in master UI
 
 ```bash
-SUBMISSION_ID="driver-<from T-28>"   # replace with actual value
-
-curl -s http://192.168.1.50:6066/v1/submissions/status/${SUBMISSION_ID} \
-  | jq '{state: .driverState, success: .success}'
+# List last 3 completed apps (should all be FINISHED, not FAILED)
+kubectl exec -n prod spark-master-6d7455fd7c-g6tkk -c spark-master -- \
+  curl -s http://localhost:8080/json/ | \
+  python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+comp = d.get('completedapps', [])
+print(f'Last {min(3,len(comp))} completed apps:')
+for a in comp[-3:]:
+    dur = a['duration'] / 1000
+    print(f'  {a[\"id\"]}  state={a[\"state\"]}  dur={dur:.0f}s  name={a[\"name\"]}')
+"
 ```
 
-**Expected:**
-```json
-{ "state": "FINISHED", "success": true }
-```
+**Expected:** all 3 batches appear as `state=FINISHED`. Duration should decrease across batches:
+- Batch 1: 60–120 s (cold start)
+- Batch 2: 20–60 s
+- Batch 3: 15–40 s
 
-✅ Pass: `FINISHED` and `success = true`.
-❌ Fail: `FAILED` → check Spark worker logs:
-```bash
-kubectl logs -n prod -l app=spark-worker | tail -100
-```
+✅ Pass: all `FINISHED`, duration trending down.
+❌ Fail: any `FAILED` → get full error: `kubectl logs -n prod deployment/doris-write-proxy --tail=100 | grep -v "at java\|at org\|at py4j"`.
 
 ---
 
 ### T-30 — Local Doris DML still works via proxy (not intercepted)
 
 ```bash
-# Local internal table write — should pass through to Doris and succeed normally
-mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
+# Local internal table write — must pass through to Doris, not Spark
+mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
   -e "CREATE TABLE IF NOT EXISTS internal.test_proxy_passthrough
-      (id INT) ENGINE=OLAP DISTRIBUTED BY HASH(id) BUCKETS 1
-      PROPERTIES ('replication_num'='1');
-      INSERT INTO internal.test_proxy_passthrough VALUES (1);"
+        (id INT) ENGINE=OLAP DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES ('replication_num'='1');
+      INSERT INTO internal.test_proxy_passthrough VALUES (42);"
 ```
 
-**Expected:** executes successfully — Doris handles it natively, proxy passes through.
+**Expected:** executes immediately (< 1 s) — Doris handles it natively, proxy passes through without touching Spark.
 
-✅ Pass: no error returned, Doris executes the INSERT.
-❌ Fail: local DML returns error → proxy is incorrectly intercepting non-catalog statements.
+✅ Pass: no error, fast response.
+❌ Fail: error or slow → proxy is incorrectly intercepting non-catalog statements; check `_catalog_and_parts()` regex.
 
 ---
 
-### T-31 — SELECT via proxy works unchanged
+### T-31 — SELECT via proxy passes through to Doris unchanged
 
 ```bash
-mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
-  -e "SELECT COUNT(*) FROM polaris.tpcds_sf10tcl.inventory;"
+# SELECT must never be intercepted — proxy only routes DML
+mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  -e "SELECT COUNT(*) AS cnt FROM polaris.tpcds_sf10tcl.inventory;"
 ```
 
-**Expected:** returns a row count — proxy forwards SELECT to Doris unchanged.
+**Expected:** returns a numeric count immediately — Doris answers from segment cache, no Spark involved.
 
-✅ Pass: numeric result returned.
-❌ Fail: error or no result → proxy is incorrectly intercepting SELECTs.
+✅ Pass: numeric result, fast response (< 5 s).
+❌ Fail: error or hang → proxy is intercepting SELECTs; verify `_DML_RE` regex does not match `SELECT`.
 
 ---
 
-### T-32 — Manual Spark REST submission executes successfully
-
-This test bypasses the proxy entirely and submits a write job directly to Spark,
-validating the full `spark_iceberg_write.py` path end-to-end.
+### T-32 — Proxy does not intercept unknown catalog DML
 
 ```bash
-JOB_ARGS=$(python3 -c "import json; print(json.dumps({
-  'catalog':'polaris', 'warehouse':'IcebergCatalog',
-  'db':'tpcds_sf10tcl', 'table':'store_sales',
-  'stmt':'SELECT 1'
-}))")
-
-curl -s -X POST http://192.168.1.50:6066/v1/submissions/create \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"action\": \"CreateSubmissionRequest\",
-    \"appResource\": \"/app/spark_iceberg_write.py\",
-    \"mainClass\": \"\",
-    \"appArgs\": [\"${JOB_ARGS}\"],
-    \"sparkProperties\": {
-      \"spark.app.name\": \"rb26-manual-write-test\",
-      \"spark.master\": \"spark://spark-master-internal.prod.svc.cluster.local:17077\",
-      \"spark.submit.deployMode\": \"cluster\"
-    },
-    \"environmentVariables\": {
-      \"ADDR\": \"http://openbao.prod.svc.cluster.local:8200\"
-    },
-    \"clientSparkVersion\": \"3.5.1\"
-  }" | jq '{submissionId: .submissionId, success: .success}'
+# DML against a non-managed catalog — proxy must forward to Doris as-is
+mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  -e "INSERT INTO unknown_catalog.db.tbl VALUES (1);" 2>&1 | head -3
 ```
 
-Poll for status:
+**Expected:** Doris error about unknown catalog (fast, < 2 s, no Spark involved).
 
-```bash
-MANUAL_ID="<submissionId from above>"
-sleep 15
-curl -s http://192.168.1.50:6066/v1/submissions/status/${MANUAL_ID} \
-  | jq '{state: .driverState, success: .success}'
-```
-
-**Expected:** `state = FINISHED`, `success = true`.
-
-✅ Pass: job finishes successfully.
-❌ Fail: `FAILED` → check Spark worker logs for errors in `spark_iceberg_write.py`. Most common: OpenBao unreachable from Spark worker, or Polaris OAuth2 token expired.
+✅ Pass: error originates from Doris (e.g. `Unknown catalog` or `Catalog not found`).
+❌ Fail: Spark submission attempted → `MANAGED_CATALOGS` check in proxy is broken.
 
 ---
 
-### T-33 — Write proxy correctly rejects bad catalog
+### T-33 — (Optional) Additional random INSERT batches for performance benchmarking
+
+Run these to build a timing baseline. Record the `real` time from `time` for each:
 
 ```bash
-# DML against a non-managed catalog — proxy must NOT intercept,
-# must forward to Doris and let Doris return its normal response.
-mysql -h 192.168.1.50 -P 30091 -u root -p"${DORIS_PASS}" \
-  -e "INSERT INTO unknown_catalog.db.table VALUES (1);" 2>&1 | head -3
+# ── 20-row insert across 5 warehouses ─────────────────────────────────────────
+time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+  --connect-timeout=600 \
+  -e "SET net_read_timeout=600; SET net_write_timeout=600;
+INSERT INTO polaris.tpcds_sf10tcl.inventory
+  (inv_date_sk, inv_item_sk, inv_warehouse_sk, inv_quantity_on_hand, snap_id, snap_timestamp)
+VALUES
+  (2450823, 4001, 1,  55, 9101, '2026-09-14 00:00:00'),
+  (2450823, 4002, 2,  77, 9102, '2026-09-14 01:00:00'),
+  (2450823, 4003, 3,  33, 9103, '2026-09-14 02:00:00'),
+  (2450823, 4004, 4,  99, 9104, '2026-09-14 03:00:00'),
+  (2450823, 4005, 5,  11, 9105, '2026-09-14 04:00:00'),
+  (2450823, 4006, 6,  44, 9106, '2026-09-14 05:00:00'),
+  (2450823, 4007, 7,  88, 9107, '2026-09-14 06:00:00'),
+  (2450823, 4008, 8,  22, 9108, '2026-09-14 07:00:00'),
+  (2450823, 4009, 9,  66, 9109, '2026-09-14 08:00:00'),
+  (2450823, 4010, 10, 10, 9110, '2026-09-14 09:00:00'),
+  (2450824, 5001, 1,  50, 9111, '2026-09-15 00:00:00'),
+  (2450824, 5002, 2,  70, 9112, '2026-09-15 01:00:00'),
+  (2450824, 5003, 3,  30, 9113, '2026-09-15 02:00:00'),
+  (2450824, 5004, 4,  90, 9114, '2026-09-15 03:00:00'),
+  (2450824, 5005, 5,  15, 9115, '2026-09-15 04:00:00'),
+  (2450824, 5006, 6,  45, 9116, '2026-09-15 05:00:00'),
+  (2450824, 5007, 7,  80, 9117, '2026-09-15 06:00:00'),
+  (2450824, 5008, 8,  25, 9118, '2026-09-15 07:00:00'),
+  (2450824, 5009, 9,  65, 9119, '2026-09-15 08:00:00'),
+  (2450824, 5010, 10,  5, 9120, '2026-09-15 09:00:00');"
+echo "20-row exit: $?"
 ```
 
-**Expected:** Doris error about unknown catalog (not a Spark error).
+**Benchmark targets (warm cluster):**
 
-✅ Pass: error message comes from Doris (mentions `unknown catalog` or `catalog not found`).
-❌ Fail: Spark submission attempted for unknown catalog → `MANAGED_CATALOGS` check in proxy is broken.
+| Rows | Expected time |
+|------|--------------|
+| 1    | 15 – 40 s    |
+| 5    | 15 – 40 s    |
+| 10   | 15 – 45 s    |
+| 20   | 20 – 50 s    |
+
+> Row count has minimal effect on latency for small inserts — the dominant cost is Spark job
+> orchestration (driver init + executor launch + Polaris OAuth roundtrip), not data volume.
+> Larger inserts (millions of rows) will show better throughput per row via Gluten/Velox native encoding.
+
+---
+
+## Performance Tuning — Why Write Pushdown Has Cold-Start Latency
+
+Understanding the timing breakdown helps distinguish normal behaviour from real problems.
+
+### Timing breakdown (per `spark-submit` invocation)
+
+| Phase | Time | Notes |
+|-------|------|-------|
+| Driver JVM start | 2 – 5 s | Temurin 17 JVM cold start inside write-proxy pod |
+| Gluten native init | 5 – 15 s | `libgluten.so` + `libvelox.so` extracted from JAR to `/tmp/`, loaded |
+| Executor launch | 10 – 30 s | Up to 4 executors × 2 cores launched on Spark workers; each worker needs to start a JVM and load Gluten |
+| Polaris OAuth token | 1 – 3 s | REST roundtrip to Polaris for catalog credentials |
+| Iceberg metadata scan | 2 – 10 s | Reads snapshot manifest from S3 to plan the write |
+| Data write + S3 upload | < 1 s (small INSERT VALUES) | Velox-encoded Parquet written via 64 MB multipart upload |
+| `spark.stop()` + cleanup | 5 – 10 s | Executors disconnect; `/tmp/gluten-*` cleaned up |
+
+**Total cold start: 25 – 73 s. Total warm cluster: 15 – 40 s.**
+
+### Why direct `spark-submit` from the Spark master was faster
+
+When you ran `spark-submit` directly from the **spark-master pod**, the master pod:
+1. Already had the Temurin 17 JDK in its native OS (Ubuntu 22.04) — no cold JVM
+2. Had `spark-defaults.conf` on its `SPARK_HOME/conf/` path — picked up `spark.driver.memory=4g` automatically
+3. Was on the same network segment as workers — executor launch messages had ~0 ms RTT
+
+The write-proxy pod previously had:
+- `python:3.11-slim` (Debian 13 / glibc 2.41) — **hard-failed on `libvelox.so` PT_GNU_STACK RWE**
+- No `spark-defaults.conf` — driver defaulted to **1 g** instead of 4 g (GC pressure)
+- Grabbed **all 20 cores** across all 4 workers (no `spark.cores.max`) — executor cold-start on every node
+
+### Fixes applied in image `1.0.14`
+
+| Problem | Fix |
+|---------|-----|
+| glibc 2.41 hard-fails `libvelox.so` execstack | Rebased to `ubuntu:22.04` (glibc 2.35) |
+| Driver memory 1 g (no spark-defaults.conf) | `spark.driver.memory=4g` in `_build_conf()` |
+| All 20 cluster cores grabbed | `spark.cores.max=8`, `spark.executor.instances=4` |
+| Executor memory/cores unset | `spark.executor.memory=3g`, `spark.executor.cores=2` |
+| S3 uploads sequential | `fs.s3a.fast.upload=true`, 64 MB multipart, 20 threads |
+| Driver classpath HTTP URLs | All 5 JARs baked into `/opt/spark-jars/` in image |
+| Timeout 300 s too tight | `SPARK_JOB_TIMEOUT_S=600` |
+
+### Further optimisation options (not yet applied)
+
+```bash
+# Option A: pre-warm executors by running a no-op job before the first real INSERT
+# This amortises the cold-start cost across the pod lifetime rather than per-INSERT.
+
+# Option B: increase spark.cores.max to 12 if the cluster is dedicated to writes
+# (trade: fewer cores available for concurrent notebook/batch jobs)
+
+# Option C: use Iceberg MERGE INTO instead of INSERT for upsert workloads —
+# Iceberg MERGE with position-delete is more efficient than blind INSERT + compaction
+```
 
 ---
 
