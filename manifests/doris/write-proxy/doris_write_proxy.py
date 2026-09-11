@@ -36,7 +36,7 @@ Environment variables
   DORIS_PORT          Doris FE MySQL port   (default: 9030)
   LISTEN_HOST         Bind address          (default: 0.0.0.0)
   LISTEN_PORT         Proxy listen port     (default: 9040)
-  SPARK_MASTER_URL    spark:// master URL   (default: spark://spark-master-internal.prod.svc.cluster.local:17077)
+  SPARK_MASTER_URL    Spark master URL      (default: local[*] — driver IS the executor, no cluster needed)
   SPARK_SQL_TIMEOUT_S Per-statement timeout (default: 300)
   ADDR / BAO_ADDR     OpenBao address       (default: http://openbao.prod.svc.cluster.local:8200)
   SPARK_INIT_TIMEOUT_S Seconds to wait for initial SparkSession startup (default: 120)
