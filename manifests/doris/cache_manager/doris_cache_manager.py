@@ -1583,8 +1583,10 @@ class CatalogSyncer:
     removal is a deliberate administrative action that should not be automated.
     """
 
-    # Polaris endpoint to list warehouses.
-    _WAREHOUSES_PATH = "/v1/warehouses"
+    # Polaris management API endpoint to list catalogs (warehouses).
+    # The catalog REST API base (POLARIS_URI) ends in /api/catalog.
+    # The management API lives at the same host under /api/management/v1/catalogs.
+    _CATALOGS_PATH = "/v1/catalogs"
 
     def __init__(self, bao: BaoClient) -> None:
         self._bao = bao
@@ -1652,13 +1654,28 @@ class CatalogSyncer:
         else:
             logger.debug("CatalogSyncer: all Polaris warehouses already registered.")
 
+    @staticmethod
+    def _management_base() -> str:
+        """
+        Derive the Polaris management API base URL from POLARIS_URI.
+        POLARIS_URI ends in /api/catalog  →  management base is /api/management.
+        Example:
+          http://polaris-auth-proxy.prod:8283/api/catalog
+          → http://polaris-auth-proxy.prod:8283/api/management
+        """
+        return POLARIS_URI.replace("/api/catalog", "/api/management").rstrip("/")
+
     def _list_polaris_warehouses(self) -> list[str]:
         """
-        Call the Polaris REST API to list all warehouses.
-        Returns warehouse names.  Fetches a fresh OAuth2 token if needed.
+        Call the Polaris management API to list all catalogs (warehouses).
+        Returns catalog names.  Fetches a fresh OAuth2 token if needed.
+
+        Polaris REST API:
+          GET /api/management/v1/catalogs
+          Response: { "catalogs": [ { "name": "IcebergCatalog", ... }, ... ] }
         """
         token = self._get_polaris_token()
-        url   = f"{POLARIS_URI}{self._WAREHOUSES_PATH}"
+        url   = f"{self._management_base()}{self._CATALOGS_PATH}"
         req   = urllib.request.Request(
             url,
             headers={
@@ -1682,8 +1699,8 @@ class CatalogSyncer:
             else:
                 raise
 
-        # Polaris returns { "warehouses": [ { "name": "...", ... }, ... ] }
-        return [w["name"] for w in data.get("warehouses", []) if w.get("name")]
+        # Polaris management API returns { "catalogs": [ { "name": "...", ... }, ... ] }
+        return [c["name"] for c in data.get("catalogs", []) if c.get("name")]
 
     def _get_polaris_token(self) -> str:
         """Fetch (or return cached) an OAuth2 bearer token from Polaris."""
