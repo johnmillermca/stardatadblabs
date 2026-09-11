@@ -250,7 +250,7 @@ def _s3a_spark_props() -> dict[str, str]:
         return {
             "spark.hadoop.fs.s3a.access.key":               s3["access_key"],
             "spark.hadoop.fs.s3a.secret.key":               s3["secret_key"],
-            "spark.hadoop.fs.s3a.endpoint":                 "s3.us-east-2.amazonaws.com",
+            "spark.hadoop.fs.s3a.endpoint":                 s3.get("endpoint", S3_ENDPOINT).lstrip("https://").lstrip("http://"),
             "spark.hadoop.fs.s3a.impl":                     "org.apache.hadoop.fs.s3a.S3AFileSystem",
             "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
         }
