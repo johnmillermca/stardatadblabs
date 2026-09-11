@@ -75,7 +75,7 @@ LISTEN_PORT         = int(os.environ.get("LISTEN_PORT", "9040"))
 
 SPARK_MASTER_URL    = os.environ.get(
     "SPARK_MASTER_URL",
-    "spark://spark-master-internal.prod.svc.cluster.local:17077",
+    "local[*]",   # default: local mode — driver IS the executor, no cluster needed for writes
 )
 SPARK_SQL_TIMEOUT_S   = int(os.environ.get("SPARK_SQL_TIMEOUT_S",   "300"))
 SPARK_INIT_TIMEOUT_S  = int(os.environ.get("SPARK_INIT_TIMEOUT_S",  "120"))
@@ -170,60 +170,24 @@ from spark_iceberg_utils import IcebergTableBuilder  # noqa: E402  (kept for fut
 
 def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     """
-    Build a SparkConf that is wired for ALL managed catalogs simultaneously.
-    Called once at startup; the resulting SparkSession is reused forever.
+    Build a SparkConf wired for ALL managed catalogs.  Runs in local[*] mode:
+    the driver IS the executor — no remote Spark cluster, no task scheduling,
+    no Gluten/Velox interference.  Writes go directly from the proxy pod to
+    S3 via the Iceberg REST catalog.  Resources are released immediately when
+    the write completes (no idle executors held on Spark workers).
     """
     conf = SparkConf()
-    conf.setAppName("doris-write-proxy-persistent")
-    conf.setMaster(SPARK_MASTER_URL)
+    conf.setAppName("doris-write-proxy")
+    conf.setMaster(SPARK_MASTER_URL)   # default: local[*]
 
-    # ── Resource sizing ──────────────────────────────────────────────────────
-    conf.set("spark.driver.memory",   "4g")
-    conf.set("spark.executor.memory", "3g")
-    conf.set("spark.executor.cores",  "2")
-    conf.set("spark.cores.max",       "8")   # 4 executors × 2 cores maximum
+    # ── Driver memory (local mode — driver = executor) ────────────────────────
+    conf.set("spark.driver.memory", "4g")
 
-    # ── Dynamic allocation ────────────────────────────────────────────────────
-    # Keep 1 executor warm at all times (minExecutors=1, initialExecutors=1)
-    # so that every INSERT after the first runs immediately without waiting for
-    # executor re-acquisition (~5-15s cold launch from the Spark workers).
-    # The warm executor holds only 3g RAM on one worker — acceptable cost for
-    # sub-second subsequent INSERTs.  Scale up to 4 executors under load, then
-    # scale back to 1 after 60s idle (not 0 — avoids the cold-start penalty).
-    conf.set("spark.dynamicAllocation.enabled",                    "true")
-    conf.set("spark.dynamicAllocation.shuffleTracking.enabled",    "true")  # no ext shuffle svc needed
-    conf.set("spark.dynamicAllocation.minExecutors",               "1")     # always keep 1 warm
-    conf.set("spark.dynamicAllocation.maxExecutors",               "4")     # cap at 4
-    conf.set("spark.dynamicAllocation.initialExecutors",           "1")     # start with 1 immediately
-    conf.set("spark.dynamicAllocation.executorIdleTimeout",        "120s")  # scale back to min after 2min idle
-    conf.set("spark.dynamicAllocation.cachedExecutorIdleTimeout",  "300s")  # hold cached data 5min
+    # ── No Gluten in local mode — Gluten/Velox is a cluster-executor plugin ──
+    conf.set("spark.plugins", "")
+    conf.set("spark.memory.offHeap.enabled", "false")
 
-    # ── Gluten / Velox — load plugin but disable columnar engine ─────────────
-    # The Spark workers have GlutenPlugin baked into spark-defaults.conf.
-    # Executors load it unconditionally from their local conf — setting
-    # spark.plugins="" on the driver does NOT prevent executor-side loading.
-    # When the driver sends a non-columnar write plan to a Velox executor,
-    # the executor stalls task acceptance indefinitely.
-    #
-    # Solution: load GlutenPlugin on the driver (matching the executor) but
-    # disable the columnar/whole-stage-codegen substitution so Gluten falls
-    # back to vanilla row-based Spark for every operator — including the
-    # Iceberg partitioned write.  This is the supported Gluten fallback path.
-    conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
-    conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
-    conf.set("spark.memory.offHeap.enabled",          "true")
-    conf.set("spark.memory.offHeap.size",             "2g")
-    # Disable columnar execution globally for this session — forces vanilla
-    # row-based plans that execute correctly on Velox executors without stalling.
-    conf.set("spark.gluten.sql.columnar.wholeStageEnabled",  "false")
-    conf.set("spark.gluten.enabled",                         "false")
-
-    # ── Executor heartbeat / network ─────────────────────────────────────────
-    conf.set("spark.executor.heartbeatInterval",        "10s")
-    conf.set("spark.network.timeout",                   "120s")
-    conf.set("spark.storage.blockManagerSlaveTimeoutMs","120000")
-
-    # ── S3A fast upload ───────────────────────────────────────────────────────
+    # ── S3A ───────────────────────────────────────────────────────────────────
     conf.set("spark.hadoop.fs.s3a.fast.upload",        "true")
     conf.set("spark.hadoop.fs.s3a.multipart.size",     "67108864")
     conf.set("spark.hadoop.fs.s3a.threads.max",        "20")
@@ -341,77 +305,35 @@ class _SparkManager:
         with self._lock:
             t0 = time.time()
             try:
-                return self._run_stmt(catalog, db, table, stmt, user, t0)
-            except Exception as exc:
-                cause = getattr(exc, "java_exception", None)
-                msg   = str(cause if cause is not None else exc)
-                # Detect Spark master restart killing our app, then recover once.
-                if "Master removed our application" in msg or "SparkContext" in msg:
+                if _is_insert_values(stmt):
+                    rows_written = self._write_via_append(catalog, db, table, stmt, user)
                     elapsed = time.time() - t0
-                    logger.warning(
-                        "SparkContext lost (%.1fs) — reinitialising and retrying: %s",
-                        elapsed, msg.split("\n")[0][:200],
+                    logger.info(
+                        "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
+                        catalog, db, table, elapsed, rows_written,
                     )
-                    self._reinit_spark()
-                    if not self._ready.wait(timeout=SPARK_INIT_TIMEOUT_S):
-                        return False, "SparkSession recovery timed out"
-                    if self._error:
-                        return False, f"SparkSession recovery failed: {self._error}"
-                    try:
-                        return self._run_stmt(catalog, db, table, stmt, user, time.time())
-                    except Exception as exc2:
-                        cause2 = getattr(exc2, "java_exception", None)
-                        msg2   = str(cause2 if cause2 is not None else exc2).split("\n")[0][:400]
-                        logger.error("Spark DML FAILED after recovery: %s", msg2)
-                        return False, msg2
+                    return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
+                # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
+                self._spark.sql(f"USE `{catalog}`.`{db}`")
+                result = self._spark.sql(stmt)
+                rows = result.count() if result is not None else 0
                 elapsed = time.time() - t0
+                logger.info(
+                    "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
+                    catalog, db, elapsed, rows,
+                )
+                return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
+            except Exception as exc:
+                elapsed = time.time() - t0
+                cause = getattr(exc, "java_exception", None)
+                msg = str(cause if cause is not None else exc).split("\n")[0][:400]
                 logger.error(
                     "Spark DML FAILED: %s.%s.%s elapsed=%.2fs error=%s",
                     catalog, db, table, elapsed, msg,
                 )
-                return False, msg.split("\n")[0][:400]
+                return False, msg
 
     # ── Private helpers ─────────────────────────────────────────────────────
-
-    def _run_stmt(
-        self, catalog: str, db: str, table: str, stmt: str, user: str, t0: float
-    ) -> Tuple[bool, str]:
-        """Inner execution — called by execute() and the recovery retry."""
-        if _is_insert_values(stmt):
-            rows_written = self._write_via_append(catalog, db, table, stmt, user)
-            elapsed = time.time() - t0
-            logger.info(
-                "write_append SUCCESS: %s.%s.%s elapsed=%.2fs rows=%d",
-                catalog, db, table, elapsed, rows_written,
-            )
-            return True, f"Write succeeded (rows={rows_written}, elapsed={elapsed:.2f}s)"
-
-        # Fallback: UPDATE / DELETE / MERGE / INSERT … SELECT
-        self._spark.sql(f"USE {catalog}.{db}")
-        result = self._spark.sql(stmt)
-        rows = result.count() if result is not None else 0
-        elapsed = time.time() - t0
-        logger.info(
-            "Spark SQL SUCCESS: %s.%s elapsed=%.2fs rows=%d",
-            catalog, db, elapsed, rows,
-        )
-        return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
-
-    def _reinit_spark(self) -> None:
-        """Stop the dead SparkSession and kick off a fresh background init."""
-        logger.info("SparkSession: stopping dead context for reinit…")
-        self._ready.clear()
-        self._error = None
-        # Flush schema cache — entries are tied to the old SparkSession.
-        self._schema_cache.clear()
-        try:
-            if self._spark:
-                self._spark.stop()
-        except Exception:
-            pass
-        self._spark = None
-        t = threading.Thread(target=self._init_spark, daemon=True, name="spark-reinit")
-        t.start()
 
 
     def _write_via_append(
@@ -422,11 +344,10 @@ class _SparkManager:
         IcebergTableBuilder.write_append(), which injects snap_id and
         snap_timestamp automatically — callers never supply those columns.
 
-        Gluten/Velox is disabled in the write-proxy SparkConf so
-        write_append() → writeTo().append() schedules tasks normally.
+        Runs in local[*] mode — driver IS the executor.  No task scheduling,
+        no Gluten/Velox interference, resources released immediately on completion.
 
-        Schema is fetched via DESCRIBE TABLE (pure Iceberg REST RPC, no
-        executor, no S3) on first call and cached for SCHEMA_CACHE_TTL_S.
+        Schema is fetched via DESCRIBE TABLE (pure REST, no S3) and cached.
         """
         from pyspark.sql.functions import col as _col, lit
         from pyspark.sql.types import StringType, StructField, StructType
