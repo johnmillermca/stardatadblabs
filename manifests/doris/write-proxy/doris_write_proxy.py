@@ -166,11 +166,25 @@ def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     conf.setMaster(SPARK_MASTER_URL)
 
     # ── Resource sizing ──────────────────────────────────────────────────────
-    conf.set("spark.driver.memory",      "4g")
-    conf.set("spark.executor.memory",    "3g")
-    conf.set("spark.executor.cores",     "2")
-    conf.set("spark.cores.max",          "8")   # 4 executors × 2 cores
-    conf.set("spark.executor.instances", "4")
+    conf.set("spark.driver.memory",   "4g")
+    conf.set("spark.executor.memory", "3g")
+    conf.set("spark.executor.cores",  "2")
+    conf.set("spark.cores.max",       "8")   # 4 executors × 2 cores maximum
+
+    # ── Dynamic allocation — release executors when idle ─────────────────────
+    # This is the KEY setting for a persistent session: executors are acquired
+    # when a SQL statement arrives and released ~idle_timeout seconds after it
+    # completes, so workers are free between INSERTs.
+    # Without this, static executors hold worker memory permanently, causing
+    # "Initial job has not accepted any resources" on the next INSERT because
+    # minRegisteredResourcesRatio cannot be met.
+    conf.set("spark.dynamicAllocation.enabled",                    "true")
+    conf.set("spark.dynamicAllocation.shuffleTracking.enabled",    "true")  # no ext shuffle svc needed
+    conf.set("spark.dynamicAllocation.minExecutors",               "0")     # release all when idle
+    conf.set("spark.dynamicAllocation.maxExecutors",               "4")     # cap at 4
+    conf.set("spark.dynamicAllocation.initialExecutors",           "0")     # don't pre-allocate
+    conf.set("spark.dynamicAllocation.executorIdleTimeout",        "30s")   # release after 30s idle
+    conf.set("spark.dynamicAllocation.cachedExecutorIdleTimeout",  "60s")   # cached data held 60s
 
     # ── Gluten + Velox native execution ─────────────────────────────────────
     conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
@@ -179,10 +193,8 @@ def _build_spark_conf(pol: dict, s3: dict) -> SparkConf:
     conf.set("spark.memory.offHeap.size",             "2g")
 
     # ── Executor heartbeat / network ─────────────────────────────────────────
-    # Persistent session: keep executors alive between SQL calls.
-    # heartbeatInterval < network.timeout to prevent false executor loss.
     conf.set("spark.executor.heartbeatInterval",        "10s")
-    conf.set("spark.network.timeout",                   "120s")   # longer — persistent session
+    conf.set("spark.network.timeout",                   "120s")
     conf.set("spark.storage.blockManagerSlaveTimeoutMs","120000")
 
     # ── S3A fast upload ───────────────────────────────────────────────────────
@@ -301,7 +313,12 @@ class _SparkManager:
                 return True, f"Write succeeded (rows={rows}, elapsed={elapsed:.2f}s)"
             except Exception as exc:
                 elapsed = time.time() - t0
-                msg = str(exc).split("\n")[0][:300]
+                # py4j wraps Java exceptions — unwrap to get the real Spark error.
+                cause = getattr(exc, "java_exception", None)
+                if cause is not None:
+                    msg = str(cause).split("\n")[0][:400]
+                else:
+                    msg = str(exc).split("\n")[0][:400]
                 logger.error(
                     "Spark SQL FAILED: %s.%s elapsed=%.2fs error=%s",
                     catalog, db, elapsed, msg,
