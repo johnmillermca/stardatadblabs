@@ -104,17 +104,34 @@ def _build_conf(catalog: str, warehouse: str, pol: dict, s3: dict) -> SparkConf:
     conf.setAppName(f"doris-write-pushdown-{catalog}")
     conf.setMaster(_SPARK_MASTER)
 
+    # ── Resource sizing — mirrors spark-defaults.conf on the cluster ───────
+    # pyspark ships no spark-defaults.conf, so these must be set explicitly.
+    # Without them the driver gets only 1g and all 20 cluster cores are grabbed,
+    # causing slow GC on the driver and long cold-start on every worker.
+    # Cap at 4 executors × 2 cores = 8 cores — enough for write-pushdown, leaves
+    # headroom for concurrent notebook/batch jobs.
+    conf.set("spark.driver.memory",               "4g")
+    conf.set("spark.executor.memory",             "3g")
+    conf.set("spark.executor.cores",              "2")
+    conf.set("spark.cores.max",                   "8")   # cap: 4 executors max
+    conf.set("spark.executor.instances",          "4")
+
     # ── Gluten + Velox native execution ───────────────────────────────────
-    # Mirrors spark-defaults.conf on the cluster so every write-pushdown job
-    # benefits from the same native columnar engine as all other Spark jobs.
-    # GlutenPlugin replaces Spark's Java row-based operators with Velox-backed
-    # columnar operators for scans, aggregations, joins, and writes.
-    # The gluten-velox-bundle JAR is added via --jars in the spark-submit
-    # call in doris_write_proxy.py / doris_cache_manager.py.
     conf.set("spark.plugins",                             "org.apache.gluten.GlutenPlugin")
     conf.set("spark.gluten.sql.columnar.backend.lib",     "velox")
     conf.set("spark.memory.offHeap.enabled",              "true")
     conf.set("spark.memory.offHeap.size",                 "2g")
+
+    # ── Executor lifecycle — release resources immediately after the job ───
+    # Without these, Spark holds executor JVMs alive for 60 s after spark.stop(),
+    # blocking the next write-pushdown job from getting fresh executors quickly.
+    conf.set("spark.dynamicAllocation.enabled",                   "false")
+    conf.set("spark.executor.heartbeatInterval",                  "10s")
+    conf.set("spark.network.timeout",                             "60s")
+    # Fast S3A multipart: overlap upload with Parquet encoding
+    conf.set("spark.hadoop.fs.s3a.fast.upload",                   "true")
+    conf.set("spark.hadoop.fs.s3a.multipart.size",                "67108864")  # 64 MB parts
+    conf.set("spark.hadoop.fs.s3a.threads.max",                   "20")
 
     # ── SQL extensions (Iceberg) ───────────────────────────────────────────
     conf.set(
@@ -132,11 +149,12 @@ def _build_conf(catalog: str, warehouse: str, pol: dict, s3: dict) -> SparkConf:
     conf.set(f"spark.sql.catalog.{catalog}.scope",            "PRINCIPAL_ROLE:ALL")
     conf.set(f"spark.sql.catalog.{catalog}.warehouse",        warehouse)
     conf.set(f"spark.sql.catalog.{catalog}.rest.auth.type",   "oauth2")
-    # Iceberg write defaults — 256 MB target file size (matches cluster default)
+    # Iceberg write defaults — 128 MB target file size for faster small inserts
     conf.set("spark.sql.iceberg.write.format.default",        "parquet")
-    conf.set("spark.sql.iceberg.target-file-size-bytes",      "268435456")
-    # COUNT(*) answered from Iceberg snapshot metadata without S3 scan
+    conf.set("spark.sql.iceberg.target-file-size-bytes",      "134217728")  # 128 MB
     conf.set("spark.sql.iceberg.aggregate-pushdown.enabled",  "true")
+    # Merge small files written by this job into fewer output files
+    conf.set("spark.sql.iceberg.merge-schema.enabled",        "true")
 
     # ── S3 / Iceberg S3FileIO ──────────────────────────────────────────────
     conf.set(f"spark.sql.catalog.{catalog}.s3.access-key-id",     s3["access_key"])

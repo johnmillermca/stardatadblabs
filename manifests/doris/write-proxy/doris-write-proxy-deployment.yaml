@@ -56,7 +56,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: write-proxy
-          image: 192.168.1.50:30500/doris-write-proxy:1.0.13
+          image: 192.168.1.50:30500/doris-write-proxy:1.0.14
           imagePullPolicy: Always
           command: ["python", "/app/doris_write_proxy.py"]
           env:
@@ -81,7 +81,7 @@ spec:
               value: "spark://spark-master-internal.prod.svc.cluster.local:17077"
             # ── Spark job timeout / poll ──────────────────────────────────────
             - name: SPARK_JOB_TIMEOUT_S
-              value: "300"
+              value: "600"
             - name: SPARK_POLL_INTERVAL_S
               value: "5"
             # ── OpenBao address (passed through to spark_iceberg_write.py) ───
