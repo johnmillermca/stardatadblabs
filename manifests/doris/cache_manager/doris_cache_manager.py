@@ -1652,7 +1652,10 @@ class CatalogSyncer:
         if created:
             logger.info("CatalogSyncer: %d new catalog(s) registered in Doris.", created)
         else:
-            logger.debug("CatalogSyncer: all Polaris warehouses already registered.")
+            logger.info(
+                "CatalogSyncer: %d Polaris warehouse(s) checked — all already registered in Doris.",
+                len(warehouses),
+            )
 
     @staticmethod
     def _management_base() -> str:

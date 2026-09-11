@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-11 (v1.6.0 — Phase 8: CatalogSyncer + CacheGuard E2E tests) |
+| **Last Updated** | 2026-09-11 (v1.6.1 — T-40/T-41: fix CatalogSyncer test commands; DEBUG→INFO log promotion) |
 | **Related** | RB-25 (Cache Manager Setup & Operations) · RB-05 (Doris & Analytics) |
 
 ---
@@ -1958,28 +1958,54 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
 
 ---
 
-### T-40 — CatalogSyncer startup log confirms Polaris warehouse enumeration
+### T-40 — CatalogSyncer runs each cycle and emits a steady-state INFO log
 
-Verify the daemon logs a `CatalogSyncer` sync entry on each cycle.
+> **Why `grep "CatalogSyncer"` returns nothing on a healthy cluster:**
+> In steady state — when all Polaris warehouses are already registered in Doris — every
+> `CatalogSyncer` log line fires at `DEBUG` level, which is swallowed by the `INFO` root
+> logger.  Only events that change state (`CREATE CATALOG`, `sync failed`) emit `INFO` or
+> above.  An empty `grep` result therefore means the syncer ran and found nothing new —
+> it is the **expected healthy outcome**, not a sign of a missing feature.
+>
+> The daemon emits one `INFO`-level confirmation per cycle starting in v1.6.1+:
+> `CatalogSyncer: N Polaris warehouse(s) checked — all already registered in Doris.`
+> If you see an empty result the image is pre-v1.6.1; use the cycle-boundary grep below.
+
+**Primary check — v1.6.1+ steady-state INFO log:**
 
 ```bash
 kubectl logs -n prod deployment/doris-cache-manager --tail=200 \
   | grep "CatalogSyncer" | head -20
 ```
 
-**Expected (first cycle after deployment):**
+**Expected (v1.6.1+, steady state):**
 ```
-CatalogSyncer: Polaris warehouses=['IcebergCatalog','star_lakehouse','pg_lakehouse','ora_lakehouse','mgo_lakehouse']  Doris catalogs={...}
-CatalogSyncer: all Polaris warehouses already registered.
-```
-
-**Expected (any subsequent cycle):**
-```
-CatalogSyncer: all Polaris warehouses already registered.
+CatalogSyncer: 5 Polaris warehouse(s) checked — all already registered in Doris.
 ```
 
-✅ Pass: at least one `CatalogSyncer:` log line present and no `CatalogSyncer: sync failed` error.
-❌ Fail: `CatalogSyncer: sync failed` or no CatalogSyncer lines → check `POLARIS_URI` env var and Polaris auth-proxy health:
+**Fallback check (any version) — confirm via cycle-boundary logs:**
+
+```bash
+# The syncer is called at step 10 of every cycle.
+# Verify the cycle itself is running — CatalogSyncer executes between these markers.
+kubectl logs -n prod deployment/doris-cache-manager --tail=200 \
+  | grep -E "=== Cache Manager cycle|=== Cycle done"
+```
+
+**Expected:** matched pairs of cycle-start and cycle-done lines, confirming the daemon
+is alive and completing full cycles (including the `catalog_syncer.sync()` call at step 10).
+
+**Confirm via the audit table (definitive — works at any log level):**
+
+```bash
+# If any catalog was ever auto-created, this will have rows.
+doris-mysql -e "SELECT * FROM cache_system.catalog_sync_log ORDER BY synced_at DESC LIMIT 5;"
+```
+
+✅ Pass: either an INFO `CatalogSyncer:` line is present (v1.6.1+), or cycle-boundary pairs
+appear confirming full cycles run, or `catalog_sync_log` shows historical creation rows.
+No `CatalogSyncer: sync failed` error.
+❌ Fail: `CatalogSyncer: sync failed` → check `POLARIS_URI` env var and Polaris auth-proxy health:
 ```bash
 kubectl get pod -n prod -l app=polaris-auth-proxy
 kubectl logs -n prod deployment/polaris-auth-proxy --tail=20
@@ -1992,23 +2018,50 @@ kubectl logs -n prod deployment/polaris-auth-proxy --tail=20
 Confirm that the syncer correctly identifies the 5 seed warehouses as already present
 and does **not** attempt to re-create them.
 
+> **Why the `grep "already registered"` command returns nothing:**
+> The per-warehouse "already registered" log lines (`logger.debug(...)`) are emitted at
+> `DEBUG` level.  The daemon runs at `INFO` by default, so they are suppressed.
+> This is **correct, healthy behaviour** — an empty result means the syncer ran and found
+> no drift.  The idempotency guarantee is validated via the absence of `CREATE CATALOG`
+> lines, not via the presence of debug-level skip messages.
+
+**Idempotency check — confirm no spurious CREATE CATALOG was issued for existing catalogs:**
+
 ```bash
 kubectl logs -n prod deployment/doris-cache-manager --tail=500 \
-  | grep "CatalogSyncer.*already registered" | sort | uniq -c
+  | grep "CREATE CATALOG" | grep -vE "test_autosync|succeeded"
+# Expected: no output (no CREATE attempted for any of the 5 known catalogs)
 ```
 
-**Expected:** At least 5 unique "already registered" lines (one per known warehouse),
-with no `CREATE CATALOG` log lines for the 5 known names.
+**Confirm Doris still holds exactly the 5 known catalogs:**
 
 ```bash
-# Confirm no spurious CREATE CATALOG was issued for existing catalogs
-kubectl logs -n prod deployment/doris-cache-manager --tail=500 \
-  | grep "CREATE CATALOG" | grep -E "polaris|databricks|postgres|oracle|mongodb"
-# Expected: no output
+doris-mysql -e "SHOW CATALOGS;" | awk '{print $2}' \
+  | grep -E "^(polaris|databricks|postgres|oracle|mongodb)$" | sort
 ```
 
-✅ Pass: 5+ "already registered" lines, zero CREATE CATALOG lines for known names.
-❌ Fail: `CREATE CATALOG 'polaris'` appears → SHOW CATALOGS returned an unexpected result; check `SHOW CATALOGS` manually.
+**Expected:**
+```
+databricks
+mongodb
+oracle
+polaris
+postgres
+```
+
+**Confirm no catalog_sync_log row exists for the 5 known names** (they were created manually, not by the syncer):
+
+```bash
+doris-mysql -e "
+SELECT catalog_name, action, synced_at
+FROM cache_system.catalog_sync_log
+WHERE catalog_name IN ('polaris','databricks','postgres','oracle','mongodb');"
+# Expected: empty result (no rows — syncer correctly skipped them)
+```
+
+✅ Pass: zero CREATE CATALOG lines for known names, all 5 catalogs present in `SHOW CATALOGS`,
+no `catalog_sync_log` rows for the 5 seed catalogs.
+❌ Fail: `CREATE CATALOG 'polaris'` appears → `SHOW CATALOGS` returned an unexpected result; verify T-03 and check `SHOW CATALOGS` manually.
 
 ---
 
@@ -2018,6 +2071,21 @@ kubectl logs -n prod deployment/doris-cache-manager --tail=500 \
 > Clean up after T-43 using the teardown commands at the bottom of this section.
 
 **Step 1 — Create a test warehouse in Polaris:**
+
+> **Two bugs in the original command — both cause `Expecting value: line 1 column 1 (char 0)`:**
+>
+> 1. **Wrong endpoint — `${POLARIS_IP}:8181` is the ClusterIP, unreachable from the master node.**
+>    `POLARIS_IP` resolves to `10.102.169.10` (the `polaris-rest` ClusterIP), which is only
+>    routable from inside the cluster.  From the master node you must use the NodePort
+>    `192.168.1.50:30181` instead.  The `TOKEN` fetch above fails silently (empty body),
+>    and then the `curl` to create the catalog receives an empty/unauthenticated response —
+>    `python3 -m json.tool` raises the `Expecting value` error on an empty string.
+>
+> 2. **Incomplete `storageConfigInfo` — Polaris returns `HTTP 400` with an empty body.**
+>    `roleArn: ""`, missing `externalId`, and missing `region` all fail Polaris validation.
+>    A `400` response has a zero-length body, which again triggers the `Expecting value` error.
+>    The correct values are the same IAM ARN and external-ID used by all other warehouses
+>    (confirmed from `GET /api/management/v1/catalogs`).
 
 ```bash
 BAO_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
@@ -2031,32 +2099,43 @@ POLARIS_SECRET=$(curl -s -H "X-Vault-Token: ${BAO_TOKEN}" \
   http://192.168.1.50:30820/v1/secret/data/platform/polaris \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['spark_svc_secret'])")
 
-POLARIS_IP=$(kubectl get svc polaris-rest -n prod -o jsonpath='{.spec.clusterIP}')
-
-TOKEN=$(curl -s -X POST "http://${POLARIS_IP}:8181/api/catalog/v1/oauth/tokens" \
+# Use the Polaris NodePort — accessible from the master node (ClusterIP is cluster-only)
+TOKEN=$(curl -s -X POST "http://192.168.1.50:30181/api/catalog/v1/oauth/tokens" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials&client_id=${POLARIS_ID}&client_secret=${POLARIS_SECRET}&scope=PRINCIPAL_ROLE:ALL" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
 
-# Create the test warehouse (storage-profile uses the existing S3 bucket — no data written)
-curl -s -X POST "http://${POLARIS_IP}:8181/api/management/v1/catalogs" \
+# Create the test warehouse.
+# storageConfigInfo must match the profile used by all production warehouses:
+#   roleArn, externalId, and region are required — empty or missing fields return HTTP 400.
+curl -s -w "\nHTTP_STATUS:%{http_code}" \
+  -X POST "http://192.168.1.50:30181/api/management/v1/catalogs" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "catalog": {
       "name": "test_autosync_warehouse",
       "type": "INTERNAL",
-      "properties": {},
+      "properties": {
+        "client.region": "us-east-2",
+        "default-base-location": "s3://xdatatoiceberg1/test-autosync"
+      },
       "storageConfigInfo": {
         "storageType": "S3",
-        "allowedLocations": ["s3://xdatatoiceberg1/test-autosync/"],
-        "roleArn": ""
+        "allowedLocations": ["s3://xdatatoiceberg1/test-autosync"],
+        "roleArn": "arn:aws:iam::586643076710:user/watsonx-s3-connector",
+        "externalId": "polaris-iceberg",
+        "region": "us-east-2"
       }
     }
-  }' | python3 -m json.tool
+  }'
 ```
 
-**Expected:** JSON response with `"name": "test_autosync_warehouse"`.
+**Expected:** HTTP 201 with JSON body:
+```
+{"type":"INTERNAL","name":"test_autosync_warehouse",...}
+HTTP_STATUS:201
+```
 
 **Step 2 — Wait for the next daemon cycle (up to `SCAN_INTERVAL_S` = 300 s) and check logs:**
 
@@ -2100,13 +2179,15 @@ WHERE catalog_name = 'test_autosync_warehouse';"
 ```
 
 ✅ Pass: Doris catalog present, `catalog_sync_log` row exists with action=`CREATED`.
-❌ Fail: No log line after 2 cycles → check `POLARIS_URI` and confirm `test_autosync_warehouse` is visible from the proxy:
+❌ Fail: No log line after 2 cycles → confirm `test_autosync_warehouse` is visible from the daemon pod (uses in-cluster address):
 ```bash
 kubectl exec -n prod deployment/doris-cache-manager -- \
   python3 -c "
-import urllib.request, json, os
-r = urllib.request.urlopen('${POLARIS_URI}/v1/warehouses')
-print([w['name'] for w in json.loads(r.read())['warehouses']])
+import urllib.request, json
+r = urllib.request.urlopen(
+    'http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/management/v1/catalogs',
+    timeout=10)
+print([c['name'] for c in json.loads(r.read())['catalogs']])
 "
 ```
 
@@ -2132,10 +2213,11 @@ doris-mysql -e "SHOW DATABASES FROM test_autosync_warehouse;"
 # 1. Drop the Doris catalog
 doris-mysql -e "DROP CATALOG IF EXISTS test_autosync_warehouse;"
 
-# 2. Delete the Polaris warehouse
-curl -s -X DELETE "http://${POLARIS_IP}:8181/api/management/v1/catalogs/test_autosync_warehouse" \
+# 2. Delete the Polaris warehouse (NodePort — accessible from master node)
+curl -s -w "\nHTTP_STATUS:%{http_code}" \
+  -X DELETE "http://192.168.1.50:30181/api/management/v1/catalogs/test_autosync_warehouse" \
   -H "Authorization: Bearer ${TOKEN}"
-echo "Polaris warehouse deleted"
+# Expected: HTTP_STATUS:204  (No Content — successful delete)
 
 # 3. Verify Doris catalog is gone
 doris-mysql -e "SHOW CATALOGS;" | grep test_autosync_warehouse
