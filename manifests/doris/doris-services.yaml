@@ -26,12 +26,11 @@ spec:
       port: 8030
       targetPort: 8030
       nodePort: 30030
-    # MySQL query port → routed to krb-doris-guard (19030) not Doris (9030)
-    # Users get KDC principal check before reaching Doris.
+    # query port not exposed externally — all MySQL traffic enters via
+    # doris-write-proxy NodePort 30090 → doris-fe ClusterIP:9030 → guard.
     - name: query
       port: 9030
       targetPort: 19030
-      nodePort: 30090
     - name: edit-log
       port: 9010
       targetPort: 9010

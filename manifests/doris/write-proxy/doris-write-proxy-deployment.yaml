@@ -65,9 +65,11 @@ spec:
           imagePullPolicy: Always
           command: ["python", "/app/doris_write_proxy.py"]
           env:
-            # ── Doris FE — direct in-cluster ──────────────────────────────────
+            # ── Doris FE — via krb-doris-guard ───────────────────────────────
+            # doris-fe ClusterIP port 9030 targets guard (19030) internally,
+            # so Doris sees all connections from 127.0.0.1 — all users work.
             - name: DORIS_HOST
-              value: "doris-fe-0.doris-fe-headless.prod.svc.cluster.local"
+              value: "doris-fe.prod.svc.cluster.local"
             - name: DORIS_PORT
               value: "9030"
             - name: DORIS_USER
@@ -123,8 +125,10 @@ spec:
             periodSeconds: 30
             failureThreshold: 3
 ---
-# NodePort 30091 — optional Iceberg DML write-pushdown path only.
-# All normal query/read clients use port 30090 (krb-doris-guard).
+# NodePort 30090 — single MySQL entry point for all clients.
+# Routes: client → write-proxy :9040 → doris-fe ClusterIP:9030
+#                                     → krb-doris-guard :19030
+#                                     → Doris :9030 on 127.0.0.1
 apiVersion: v1
 kind: Service
 metadata:
@@ -141,5 +145,5 @@ spec:
     - name: mysql-proxy
       port: 9040
       targetPort: 9040
-      nodePort: 30091
+      nodePort: 30090
       protocol: TCP
