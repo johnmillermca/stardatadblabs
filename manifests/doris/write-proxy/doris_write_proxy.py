@@ -5,7 +5,7 @@ Transparent MySQL protocol proxy for Doris write-pushdown to Apache Spark.
 
 Architecture
 ------------
-Clients connect to this proxy on port 9040 using the standard MySQL protocol.
+Clients connect to this proxy on port 9030 using the standard MySQL protocol.
 The proxy handles the MySQL handshake and then forwards every statement to
 the real Doris FE.  For most statements (SELECT, DDL, local DML) the response
 from Doris is forwarded directly back to the client unchanged.
@@ -35,7 +35,7 @@ Environment variables
   DORIS_HOST          Doris FE host         (default: 127.0.0.1)
   DORIS_PORT          Doris FE MySQL port   (default: 9030)
   LISTEN_HOST         Bind address          (default: 0.0.0.0)
-  LISTEN_PORT         Proxy listen port     (default: 9040)
+  LISTEN_PORT         Proxy listen port     (default: 9030)
   SPARK_MASTER_URL    Spark master URL      (default: local[*] — driver IS the executor, no cluster needed)
   SPARK_SQL_TIMEOUT_S Per-statement timeout (default: 300)
   ADDR / BAO_ADDR     OpenBao address       (default: http://openbao.prod.svc.cluster.local:8200)
@@ -71,7 +71,7 @@ logger = logging.getLogger("doris-write-proxy")
 DORIS_HOST          = os.environ.get("DORIS_HOST",   "127.0.0.1")
 DORIS_PORT          = int(os.environ.get("DORIS_PORT",  "9030"))
 LISTEN_HOST         = os.environ.get("LISTEN_HOST",  "0.0.0.0")
-LISTEN_PORT         = int(os.environ.get("LISTEN_PORT", "9040"))
+LISTEN_PORT         = int(os.environ.get("LISTEN_PORT", "9030"))
 
 # Cache-guard SELECT intercept
 # URL of the cache manager's warm-up trigger HTTP endpoint.
@@ -97,6 +97,7 @@ _BAO_K8S_SA_JWT     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _BAO_ROLE           = os.environ.get("BAO_ROLE", "platform-secrets-read")
 _PATH_POLARIS       = "secret/data/platform/polaris"
 _PATH_S3            = "secret/data/platform/s3"
+_PATH_DORIS         = "secret/data/platform/doris"
 
 # ── Polaris URI for Spark catalogs ────────────────────────────────────────────
 # MUST point to polaris-auth-proxy (port 8283), NOT polaris-rest directly.
@@ -1052,7 +1053,7 @@ class _SelectGuard:
             doris_pass = os.environ.get("DORIS_ADMIN_PASSWORD", "")
             self._conn = pymysql.connect(
                 host=DORIS_HOST, port=DORIS_PORT,
-                user="root", password=doris_pass,
+                user=DORIS_USER, password=doris_pass,
                 charset="utf8mb4", connect_timeout=5,
                 read_timeout=5, autocommit=True,
             )
@@ -1062,7 +1063,7 @@ class _SelectGuard:
             doris_pass = os.environ.get("DORIS_ADMIN_PASSWORD", "")
             self._conn = pymysql.connect(
                 host=DORIS_HOST, port=DORIS_PORT,
-                user="root", password=doris_pass,
+                user=DORIS_USER, password=doris_pass,
                 charset="utf8mb4", connect_timeout=5,
                 read_timeout=5, autocommit=True,
             )

@@ -65,6 +65,6 @@ COPY spark_iceberg_write.py /app/spark_iceberg_write.py
 # automatically so callers never need to supply those columns.
 COPY --from=spark-jars /opt/spark/work-dir/spark_iceberg_utils.py /app/spark_iceberg_utils.py
 
-EXPOSE 9040
+EXPOSE 9030
 
 CMD ["python", "/app/doris_write_proxy.py"]
