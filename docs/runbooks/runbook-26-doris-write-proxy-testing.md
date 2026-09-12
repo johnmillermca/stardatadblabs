@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-write-proxy |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-11 |
+| **Last Updated** | 2026-09-12 |
 | **Related** | RB-25 (Cache Manager), RB-05 (Doris & Analytics), RB-13 (RBAC) |
 
 ---
@@ -17,6 +17,22 @@ This runbook provides **10 manually executable write operations** (INSERT, UPDAT
 against `polaris.tpcds_sf10tcl.customer_address` via the Doris write-proxy, along with
 commands to verify that Spark releases all JVM heap, RDD, and broadcast memory between
 each job — ensuring no resource starvation for subsequent writes.
+
+### Architecture
+
+All MySQL connections (reads and writes) use the **same port: 30090**.
+
+```
+Client :30090
+    → doris-write-proxy :9040   (DML intercepted → Spark; all else forwarded)
+    → doris-fe ClusterIP :9030
+    → krb-doris-guard :19030    (KDC principal check)
+    → Doris FE :9030 on 127.0.0.1
+```
+
+DML against managed catalogs (`polaris`, `databricks`, `postgres`, `oracle`, `mongodb`)
+is intercepted by the proxy and executed by Spark. All other statements (SELECT, DDL,
+USE, local Doris DML) pass through to Doris unchanged.
 
 ### How resource cleanup works in `local[*]` mode
 
@@ -92,14 +108,11 @@ print(out)
 \" 2>/dev/null || echo 'jcmd unavailable — check proxy logs instead'"
 ```
 
-If `jcmd` is not available in the image, the proxy debug log line is the primary signal.
-
 ---
 
 ## 4. Write Operations
 
-Connect to the proxy on port **30091** (write path) for all DML.
-Use port **30090** (Doris direct) for SELECT verification.
+All commands connect on port **30090** — the single MySQL entry point.
 
 ---
 
@@ -108,7 +121,7 @@ Use port **30090** (Doris direct) for SELECT verification.
 **Purpose:** Schema cold-start (cache MISS). Expect ~5–8 s elapsed.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "INSERT INTO polaris.tpcds_sf10tcl.customer_address
         (ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country)
       VALUES (9200001, '10', 'Maple Ave', 'Chicago', 'IL', '60601', 'US');"
@@ -128,7 +141,7 @@ post-write cleanup: df unpersisted, catalog cache cleared, GC requested
 **Purpose:** Warm path — schema HIT. Expect <3 s elapsed.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "INSERT INTO polaris.tpcds_sf10tcl.customer_address
         (ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country)
       VALUES
@@ -146,7 +159,7 @@ time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout
 **Purpose:** Verify that omitted columns are padded as NULL by the proxy, not rejected.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "INSERT INTO polaris.tpcds_sf10tcl.customer_address
         (ca_address_sk, ca_city, ca_state, ca_zip, ca_country)
       VALUES
@@ -164,7 +177,7 @@ Columns `ca_street_number`, `ca_street_name`, `ca_suite_number`, etc. will be NU
 **Purpose:** Confirm cleanup frees memory before the next job. Expect <3 s elapsed.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "INSERT INTO polaris.tpcds_sf10tcl.customer_address
         (ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country)
       VALUES
@@ -197,7 +210,7 @@ time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout
 **Purpose:** Most-sparse insert — only PK + city + country. All other cols NULL.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "INSERT INTO polaris.tpcds_sf10tcl.customer_address
         (ca_address_sk, ca_city, ca_country)
       VALUES
@@ -213,7 +226,6 @@ time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout
 **Purpose:** Larger batch — verify cleanup still frees everything before write 7.
 
 ```bash
-# Generate the SQL with Python then pipe to mysql
 python3 -c "
 rows = [
     f\"(920{1000+i}, '{i}', 'Load Ave', 'LoadCity', 'TX', '77001', 'US')\"
@@ -223,7 +235,7 @@ sql = ('INSERT INTO polaris.tpcds_sf10tcl.customer_address '
        '(ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country) '
        'VALUES ' + ', '.join(rows) + ';')
 print(sql)
-" | { time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60; } 2>&1
+" | { time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60; } 2>&1
 ```
 
 ---
@@ -237,7 +249,7 @@ Iceberg UPDATE rewrites affected data files in place.
 > The proxy routes this through `spark.sql(stmt)` after `USE catalog.db`.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "UPDATE polaris.tpcds_sf10tcl.customer_address
       SET    ca_city = 'Updated City',
              ca_state = 'ZZ'
@@ -261,7 +273,7 @@ post-write cleanup: df unpersisted, catalog cache cleared, GC requested
 **Purpose:** Test DELETE path via `spark.sql()`.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "DELETE FROM polaris.tpcds_sf10tcl.customer_address
       WHERE ca_address_sk BETWEEN 9200050 AND 9200052;"
 ```
@@ -279,7 +291,7 @@ post-write cleanup: df unpersisted, catalog cache cleared, GC requested
 **Purpose:** Targeted single-row UPDATE to verify precision of Iceberg row-level update.
 
 ```bash
-time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
+time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60 \
   -e "UPDATE polaris.tpcds_sf10tcl.customer_address
       SET    ca_street_name = 'Corrected Blvd',
              ca_zip         = '99999'
@@ -303,7 +315,7 @@ sql = ('INSERT INTO polaris.tpcds_sf10tcl.customer_address '
        '(ca_address_sk, ca_street_number, ca_street_name, ca_city, ca_state, ca_zip, ca_country) '
        'VALUES ' + ', '.join(rows) + ';')
 print(sql)
-" | { time mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" --connect-timeout=60; } 2>&1
+" | { time mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" --connect-timeout=60; } 2>&1
 ```
 
 **Expected elapsed: <5 s** (1000 rows, schema cached, cleanup included).
@@ -312,7 +324,7 @@ print(sql)
 
 ## 5. Verify all data landed in Iceberg
 
-Run this after all 10 writes (port **30090**, Doris direct):
+Run this after all 10 writes:
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
@@ -373,14 +385,14 @@ post-write cleanup: df unpersisted, catalog cache cleared, GC requested
 ...  (×10 total)
 ```
 
-No `FAILED` lines should appear. If any write fails, see §7 below.
+No `FAILED` lines should appear. If any write fails, see §8 below.
 
 ---
 
 ## 7. Confirming pushdown is happening
 
 Every DML statement that targets a managed catalog goes through four observable
-checkpoints.  Check them in order to confirm the full pushdown path is working.
+checkpoints. Check them in order to confirm the full pushdown path is working.
 
 ### Checkpoint 1 — Proxy intercepts the statement
 
@@ -397,8 +409,7 @@ WriteProxy: intercepted polaris.tpcds_sf10tcl.customer_address DML from 10.x.x.x
 ```
 
 If this line is **absent**, the proxy did not see the statement as a managed-catalog
-DML.  Possible causes:
-- Statement was sent directly to Doris port **30090**, bypassing the proxy (port **30091**)
+DML. Possible causes:
 - The catalog name is not in the proxy's managed list (`polaris`, `databricks`, `postgres`, `oracle`, `mongodb`)
 - The statement is a SELECT, DDL, or USE — those are forwarded to Doris unchanged
 
@@ -431,11 +442,11 @@ it and check §8 (Troubleshooting).
 
 ### Checkpoint 3 — Client receives MySQL OK
 
-The proxy returns a MySQL `OK` packet to the client on success.  Your `mysql` session
+The proxy returns a MySQL `OK` packet to the client on success. Your `mysql` session
 should exit cleanly with **no error printed** and `time` showing a non-zero elapsed.
 
 If you see a MySQL error like `ERROR 1105 (HY000): ...`, the proxy returned an ERR
-packet — the Spark job failed.  The error text is the Spark exception message (first
+packet — the Spark job failed. The error text is the Spark exception message (first
 400 chars).
 
 To watch the exact OK/ERR packet flow in real time:
@@ -451,9 +462,6 @@ kubectl logs -n prod -l app=doris-write-proxy -f 2>&1 \
 After the write, refresh the Doris catalog metadata and query directly:
 
 ```bash
-DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
-  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
-
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "REFRESH CATALOG polaris;
       SELECT ca_address_sk, ca_city, ca_state, snap_timestamp
@@ -508,8 +516,7 @@ kubectl rollout restart deployment/doris-write-proxy -n prod
 
 Iceberg row-level UPDATE/DELETE requires the table to have been created with
 `'write.delete.mode'='merge-on-read'` or `'copy-on-write'`.
-Check table properties via `SHOW CREATE TABLE` (Doris does not support the
-`$properties` metadata table syntax — that is Spark/Trino only):
+Check table properties:
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
@@ -517,11 +524,10 @@ mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   | grep -i "write\.\(delete\|update\|merge\)"
 ```
 
-If the properties are missing, set them by sending an `ALTER TABLE` through
-the write-proxy (port **30091**) so Spark executes it:
+If the properties are missing, set them via the write-proxy so Spark executes it:
 
 ```bash
-mysql -h 192.168.1.50 -P 30091 -u admin -p"${DORIS_PASS}" \
+mysql -h 192.168.1.50 -P 30090 -u admin -p"${DORIS_PASS}" \
   -e "ALTER TABLE polaris.tpcds_sf10tcl.customer_address
       SET TBLPROPERTIES (
         'write.update.mode' = 'merge-on-read',
@@ -537,18 +543,31 @@ rely on `write_append SUCCESS` appearing without memory errors in subsequent wri
 
 ### Memory pressure between writes (OOMKilled pod)
 
-The proxy pod has no memory limit set by default.  If the pod is OOMKilled during
-a large batch, set a driver memory limit in the deployment:
+If the pod is OOMKilled during a large batch, increase the driver memory limit:
 
 ```bash
 kubectl set env deployment/doris-write-proxy -n prod SPARK_DRIVER_MEMORY=6g
-# or edit the deployment and add to _build_spark_conf:
-#   conf.set("spark.driver.memory", "6g")
+```
+
+### Access denied for user `admin`
+
+`admin` must exist as a Kerberos principal. If you see:
+```
+ERROR 1045 (28000): Access denied ... principal admin@STARDATADBLABS.LOCAL not found in KDC
+```
+
+Add the principal (run once):
+```bash
+PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+kubectl exec -n prod $(kubectl get pod -n prod -l app=kerberos-kdc \
+  -o jsonpath='{.items[0].metadata.name}') -- \
+  kadmin.local -q "addprinc -pw ${PASS} admin@STARDATADBLABS.LOCAL"
 ```
 
 ---
 
-## 8. Expected timing summary
+## 9. Expected timing summary
 
 | Write | Operation | Rows | Expected elapsed |
 |---|---|---|---|
@@ -565,4 +584,4 @@ kubectl set env deployment/doris-write-proxy -n prod SPARK_DRIVER_MEMORY=6g
 
 > UPDATE and DELETE are slower than INSERT because Spark must read, rewrite, and
 > commit affected Iceberg data files (copy-on-write) rather than simply appending
-> a new file.  Schema MISS on Write 1 includes a `DESCRIBE TABLE` REST call (~1 s).
+> a new file. Schema MISS on Write 1 includes a `DESCRIBE TABLE` REST call (~1 s).
