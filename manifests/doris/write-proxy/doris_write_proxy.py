@@ -73,6 +73,14 @@ DORIS_PORT          = int(os.environ.get("DORIS_PORT",  "9030"))
 LISTEN_HOST         = os.environ.get("LISTEN_HOST",  "0.0.0.0")
 LISTEN_PORT         = int(os.environ.get("LISTEN_PORT", "9040"))
 
+# Cache-guard SELECT intercept
+# URL of the cache manager's warm-up trigger HTTP endpoint.
+# Set to empty string to disable the intercept entirely.
+CACHE_MANAGER_URL   = os.environ.get(
+    "CACHE_MANAGER_URL",
+    "http://doris-cache-manager.prod.svc.cluster.local:8090",
+)
+
 SPARK_MASTER_URL    = os.environ.get(
     "SPARK_MASTER_URL",
     "local[*]",   # default: local mode — driver IS the executor, no cluster needed for writes
@@ -962,6 +970,17 @@ _DML_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SELECT_RE = re.compile(
+    r"^\s*(select\b|with\b)",
+    re.IGNORECASE,
+)
+
+# Extract the first fully-qualified catalog.db.table reference from a SELECT.
+_FROM_TABLE_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+`?(\w+)`?\.`?(\w+)`?\.`?(\w+)`?",
+    re.IGNORECASE,
+)
+
 
 def _catalog_and_parts(stmt: str) -> Tuple[str | None, str | None, str | None]:
     if not _DML_RE.match(stmt):
@@ -992,6 +1011,154 @@ def _catalog_and_parts(stmt: str) -> Tuple[str | None, str | None, str | None]:
     if catalog and catalog.lower() in MANAGED_CATALOGS:
         return catalog.lower(), db, table
     return None, None, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SELECT cache guard — intercept cold-table queries before they reach Doris
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _SelectGuard:
+    """
+    Checks whether tables referenced in a SELECT are WARM in the Doris segment
+    cache before the query is forwarded to Doris.
+
+    If any referenced managed-catalog table is not WARM (or is unseen):
+      1. Returns a MySQL ERR packet to the client immediately — the SELECT is
+         never forwarded to Doris, so no S3 read occurs.
+      2. Writes a row to cache_system.query_block_log so the user can see why
+         their query was rejected and when warm-up will complete.
+      3. Calls the cache manager's POST /warmup HTTP endpoint to trigger
+         immediate warm-up for every cold table.
+
+    Once warm-up completes (typically < 2 minutes for small tables), the user
+    re-runs the same query — this time all tables are WARM and the SELECT is
+    forwarded to Doris normally, served from NVMe cache.
+
+    The guard uses a dedicated pymysql connection per proxy process (not per
+    connection) so it never shares state with the write-path Doris connection.
+    It is disabled if CACHE_MANAGER_URL is empty.
+    """
+
+    _WARM = "WARM"
+
+    def __init__(self) -> None:
+        self._conn = None
+        self._lock = threading.Lock()
+
+    def _get_conn(self):
+        """Lazy-connect to Doris for metadata queries. Reconnects on failure."""
+        import pymysql  # type: ignore
+        if self._conn is None:
+            doris_pass = os.environ.get("DORIS_ADMIN_PASSWORD", "")
+            self._conn = pymysql.connect(
+                host=DORIS_HOST, port=DORIS_PORT,
+                user="root", password=doris_pass,
+                charset="utf8mb4", connect_timeout=5,
+                read_timeout=5, autocommit=True,
+            )
+        try:
+            self._conn.ping(reconnect=True)
+        except Exception:
+            doris_pass = os.environ.get("DORIS_ADMIN_PASSWORD", "")
+            self._conn = pymysql.connect(
+                host=DORIS_HOST, port=DORIS_PORT,
+                user="root", password=doris_pass,
+                charset="utf8mb4", connect_timeout=5,
+                read_timeout=5, autocommit=True,
+            )
+        return self._conn
+
+    def check(
+        self,
+        stmt: str,
+        user: str,
+        query_id: str,
+    ) -> "str | None":
+        """
+        Check cache state for all managed-catalog tables in stmt.
+        Returns an error message string if any table is cold/unseen,
+        or None if all tables are WARM (query should proceed).
+        Catches all exceptions internally — never raises.
+        """
+        if not CACHE_MANAGER_URL:
+            return None  # intercept disabled
+        if not _SELECT_RE.match(stmt):
+            return None  # not a SELECT
+
+        # Extract all catalog.db.table references in managed catalogs
+        cold_tables = []
+        try:
+            with self._lock:
+                conn = self._get_conn()
+                for m in _FROM_TABLE_RE.finditer(stmt):
+                    catalog, db, table = m.group(1).lower(), m.group(2), m.group(3)
+                    if catalog not in MANAGED_CATALOGS:
+                        continue
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT cache_state FROM cache_system.table_query_stats "
+                            "WHERE catalog_name=%s AND db_name=%s AND table_name=%s",
+                            (catalog, db, table),
+                        )
+                        row = cur.fetchone()
+                    # Not in stats (never seen) or not WARM → cold
+                    state = row[0] if row else None
+                    if state != self._WARM:
+                        cold_tables.append(f"{catalog}.{db}.{table}")
+        except Exception as exc:
+            logger.warning("SelectGuard: metadata check failed (%s) — letting query through.", exc)
+            return None
+
+        if not cold_tables:
+            return None  # all WARM
+
+        cold_str = ", ".join(cold_tables)
+        message = (
+            f"The following table(s) referenced in your query are not in the "
+            f"Doris segment cache: {cold_str}. "
+            f"Automatic warm-up has been triggered — please retry your query "
+            f"in a few minutes once warm-up completes."
+        )
+        logger.info(
+            "SelectGuard: query_id=%s user=%s — cold tables: %s",
+            query_id, user, cold_str,
+        )
+
+        # Write query_block_log row
+        try:
+            with self._lock:
+                conn = self._get_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO cache_system.query_block_log "
+                        "(query_id, detected_at, user_name, cold_tables, stmt_preview, message) "
+                        "VALUES (%s, NOW(), %s, %s, %s, %s)",
+                        (query_id, user, cold_str, stmt[:500], message),
+                    )
+        except Exception as exc:
+            logger.warning("SelectGuard: could not write query_block_log (%s).", exc)
+
+        # Trigger warm-up on the cache manager (fire-and-forget)
+        for fqn in cold_tables:
+            try:
+                parts = fqn.split(".")
+                body = json.dumps({"catalog": parts[0], "db": parts[1], "table": parts[2]}).encode()
+                req = urllib.request.Request(
+                    f"{CACHE_MANAGER_URL}/warmup",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=3)
+                logger.info("SelectGuard: warm-up triggered for %s via cache manager.", fqn)
+            except Exception as exc:
+                logger.warning("SelectGuard: warm-up trigger failed for %s (%s).", fqn, exc)
+
+        return message
+
+
+# Module-level singleton
+_select_guard = _SelectGuard()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1061,6 +1228,24 @@ class ProxyConnection:
 
                 if cmd == self._COM_QUERY:
                     stmt = payload[1:].decode("utf-8", errors="replace").strip()
+
+                    # ── SELECT cache guard ────────────────────────────────────
+                    # Check before forwarding: if any referenced managed-catalog
+                    # table is not WARM, reject immediately with a MySQL error,
+                    # write query_block_log, and trigger warm-up. The client
+                    # never hits Doris and no S3 read occurs.
+                    if _SELECT_RE.match(stmt):
+                        import uuid
+                        query_id = str(uuid.uuid4())
+                        err_msg = await self._loop.run_in_executor(
+                            None, _select_guard.check, stmt, self._user, query_id,
+                        )
+                        if err_msg:
+                            self._cw.write(_mysql_err_packet(seq + 1, err_msg, 1105))
+                            await self._cw.drain()
+                            continue
+
+                    # ── DML write-pushdown ────────────────────────────────────
                     catalog, db, table = _catalog_and_parts(stmt)
 
                     if catalog:

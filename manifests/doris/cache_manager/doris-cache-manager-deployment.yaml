@@ -163,6 +163,15 @@ spec:
             # How often (seconds) the guard polls audit_log for cold-table SELECTs.
             - name: CACHE_GUARD_POLL_S
               value: "60"
+            # ── WarmupHttpServer (feature c) ────────────────────────────────
+            # Port the cache manager's HTTP server listens on for on-demand
+            # warm-up requests from the write-proxy SelectGuard.
+            - name: WARMUP_HTTP_PORT
+              value: "8090"
+          ports:
+            - name: warmup-http
+              containerPort: 8090
+              protocol: TCP
           resources:
             requests:
               memory: 128Mi

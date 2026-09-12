@@ -84,6 +84,21 @@ spec:
             # ── OpenBao address (passed through to spark_iceberg_write.py) ───
             - name: ADDR
               value: "http://openbao.prod.svc.cluster.local:8200"
+            # ── SelectGuard — cache-state check before forwarding SELECTs ───
+            # URL of the cache manager's warm-up trigger HTTP endpoint.
+            # The SelectGuard checks cache_system.table_query_stats before any
+            # SELECT against a managed catalog; cold tables get an ERR packet
+            # instead of a slow S3 read, and warm-up is triggered immediately.
+            # Set to "" to disable the intercept.
+            - name: CACHE_MANAGER_URL
+              value: "http://doris-cache-manager.prod.svc.cluster.local:8090"
+            # DORIS_ADMIN_PASSWORD is used by SelectGuard to connect to Doris
+            # for cache_system.table_query_stats and query_block_log access.
+            - name: DORIS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rbac-plane-credentials
+                  key: DORIS_ADMIN_PASSWORD
           ports:
             - name: mysql-proxy
               containerPort: 9040

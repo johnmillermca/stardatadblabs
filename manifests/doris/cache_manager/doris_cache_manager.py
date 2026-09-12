@@ -151,6 +151,10 @@ _SPARK_WRITE_SCRIPT = os.environ.get(
 # How frequently the write-interceptor background thread polls audit_log (seconds).
 WRITE_POLL_INTERVAL_S = int(os.environ.get("WRITE_POLL_INTERVAL_S", "10"))
 
+# Port the cache manager's HTTP server listens on for warm-up trigger requests
+# from the write-proxy's SelectGuard.
+WARMUP_HTTP_PORT = int(os.environ.get("WARMUP_HTTP_PORT", "8090"))
+
 # ── CatalogSyncer settings ────────────────────────────────────────────────────
 # Polaris REST API base URL — used to enumerate warehouses and auto-create catalogs.
 POLARIS_URI = os.environ.get(
@@ -2231,7 +2235,94 @@ class CacheManagerDaemon:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Warm-up HTTP server — called by write-proxy SelectGuard
+# ─────────────────────────────────────────────────────────────────────────────
+class WarmupHttpServer:
+    """
+    Tiny HTTP server that accepts POST /warmup requests from the write-proxy's
+    SelectGuard to trigger on-demand warm-up for a specific table.
+
+    Request body (JSON): {"catalog": "polaris", "db": "tpcds_sf10tcl", "table": "inventory"}
+    Response: 200 OK on success, 400 on bad request, 500 on internal error.
+
+    Runs in a daemon thread alongside the main cycle loop.
+    """
+
+    def __init__(self, daemon: "CacheManagerDaemon") -> None:
+        self._daemon = daemon
+
+    def start(self) -> None:
+        t = threading.Thread(
+            target=self._serve,
+            name="warmup-http",
+            daemon=True,
+        )
+        t.start()
+        logger.info("WarmupHttpServer: listening on port %d.", WARMUP_HTTP_PORT)
+
+    def _serve(self) -> None:
+        import http.server
+
+        daemon = self._daemon
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass  # suppress default access log; daemon logger used instead
+
+            def do_POST(self):
+                if self.path != "/warmup":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body   = json.loads(self.rfile.read(length))
+                    catalog = body["catalog"]
+                    db      = body["db"]
+                    table   = body["table"]
+                except Exception as exc:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(str(exc).encode())
+                    return
+
+                try:
+                    key      = TableKey(catalog=catalog, db=db, table=table)
+                    be_nodes = daemon._be_nodes
+                    if not be_nodes:
+                        be_nodes = daemon._be_discovery.discover(daemon._meta_doris)
+                    submitted = 0
+                    for be in be_nodes:
+                        if not daemon._executor.is_running(key, be):
+                            daemon._executor.submit(
+                                key, be,
+                                daemon._doris_creds,
+                                daemon._meta_doris,
+                            )
+                            submitted += 1
+                    logger.info(
+                        "WarmupHttpServer: on-demand warm-up for %s — %d BE(s) submitted.",
+                        key, submitted,
+                    )
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(
+                        json.dumps({"status": "ok", "submitted": submitted}).encode()
+                    )
+                except Exception as exc:
+                    logger.error("WarmupHttpServer: error handling /warmup: %s", exc)
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(str(exc).encode())
+
+        server = http.server.HTTPServer(("0.0.0.0", WARMUP_HTTP_PORT), Handler)
+        server.serve_forever()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    CacheManagerDaemon().run()
+    daemon = CacheManagerDaemon()
+    WarmupHttpServer(daemon).start()
+    daemon.run()
