@@ -4,17 +4,18 @@
 # FE NodePort: http://192.168.1.50:30030 (HTTP)
 #
 # MySQL entry point:
-#   All MySQL clients connect to NodePort 30090, which now routes to the
-#   doris-write-proxy (port 9030) — NOT directly to Doris FE.
-#   The write-proxy enforces the SELECT cache guard, handles write-pushdown
-#   to Spark, and forwards everything else to Doris FE :9030 internally.
+#   All MySQL clients connect to NodePort 30090 → write-proxy → krb-doris-guard
+#   (port 19030 on doris-fe ClusterIP) → Doris :9030 on 127.0.0.1.
+#   The write-proxy enforces the SELECT cache guard and write-pushdown, then
+#   forwards all other traffic to krb-doris-guard which proxies to Doris
+#   on loopback — so Doris always sees the connection from 127.0.0.1 and
+#   root/other users are authenticated normally.
 #
-#   doris-fe query port (9030) is NO LONGER exposed as a NodePort.
-#   External clients cannot bypass the write-proxy.
-#   The krb-doris-guard sidecar (19030) is also no longer reachable externally.
+#   doris-fe query port (9030) is NOT exposed externally or in-cluster.
+#   External clients cannot bypass the write-proxy or the guard.
 # =============================================================================
 ---
-# External NodePort for FE — HTTP WebUI only (MySQL removed — now via write-proxy)
+# External NodePort for FE — HTTP WebUI only (MySQL now via write-proxy → guard)
 apiVersion: v1
 kind: Service
 metadata:
@@ -29,8 +30,11 @@ spec:
       port: 8030
       targetPort: 8030
       nodePort: 30030
-    # query port intentionally NOT exposed as NodePort —
-    # all MySQL traffic enters via doris-write-proxy NodePort 30090.
+    # krb-doris-guard port — reachable in-cluster by the write-proxy.
+    # NOT exposed as a NodePort; only the write-proxy uses this path.
+    - name: guard
+      port: 19030
+      targetPort: 19030
     - name: edit-log
       port: 9010
       targetPort: 9010

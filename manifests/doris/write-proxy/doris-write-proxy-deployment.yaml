@@ -63,15 +63,15 @@ spec:
           imagePullPolicy: Always
           command: ["python", "/app/doris_write_proxy.py"]
           env:
-            # ── Doris FE — direct in-pod port (bypasses krb-guard for proxy) ─
-            # The proxy connects to Doris FE directly on :9030 (the real Doris
-            # port, not the guard port :19030) because the proxy is itself a
-            # trusted in-cluster component and the client's Kerberos auth is
-            # already validated at the connection level by the proxy.
+            # ── Doris FE — via krb-doris-guard (19030) ───────────────────────
+            # The write-proxy forwards to krb-doris-guard on port 19030, which
+            # then proxies to Doris :9030 on 127.0.0.1 inside the FE pod.
+            # This means Doris sees every connection from 127.0.0.1 — all users
+            # (root, admin, etc.) are authenticated exactly as before.
             - name: DORIS_HOST
-              value: "doris-fe-0.doris-fe-headless.prod.svc.cluster.local"
+              value: "doris-fe.prod.svc.cluster.local"
             - name: DORIS_PORT
-              value: "9030"
+              value: "19030"
             - name: DORIS_USER
               value: "admin"
             # ── Proxy listen ─────────────────────────────────────────────────
