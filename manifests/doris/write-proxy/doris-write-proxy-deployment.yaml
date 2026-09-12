@@ -1,36 +1,38 @@
 # =============================================================================
-# Doris Write Proxy — Deployment + Services
+# Doris Write Proxy — Deployment + Service
 # Namespace : prod
 # Node      : worker1.local  (same node as Doris FE)
 #
 # Purpose:
-#   Single MySQL entry point for ALL Doris clients (NodePort 30090).
-#   Replaces the direct doris-fe NodePort 30090 — all MySQL traffic now
-#   flows through this proxy first.
+#   Optional MySQL protocol proxy for DML write-pushdown to Apache Spark.
+#   Apps that need to INSERT/UPDATE/DELETE against managed Iceberg catalogs
+#   connect on port 30091 instead of 30090.
 #
 #   For all statements except DML against managed Iceberg catalogs, packets
 #   are forwarded to Doris unchanged.
 #
-#   For SELECT against managed catalogs with cold cache_state:
-#     → Returns ERR 1105 with a friendly message + triggers warm-up.
-#
 #   For DML against managed catalogs (polaris, databricks, postgres, oracle,
 #   mongodb) the proxy:
 #     1. Intercepts the statement BEFORE sending it to Doris.
-#     2. Submits it to the Spark standalone REST API (:6066).
-#     3. Polls Spark until the job finishes (FINISHED / FAILED).
-#     4. Returns MySQL OK (rows affected = 0) on success.
-#     5. Returns MySQL ERR with the Spark error on failure.
+#     2. Submits it via the in-process SparkSession (local[*] mode).
+#     3. Returns MySQL OK (rows affected = 0) on success.
+#     4. Returns MySQL ERR with the Spark error on failure.
 #
 #   The client never sees a "not writable" error from Doris.
 #   Local Doris DML (internal tables) passes through to Doris unmodified.
 #
 # Routing:
-#   Client → :30090 (NodePort) → proxy :9030 → Doris FE :9030 (in-cluster)
+#   Client → :30091 (NodePort) → proxy :9040 → Doris FE :9030 (in-cluster)
 #
-# Note: The write proxy connects to Doris FE directly on :9030 via the
-#   in-cluster headless FQDN — it is a trusted in-cluster component and
-#   does not go through krb-doris-guard.
+# Note: The write proxy connects directly to Doris FE on :9030 via the
+#   in-cluster headless FQDN — it is a trusted in-cluster component.
+#
+# Image: 192.168.1.50:30500/doris-write-proxy:1.0.22
+#   1.0.18 — initial release
+#   1.0.19 — OpenBao admin_user key support
+#   1.0.20 — SelectGuard added (CACHE_MANAGER_URL)
+#   1.0.21 — port change to 9030/30090 (reverted)
+#   1.0.22 — add DORIS_USER constant; restore to 9040/30091
 # =============================================================================
 ---
 apiVersion: apps/v1
@@ -59,46 +61,33 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: write-proxy
-          image: 192.168.1.50:30500/doris-write-proxy:1.0.21
+          image: 192.168.1.50:30500/doris-write-proxy:1.0.22
           imagePullPolicy: Always
           command: ["python", "/app/doris_write_proxy.py"]
           env:
-            # ── Doris FE — via krb-doris-guard (19030) ───────────────────────
-            # The write-proxy forwards to krb-doris-guard on port 19030, which
-            # then proxies to Doris :9030 on 127.0.0.1 inside the FE pod.
-            # This means Doris sees every connection from 127.0.0.1 — all users
-            # (root, admin, etc.) are authenticated exactly as before.
+            # ── Doris FE — direct in-cluster ──────────────────────────────────
             - name: DORIS_HOST
-              value: "doris-fe.prod.svc.cluster.local"
+              value: "doris-fe-0.doris-fe-headless.prod.svc.cluster.local"
             - name: DORIS_PORT
-              value: "19030"
+              value: "9030"
             - name: DORIS_USER
               value: "admin"
             # ── Proxy listen ─────────────────────────────────────────────────
             - name: LISTEN_HOST
               value: "0.0.0.0"
             - name: LISTEN_PORT
-              value: "9030"
+              value: "9040"
             # ── Spark ────────────────────────────────────────────────────────
-            # Timeout for the SparkSession background init (first pod start)
             - name: SPARK_INIT_TIMEOUT_S
               value: "120"
-            # Per-statement SQL timeout
             - name: SPARK_SQL_TIMEOUT_S
               value: "300"
-            # ── OpenBao address (passed through to spark_iceberg_write.py) ───
+            # ── OpenBao ──────────────────────────────────────────────────────
             - name: ADDR
               value: "http://openbao.prod.svc.cluster.local:8200"
-            # ── SelectGuard — cache-state check before forwarding SELECTs ───
-            # URL of the cache manager's warm-up trigger HTTP endpoint.
-            # The SelectGuard checks cache_system.table_query_stats before any
-            # SELECT against a managed catalog; cold tables get an ERR packet
-            # instead of a slow S3 read, and warm-up is triggered immediately.
-            # Set to "" to disable the intercept.
+            # ── SelectGuard disabled — cache guard runs in cache-manager ─────
             - name: CACHE_MANAGER_URL
-              value: "http://doris-cache-manager.prod.svc.cluster.local:8090"
-            # DORIS_ADMIN_PASSWORD is used by SelectGuard to connect to Doris
-            # for cache_system.table_query_stats and query_block_log access.
+              value: ""
             - name: DORIS_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -106,24 +95,16 @@ spec:
                   key: DORIS_ADMIN_PASSWORD
           ports:
             - name: mysql-proxy
-              containerPort: 9030
+              containerPort: 9040
               protocol: TCP
           resources:
             requests:
               memory: 512Mi
               cpu: 100m
             limits:
-              # spark-submit client mode runs a JVM driver inside this pod.
-              # JVM needs ~400 MB baseline + SparkContext overhead.
               memory: 2Gi
               cpu: 1000m
           readinessProbe:
-            # tcpSocket probes open and immediately close the connection — this
-            # generates "0 bytes read on a total of 4 expected bytes" errors every
-            # 10 s because the MySQL protocol proxy expects a 4-byte packet header
-            # before the handshake response, but the probe sends nothing.
-            # Use /proc/1/cmdline to verify PID 1 is the proxy process — works
-            # on any slim Python image without needing pgrep or procps.
             exec:
               command:
                 - sh
@@ -142,9 +123,8 @@ spec:
             periodSeconds: 30
             failureThreshold: 3
 ---
-# NodePort 30090 — single MySQL entry point for all Doris clients.
-# Replaces the former doris-fe NodePort 30090.
-# In-cluster access: doris-write-proxy.prod.svc.cluster.local:9030
+# NodePort 30091 — optional Iceberg DML write-pushdown path only.
+# All normal query/read clients use port 30090 (krb-doris-guard).
 apiVersion: v1
 kind: Service
 metadata:
@@ -159,7 +139,7 @@ spec:
   type: NodePort
   ports:
     - name: mysql-proxy
-      port: 9030
-      targetPort: 9030
-      nodePort: 30090
+      port: 9040
+      targetPort: 9040
+      nodePort: 30091
       protocol: TCP

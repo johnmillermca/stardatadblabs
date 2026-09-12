@@ -1,21 +1,17 @@
 # =============================================================================
 # Apache Doris Services
 # Namespace : prod
-# FE NodePort: http://192.168.1.50:30030 (HTTP)
+# FE NodePort: http://192.168.1.50:30030 (HTTP)  jdbc://192.168.1.50:30090 (MySQL)
 #
-# MySQL entry point:
-#   All MySQL clients connect to NodePort 30090 → write-proxy → krb-doris-guard
-#   (port 19030 on doris-fe ClusterIP) → Doris :9030 on 127.0.0.1.
-#   The write-proxy enforces the SELECT cache guard and write-pushdown, then
-#   forwards all other traffic to krb-doris-guard which proxies to Doris
-#   on loopback — so Doris always sees the connection from 127.0.0.1 and
-#   root/other users are authenticated normally.
-#
-#   doris-fe query port (9030) is NOT exposed externally or in-cluster.
-#   External clients cannot bypass the write-proxy or the guard.
+# Kerberos enforcement:
+#   MySQL port 9030 → targetPort 19030 (krb-doris-guard sidecar).
+#   The guard validates the KDC principal before proxying to Doris :9030.
+#   Clients connecting on port 30090 / 9030 go through the guard.
+#   Direct access to Doris port 9030 is blocked at the Service level —
+#   only the guard (127.0.0.1:9030 inside the pod) can reach Doris directly.
 # =============================================================================
 ---
-# External NodePort for FE — HTTP WebUI only (MySQL now via write-proxy → guard)
+# External NodePort for FE — HTTP WebUI (8030) and MySQL via guard (9030→19030)
 apiVersion: v1
 kind: Service
 metadata:
@@ -30,11 +26,12 @@ spec:
       port: 8030
       targetPort: 8030
       nodePort: 30030
-    # krb-doris-guard port — reachable in-cluster by the write-proxy.
-    # NOT exposed as a NodePort; only the write-proxy uses this path.
-    - name: guard
-      port: 19030
+    # MySQL query port → routed to krb-doris-guard (19030) not Doris (9030)
+    # Users get KDC principal check before reaching Doris.
+    - name: query
+      port: 9030
       targetPort: 19030
+      nodePort: 30090
     - name: edit-log
       port: 9010
       targetPort: 9010
