@@ -1614,11 +1614,11 @@ class CatalogSyncer:
     def _do_sync(self, doris: DorisClient) -> None:
         warehouses = self._list_polaris_warehouses()
         if not warehouses:
-            logger.debug("CatalogSyncer: no warehouses returned from Polaris — nothing to sync.")
+            logger.info("CatalogSyncer: no warehouses returned from Polaris — nothing to sync.")
             return
 
         existing = self._list_doris_catalogs(doris)
-        logger.debug(
+        logger.info(
             "CatalogSyncer: Polaris warehouses=%s  Doris catalogs=%s",
             warehouses, existing,
         )
@@ -1633,7 +1633,7 @@ class CatalogSyncer:
         for warehouse in warehouses:
             catalog_name = self._warehouse_to_catalog_name(warehouse)
             if catalog_name in existing:
-                logger.debug("CatalogSyncer: catalog '%s' already registered — skip.", catalog_name)
+                logger.info("CatalogSyncer: catalog '%s' already registered — skip.", catalog_name)
                 continue
 
             logger.info(

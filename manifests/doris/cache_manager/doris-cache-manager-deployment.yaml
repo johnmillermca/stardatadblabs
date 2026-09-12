@@ -15,7 +15,7 @@
 #   • Evicts cold tables after 24 h of inactivity
 #   • Runs up to 32 concurrent warm-up jobs
 #
-# Image: 192.168.1.50:30500/doris-cache-manager:1.6.0
+# Image: 192.168.1.50:30500/doris-cache-manager:1.6.1
 #   Built from manifests/doris/cache_manager/ — see runbook-25 for build steps.
 #   1.1.0 — fix audit_log catalog detection (use stmt LIKE, not catalog IN);
 #            make MANAGED_CATALOGS and CATALOG_WAREHOUSES env-var driven.
@@ -52,6 +52,10 @@
 #            the next execution of the same query hits the segment cache.
 #            New env vars: POLARIS_URI, S3_ENDPOINT, S3_REGION,
 #            CACHE_GUARD_LOOKBACK_S, CACHE_GUARD_POLL_S.
+#   1.6.1 — CatalogSyncer steady-state log levels promoted DEBUG→INFO:
+#            "no warehouses", "warehouses vs catalogs", "already registered".
+#            These lines were previously suppressed at INFO log level, making
+#            it impossible to confirm CatalogSyncer was running each cycle.
 # =============================================================================
 ---
 apiVersion: v1
