@@ -33,7 +33,7 @@ RUN apt-get update && \
         libpython3.11 && \
     ln -sf python3.11 /usr/bin/python3 && \
     ln -sf python3 /usr/bin/python && \
-    pip3 install --no-cache-dir pyspark==3.5.1 && \
+    pip3 install --no-cache-dir pyspark==3.5.1 pymysql==1.1.1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy Temurin 17 JDK from the Spark stage
