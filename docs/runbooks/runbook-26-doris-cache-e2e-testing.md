@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / doris-cache-manager |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-09-11 (v1.6.1 — T-40/T-41: fix CatalogSyncer test commands; DEBUG→INFO log promotion) |
+| **Last Updated** | 2026-09-11 (v1.6.1 — T-40/T-41: fix CatalogSyncer test commands; DEBUG→INFO log promotion) · 2026-09-12 (P-9: cross-catalog JOIN cache performance tests T-47–T-50) |
 | **Related** | RB-25 (Cache Manager Setup & Operations) · RB-05 (Doris & Analytics) |
 
 ---
@@ -17,7 +17,7 @@ This runbook is a single, ordered end-to-end test script for the Doris Dynamic S
 Manager. Run each section from top to bottom on a live cluster. Every test includes the exact
 command, expected output, and a ✅ / ❌ pass/fail criterion.
 
-The test covers eight phases in order:
+The test covers nine phases in order:
 
 | Phase | Tests | What it validates |
 |---|---|---|
@@ -29,6 +29,7 @@ The test covers eight phases in order:
 | **P-6** | T-26 – T-33 | Write pushdown — DML interception and Spark execution |
 | **P-7** | T-34 – T-38 | Cache metrics — `table_cache_metrics` I/O tracking and hit-rate validation |
 | **P-8** | T-39 – T-46 | Auto-catalog sync + Cache Guard — CatalogSyncer and CacheGuard E2E validation |
+| **P-9** | T-47 – T-50 | Cross-catalog JOIN performance — warm vs cold table cache behaviour under complex analytical SQL |
 
 ---
 
@@ -85,6 +86,10 @@ The test covers eight phases in order:
 | T-44 | P-8 | CacheGuard | CacheGuard thread is running (log confirms startup) |
 | T-45 | P-8 | CacheGuard | SELECT against a cold table creates a row in `query_block_log` within 60 s |
 | T-46 | P-8 | CacheGuard | JOIN query where one table is cold flags all cold tables and triggers warm-up for each |
+| T-47 | P-9 | JOIN Perf | Baseline cross-catalog JOIN: record cold-read latency and `remote_S3` bytes for uncached tables |
+| T-48 | P-9 | JOIN Perf | Complex 5-table analytical JOIN spanning `polaris` (WARM) + `oracle`/`postgres`/`mongodb` (COLD) |
+| T-49 | P-9 | JOIN Perf | Warm all cold tables, re-run the same JOIN, compare latency and `cache_hit_pct` |
+| T-50 | P-9 | JOIN Perf | Confirm `table_cache_metrics` shows ≥ 80% cache hit for every table in the JOIN after warm-up |
 
 ---
 
@@ -1070,8 +1075,12 @@ logic can be exercised.
 DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
 
-# Step 1 — Stop the daemon so it cannot overwrite the UPDATE before the test runs
+# Step 1 — Stop the daemon so it cannot overwrite the UPDATE before the test runs.
+# Wait for the pod to fully terminate before proceeding — scale returns immediately
+# but the pod takes a few seconds to stop; running the UPDATE while it is still
+# alive risks the daemon overwriting cache_state back to WARM.
 kubectl scale deployment/doris-cache-manager -n prod --replicas=0
+kubectl wait --for=delete pod -n prod -l app=doris-cache-manager --timeout=30s
 
 # Step 2 — Mark the table COLD
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
@@ -2435,3 +2444,474 @@ kubectl set env deployment/doris-cache-manager -n prod \
 
 kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 ```
+
+---
+
+## Phase 9 — Cross-Catalog JOIN Performance with Segment Caching
+
+> **Goal:** Run a realistic multi-catalog analytical JOIN query and measure how Doris segment
+> caching affects end-to-end latency.  The test uses **already-warmed `polaris` tables** as the
+> high-selectivity anchor (proven `cache_state = WARM` from Phase 4) and joins them against
+> tables from `oracle`, `postgres`, and `mongodb` that have **not yet been warmed** — so the
+> first execution demonstrates the cold S3-read penalty and the second run (after daemon warm-up)
+> demonstrates the NVMe cache benefit.
+>
+> **Prerequisites:** Phases 1–4 must have passed (infrastructure alive, daemon running, polaris
+> tables in `WARM` state).  The `oracle.tpcds`, `postgres.public`, and `mongodb.cache_testing`
+> tables used below must exist (confirmed via T-03a).
+>
+> **Which tables are already cached vs cold:**
+>
+> | Table | Catalog | Confirmed state | Role in JOIN |
+> |---|---|---|---|
+> | `tpcds_sf10tcl.store_sales` | `polaris` | `WARM` ✅ | Fact table (large — 7.2 M rows) |
+> | `tpcds_sf10tcl.date_dim` | `polaris` | `WARM` ✅ | Dimension — date filter |
+> | `tpcds_sf10tcl.item` | `polaris` | `WARM` ✅ | Dimension — item attributes |
+> | `tpcds.store` | `oracle` | `COLD` ❄ | Store dimension — not yet warmed |
+> | `public.customers` | `postgres` | `COLD` ❄ | Customer dimension — not yet warmed |
+> | `cache_testing.orders` | `mongodb` | `COLD` ❄ | Order header — not yet warmed |
+> | `cache_testing.order_items` | `mongodb` | `COLD` ❄ | Order line items — not yet warmed |
+>
+> The polaris TPC-DS `store` table is used from oracle rather than polaris because the oracle
+> catalog's `tpcds` schema contains an independent copy whose cache state is independently
+> controllable — this lets us test the mixed warm/cold boundary cleanly.
+
+---
+
+### T-47 — Baseline: record cold-read latency and `remote_S3` bytes before warm-up
+
+Before running the complex JOIN, establish a per-table baseline so you have concrete numbers to
+compare against after warm-up (T-49).  For each cold table run a full-scan aggregate query (not
+`COUNT(*)`, which resolves from metadata) and record the query time.
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+# ── oracle.tpcds.store — cold baseline ────────────────────────────────────────
+echo "=== oracle.tpcds.store (cold) ==="
+time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT MAX(s_store_name), MIN(s_gmt_offset), COUNT(*)
+      FROM oracle.tpcds.store;"
+
+# ── postgres.public.customers — cold baseline ──────────────────────────────────
+echo "=== postgres.public.customers (cold) ==="
+time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT MAX(c_birth_year), MIN(c_birth_year), COUNT(*)
+      FROM postgres.public.customers;"
+
+# ── mongodb.cache_testing.orders — cold baseline ───────────────────────────────
+echo "=== mongodb.cache_testing.orders (cold) ==="
+time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT MAX(order_date), MIN(order_date), COUNT(*)
+      FROM mongodb.cache_testing.orders;"
+
+# ── mongodb.cache_testing.order_items — cold baseline ─────────────────────────
+echo "=== mongodb.cache_testing.order_items (cold) ==="
+time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT MAX(quantity), SUM(unit_price), COUNT(*)
+      FROM mongodb.cache_testing.order_items;"
+```
+
+Record the `real` time from each `time` output.  These are your **cold-read baselines**.
+
+**Then confirm each table shows `remote_S3 > 0` in the metrics table** (wait one daemon cycle
+after running the queries above):
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT
+    CONCAT(catalog_name,'.',db_name,'.',table_name) AS table_fqn,
+    cache_state,
+    CONCAT(ROUND(remote_scan_bytes / 1024 / 1024, 2), ' MB') AS remote_S3,
+    CONCAT(ROUND(local_scan_bytes  / 1024 / 1024, 2), ' MB') AS local_NVMe,
+    CONCAT(cache_hit_pct, '%') AS hit_pct,
+    sampled_at
+FROM cache_system.table_cache_metrics
+WHERE (catalog_name = 'oracle'   AND table_name = 'store')
+   OR (catalog_name = 'postgres' AND table_name = 'customers')
+   OR (catalog_name = 'mongodb'  AND table_name IN ('orders','order_items'))
+ORDER BY catalog_name, table_name, sampled_at DESC;"
+```
+
+**Expected:** each row shows `remote_S3 > 0 MB`, `local_NVMe = 0 MB`, `hit_pct = 0%`,
+`cache_state` in `COLD` or `UNKNOWN`.
+
+✅ Pass: all 4 cold tables show `remote_S3 > 0 MB` and `local_NVMe = 0 MB`.
+❌ Fail: `remote_S3 = 0 MB` → the baseline query used `COUNT(*)` (metadata-only) or the daemon
+cycle has not yet run; wait one `SCAN_INTERVAL_S` and re-check.
+
+---
+
+### T-48 — Complex 5-table analytical JOIN: polaris (WARM) + oracle/postgres/mongodb (COLD)
+
+This query is a realistic analytical workload: it joins the large TPC-DS `store_sales` fact table
+(polaris — cached) with a date filter, item dimension, and store dimension, then enriches each
+sale with a customer record from postgres and a matching order from mongodb.  The `date_dim`
+filter keeps the result set manageable while still forcing the BE to scan all referenced tables.
+
+The query intentionally spans **all three cold catalogs** and the **two warm polaris dimensions**
+in a single statement so the execution plan exercises both the NVMe cache path and the cold S3
+path within the same query.
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+echo "=== T-48: Cross-catalog JOIN (cold run) ==="
+time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  --connect-timeout=300 \
+  -e "
+/*
+ * T-48 — Cross-catalog analytical JOIN
+ *
+ * Warm tables  (polaris):   store_sales · date_dim · item
+ * Cold tables  (oracle):    store
+ * Cold tables  (postgres):  customers
+ * Cold tables  (mongodb):   orders · order_items
+ *
+ * Purpose: measure latency when the hot side (polaris) is already in the
+ * Doris BE segment cache but the dimension/fact tables from other catalogs
+ * are still cold (fetched from S3 / remote storage).
+ */
+SELECT
+    -- Date bucket
+    dd.d_year                                           AS sale_year,
+    dd.d_moy                                            AS sale_month,
+
+    -- Store info (cold — oracle)
+    st.s_store_name                                     AS store_name,
+    st.s_state                                          AS store_state,
+
+    -- Item info (warm — polaris)
+    i.i_product_name                                    AS product_name,
+    i.i_category                                        AS item_category,
+    i.i_brand                                           AS item_brand,
+
+    -- Customer info (cold — postgres)
+    c.c_first_name                                      AS customer_first_name,
+    c.c_last_name                                       AS customer_last_name,
+
+    -- Order header (cold — mongodb)
+    o.order_date                                        AS order_date,
+    o.status                                            AS order_status,
+
+    -- Aggregated sales metrics
+    COUNT(ss.ss_ticket_number)                          AS num_transactions,
+    SUM(ss.ss_quantity)                                 AS total_qty_sold,
+    ROUND(SUM(ss.ss_net_paid), 2)                       AS total_net_paid,
+    ROUND(AVG(ss.ss_net_paid), 2)                       AS avg_net_paid,
+    ROUND(SUM(ss.ss_net_profit), 2)                     AS total_net_profit,
+
+    -- Order line item aggregates (cold — mongodb)
+    COUNT(DISTINCT oi.product_id)                       AS distinct_products_ordered
+
+FROM
+    -- ── Fact table (warm — polaris, 7.2 M rows) ─────────────────────────────
+    polaris.tpcds_sf10tcl.store_sales           ss
+
+    -- ── Date dimension (warm — polaris) ──────────────────────────────────────
+    INNER JOIN polaris.tpcds_sf10tcl.date_dim   dd
+        ON ss.ss_sold_date_sk = dd.d_date_sk
+        AND dd.d_year = 2002
+        AND dd.d_moy  BETWEEN 1 AND 6          -- H1 2002 only — limits scan range
+
+    -- ── Item dimension (warm — polaris) ──────────────────────────────────────
+    INNER JOIN polaris.tpcds_sf10tcl.item       i
+        ON ss.ss_item_sk = i.i_item_sk
+        AND i.i_category IN ('Books', 'Electronics', 'Sports')
+
+    -- ── Store dimension (cold — oracle) ──────────────────────────────────────
+    LEFT JOIN oracle.tpcds.store                st
+        ON ss.ss_store_sk = st.s_store_sk
+
+    -- ── Customer dimension (cold — postgres) ─────────────────────────────────
+    -- Join on customer_sk → maps to the c_customer_sk surrogate key.
+    -- The postgres table exposes a c_customer_sk INT column matching TPC-DS schema.
+    LEFT JOIN postgres.public.customers         c
+        ON ss.ss_customer_sk = c.c_customer_sk
+
+    -- ── Order header (cold — mongodb) ────────────────────────────────────────
+    -- Best-effort join: link store_sales ticket to a mongodb order via customer_sk.
+    -- Mismatches produce NULL (LEFT JOIN) — that is expected; the BE still scans the table.
+    LEFT JOIN mongodb.cache_testing.orders      o
+        ON ss.ss_customer_sk = o.customer_id
+
+    -- ── Order line items (cold — mongodb) ────────────────────────────────────
+    LEFT JOIN mongodb.cache_testing.order_items oi
+        ON o.order_id = oi.order_id
+
+GROUP BY
+    dd.d_year,
+    dd.d_moy,
+    st.s_store_name,
+    st.s_state,
+    i.i_product_name,
+    i.i_category,
+    i.i_brand,
+    c.c_first_name,
+    c.c_last_name,
+    o.order_date,
+    o.status
+
+ORDER BY
+    sale_year,
+    sale_month,
+    total_net_paid DESC
+
+LIMIT 200;
+"
+echo "T-48 exit: $?"
+```
+
+**Record:**
+- The `real` elapsed time from the `time` output — this is your **cold JOIN baseline**.
+- The number of result rows (may be 0 if the key join columns have no overlap across catalogs —
+  that is acceptable; we care about scan performance, not business correctness).
+
+> **Why LEFT JOINs for the cold tables?**  The TPC-DS `store_sales` fact table uses integer
+> surrogate keys that were generated independently in each catalog.  A strict `INNER JOIN`
+> against `oracle.tpcds.store` would drop all rows where `ss_store_sk` has no match (likely
+> most rows, since the oracle copy is sparse).  `LEFT JOIN` ensures the BE still scans every
+> cold table so we get real cold-read metrics while keeping the query result non-empty.
+
+> **Why `date_dim` and `item` filters?**  Without the `d_year = 2002` and `i_category IN (…)`
+> predicates the planner would scan all 7.2 M `store_sales` rows.  The filters reduce the probe
+> side to a manageable slice while still forcing a full scan of the cold dimension tables — the
+> combination accurately simulates the hot-fact / cold-dimension mixed workload.
+
+**Expected (cold run):**
+- Query completes without error (exit 0).
+- `real` time is in the range of **20–90 s** depending on S3 latency and network bandwidth.
+- 0–200 result rows (join key overlap is implementation-specific; any count is valid).
+
+✅ Pass: query returns a result set without error.  Time is recorded for T-49 comparison.
+❌ Fail: `Table 'oracle.tpcds.store' does not exist` → oracle store table was not populated; substitute `oracle.tpcds.warehouse` and update the `ON` clause accordingly (`ss_warehouse_sk = w_warehouse_sk`).
+❌ Fail: `Column 'c_customer_sk' not found` in postgres → the postgres `customers` schema uses a different PK name; check with `DESCRIBE postgres.public.customers` and adjust the join predicate.
+❌ Fail: `Connection timed out` after 300 s → reduce the date range to a single month (`d_moy = 1`) and retry; S3 latency on cold reads can spike under contention.
+
+---
+
+### T-49 — Warm all cold tables, re-run the JOIN, compare latency
+
+Trigger warm-up for the four cold tables, then re-run the identical query from T-48 to measure
+the cache-warm improvement.
+
+**Step 1 — Force warm-up for each cold table:**
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+# Warm oracle.tpcds.store — MAX() forces a real BE data scan
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
+      MAX(s_store_sk), MIN(s_gmt_offset), COUNT(*)
+      FROM oracle.tpcds.store;"
+
+# Warm postgres.public.customers
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
+      MAX(c_customer_sk), MIN(c_birth_year), COUNT(*)
+      FROM postgres.public.customers;"
+
+# Warm mongodb.cache_testing.orders
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
+      MAX(order_id), MIN(order_date), COUNT(*)
+      FROM mongodb.cache_testing.orders;"
+
+# Warm mongodb.cache_testing.order_items
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
+      MAX(order_id), SUM(quantity), COUNT(*)
+      FROM mongodb.cache_testing.order_items;"
+```
+
+**Step 2 — Confirm warm-up completed in daemon logs:**
+
+```bash
+kubectl logs -n prod -l app=doris-cache-manager --tail=200 \
+  | grep -E "WARM_UP.*store|WARM_UP.*customers|WARM_UP.*order"
+```
+
+Or wait for the next daemon cycle and check `cache_state`:
+
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT
+    CONCAT(catalog_name,'.',db_name,'.',table_name) AS table_fqn,
+    cache_state,
+    last_warmed_ts
+FROM cache_system.table_query_stats
+WHERE (catalog_name = 'oracle'   AND table_name = 'store')
+   OR (catalog_name = 'postgres' AND table_name = 'customers')
+   OR (catalog_name = 'mongodb'  AND table_name IN ('orders','order_items'))
+ORDER BY catalog_name, table_name;"
+```
+
+**Expected:** all four tables show `cache_state = WARM` and a recent `last_warmed_ts`.
+
+**Step 3 — Re-run the identical JOIN from T-48 (warm run):**
+
+```bash
+echo "=== T-49: Cross-catalog JOIN (warm run) ==="
+time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  --connect-timeout=300 \
+  -e "
+SELECT
+    dd.d_year                                           AS sale_year,
+    dd.d_moy                                            AS sale_month,
+    st.s_store_name                                     AS store_name,
+    st.s_state                                          AS store_state,
+    i.i_product_name                                    AS product_name,
+    i.i_category                                        AS item_category,
+    i.i_brand                                           AS item_brand,
+    c.c_first_name                                      AS customer_first_name,
+    c.c_last_name                                       AS customer_last_name,
+    o.order_date                                        AS order_date,
+    o.status                                            AS order_status,
+    COUNT(ss.ss_ticket_number)                          AS num_transactions,
+    SUM(ss.ss_quantity)                                 AS total_qty_sold,
+    ROUND(SUM(ss.ss_net_paid), 2)                       AS total_net_paid,
+    ROUND(AVG(ss.ss_net_paid), 2)                       AS avg_net_paid,
+    ROUND(SUM(ss.ss_net_profit), 2)                     AS total_net_profit,
+    COUNT(DISTINCT oi.product_id)                       AS distinct_products_ordered
+FROM
+    polaris.tpcds_sf10tcl.store_sales           ss
+    INNER JOIN polaris.tpcds_sf10tcl.date_dim   dd
+        ON ss.ss_sold_date_sk = dd.d_date_sk
+        AND dd.d_year = 2002
+        AND dd.d_moy  BETWEEN 1 AND 6
+    INNER JOIN polaris.tpcds_sf10tcl.item       i
+        ON ss.ss_item_sk = i.i_item_sk
+        AND i.i_category IN ('Books', 'Electronics', 'Sports')
+    LEFT JOIN oracle.tpcds.store                st
+        ON ss.ss_store_sk = st.s_store_sk
+    LEFT JOIN postgres.public.customers         c
+        ON ss.ss_customer_sk = c.c_customer_sk
+    LEFT JOIN mongodb.cache_testing.orders      o
+        ON ss.ss_customer_sk = o.customer_id
+    LEFT JOIN mongodb.cache_testing.order_items oi
+        ON o.order_id = oi.order_id
+GROUP BY
+    dd.d_year, dd.d_moy, st.s_store_name, st.s_state,
+    i.i_product_name, i.i_category, i.i_brand,
+    c.c_first_name, c.c_last_name, o.order_date, o.status
+ORDER BY sale_year, sale_month, total_net_paid DESC
+LIMIT 200;
+"
+echo "T-49 exit: $?"
+```
+
+**Compare timings:**
+
+| Run | Tables state | Expected `real` time |
+|-----|-------------|---------------------|
+| T-48 (cold) | polaris WARM + oracle/postgres/mongodb COLD | 20 – 90 s |
+| T-49 (warm) | all tables WARM | 5 – 25 s |
+
+✅ Pass: warm-run `real` time is meaningfully lower than the cold-run baseline (target ≥ 30% reduction).
+❌ Fail: warm run is equally slow → blocks may have been evicted by BE LRU (cache full); check available NVMe headroom with:
+```bash
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=doris-be --no-headers -o custom-columns=NAME:.metadata.name | head -1) \
+  -- df -h /opt/apache-doris/be/storage/file_cache
+```
+❌ Fail: `cache_state` still `COLD` after step 2 → the manual `enable_file_cache=true` queries populated the BE NVMe cache but the daemon has not yet written the metadata update; restart the daemon and wait one cycle.
+
+---
+
+### T-50 — Verify `table_cache_metrics` shows ≥ 80% cache hit for every JOIN table
+
+After T-49, wait for the next daemon cycle (up to `SCAN_INTERVAL_S` seconds) and query the
+metrics table for every table that participated in the JOIN.
+
+```bash
+DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
+
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT
+    CONCAT(catalog_name,'.',db_name,'.',table_name)     AS table_fqn,
+    cache_state,
+    CONCAT(ROUND(local_scan_bytes  / 1024 / 1024, 2), ' MB') AS local_NVMe,
+    CONCAT(ROUND(remote_scan_bytes / 1024 / 1024, 2), ' MB') AS remote_S3,
+    CONCAT(ROUND(total_scan_bytes  / 1024 / 1024, 2), ' MB') AS total,
+    CONCAT(cache_hit_pct, '%')                               AS hit_pct,
+    query_count,
+    CONCAT(ROUND(avg_query_time_ms, 0), ' ms')               AS avg_latency,
+    warmup_count,
+    sampled_at
+FROM cache_system.table_cache_metrics
+WHERE
+    (catalog_name = 'polaris'   AND table_name IN ('store_sales','date_dim','item'))
+ OR (catalog_name = 'oracle'    AND table_name = 'store')
+ OR (catalog_name = 'postgres'  AND table_name = 'customers')
+ OR (catalog_name = 'mongodb'   AND table_name IN ('orders','order_items'))
+ORDER BY catalog_name, table_name, sampled_at DESC;
+" 2>/dev/null | column -t
+```
+
+**Expected output (warm run):**
+
+| table_fqn | cache_state | local_NVMe | remote_S3 | hit_pct | avg_latency |
+|---|---|---|---|---|---|
+| `mongodb.cache_testing.order_items` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
+| `mongodb.cache_testing.orders` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
+| `oracle.tpcds.store` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
+| `polaris.tpcds_sf10tcl.date_dim` | WARM | > 0 MB | 0 MB | 100% | < 100 ms |
+| `polaris.tpcds_sf10tcl.item` | WARM | > 0 MB | 0 MB | 100% | < 100 ms |
+| `polaris.tpcds_sf10tcl.store_sales` | WARM | > 0 MB | 0 MB | 100% | < T-47 baseline |
+| `postgres.public.customers` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
+
+> **Why polaris tables show 100% and newly-warmed tables may show 80–99%:**
+> `polaris.tpcds_sf10tcl.store_sales` has been in the BE file cache since Phase 4.  Its blocks
+> fill the NVMe first-look cache with high residency.  The oracle/postgres/mongodb tables were
+> first warmed in T-49 — the BE writes the blocks to NVMe but some small number of blocks may
+> have already been evicted by the time the T-49 re-run executes, so hit rates slightly below
+> 100% are normal.  The threshold of **≥ 80%** accounts for this transient effect; anything
+> below 80% indicates the warm-up did not fully populate the cache (check BE NVMe headroom).
+
+**Annotated pass / fail conditions:**
+
+```bash
+# Quick pass check: are all 7 tables above 80%?
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "
+SELECT
+    CONCAT(catalog_name,'.',db_name,'.',table_name) AS table_fqn,
+    cache_hit_pct,
+    CASE WHEN cache_hit_pct >= 80 THEN '✅ PASS' ELSE '❌ FAIL' END AS result
+FROM cache_system.table_cache_metrics
+WHERE
+    (catalog_name = 'polaris'   AND table_name IN ('store_sales','date_dim','item'))
+ OR (catalog_name = 'oracle'    AND table_name = 'store')
+ OR (catalog_name = 'postgres'  AND table_name = 'customers')
+ OR (catalog_name = 'mongodb'   AND table_name IN ('orders','order_items'))
+ORDER BY cache_hit_pct DESC, catalog_name, table_name;
+"
+```
+
+✅ Pass: every table shows `cache_hit_pct ≥ 80` and `remote_scan_bytes = 0` (or near-zero).
+❌ Fail: a formerly COLD table still shows `cache_hit_pct = 0%` after warm-up → check that the
+warm-up query in T-49 Step 1 used an aggregate that forces real BE I/O (not `COUNT(*)`), and
+that `enable_file_cache=true` was honoured (verify with:
+```bash
+mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+  -e "SHOW VARIABLES LIKE 'enable_file_cache';"
+# Expected: Value = true
+```
+).
+❌ Fail: polaris tables drop below 100% → BE cache eviction under pressure; increase
+`file_cache_total_size_mb` in `be.conf` or reduce `MAX_CONCURRENT` warm-up threads.
+
+---
+
+## Summary Scorecard (Phase 9)
+
+| Test | Description | Pass Criterion |
+|---|---|---|
+| T-47 | Cold-read baseline for oracle/postgres/mongodb tables | Each cold table shows `remote_S3 > 0 MB`, `local_NVMe = 0 MB`, `hit_pct = 0%` |
+| T-48 | Complex cross-catalog JOIN — cold run | Query completes without error; `real` time recorded |
+| T-49 | Same JOIN after warm-up of cold tables | Query completes; `real` time ≥ 30% faster than T-48 |
+| T-50 | `table_cache_metrics` hit-rate validation | All 7 JOIN tables show `cache_hit_pct ≥ 80%` after warm-up |
