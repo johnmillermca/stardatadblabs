@@ -149,7 +149,7 @@ from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t282-before")).getOrCreate()
 test_id = sys.argv[1]
-spark.sql(f"SELECT id, tier, snap_timestamp FROM `postgres`.`cache_testing`.`customers` WHERE id={test_id}").show()
+spark.sql(f"SELECT id, tier, snap_timestamp FROM `postgres`.`public`.`customers` WHERE id={test_id}").show()
 spark.stop()
 PYEOF
 kubectl cp /tmp/t282_before.py prod/$MASTER:/tmp/t282_before.py -c spark-master
@@ -200,7 +200,7 @@ from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t282-after")).getOrCreate()
 test_id = sys.argv[1]
-df = spark.sql(f"SELECT id, tier, snap_timestamp FROM `postgres`.`cache_testing`.`customers` WHERE id={test_id} ORDER BY snap_timestamp")
+df = spark.sql(f"SELECT id, tier, snap_timestamp FROM `postgres`.`public`.`customers` WHERE id={test_id} ORDER BY snap_timestamp")
 df.show()
 print(f"Row count: {df.count()}  (expected: 1 — MERGE replaces, not appends)")
 spark.stop()
@@ -256,7 +256,7 @@ from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t283-before")).getOrCreate()
 del_id = sys.argv[1]
-df = spark.sql(f"SELECT id, name, tier FROM `postgres`.`cache_testing`.`customers` WHERE id={del_id}")
+df = spark.sql(f"SELECT id, name, tier FROM `postgres`.`public`.`customers` WHERE id={del_id}")
 df.show()
 print(f"Row count before delete: {df.count()}  (expected: 1)")
 spark.stop()
@@ -308,7 +308,7 @@ from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t283-after")).getOrCreate()
 del_id = sys.argv[1]
-df = spark.sql(f"SELECT id, name FROM `postgres`.`cache_testing`.`customers` WHERE id={del_id}")
+df = spark.sql(f"SELECT id, name FROM `postgres`.`public`.`customers` WHERE id={del_id}")
 df.show()
 print(f"Row count after delete: {df.count()}  (expected: 0 — hard deleted from Iceberg)")
 spark.stop()
@@ -457,13 +457,13 @@ from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t285-verify")).getOrCreate()
 soft_id = sys.argv[1]
-df = spark.sql(f"SELECT id, sku, is_deleted, deleted_at FROM `postgres`.`cache_testing`.`products` WHERE id={soft_id}")
+df = spark.sql(f"SELECT id, sku, is_deleted, deleted_at FROM `postgres`.`public`.`products` WHERE id={soft_id}")
 df.show()
 row = df.collect()[0]
 print(f"Row still present: {df.count()}  (expected: 1)")
 print(f"is_deleted: {row['is_deleted']}   (expected: True)")
 print(f"deleted_at: {row['deleted_at']}   (expected: non-null timestamp)")
-n = spark.sql(f"SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`products` WHERE id={soft_id} AND (is_deleted IS NULL OR is_deleted=false)").collect()[0]['n']
+n = spark.sql(f"SELECT COUNT(*) AS n FROM `postgres`.`public`.`products` WHERE id={soft_id} AND (is_deleted IS NULL OR is_deleted=false)").collect()[0]['n']
 print(f"Live rows (is_deleted filter): {n}  (expected: 0)")
 spark.stop()
 PYEOF
@@ -615,7 +615,7 @@ bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t287-verify")).getOrCreate()
 df = spark.sql("""
   SELECT id, name, tier, _change_type, _change_ts, snap_timestamp
-  FROM   `postgres`.`cache_testing`.`customers`
+  FROM   `postgres`.`public`.`customers`
   WHERE  email = 'hist-a@starpump.local'
   ORDER  BY snap_timestamp
 """)
@@ -796,7 +796,7 @@ from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t2810-verify")).getOrCreate()
-df = spark.sql("SELECT id, sku, snap_timestamp FROM `postgres`.`cache_testing`.`products` WHERE sku='BOUNDARY-T2810'")
+df = spark.sql("SELECT id, sku, snap_timestamp FROM `postgres`.`public`.`products` WHERE sku='BOUNDARY-T2810'")
 df.show()
 print(f"Boundary row count: {df.count()}  (expected: 1 — >= includes exact boundary)")
 spark.stop()
@@ -938,28 +938,28 @@ spark = SparkSession.builder.config(conf=bao.spark_conf("t28-scorecard")).getOrC
 
 checks = [
     ("T-28.2 PG UPDATE — 1 row id=1 PLATINUM",
-     "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`customers` WHERE id=1 AND tier='PLATINUM'",
+     "SELECT COUNT(*) AS n FROM `postgres`.`public`.`customers` WHERE id=1 AND tier='PLATINUM'",
      lambda n: n == 1, "1"),
     ("T-28.3 PG DELETE — deletetest gone",
-     "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`customers` WHERE email='deletetest@starpump.local'",
+     "SELECT COUNT(*) AS n FROM `postgres`.`public`.`customers` WHERE email='deletetest@starpump.local'",
      lambda n: n == 0, "0"),
     ("T-28.4 ORA UPDATE — customer_id=1 PLATINUM (no --pk-cols)",
      "SELECT COUNT(*) AS n FROM `oracle`.`cache_testing`.`customers` WHERE customer_id=1 AND tier='PLATINUM'",
      lambda n: n == 1, "1"),
     ("T-28.5 PG soft_delete — SOFT-DEL-T285 flagged",
-     "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`products` WHERE sku='SOFT-DEL-T285' AND is_deleted=true",
+     "SELECT COUNT(*) AS n FROM `postgres`.`public`.`products` WHERE sku='SOFT-DEL-T285' AND is_deleted=true",
      lambda n: n == 1, "1"),
     ("T-28.6 ORA soft_delete — product_id=9999999 flagged (no --pk-cols)",
      "SELECT COUNT(*) AS n FROM `oracle`.`cache_testing`.`products` WHERE product_id=9999999 AND is_deleted=true",
      lambda n: n == 1, "1"),
     ("T-28.7 PG history — 2 versions of hist-a",
-     "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`customers` WHERE email='hist-a@starpump.local'",
+     "SELECT COUNT(*) AS n FROM `postgres`.`public`.`customers` WHERE email='hist-a@starpump.local'",
      lambda n: n >= 2, ">=2"),
     ("T-28.8 MGO standard — 1 PLATINUM row",
      "SELECT COUNT(*) AS n FROM `mongodb`.`cache_testing`.`customers` WHERE email='mgo-std@starpump.local' AND tier='PLATINUM'",
      lambda n: n == 1, "1"),
     ("T-28.10 PG boundary row present",
-     "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`products` WHERE sku='BOUNDARY-T2810'",
+     "SELECT COUNT(*) AS n FROM `postgres`.`public`.`products` WHERE sku='BOUNDARY-T2810'",
      lambda n: n == 1, "1"),
 ]
 
