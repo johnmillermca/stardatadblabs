@@ -183,7 +183,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected log:**
 ```
-[customers] PK cols resolved from source catalog: ['id']
+[customers] PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=customers)
+[customers] PK cols: ['id']  (source=postgres schema=public)
 [customers] MERGE INTO (upsert)
 [customers] DONE
 ```
@@ -288,7 +289,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected log:**
 ```
-[customers] PK cols resolved from source catalog: ['id']
+[customers] PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=customers)
+[customers] PK cols: ['id']  (source=postgres schema=public)
 [customers] Delete-detection pass (write_mode=standard) — collecting live PKs from source window …
 [customers] Live PK count in source window: N
 [customers] MERGE INTO (delete pass)
@@ -355,7 +357,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected log:**
 ```
-[customers] PK cols resolved from source catalog: ['customer_id']
+[customers] PK cols resolved from source catalog: ['customer_id']  (source=oracle schema=cache_testing table=customers)
+[customers] PK cols: ['customer_id']  (source=oracle schema=cache_testing)
 [customers] MERGE INTO (upsert)
 [customers] DONE
 ```
@@ -436,7 +439,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected log:**
 ```
-[products] PK cols resolved from source catalog: ['id']
+[products] PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=products)
+[products] PK cols: ['id']  (source=postgres schema=public)
 [products] Delete-detection pass (write_mode=soft_delete) — collecting live PKs …
 [products] MERGE INTO (delete pass)
 [products] Delete-detection pass complete.
