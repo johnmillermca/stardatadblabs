@@ -348,6 +348,16 @@ BATCH_SIZE      = int(os.environ.get("BATCH_SIZE",   "100000"))
 # MAX_ROWS: hard cap on NEW rows written in this run (across all batches, per table).
 #   0 = no cap.  Example: MAX_ROWS=1000 appends exactly 1 000 new rows then stops.
 MAX_ROWS        = int(os.environ.get("MAX_ROWS", "0"))
+# WRITE_MAX_RETRIES: how many times to retry a failed writeTo().append() before
+#   giving up on the batch.  Each retry sleeps WRITE_RETRY_SLEEP_S seconds.
+#   Fixes: java.lang.IllegalStateException — Iceberg snapshot conflict when
+#   multiple threads commit to the same table concurrently.
+WRITE_MAX_RETRIES   = int(os.environ.get("WRITE_MAX_RETRIES", "5"))
+WRITE_RETRY_SLEEP_S = int(os.environ.get("WRITE_RETRY_SLEEP_S", "3"))
+# READ_MAX_RETRIES: how many times to retry a failed read_batch() before giving up.
+#   On each retry the batch size is halved so the executor never OOMs on large tables.
+#   Fixes: org.apache.spark.SparkException: Job aborted on large tables (>1 GB).
+READ_MAX_RETRIES    = int(os.environ.get("READ_MAX_RETRIES", "3"))
 # --threads CLI flag takes precedence over the MAX_THREADS env var (default 8).
 MAX_THREADS     = _ARGS.threads if _ARGS.threads is not None else int(os.environ.get("MAX_THREADS", "8"))
 
@@ -1995,15 +2005,45 @@ def _copy_table(
                         break
                     effective_batch = min(BATCH_SIZE, remaining)
 
-                batch: DataFrame = connector.read_batch(
-                    spark, conn_opts, table, offset, effective_batch,
-                    where_clause=where_clause,
-                )
-                # Cache before count() so the MongoDB cursor is opened only once.
-                # Without this, count() triggers one full connector read and
-                # writeTo().append() triggers a second — doubling network I/O and
-                # executor time for every batch.
-                batch.cache()
+                # ── Read with adaptive batch-halving retry ─────────────────────
+                # Fixes: SparkException: Job aborted on large tables (>1 GB).
+                # On each failure the batch size is halved so the executor memory
+                # pressure is reduced — the same data is fetched in smaller chunks.
+                read_attempt  = 0
+                read_batch_sz = effective_batch
+                batch         = None
+                while read_attempt <= READ_MAX_RETRIES:
+                    try:
+                        batch = connector.read_batch(
+                            spark, conn_opts, table, offset, read_batch_sz,
+                            where_clause=where_clause,
+                        )
+                        # Cache before count() so the source cursor is opened once.
+                        # Without this, count() + writeTo().append() each trigger a
+                        # full connector read — doubling network I/O per batch.
+                        batch.cache()
+                        _ = batch.count()   # force materialisation; raises on failure
+                        break
+                    except Exception as read_err:  # noqa: BLE001
+                        if batch is not None:
+                            try:
+                                batch.unpersist()
+                            except Exception:
+                                pass
+                            batch = None
+                        read_attempt += 1
+                        if read_attempt > READ_MAX_RETRIES:
+                            raise
+                        new_sz = max(read_batch_sz // 2, 1000)
+                        logger.warning(
+                            "[%s] read_batch failed (attempt %d/%d): %s — "
+                            "halving batch size %d → %d and retrying …",
+                            table, read_attempt, READ_MAX_RETRIES,
+                            read_err, read_batch_sz, new_sz,
+                        )
+                        read_batch_sz = new_sz
+                        time.sleep(2)
+
                 n = batch.count()
                 if n == 0:
                     batch.unpersist()
@@ -2032,7 +2072,38 @@ def _copy_table(
                     .withColumn("snap_timestamp",  current_timestamp())
                 )
 
-                final.writeTo(fqn).option("mergeSchema", "true").append()
+                # ── Write with snapshot-conflict retry ─────────────────────────
+                # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
+                # Occurs when multiple threads commit to the same table and the
+                # snapshot ID changes between scan-time and commit-time.
+                # Retrying re-reads the current snapshot and re-attempts the commit.
+                write_attempt = 0
+                while True:
+                    try:
+                        final.writeTo(fqn).option("mergeSchema", "true").append()
+                        break
+                    except Exception as write_err:  # noqa: BLE001
+                        write_attempt += 1
+                        err_str = str(write_err)
+                        is_retryable = any(k in err_str for k in (
+                            "IllegalStateException",
+                            "CommitFailedException",
+                            "ValidationException",
+                            "Cannot commit",
+                            "concurrent",
+                            "conflict",
+                        ))
+                        if write_attempt > WRITE_MAX_RETRIES or not is_retryable:
+                            raise
+                        sleep_s = WRITE_RETRY_SLEEP_S * write_attempt
+                        logger.warning(
+                            "[%s] writeTo().append() conflict (attempt %d/%d): %s "
+                            "— retrying in %ds …",
+                            table, write_attempt, WRITE_MAX_RETRIES,
+                            err_str[:120], sleep_s,
+                        )
+                        time.sleep(sleep_s)
+
                 batch.unpersist()
 
                 rows_total += n
