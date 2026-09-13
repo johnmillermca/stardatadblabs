@@ -3256,7 +3256,9 @@ def main() -> None:
 
                             # Resolve PK here so it is available for both the
                             # ORDER BY on reads and the MERGE ON clause in _copy_table.
-                            _tbl_pk = _resolve_primary_keys(tbl, mapped)
+                            _tbl_pk = _resolve_primary_keys(
+                                tbl, mapped, connector, spark, conn_opts
+                            )
 
                             last_ts = None
                             if wm_col:
