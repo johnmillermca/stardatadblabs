@@ -1,6 +1,6 @@
 # Runbook 27 — CDC + Batch Pipeline End-to-End Testing
 
-> **Version:** 1.1
+> **Version:** 1.2
 > **Status:** Active
 > **Owner:** Platform Engineering
 > **Related architecture:** [`docs/architecture/cdc-batch-pipeline.md`](../architecture/cdc-batch-pipeline.md)
@@ -45,6 +45,16 @@ This runbook provides step-by-step validation procedures for the complete Starpu
 | 2.16 | Starpump | DDL drift detection — DROP COLUMN detected and ALTER TABLE emitted |
 | 2.17 | Starpump | Full load is idempotent — re-run does not duplicate rows |
 | 2.18 | Starpump | `--threads` concurrency — 8-thread load finishes faster than 1-thread |
+| 9.1 | Write Modes | PK auto-detection logged for each source |
+| 9.2 | Write Modes | `standard` — UPDATE in Iceberg when source row changes (PostgreSQL) |
+| 9.3 | Write Modes | `standard` — hard DELETE from Iceberg when source row is deleted (PostgreSQL) |
+| 9.4 | Write Modes | `standard` — UPDATE + DELETE on Oracle (`customer_id` / `order_id` PKs) |
+| 9.5 | Write Modes | `soft_delete` — `is_deleted=true` + `deleted_at` set on deleted row (PostgreSQL) |
+| 9.6 | Write Modes | `soft_delete` — `is_deleted=true` set on Oracle deleted row |
+| 9.7 | Write Modes | `history` — INSERT + UPDATE + DELETE all append new Iceberg rows with `_change_type` |
+| 9.8 | Write Modes | MongoDB incremental — `standard` mode MERGE via `_id` PK |
+| 9.9 | Write Modes | `--pk-cols` explicit override used for composite-key table |
+| 9.10 | Write Modes | Watermark boundary `>=` — row at exact boundary is not skipped |
 | 3.1 | CDC | Debezium connectors registered and RUNNING |
 | 3.2 | CDC | Kafka → Iceberg streaming job starts |
 | 3.3 | CDC | INSERT propagates Postgres → Kafka → Iceberg within 60 s |
@@ -1326,6 +1336,750 @@ spark.stop()
 
 ---
 
+## Test 9 — Write Modes: UPDATE / DELETE / History Tracking
+
+> **Prerequisite:** Full loads for all three sources (T-2.2, T-2.3, T-2.4) must have completed
+> and watermarks must exist in `pipeline_watermarks` before running any test in this section.
+>
+> **Source PKs used throughout this section:**
+>
+> | Source | Table | Primary Key | Notes |
+> |--------|-------|-------------|-------|
+> | PostgreSQL | all tables | `id` (bigserial) | auto-detected by starpump |
+> | Oracle | `customers` | `customer_id` | must pass `--pk-cols customer_id` |
+> | Oracle | `orders` | `order_id` | must pass `--pk-cols order_id` |
+> | Oracle | `order_items` | `item_id` | must pass `--pk-cols item_id` |
+> | Oracle | `products` | `product_id` | must pass `--pk-cols product_id` |
+> | MongoDB | all collections | `_id` | auto-detected by starpump |
+
+---
+
+### T-9.1 — PK auto-detection logged at run start
+
+Run incremental on PostgreSQL with no `--pk-cols` override and confirm auto-detection:
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode standard 2>&1 | grep -E "PK cols|write_mode"
+```
+
+**Expected log lines (one per table):**
+```
+[customers]       PK cols: ['id']  (write_mode=standard)
+[products]        PK cols: ['id']  (write_mode=standard)
+[orders]          PK cols: ['id']  (write_mode=standard)
+[product_reviews] PK cols: ['id']  (write_mode=standard)
+```
+
+✅ Pass: every table logs `['id']` — no `"No standard PK column found"` warnings.
+❌ Fail: `PK cols: []` → override manually with `--pk-cols id`.
+
+---
+
+### T-9.2 — `standard` mode UPDATE: changed row overwrites Iceberg row (PostgreSQL)
+
+**Step 1 — Record the current value of a known customer in Iceberg:**
+
+```bash
+# Capture a customer id to use as our test subject
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+export TEST_ID=$(kubectl exec -n prod "$PG_POD" -- \
+  psql -U postgres -d cache_testing -At \
+  -c "SELECT id FROM public.customers ORDER BY id LIMIT 1")
+echo "Test customer id=$TEST_ID"
+
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t92-before')).getOrCreate()
+spark.sql(f\"SELECT id, tier, updated_at, snap_timestamp FROM \\\`postgres\\\`.\\\`cache_testing\\\`.\\\`customers\\\` WHERE id={$TEST_ID}\").show()
+spark.stop()
+"
+```
+
+**Step 2 — Update the row in PostgreSQL:**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+UPDATE public.customers
+SET    tier = 'PLATINUM', updated_at = NOW()
+WHERE  id = $TEST_ID
+RETURNING id, tier, updated_at;
+"
+```
+
+**Step 3 — Run incremental in `standard` mode:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode standard \
+  --watermark-col updated_at
+```
+
+**Expected log:**
+```
+[customers] Incremental mode: col=updated_at  clause='updated_at >= ...'  write_mode=standard
+[customers] MERGE INTO (upsert) — N rows merged
+[customers] DONE — N rows written
+```
+
+**Step 4 — Verify only ONE row for `id=$TEST_ID` exists in Iceberg with the new tier:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t92-after')).getOrCreate()
+df = spark.sql(\"SELECT id, tier, snap_timestamp FROM \`postgres\`.\`cache_testing\`.\`customers\` WHERE id=$TEST_ID ORDER BY snap_timestamp\")
+df.show()
+total = df.count()
+print(f'Row count for id={$TEST_ID}: {total}  (expected: 1 — MERGE replaces, not appends)')
+spark.stop()
+"
+```
+
+✅ Pass: exactly **1** row for `id=$TEST_ID`, `tier='PLATINUM'`.
+❌ Fail: 2 rows → MERGE did not fire; check that `--write-mode standard` was passed and PK resolved correctly.
+
+---
+
+### T-9.3 — `standard` mode DELETE: hard-deleted source row removed from Iceberg (PostgreSQL)
+
+**Step 1 — Insert a sacrificial row:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.customers (name, email, phone, tier, created_at, updated_at)
+VALUES ('Delete Test', 'deletetest@starpump.local', '+1-000-0000', 'BRONZE', NOW(), NOW())
+RETURNING id, email;
+"
+export DEL_ID=$(kubectl exec -n prod "$PG_POD" -- \
+  psql -U postgres -d cache_testing -At \
+  -c "SELECT id FROM public.customers WHERE email='deletetest@starpump.local' LIMIT 1")
+echo "Sacrificial row id=$DEL_ID"
+```
+
+**Step 2 — Run incremental (standard) to push the new row into Iceberg:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode standard \
+  --watermark-col updated_at
+
+# Confirm row landed in Iceberg
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t93-before')).getOrCreate()
+spark.sql(\"SELECT id, name, tier FROM \`postgres\`.\`cache_testing\`.\`customers\` WHERE id=$DEL_ID\").show()
+spark.stop()
+"
+# Expected: 1 row — email=deletetest@starpump.local
+```
+
+**Step 3 — Delete the row from PostgreSQL:**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+DELETE FROM public.customers WHERE id = $DEL_ID;
+SELECT 'deleted rows: ' || ROW_COUNT();
+"
+```
+
+**Step 4 — Run incremental again (standard) — delete-detection pass fires:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode standard \
+  --watermark-col updated_at
+```
+
+**Expected log shows delete-detection pass:**
+```
+[customers] Delete-detection pass (write_mode=standard) — collecting live PKs from source window …
+[customers] Live PK count in source window: N
+[customers] MERGE INTO (delete pass) — M rows deleted
+[customers] Delete-detection pass complete.
+```
+
+**Step 5 — Verify the row is gone from Iceberg:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t93-after')).getOrCreate()
+df = spark.sql(\"SELECT id, name FROM \`postgres\`.\`cache_testing\`.\`customers\` WHERE id=$DEL_ID\")
+df.show()
+print(f'Row count: {df.count()}  (expected: 0 — hard deleted)')
+spark.stop()
+"
+```
+
+✅ Pass: **0** rows for `id=$DEL_ID` — physically removed from Iceberg.
+❌ Fail: row still present → delete-detection pass did not fire; confirm `--watermark-col updated_at` is set so `_wc_for_del` is non-empty.
+
+---
+
+### T-9.4 — `standard` mode UPDATE + DELETE on Oracle (`CACHE_TESTING` schema)
+
+Oracle uses entity-specific PKs (`customer_id`, `order_id`) — must be passed explicitly.
+
+**Step 1 — Update a customer in Oracle:**
+
+```bash
+ORA_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 <<'EOF'
+UPDATE customers SET tier = 'PLATINUM', updated_at = SYSTIMESTAMP WHERE customer_id = 1;
+COMMIT;
+SELECT customer_id, tier, updated_at FROM customers WHERE customer_id = 1;
+EXIT;
+EOF
+```
+
+**Step 2 — Run incremental on Oracle with explicit PK:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+  --mode incremental \
+  --write-mode standard \
+  --pk-cols customer_id \
+  --watermark-col updated_at \
+  INCLUDE_TABLES=customers
+```
+
+**Verify MERGE updated the row (not appended):**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t94-verify')).getOrCreate()
+df = spark.sql(\"SELECT customer_id, tier, snap_timestamp FROM \`oracle\`.\`cache_testing\`.\`customers\` WHERE customer_id=1 ORDER BY snap_timestamp\")
+df.show()
+print(f'Row count for customer_id=1: {df.count()}  (expected: 1 — MERGE replaces)')
+spark.stop()
+"
+```
+
+✅ Pass: exactly 1 row, `tier='PLATINUM'`.
+
+---
+
+### T-9.5 — `soft_delete` mode: deleted row flagged, NOT physically removed (PostgreSQL)
+
+**Step 1 — Insert a test row:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.products (sku, name, category, price, stock_qty, weight_kg, created_at, updated_at)
+VALUES ('SOFT-DEL-T95', 'Soft Delete Test Product', 'Testing', 1.00, 1, 0.1, NOW(), NOW())
+RETURNING id, sku;
+"
+export SOFT_ID=$(kubectl exec -n prod "$PG_POD" -- \
+  psql -U postgres -d cache_testing -At \
+  -c "SELECT id FROM public.products WHERE sku='SOFT-DEL-T95' LIMIT 1")
+echo "Soft-delete test row id=$SOFT_ID"
+```
+
+**Step 2 — Push row into Iceberg via standard incremental first:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode soft_delete \
+  --watermark-col updated_at
+```
+
+**Verify row is in Iceberg and `is_deleted` is false/null:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t95-before')).getOrCreate()
+spark.sql(\"SELECT id, sku, is_deleted, deleted_at FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE id=$SOFT_ID\").show()
+spark.stop()
+"
+# Expected: is_deleted=null or false, deleted_at=null
+```
+
+**Step 3 — Delete the row from PostgreSQL source:**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+DELETE FROM public.products WHERE id = $SOFT_ID;
+"
+```
+
+**Step 4 — Run incremental again in `soft_delete` mode:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode soft_delete \
+  --watermark-col updated_at
+```
+
+**Expected log:**
+```
+[products] Delete-detection pass (write_mode=soft_delete) — collecting live PKs …
+[products] MERGE INTO (delete pass) — 1 row(s) soft-deleted
+[products] Delete-detection pass complete.
+```
+
+**Step 5 — Verify the row is still in Iceberg but flagged:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t95-after')).getOrCreate()
+df = spark.sql(\"SELECT id, sku, is_deleted, deleted_at FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE id=$SOFT_ID\")
+df.show()
+print(f'Row physically present: {df.count()} (expected: 1)')
+is_del = df.collect()[0]['is_deleted']
+del_at  = df.collect()[0]['deleted_at']
+print(f'is_deleted={is_del} (expected: True)')
+print(f'deleted_at={del_at} (expected: non-null timestamp)')
+spark.stop()
+"
+
+# Confirm live-data query with is_deleted filter works:
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t95-live')).getOrCreate()
+n = spark.sql(\"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE id=$SOFT_ID AND (is_deleted IS NULL OR is_deleted=false)\").collect()[0]['n']
+print(f'Live rows for id={$SOFT_ID}: {n} (expected: 0 — filtered out by is_deleted=true)')
+spark.stop()
+"
+```
+
+✅ Pass: row present in Iceberg with `is_deleted=true` and `deleted_at` set; live filter returns 0 rows.
+❌ Fail: row missing entirely → mode was `standard` not `soft_delete`; re-run with `--write-mode soft_delete`.
+
+---
+
+### T-9.6 — `soft_delete` mode on Oracle
+
+Oracle requires explicit `--pk-cols`. Use the `products` table (`product_id` PK).
+
+```bash
+ORA_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+
+# Step 1 — Insert a sacrificial Oracle product
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 <<'EOF'
+INSERT INTO products (product_id, product_name, category, subcategory, brand,
+                      sku, price, stock_qty, is_active, created_at, updated_at)
+VALUES (9999999, 'Oracle SoftDel Test', 'Testing', 'QA', 'TestBrand',
+        'ORA-SOFTDEL-T96', 0.01, 1, 'Y', SYSTIMESTAMP, SYSTIMESTAMP);
+COMMIT;
+SELECT product_id, sku FROM products WHERE sku='ORA-SOFTDEL-T96';
+EXIT;
+EOF
+
+# Step 2 — Push into Iceberg via soft_delete incremental
+spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+  --mode incremental \
+  --write-mode soft_delete \
+  --pk-cols product_id \
+  --watermark-col updated_at \
+  INCLUDE_TABLES=products
+
+# Step 3 — Delete from Oracle
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 <<'EOF'
+DELETE FROM products WHERE sku = 'ORA-SOFTDEL-T96';
+COMMIT;
+EXIT;
+EOF
+
+# Step 4 — Run soft_delete incremental again
+spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+  --mode incremental \
+  --write-mode soft_delete \
+  --pk-cols product_id \
+  --watermark-col updated_at \
+  INCLUDE_TABLES=products
+
+# Step 5 — Verify flagged in Iceberg
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t96-verify')).getOrCreate()
+df = spark.sql(\"SELECT product_id, sku, is_deleted, deleted_at FROM \`oracle\`.\`cache_testing\`.\`products\` WHERE product_id=9999999\")
+df.show()
+print(f'is_deleted should be True: {df.collect()[0][\"is_deleted\"]}')
+spark.stop()
+"
+```
+
+✅ Pass: `is_deleted=true`, row physically remains in Iceberg.
+
+---
+
+### T-9.7 — `history` mode: all changes append as new Iceberg rows with `_change_type`
+
+History mode never updates or deletes Iceberg rows — every incremental read appends new rows tagged with `_change_type` and `_change_ts`.
+
+**Step 1 — Run incremental on PostgreSQL `customers` in `history` mode:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+
+# Capture before count
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t97-before')).getOrCreate()
+n = spark.sql(\"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`customers\`\").collect()[0]['n']
+print(f'BEFORE history run: {n:,} rows')
+spark.stop()
+"
+
+# Insert 2 test rows
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.customers (name, email, phone, tier, created_at, updated_at)
+VALUES
+  ('History Test A', 'hist-a@starpump.local', '+1-001', 'GOLD',   NOW(), NOW()),
+  ('History Test B', 'hist-b@starpump.local', '+1-002', 'SILVER', NOW(), NOW());
+"
+```
+
+**Step 2 — Run incremental in `history` mode:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode history \
+  --watermark-col updated_at
+```
+
+**Expected log (no MERGE, no delete pass — plain append):**
+```
+[customers] write_mode=history  → plain append (no MERGE, no delete-detection)
+[customers] DONE — 2 rows written
+```
+
+**Step 3 — Now UPDATE one of the rows:**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+UPDATE public.customers SET tier='PLATINUM', updated_at=NOW()
+WHERE email='hist-a@starpump.local';
+"
+```
+
+**Step 4 — Run incremental in `history` mode again:**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode history \
+  --watermark-col updated_at
+```
+
+**Step 5 — Verify BOTH the old and new versions exist in Iceberg:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t97-verify')).getOrCreate()
+df = spark.sql(\"\"\"
+  SELECT id, name, tier, _change_type, _change_ts, snap_timestamp
+  FROM   \`postgres\`.\`cache_testing\`.\`customers\`
+  WHERE  email = 'hist-a@starpump.local'
+  ORDER  BY snap_timestamp
+\"\"\")
+df.show()
+print(f'Total versions for hist-a: {df.count()} (expected: 2 — original INSERT + UPDATE append)')
+spark.stop()
+"
+```
+
+✅ Pass: **2 rows** for `hist-a@starpump.local` — one with `tier=GOLD` (first insert), one with `tier=PLATINUM` (after update). Both have `_change_type='INSERT'` (batch mode always tags as INSERT).
+❌ Fail: only 1 row → mode reverted to `standard`; check `--write-mode history` was passed.
+
+---
+
+### T-9.8 — MongoDB `standard` mode MERGE via `_id` PK
+
+MongoDB's PK is `_id` — auto-detected by starpump. The MERGE join casts `_id` to STRING for comparison.
+
+```bash
+MONGO_PASS=$(kubectl get secret mongodb-credentials -n prod \
+  -o jsonpath='{.data.mongodb-root-password}' | base64 -d)
+
+# Step 1 — Insert a test document
+kubectl exec -n prod mongodb-0 -- mongosh \
+  --username root --password "$MONGO_PASS" \
+  --authenticationDatabase admin --quiet \
+  cache_testing --eval '
+db.customers.insertOne({
+  email:      "mgo-std-test@starpump.local",
+  first_name: "MGO",
+  last_name:  "StdTest",
+  tier:       "SILVER",
+  country_code: "US",
+  city:       "TestCity",
+  created_at: new Date(),
+  updated_at: new Date()
+});
+print("inserted: " + db.customers.findOne({email:"mgo-std-test@starpump.local"})._id);
+'
+export MGO_ID=$(kubectl exec -n prod mongodb-0 -- mongosh \
+  --username root --password "$MONGO_PASS" \
+  --authenticationDatabase admin --quiet cache_testing --eval \
+  'db.customers.findOne({email:"mgo-std-test@starpump.local"})._id.toString()')
+echo "MongoDB _id=$MGO_ID"
+
+# Step 2 — Push into Iceberg
+spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
+  --mode incremental \
+  --write-mode standard \
+  --watermark-col updated_at
+
+# Step 3 — Update the document in MongoDB
+kubectl exec -n prod mongodb-0 -- mongosh \
+  --username root --password "$MONGO_PASS" \
+  --authenticationDatabase admin --quiet \
+  cache_testing --eval '
+db.customers.updateOne(
+  {email: "mgo-std-test@starpump.local"},
+  {$set: {tier: "PLATINUM", updated_at: new Date()}}
+);
+print("updated tier → PLATINUM");
+'
+
+# Step 4 — Run incremental again
+spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
+  --mode incremental \
+  --write-mode standard \
+  --watermark-col updated_at
+
+# Step 5 — Verify exactly 1 row in Iceberg with PLATINUM tier
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t98-verify')).getOrCreate()
+df = spark.sql(\"SELECT _id, email, tier, snap_timestamp FROM \`mongodb\`.\`cache_testing\`.\`customers\` WHERE email='mgo-std-test@starpump.local' ORDER BY snap_timestamp\")
+df.show()
+print(f'Row count: {df.count()} (expected: 1 — MERGE replaces via _id)')
+spark.stop()
+"
+```
+
+✅ Pass: exactly 1 row, `tier='PLATINUM'`.
+❌ Fail: 2 rows → MongoDB `supports_offset_resume=False` means the delete-detection pass is skipped; MERGE upsert should still have fired on the `_id` match. Check `_build_pk_order_clause` is returning `""` for MongoDB (no ORDER BY) and that the MERGE branch was taken.
+
+---
+
+### T-9.9 — Explicit `--pk-cols` override for a composite-key table
+
+The `order_items` table in Oracle uses `item_id` as PK. Test that an explicit override works:
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+  --mode incremental \
+  --write-mode standard \
+  --pk-cols item_id \
+  --watermark-col updated_at \
+  INCLUDE_TABLES=order_items 2>&1 | grep -E "PK cols|write_mode|MERGE"
+```
+
+**Expected log:**
+```
+[order_items] PK cols: ['item_id']  (write_mode=standard)
+[order_items] PK-ordered reads: ORDER BY "item_id"
+[order_items] MERGE INTO (upsert) ...
+```
+
+✅ Pass: `PK cols: ['item_id']` logged — not the auto-detected fallback.
+
+Now test with a hypothetical two-column PK using a comma-separated override:
+
+```bash
+# Verify the env-var form also works
+PK_COLS=order_id,item_id spark_exec \
+  python3 /opt/spark/scripts/starpump.py oracle \
+  --mode incremental \
+  --write-mode standard \
+  INCLUDE_TABLES=order_items 2>&1 | grep "PK cols"
+# Expected: [order_items] PK cols: ['order_id', 'item_id']
+```
+
+✅ Pass: composite PK logged correctly.
+
+---
+
+### T-9.10 — Watermark boundary `>=`: row at exact boundary timestamp is not skipped
+
+This test confirms the `>=` fix — a row whose `updated_at` equals exactly the last `sf_extraction_ts` watermark must be re-read and merged, not skipped.
+
+**Step 1 — Capture the current watermark for `products`:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+export WM_TS=$(kubectl exec -n prod "$PG_POD" -- \
+  psql -U pipeline -d pipeline -At \
+  -c "SELECT sf_extraction_ts FROM pipeline_watermarks
+      WHERE source_db='cache_testing' AND source_schema='public' AND table_name='products'")
+echo "Current watermark: $WM_TS"
+```
+
+**Step 2 — Insert a row with `updated_at` set to EXACTLY the watermark timestamp:**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.products (sku, name, category, price, stock_qty, weight_kg,
+                             created_at, updated_at)
+VALUES ('BOUNDARY-T910', 'Boundary Test Product', 'Testing', 1.00, 1, 0.1,
+        TIMESTAMP WITH TIME ZONE '$WM_TS',
+        TIMESTAMP WITH TIME ZONE '$WM_TS');
+SELECT id, sku, updated_at FROM products WHERE sku='BOUNDARY-T910';
+"
+```
+
+**Step 3 — Run incremental (the `>=` clause must include this row):**
+
+```bash
+spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+  --mode incremental \
+  --write-mode standard \
+  --watermark-col updated_at
+```
+
+**Step 4 — Verify the boundary row was captured:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t910-verify')).getOrCreate()
+df = spark.sql(\"SELECT id, sku, snap_timestamp FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='BOUNDARY-T910'\")
+df.show()
+print(f'Boundary row count: {df.count()} (expected: 1 — >= includes exact boundary)')
+spark.stop()
+"
+```
+
+✅ Pass: exactly 1 row with `sku='BOUNDARY-T910'` — the `>=` boundary is inclusive.
+❌ Fail: 0 rows → watermark is using `>` (strict) — confirm `_incremental_where_clause` was updated to `>=` in `starpump.py`.
+
+---
+
+## Write Mode Scorecard
+
+Run after all T-9.x tests to verify end state:
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t9-scorecard')).getOrCreate()
+
+checks = [
+  # (description, SQL, expected condition lambda, expected_str)
+  ('T-9.2 UPDATE in PG customers (id=1 → PLATINUM)',
+   \"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`customers\` WHERE id=1 AND tier='PLATINUM'\",
+   lambda n: n == 1, '1'),
+  ('T-9.3 DELETE from PG customers gone',
+   \"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`customers\` WHERE email='deletetest@starpump.local'\",
+   lambda n: n == 0, '0'),
+  ('T-9.5 soft_delete flag on PG products',
+   \"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='SOFT-DEL-T95' AND is_deleted=true\",
+   lambda n: n == 1, '1'),
+  ('T-9.7 history: 2 versions of hist-a customer',
+   \"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`customers\` WHERE email='hist-a@starpump.local'\",
+   lambda n: n >= 2, '>=2'),
+  ('T-9.8 MongoDB MERGE: 1 row for mgo-std-test PLATINUM',
+   \"SELECT COUNT(*) AS n FROM \`mongodb\`.\`cache_testing\`.\`customers\` WHERE email='mgo-std-test@starpump.local' AND tier='PLATINUM'\",
+   lambda n: n == 1, '1'),
+  ('T-9.10 boundary row present',
+   \"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='BOUNDARY-T910'\",
+   lambda n: n == 1, '1'),
+]
+
+for desc, sql, check_fn, exp in checks:
+    try:
+        n = spark.sql(sql).collect()[0]['n']
+        status = '✅' if check_fn(n) else '❌'
+        print(f'{status}  {desc}  → {n} (expected {exp})')
+    except Exception as e:
+        print(f'❌  {desc}  → ERROR: {e}')
+
+spark.stop()
+"
+```
+
+---
+
+## Cleanup — Write Mode Tests
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+ORA_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+MONGO_PASS=$(kubectl get secret mongodb-credentials -n prod \
+  -o jsonpath='{.data.mongodb-root-password}' | base64 -d)
+
+# PostgreSQL test rows
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+DELETE FROM public.customers WHERE email IN (
+  'deletetest@starpump.local',
+  'hist-a@starpump.local',
+  'hist-b@starpump.local'
+);
+DELETE FROM public.products WHERE sku IN (
+  'SOFT-DEL-T95',
+  'BOUNDARY-T910'
+);
+-- Revert the test-id customer back to GOLD
+UPDATE public.customers SET tier='GOLD', updated_at=NOW() WHERE id=1;
+"
+
+# Oracle test rows
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 <<'EOF'
+DELETE FROM products WHERE sku = 'ORA-SOFTDEL-T96';
+UPDATE customers SET tier='GOLD', updated_at=SYSTIMESTAMP WHERE customer_id=1;
+COMMIT;
+EXIT;
+EOF
+
+# MongoDB test document
+kubectl exec -n prod mongodb-0 -- mongosh \
+  --username root --password "$MONGO_PASS" \
+  --authenticationDatabase admin --quiet \
+  cache_testing --eval \
+  'db.customers.deleteOne({email:"mgo-std-test@starpump.local"}); print("cleaned")'
+```
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Resolution |
@@ -1339,3 +2093,9 @@ spark.stop()
 | `schema-changes.*` topic has no messages | Debezium not capturing DDL | Ensure `include.schema.changes=true` in connector config; check connector log |
 | Streaming job OOM | Too many offsets per trigger | Reduce `MAX_OFFSETS_PER_TRIGGER` (default 50000) |
 | Incremental load copies 0 rows | Watermark column not found | Set `WATERMARK_COL=created_at` (or the actual timestamp column name) |
+| MERGE fires but duplicate rows appear | `_pk_cols` resolved to wrong column | Add `--pk-cols <correct_col>` or set `PK_COLS=<col>` env var |
+| Delete-detection pass never fires | Watermark clause empty (first full run) | Run one incremental pass first to establish a non-null watermark |
+| Oracle MERGE fails on `customer_id` | Missing `--pk-cols` for Oracle | Oracle tables use entity PKs — always pass `--pk-cols customer_id` (etc.) |
+| `soft_delete` columns not in Iceberg | First run used `standard` mode | Drop and recreate Iceberg table, then re-run with `--write-mode soft_delete` |
+| `history` mode shows `_change_type=null` | Iceberg table predates `history` mode | `mergeSchema=true` adds the column; null means the pre-history rows — expected |
+| Boundary row T-9.10 returns 0 rows | `>` still used in `_incremental_where_clause` | Confirm line ~2596 in `starpump.py` reads `return f"{wm_col} >= '{last_ts}'"` |
