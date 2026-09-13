@@ -215,7 +215,7 @@ kubectl get pod -n prod -l app=polaris-auth-proxy
 ### T-2.2 — Full load: PostgreSQL (`cache_testing` — 4 tables)
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode full \
   --threads 8
 ```
@@ -267,7 +267,7 @@ spark.stop()
 ### T-2.3 — Full load: Oracle (`XEPDB1/TPCDS` — 10 tables)
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+spark_exec starpump oracle \
   --mode full \
   --threads 4
 ```
@@ -299,7 +299,7 @@ spark.stop()
 ### T-2.4 — Full load: MongoDB (`cache_testing` — 2 collections)
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
+spark_exec starpump mongodb \
   --mode full \
   --threads 4
 ```
@@ -495,7 +495,7 @@ SELECT id, sku, created_at FROM products WHERE sku='INCR-T29-001';
 **Step 3 — Run the incremental load:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --watermark-col created_at \
   --threads 4
@@ -544,7 +544,7 @@ WHERE source_db='cache_testing' AND table_name='products';"
 ### T-2.10 — Incremental load: Oracle
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+spark_exec starpump oracle \
   --mode incremental \
   --threads 2
 ```
@@ -567,7 +567,7 @@ WHERE source_db='XEPDB1' ORDER BY table_name;"
 ### T-2.11 — Incremental load: MongoDB
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
+spark_exec starpump mongodb \
   --mode incremental \
   --watermark-col updated_at \
   --threads 2
@@ -585,7 +585,7 @@ spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
 Immediately re-run incremental for PostgreSQL without inserting any new rows:
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --watermark-col created_at
 ```
@@ -608,7 +608,7 @@ Completed in <T>s — 0 new row(s) | mode=incremental
 ### T-2.13 — Custom SQL: single-table SELECT with WHERE condition
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode custom_sql \
   --custom-sql "SELECT id, name, tier, email FROM public.customers WHERE tier = 'GOLD'" \
   --target-table gold_customers
@@ -647,7 +647,7 @@ This test confirms that Starpump's `custom_sql` mode can execute a JOIN across m
 tables and write the result to a new Iceberg table — the equivalent of a Fivetran dbt model.
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode custom_sql \
   --custom-sql "
     SELECT
@@ -836,7 +836,7 @@ spark.stop()
 "
 
 # Re-run with --mode full
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode full --threads 1
 
 # Get count after re-run
@@ -862,12 +862,12 @@ spark.stop()
 ```bash
 # 1-thread run — time it
 echo "=== 1 thread ==="
-time spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+time spark_exec starpump postgres \
   --mode full --threads 1
 
 # 8-thread run — time it
 echo "=== 8 threads ==="
-time spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+time spark_exec starpump postgres \
   --mode full --threads 8
 ```
 
@@ -1176,7 +1176,7 @@ kubectl exec -n prod "$(kubectl get pod -n prod -l app=postgresql -o name | head
 ### 6.1 Run a JOIN query landing results into Iceberg
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode custom_sql \
   --custom-sql "SELECT o.id AS order_id, o.status, o.total_amount,
                        c.name AS customer_name, c.tier AS customer_tier,
@@ -1281,7 +1281,7 @@ spark_exec python3 /opt/spark/scripts/00_catalog_bootstrap.py
 
 ```bash
 # For PostgreSQL (supports offset resume): should skip already-copied rows
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode full --threads 1
 
 # Expected log:
@@ -1359,7 +1359,7 @@ spark.stop()
 Run incremental on PostgreSQL with no `--pk-cols` override and confirm auto-detection:
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode standard 2>&1 | grep -E "PK cols|write_mode"
 ```
@@ -1413,7 +1413,7 @@ RETURNING id, tier, updated_at;
 **Step 3 — Run incremental in `standard` mode:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode standard \
   --watermark-col updated_at
@@ -1467,7 +1467,7 @@ echo "Sacrificial row id=$DEL_ID"
 **Step 2 — Run incremental (standard) to push the new row into Iceberg:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode standard \
   --watermark-col updated_at
@@ -1496,7 +1496,7 @@ SELECT 'deleted rows: ' || ROW_COUNT();
 **Step 4 — Run incremental again (standard) — delete-detection pass fires:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode standard \
   --watermark-col updated_at
@@ -1550,7 +1550,7 @@ EOF
 **Step 2 — Run incremental on Oracle with explicit PK:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+spark_exec starpump oracle \
   --mode incremental \
   --write-mode standard \
   --pk-cols customer_id \
@@ -1597,7 +1597,7 @@ echo "Soft-delete test row id=$SOFT_ID"
 **Step 2 — Push row into Iceberg via standard incremental first:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode soft_delete \
   --watermark-col updated_at
@@ -1628,7 +1628,7 @@ DELETE FROM public.products WHERE id = $SOFT_ID;
 **Step 4 — Run incremental again in `soft_delete` mode:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode soft_delete \
   --watermark-col updated_at
@@ -1696,7 +1696,7 @@ EXIT;
 EOF
 
 # Step 2 — Push into Iceberg via soft_delete incremental
-spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+spark_exec starpump oracle \
   --mode incremental \
   --write-mode soft_delete \
   --pk-cols product_id \
@@ -1712,7 +1712,7 @@ EXIT;
 EOF
 
 # Step 4 — Run soft_delete incremental again
-spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+spark_exec starpump oracle \
   --mode incremental \
   --write-mode soft_delete \
   --pk-cols product_id \
@@ -1768,7 +1768,7 @@ VALUES
 **Step 2 — Run incremental in `history` mode:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode history \
   --watermark-col updated_at
@@ -1792,7 +1792,7 @@ WHERE email='hist-a@starpump.local';
 **Step 4 — Run incremental in `history` mode again:**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode history \
   --watermark-col updated_at
@@ -1855,7 +1855,7 @@ export MGO_ID=$(kubectl exec -n prod mongodb-0 -- mongosh \
 echo "MongoDB _id=$MGO_ID"
 
 # Step 2 — Push into Iceberg
-spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
+spark_exec starpump mongodb \
   --mode incremental \
   --write-mode standard \
   --watermark-col updated_at
@@ -1873,7 +1873,7 @@ print("updated tier → PLATINUM");
 '
 
 # Step 4 — Run incremental again
-spark_exec python3 /opt/spark/scripts/starpump.py mongodb \
+spark_exec starpump mongodb \
   --mode incremental \
   --write-mode standard \
   --watermark-col updated_at
@@ -1901,7 +1901,7 @@ spark.stop()
 The `order_items` table in Oracle uses `item_id` as PK. Test that an explicit override works:
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py oracle \
+spark_exec starpump oracle \
   --mode incremental \
   --write-mode standard \
   --pk-cols item_id \
@@ -1965,7 +1965,7 @@ SELECT id, sku, updated_at FROM products WHERE sku='BOUNDARY-T910';
 **Step 3 — Run incremental (the `>=` clause must include this row):**
 
 ```bash
-spark_exec python3 /opt/spark/scripts/starpump.py postgres \
+spark_exec starpump postgres \
   --mode incremental \
   --write-mode standard \
   --watermark-col updated_at
