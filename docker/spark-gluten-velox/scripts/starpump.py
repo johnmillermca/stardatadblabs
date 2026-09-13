@@ -2155,6 +2155,40 @@ def _copy_table(
     # pk_cols resolved after schema discovery below — placeholder here
     _pk_cols: list[str] = pk_cols if pk_cols is not None else []
 
+    # ── Write with snapshot-conflict retry ─────────────────────────────────
+    # Defined at function scope (not inside the `else: not DRY_RUN` branch) so
+    # it is always bound before the delete-detection pass can reference it.
+    # Fixes: UnboundLocalError — cannot access local variable
+    #        '_iceberg_write_with_retry' where it is not associated with a value.
+    def _iceberg_write_with_retry(write_fn, label: str) -> None:
+        """Execute write_fn(), retrying on snapshot-conflict errors."""
+        attempt = 0
+        while True:
+            try:
+                write_fn()
+                break
+            except Exception as _w_err:  # noqa: BLE001
+                attempt += 1
+                err_str = str(_w_err)
+                is_retryable = any(k in err_str for k in (
+                    "IllegalStateException",
+                    "CommitFailedException",
+                    "ValidationException",
+                    "Cannot commit",
+                    "concurrent",
+                    "conflict",
+                ))
+                if attempt > WRITE_MAX_RETRIES or not is_retryable:
+                    raise
+                sleep_s = WRITE_RETRY_SLEEP_S * attempt
+                logger.warning(
+                    "[%s] %s conflict (attempt %d/%d): %s "
+                    "— retrying in %ds …",
+                    table, label, attempt, WRITE_MAX_RETRIES,
+                    err_str[:120], sleep_s,
+                )
+                time.sleep(sleep_s)
+
     try:
         logger.info(
             "[%s] START: %.1f GB | discovering schema … (write_mode=%s)",
@@ -2199,8 +2233,21 @@ def _copy_table(
             # copy can be resumed from the last committed Iceberg row count.
             # Databricks JDBC does not (no guaranteed order without ORDER BY),
             # so it always reads from offset 0 regardless of prior runs.
+            #
+            # IMPORTANT: Resume-at-offset only makes sense for FULL copies.
+            # In incremental mode a watermark WHERE clause is already injected
+            # into QUERY_FILTERS, so the paginated read is over the *filtered
+            # window* — not the full table.  spark.table(fqn).count() returns
+            # the total Iceberg row count across ALL prior runs, which is
+            # meaningless as an offset into the current (much smaller) filtered
+            # window.  Using it as such causes the batch loop to skip the
+            # entire window (offset > window size → first batch is empty →
+            # 0 new rows written) AND the watermark to be written back with
+            # the same old extraction_ts, so no rows ever advance.
+            # Fix: skip resume-at-offset whenever a watermark filter is active.
+            _has_wm_filter = bool(_get_where_clause(table))
             already_written = 0
-            if connector.supports_offset_resume:
+            if connector.supports_offset_resume and not _has_wm_filter:
                 try:
                     already_written = spark.table(fqn).count()
                 except Exception:
@@ -2253,8 +2300,10 @@ def _copy_table(
                             table, _pg_err,
                         )
             else:
-                # Fresh run (or full re-read for non-resumable connectors):
-                # capture CDC sync-point from the source BEFORE the first batch.
+                # Incremental run (watermark filter active) or fresh full copy:
+                # always capture a fresh CDC sync-point from the source NOW,
+                # before the first batch.  This becomes the new watermark that
+                # gets written at the end of the run, advancing the window.
                 sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                 logger.info("[%s] extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
 
@@ -2294,39 +2343,6 @@ def _copy_table(
             )
             if _pk_order:
                 logger.info("[%s] PK-ordered reads: %s", table, _pk_order)
-
-            # ── Write with snapshot-conflict retry ─────────────────────────
-            # Defined here (outside the batch loop) so it is also available to
-            # the delete-detection pass that runs after the loop exits.
-            # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
-            def _iceberg_write_with_retry(write_fn, label: str) -> None:
-                """Execute write_fn(), retrying on snapshot-conflict errors."""
-                attempt = 0
-                while True:
-                    try:
-                        write_fn()
-                        break
-                    except Exception as _w_err:  # noqa: BLE001
-                        attempt += 1
-                        err_str = str(_w_err)
-                        is_retryable = any(k in err_str for k in (
-                            "IllegalStateException",
-                            "CommitFailedException",
-                            "ValidationException",
-                            "Cannot commit",
-                            "concurrent",
-                            "conflict",
-                        ))
-                        if attempt > WRITE_MAX_RETRIES or not is_retryable:
-                            raise
-                        sleep_s = WRITE_RETRY_SLEEP_S * attempt
-                        logger.warning(
-                            "[%s] %s conflict (attempt %d/%d): %s "
-                            "— retrying in %ds …",
-                            table, label, attempt, WRITE_MAX_RETRIES,
-                            err_str[:120], sleep_s,
-                        )
-                        time.sleep(sleep_s)
 
             while True:
                 # Shrink batch to never write more than MAX_ROWS new rows total.
