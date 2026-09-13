@@ -26,20 +26,25 @@ This runbook tests the three write modes introduced in starpump for handling **u
 | Flag | Env var | Default | Description |
 |---|---|---|---|
 | `--write-mode` | `WRITE_MODE` | `standard` | One of `standard`, `soft_delete`, `history` |
-| `--pk-cols` | `PK_COLS` | *(auto)* | Comma-separated PK column(s) for MERGE join and ORDER BY |
+| `--pk-cols` | `PK_COLS` | *(auto)* | Comma-separated PK column(s) — overrides catalog detection |
 | `--watermark-col` | `WATERMARK_COL` | `updated_at` → `created_at` | Timestamp column for incremental delta |
 | — | `DELETED_AT_COL` | `deleted_at` | Column written by `soft_delete` mode |
 
-**Source primary keys:**
+**Primary key resolution (priority order):**
 
-| Source | Table | Primary Key | Notes |
-|---|---|---|---|
-| PostgreSQL | all tables | `id` | auto-detected |
-| Oracle | `customers` | `customer_id` | must pass `--pk-cols customer_id` |
-| Oracle | `products` | `product_id` | must pass `--pk-cols product_id` |
-| Oracle | `orders` | `order_id` | must pass `--pk-cols order_id` |
-| Oracle | `order_items` | `item_id` | must pass `--pk-cols item_id` |
-| MongoDB | all collections | `_id` | auto-detected |
+1. `--pk-cols` / `PK_COLS` — explicit operator override, always wins
+2. **Source catalog** — starpump calls `java.sql.DatabaseMetaData.getPrimaryKeys()` via
+   the JDBC driver, which resolves real constraints from the source's own catalog with
+   zero hardcoded schema or table names. Works for simple and composite PKs, any table name.
+3. Name heuristic — `id` → `<table>_id` → first column (only when catalog returns nothing)
+
+| Source | Catalog API used | Example result |
+|---|---|---|
+| PostgreSQL | `DatabaseMetaData.getPrimaryKeys()` via `org.postgresql.Driver` | `['id']` |
+| Oracle | `DatabaseMetaData.getPrimaryKeys()` via `oracle.jdbc.OracleDriver` | `['customer_id']`, `['order_id', 'line_id']` |
+| Databricks | `DatabaseMetaData.getPrimaryKeys()` (informational; usually `[]`, falls to heuristic) | `['id']` |
+| Snowflake | `SHOW PRIMARY KEYS IN TABLE` via native Spark connector | `['id']` |
+| MongoDB | Always `['_id']` — enforced by the storage engine | `['_id']` |
 
 ---
 
@@ -64,10 +69,12 @@ echo "Master: $MASTER   Token: ${TOKEN:0:10}..."
 
 ---
 
-## Test T-28.1 — PK auto-detection (PostgreSQL)
+## Test T-28.1 — PK catalog detection (PostgreSQL + Oracle)
 
-Run incremental on PostgreSQL with no `--pk-cols` override.
-Every table must log `PK cols: ['id']`.
+Verifies that starpump reads the real PK from the source database's own constraint
+catalog — not by guessing column names.
+
+**Step 1 — PostgreSQL: confirm `id` is detected from `pg_constraint` (not hardcoded):**
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
@@ -75,19 +82,43 @@ kubectl exec -n prod $MASTER -c spark-master -- \
   starpump postgres \
     --mode incremental \
     --write-mode standard \
-    --watermark-col updated_at 2>&1 | grep -E "PK cols|write_mode"
+    --watermark-col updated_at 2>&1 \
+  | grep -E "PK cols resolved from source catalog|PK cols:"
 ```
 
-**Expected (one line per table):**
+**Expected — one line per table, source logged as "source catalog":**
 ```
-[customers]       PK cols: ['id']  (write_mode=standard)
-[products]        PK cols: ['id']  (write_mode=standard)
-[orders]          PK cols: ['id']  (write_mode=standard)
-[product_reviews] PK cols: ['id']  (write_mode=standard)
+[customers]       PK cols resolved from source catalog: ['id']
+[products]        PK cols resolved from source catalog: ['id']
+[orders]          PK cols resolved from source catalog: ['id']
+[product_reviews] PK cols resolved from source catalog: ['id']
 ```
 
-✅ Pass: every table shows `['id']` — no `"No standard PK column found"` warning.
-❌ Fail: `PK cols: []` → add `PK_COLS=id` env var.
+✅ Pass: every table shows `resolved from source catalog` — catalog path is active.
+❌ Fail: `No standard PK column found` warning — catalog call failed, fell to heuristic; check JDBC connectivity.
+
+**Step 2 — Oracle: confirm entity-specific PKs are detected without `--pk-cols`:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  starpump oracle \
+    --mode incremental \
+    --write-mode standard \
+    --watermark-col updated_at 2>&1 \
+  | grep -E "PK cols resolved from source catalog|PK cols:"
+```
+
+**Expected:**
+```
+[customers]   PK cols resolved from source catalog: ['customer_id']
+[products]    PK cols resolved from source catalog: ['product_id']
+[orders]      PK cols resolved from source catalog: ['order_id']
+[order_items] PK cols resolved from source catalog: ['item_id']
+```
+
+✅ Pass: each table shows its real PK name from Oracle `ALL_CONSTRAINTS` — no `--pk-cols` required.
+❌ Fail: wrong PK name or heuristic fallback — check `oracle.jdbc.OracleDriver` has `ALL_CONSTRAINTS` access.
 
 ---
 
@@ -111,12 +142,12 @@ SELECT id, name, tier, updated_at FROM public.customers WHERE id=$TEST_ID;
 
 ```bash
 cat > /tmp/t282_before.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os, sys
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t282-before")).getOrCreate()
-import sys
 test_id = sys.argv[1]
 spark.sql(f"SELECT id, tier, snap_timestamp FROM `postgres`.`cache_testing`.`customers` WHERE id={test_id}").show()
 spark.stop()
@@ -143,17 +174,16 @@ RETURNING id, tier, updated_at;
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
   starpump postgres \
     --mode incremental \
     --write-mode standard \
-    --watermark-col updated_at \
-    INCLUDE_TABLES=customers
+    --watermark-col updated_at
 ```
 
 **Expected log:**
 ```
-[customers] PK cols: ['id']  (write_mode=standard)
-[customers] Incremental mode: col=updated_at  clause='updated_at >= ...'
+[customers] PK cols resolved from source catalog: ['id']
 [customers] MERGE INTO (upsert)
 [customers] DONE
 ```
@@ -162,12 +192,12 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ```bash
 cat > /tmp/t282_after.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os, sys
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t282-after")).getOrCreate()
-import sys
 test_id = sys.argv[1]
 df = spark.sql(f"SELECT id, tier, snap_timestamp FROM `postgres`.`cache_testing`.`customers` WHERE id={test_id} ORDER BY snap_timestamp")
 df.show()
@@ -207,23 +237,23 @@ echo "Sacrificial row id=$DEL_ID"
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
   starpump postgres \
     --mode incremental \
     --write-mode standard \
-    --watermark-col updated_at \
-    INCLUDE_TABLES=customers
+    --watermark-col updated_at
 ```
 
 **Step 3 — Confirm row landed in Iceberg:**
 
 ```bash
 cat > /tmp/t283_before.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os, sys
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t283-before")).getOrCreate()
-import sys
 del_id = sys.argv[1]
 df = spark.sql(f"SELECT id, name, tier FROM `postgres`.`cache_testing`.`customers` WHERE id={del_id}")
 df.show()
@@ -249,15 +279,16 @@ DELETE FROM public.customers WHERE id = $DEL_ID;
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
   starpump postgres \
     --mode incremental \
     --write-mode standard \
-    --watermark-col updated_at \
-    INCLUDE_TABLES=customers
+    --watermark-col updated_at
 ```
 
 **Expected log:**
 ```
+[customers] PK cols resolved from source catalog: ['id']
 [customers] Delete-detection pass (write_mode=standard) — collecting live PKs from source window …
 [customers] Live PK count in source window: N
 [customers] MERGE INTO (delete pass)
@@ -268,12 +299,12 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ```bash
 cat > /tmp/t283_after.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os, sys
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t283-after")).getOrCreate()
-import sys
 del_id = sys.argv[1]
 df = spark.sql(f"SELECT id, name FROM `postgres`.`cache_testing`.`customers` WHERE id={del_id}")
 df.show()
@@ -291,9 +322,10 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ---
 
-## Test T-28.4 — `standard` mode UPDATE + DELETE (Oracle)
+## Test T-28.4 — `standard` mode UPDATE + DELETE (Oracle, catalog PK detection)
 
-Oracle uses entity-specific PKs — must pass `--pk-cols` explicitly.
+Oracle uses entity-specific PKs (`customer_id`, `order_id`, etc.). starpump now detects
+them automatically via `DatabaseMetaData.getPrimaryKeys()` — **no `--pk-cols` required**.
 
 **Step 1 — Update a customer in Oracle:**
 
@@ -309,7 +341,7 @@ EXIT;
 EOF
 ```
 
-**Step 2 — Run incremental with explicit PK:**
+**Step 2 — Run incremental with NO `--pk-cols` — catalog detects `customer_id`:**
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
@@ -318,15 +350,22 @@ kubectl exec -n prod $MASTER -c spark-master -- \
   starpump oracle \
     --mode incremental \
     --write-mode standard \
-    --pk-cols customer_id \
     --watermark-col updated_at
+```
+
+**Expected log:**
+```
+[customers] PK cols resolved from source catalog: ['customer_id']
+[customers] MERGE INTO (upsert)
+[customers] DONE
 ```
 
 **Step 3 — Verify exactly 1 row for customer_id=1 with new tier:**
 
 ```bash
 cat > /tmp/t284_verify.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
@@ -342,7 +381,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
   python3 /tmp/t284_verify.py
 ```
 
-✅ Pass: exactly 1 row, `tier='PLATINUM'`.
+✅ Pass: exactly 1 row, `tier='PLATINUM'`, PK log shows `resolved from source catalog: ['customer_id']`.
 
 ---
 
@@ -397,6 +436,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected log:**
 ```
+[products] PK cols resolved from source catalog: ['id']
 [products] Delete-detection pass (write_mode=soft_delete) — collecting live PKs …
 [products] MERGE INTO (delete pass)
 [products] Delete-detection pass complete.
@@ -406,12 +446,12 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ```bash
 cat > /tmp/t285_verify.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os, sys
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("t285-verify")).getOrCreate()
-import sys
 soft_id = sys.argv[1]
 df = spark.sql(f"SELECT id, sku, is_deleted, deleted_at FROM `postgres`.`cache_testing`.`products` WHERE id={soft_id}")
 df.show()
@@ -419,7 +459,6 @@ row = df.collect()[0]
 print(f"Row still present: {df.count()}  (expected: 1)")
 print(f"is_deleted: {row['is_deleted']}   (expected: True)")
 print(f"deleted_at: {row['deleted_at']}   (expected: non-null timestamp)")
-# Live filter — should return 0
 n = spark.sql(f"SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`products` WHERE id={soft_id} AND (is_deleted IS NULL OR is_deleted=false)").collect()[0]['n']
 print(f"Live rows (is_deleted filter): {n}  (expected: 0)")
 spark.stop()
@@ -435,7 +474,9 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ---
 
-## Test T-28.6 — `soft_delete` mode (Oracle)
+## Test T-28.6 — `soft_delete` mode (Oracle, catalog PK detection)
+
+Oracle's `product_id` PK is detected automatically — no `--pk-cols`.
 
 ```bash
 ORA_POD=$(kubectl get pod -n prod -l app=oracle-xe \
@@ -453,14 +494,13 @@ SELECT product_id, sku FROM products WHERE sku='ORA-SOFT-T286';
 EXIT;
 EOF
 
-# Step 2 — Push into Iceberg
+# Step 2 — Push into Iceberg (no --pk-cols — catalog detects product_id)
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
   INCLUDE_TABLES=products \
   starpump oracle \
     --mode incremental \
     --write-mode soft_delete \
-    --pk-cols product_id \
     --watermark-col updated_at
 
 # Step 3 — Delete from Oracle
@@ -471,19 +511,19 @@ COMMIT;
 EXIT;
 EOF
 
-# Step 4 — Run soft_delete incremental again
+# Step 4 — Run soft_delete incremental again (no --pk-cols)
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
   INCLUDE_TABLES=products \
   starpump oracle \
     --mode incremental \
     --write-mode soft_delete \
-    --pk-cols product_id \
     --watermark-col updated_at
 
 # Step 5 — Verify flagged in Iceberg
 cat > /tmp/t286_verify.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
@@ -499,7 +539,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
   python3 /tmp/t286_verify.py
 ```
 
-✅ Pass: `is_deleted=True`, row physically remains in Iceberg.
+✅ Pass: `is_deleted=True`, row physically remains in Iceberg, log shows `PK cols resolved from source catalog: ['product_id']`.
 
 ---
 
@@ -563,7 +603,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ```bash
 cat > /tmp/t287_verify.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
@@ -613,7 +654,7 @@ db.customers.insertOne({
 print("inserted _id: " + db.customers.findOne({email:"mgo-std@starpump.local"})._id);
 '
 
-# Step 2 — Push into Iceberg
+# Step 2 — Push into Iceberg (_id auto-detected, no --pk-cols)
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
   INCLUDE_TABLES=customers \
@@ -645,7 +686,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 # Step 5 — Verify exactly 1 row with PLATINUM tier
 cat > /tmp/t288_verify.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
@@ -661,14 +703,17 @@ kubectl exec -n prod $MASTER -c spark-master -- \
   python3 /tmp/t288_verify.py
 ```
 
-✅ Pass: exactly 1 row, `tier='PLATINUM'`.
+✅ Pass: exactly 1 row, `tier='PLATINUM'`, log shows `PK cols resolved from source catalog: ['_id']`.
 
 ---
 
-## Test T-28.9 — Explicit `--pk-cols` override (Oracle)
+## Test T-28.9 — `--pk-cols` override takes priority over catalog (Oracle)
+
+Verifies that an explicit `--pk-cols` value beats the catalog result — useful when you
+want a composite MERGE key that differs from the table's declared PK.
 
 ```bash
-# Single PK override
+# Single override — operator forces item_id even though catalog would return it anyway
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
   INCLUDE_TABLES=order_items \
@@ -678,8 +723,9 @@ kubectl exec -n prod $MASTER -c spark-master -- \
     --pk-cols item_id \
     --watermark-col updated_at 2>&1 | grep "PK cols"
 # Expected: [order_items] PK cols: ['item_id']
+# Note: no "resolved from source catalog" — override bypasses the catalog call entirely
 
-# Composite PK via env var
+# Composite override via env var — forces a 2-column join key
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
   PK_COLS=order_id,item_id \
@@ -691,7 +737,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 # Expected: [order_items] PK cols: ['order_id', 'item_id']
 ```
 
-✅ Pass: PK cols logged match the override exactly.
+✅ Pass: PK cols log matches the override exactly and does **not** show `resolved from source catalog`.
+❌ Fail: shows `resolved from source catalog` → override was not passed correctly.
 
 ---
 
@@ -739,7 +786,8 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ```bash
 cat > /tmp/t2810_verify.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
@@ -756,7 +804,118 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 ```
 
 ✅ Pass: exactly 1 row — `>=` boundary is inclusive.
-❌ Fail: 0 rows → `_incremental_where_clause` still uses `>`; confirm `starpump.py` line reads `return f"{wm_col} >= '{last_ts}'"`.
+❌ Fail: 0 rows → `_incremental_where_clause` still uses `>`; confirm `starpump.py` reads `return f"{wm_col} >= '{last_ts}'"`.
+
+---
+
+## Test T-28.11 — Oracle composite PK detected from catalog
+
+Verifies that a table with a multi-column primary key returns both columns in declaration
+order from `DatabaseMetaData.getPrimaryKeys()` — no `--pk-cols` required.
+
+**Step 1 — Create a composite-PK test table in Oracle:**
+
+```bash
+ORA_POD=$(kubectl get pod -n prod -l app=oracle-xe \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 << 'EOF'
+CREATE TABLE order_line_items (
+  order_id    NUMBER(10)    NOT NULL,
+  line_seq    NUMBER(5)     NOT NULL,
+  product_id  NUMBER(10)    NOT NULL,
+  qty         NUMBER(6)     DEFAULT 1,
+  unit_price  NUMBER(12, 2),
+  updated_at  TIMESTAMP     DEFAULT SYSTIMESTAMP,
+  CONSTRAINT pk_order_line_items PRIMARY KEY (order_id, line_seq)
+);
+INSERT INTO order_line_items VALUES (1001, 1, 42, 2, 19.99, SYSTIMESTAMP);
+INSERT INTO order_line_items VALUES (1001, 2, 77, 1, 49.99, SYSTIMESTAMP);
+INSERT INTO order_line_items VALUES (1002, 1, 42, 3, 19.99, SYSTIMESTAMP);
+COMMIT;
+SELECT order_id, line_seq, product_id FROM order_line_items;
+EXIT;
+EOF
+```
+
+**Step 2 — Run incremental — catalog must detect `(order_id, line_seq)`:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=order_line_items \
+  starpump oracle \
+    --mode incremental \
+    --write-mode standard \
+    --watermark-col updated_at 2>&1 | grep -E "PK cols"
+```
+
+**Expected:**
+```
+[order_line_items] PK cols resolved from source catalog: ['order_id', 'line_seq']
+```
+
+**Step 3 — Update one row and confirm MERGE joins on both columns:**
+
+```bash
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 << 'EOF'
+UPDATE order_line_items SET qty = 5, updated_at = SYSTIMESTAMP
+WHERE order_id = 1001 AND line_seq = 1;
+COMMIT;
+EXIT;
+EOF
+
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=order_line_items \
+  starpump oracle \
+    --mode incremental \
+    --write-mode standard \
+    --watermark-col updated_at
+```
+
+**Step 4 — Verify exactly 1 row for (1001, 1) with qty=5:**
+
+```bash
+cat > /tmp/t2811_verify.py << 'PYEOF'
+import os
+os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("t2811-verify")).getOrCreate()
+df = spark.sql("""
+  SELECT order_id, line_seq, qty, snap_timestamp
+  FROM   `oracle`.`cache_testing`.`order_line_items`
+  WHERE  order_id=1001 AND line_seq=1
+  ORDER  BY snap_timestamp
+""")
+df.show()
+count = df.count()
+qty   = df.collect()[0]["qty"] if count > 0 else None
+print(f"Row count for (1001,1): {count}  (expected: 1 — composite MERGE replaces)")
+print(f"qty: {qty}  (expected: 5)")
+spark.stop()
+PYEOF
+kubectl cp /tmp/t2811_verify.py prod/$MASTER:/tmp/t2811_verify.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 /tmp/t2811_verify.py
+```
+
+✅ Pass: 1 row, `qty=5`, log shows `['order_id', 'line_seq']` — composite PK detected and joined correctly.
+❌ Fail: 2 rows → MERGE join produced a Cartesian match; check `_build_pk_order_clause` uses both columns in `ON` clause.
+
+**Step 5 — Cleanup test table:**
+
+```bash
+kubectl exec -n prod "$ORA_POD" -- sqlplus -s \
+  cache_testing/CacheTesting#2025@localhost:1521/XEPDB1 << 'EOF'
+DROP TABLE order_line_items;
+EXIT;
+EOF
+```
 
 ---
 
@@ -766,7 +925,8 @@ Run after all tests to verify end state in one shot:
 
 ```bash
 cat > /tmp/t28_scorecard.py << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+import os
+os.environ["USER"] = "dave"
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
 bao = BaoSparkInit()
@@ -779,8 +939,14 @@ checks = [
     ("T-28.3 PG DELETE — deletetest gone",
      "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`customers` WHERE email='deletetest@starpump.local'",
      lambda n: n == 0, "0"),
+    ("T-28.4 ORA UPDATE — customer_id=1 PLATINUM (no --pk-cols)",
+     "SELECT COUNT(*) AS n FROM `oracle`.`cache_testing`.`customers` WHERE customer_id=1 AND tier='PLATINUM'",
+     lambda n: n == 1, "1"),
     ("T-28.5 PG soft_delete — SOFT-DEL-T285 flagged",
      "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`products` WHERE sku='SOFT-DEL-T285' AND is_deleted=true",
+     lambda n: n == 1, "1"),
+    ("T-28.6 ORA soft_delete — product_id=9999999 flagged (no --pk-cols)",
+     "SELECT COUNT(*) AS n FROM `oracle`.`cache_testing`.`products` WHERE product_id=9999999 AND is_deleted=true",
      lambda n: n == 1, "1"),
     ("T-28.7 PG history — 2 versions of hist-a",
      "SELECT COUNT(*) AS n FROM `postgres`.`cache_testing`.`customers` WHERE email='hist-a@starpump.local'",
@@ -852,9 +1018,10 @@ kubectl exec -n prod mongodb-0 -- mongosh \
 
 | Symptom | Likely Cause | Resolution |
 |---------|-------------|------------|
-| MERGE fires but 2 rows appear | `pk_cols` resolved to wrong column | Pass `--pk-cols <correct_col>` explicitly |
+| `resolved from source catalog` missing in logs | Catalog call failed silently | Check JDBC connectivity; starpump falls back to heuristic — look for `PK cols: ['id']` without "catalog" prefix |
+| MERGE fires but 2 rows appear | PK resolved to wrong column | Check log for actual PK used; override with `--pk-cols <correct_col>` if needed |
 | Delete-detection pass never fires | Watermark clause empty (first full run) | Run one incremental pass first to establish a non-null watermark |
-| Oracle MERGE fails | Missing `--pk-cols` | Oracle tables use entity PKs — always pass e.g. `--pk-cols customer_id` |
+| Composite PK test shows 2 rows after UPDATE | Only first PK column used in join | Confirm `_build_pk_order_clause` emits both columns; check catalog returned both in `KEY_SEQ` order |
 | `soft_delete` columns not in Iceberg | First run used `standard` mode | Drop + recreate Iceberg table, re-run with `--write-mode soft_delete` |
 | `history` shows only 1 version | `--write-mode history` not passed | Confirm flag is present; MERGE would produce 1 row |
 | Boundary row T-28.10 returns 0 | `>` still used in starpump | Confirm `_incremental_where_clause` returns `>=` in `starpump.py` |
