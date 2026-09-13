@@ -1,0 +1,324 @@
+# =============================================================================
+# starpump-incremental.yaml
+#
+# Kubernetes CronJob + ConfigMap for scheduled Starpump incremental loads.
+#
+# Schedule: every 15 minutes for all three CDC sources (Fivetran-style).
+# Mode: incremental — reads only rows newer than the last pipeline_watermarks
+#       timestamp, updates the watermark after each successful run.
+#
+# The CronJobs reference the spark-master pod via the internal Spark master URL.
+# Credentials come from OpenBao — no secrets are stored in Kubernetes.
+#
+# Image: uses the existing spark-gluten-velox image which already contains
+#        starpump.py, bao_spark_init.py, spark_iceberg_utils.py and all JARs.
+# =============================================================================
+
+# ── ConfigMap: Starpump incremental job config ───────────────────────────────
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: starpump-incremental-config
+  namespace: prod
+  labels:
+    app: starpump
+    pipeline.type: incremental
+data:
+  # Common settings (overridden per-source by env vars in the CronJob spec)
+  BATCH_SIZE:          "100000"
+  MAX_THREADS:         "8"
+  MODE:                "incremental"
+  DDL_DRIFT_DETECT:    "1"
+  DRY_RUN:             "0"
+  MAX_TABLE_SIZE_GB:   "0"      # no size filter for incremental — only new rows are fetched
+  ADDR:                "http://openbao.prod.svc.cluster.local:8200"
+
+  # PostgreSQL incremental config
+  pg-SCHEMAS:          "public"
+  pg-DATABASE:         "cache_testing"
+  pg-ICEBERG_CATALOG:  "postgres"
+  pg-INCLUDE_TABLES:   "customers,products,product_reviews,orders"
+
+  # Oracle incremental config
+  ora-SCHEMAS:         "TPCDS"
+  ora-DATABASE:        "XEPDB1"
+  ora-ICEBERG_CATALOG: "oracle"
+  ora-INCLUDE_TABLES:  "call_center,catalog_page,household_demographics,income_band,promotion,reason,ship_mode,warehouse,web_page,web_site"
+
+  # MongoDB incremental config
+  mgo-SCHEMAS:         "cache_testing"
+  mgo-DATABASE:        "cache_testing"
+  mgo-ICEBERG_CATALOG: "mongodb"
+  mgo-INCLUDE_TABLES:  "customers,products"
+
+---
+# ── CronJob: PostgreSQL incremental load ─────────────────────────────────────
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: starpump-incremental-postgres
+  namespace: prod
+  labels:
+    app: starpump
+    pipeline.source: postgres
+    pipeline.type: incremental
+spec:
+  schedule: "*/15 * * * *"     # every 15 minutes
+  concurrencyPolicy: Forbid    # skip if previous run still active
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120 # allow 2 min late start before skipping
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600  # kill if running > 10 min
+      template:
+        metadata:
+          labels:
+            app: starpump
+            pipeline.source: postgres
+        spec:
+          restartPolicy: Never
+          serviceAccountName: spark-service-account
+          containers:
+            - name: starpump
+              image: 192.168.1.50:30500/spark-gluten-velox:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  cd /opt/spark/scripts && \
+                  SPARK_USER=dave \
+                  python3 starpump.py postgres \
+                    --mode incremental
+              env:
+                - name: USER
+                  value: dave
+                - name: SPARK_USER
+                  value: dave
+                - name: MODE
+                  value: incremental
+                - name: DDL_DRIFT_DETECT
+                  value: "1"
+                - name: BATCH_SIZE
+                  value: "100000"
+                - name: MAX_THREADS
+                  value: "8"
+                - name: MAX_TABLE_SIZE_GB
+                  value: "0"
+                - name: INCLUDE_TABLES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: pg-INCLUDE_TABLES
+                - name: DATABASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: pg-DATABASE
+                - name: SCHEMAS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: pg-SCHEMAS
+                - name: ICEBERG_CATALOG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: pg-ICEBERG_CATALOG
+                - name: ADDR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ADDR
+              resources:
+                requests:
+                  memory: "2Gi"
+                  cpu: "500m"
+                limits:
+                  memory: "4Gi"
+                  cpu: "2"
+
+---
+# ── CronJob: Oracle incremental load ─────────────────────────────────────────
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: starpump-incremental-oracle
+  namespace: prod
+  labels:
+    app: starpump
+    pipeline.source: oracle
+    pipeline.type: incremental
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: starpump
+            pipeline.source: oracle
+        spec:
+          restartPolicy: Never
+          serviceAccountName: spark-service-account
+          containers:
+            - name: starpump
+              image: 192.168.1.50:30500/spark-gluten-velox:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  cd /opt/spark/scripts && \
+                  SPARK_USER=dave \
+                  python3 starpump.py oracle \
+                    --mode incremental
+              env:
+                - name: USER
+                  value: dave
+                - name: SPARK_USER
+                  value: dave
+                - name: MODE
+                  value: incremental
+                - name: DDL_DRIFT_DETECT
+                  value: "1"
+                - name: BATCH_SIZE
+                  value: "100000"
+                - name: MAX_THREADS
+                  value: "8"
+                - name: MAX_TABLE_SIZE_GB
+                  value: "0"
+                - name: INCLUDE_TABLES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ora-INCLUDE_TABLES
+                - name: DATABASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ora-DATABASE
+                - name: SCHEMAS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ora-SCHEMAS
+                - name: ICEBERG_CATALOG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ora-ICEBERG_CATALOG
+                - name: ADDR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ADDR
+              resources:
+                requests:
+                  memory: "2Gi"
+                  cpu: "500m"
+                limits:
+                  memory: "4Gi"
+                  cpu: "2"
+
+---
+# ── CronJob: MongoDB incremental load ────────────────────────────────────────
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: starpump-incremental-mongodb
+  namespace: prod
+  labels:
+    app: starpump
+    pipeline.source: mongodb
+    pipeline.type: incremental
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: starpump
+            pipeline.source: mongodb
+        spec:
+          restartPolicy: Never
+          serviceAccountName: spark-service-account
+          containers:
+            - name: starpump
+              image: 192.168.1.50:30500/spark-gluten-velox:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  cd /opt/spark/scripts && \
+                  SPARK_USER=dave \
+                  python3 starpump.py mongodb \
+                    --mode incremental
+              env:
+                - name: USER
+                  value: dave
+                - name: SPARK_USER
+                  value: dave
+                - name: MODE
+                  value: incremental
+                - name: DDL_DRIFT_DETECT
+                  value: "1"
+                - name: BATCH_SIZE
+                  value: "100000"
+                - name: MAX_THREADS
+                  value: "4"
+                - name: MAX_TABLE_SIZE_GB
+                  value: "0"
+                - name: INCLUDE_TABLES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: mgo-INCLUDE_TABLES
+                - name: DATABASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: mgo-DATABASE
+                - name: SCHEMAS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: mgo-SCHEMAS
+                - name: ICEBERG_CATALOG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: mgo-ICEBERG_CATALOG
+                - name: ADDR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: ADDR
+              resources:
+                requests:
+                  memory: "2Gi"
+                  cpu: "500m"
+                limits:
+                  memory: "4Gi"
+                  cpu: "2"

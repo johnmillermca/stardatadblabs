@@ -221,6 +221,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+# ── CDC / incremental mode imports (available when confluent-kafka is installed)
+try:
+    from confluent_kafka.schema_registry import SchemaRegistryClient
+    _SR_AVAILABLE = True
+except ImportError:
+    _SR_AVAILABLE = False
+
 import psycopg2
 import psycopg2.extras
 from pyspark.sql import DataFrame, SparkSession
@@ -273,6 +280,40 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="Override the number of parallel copy threads (default: 8, or MAX_THREADS env).",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["full", "incremental", "custom_sql"],
+        default=None,
+        help=(
+            "Copy mode: full (default), incremental (watermark-based), "
+            "or custom_sql (user-supplied JOIN query)."
+        ),
+    )
+    parser.add_argument(
+        "--custom-sql",
+        default=None,
+        metavar="SQL",
+        help=(
+            "SQL query to execute in custom_sql mode. "
+            "Result is written to --target-table in the Iceberg catalog. "
+            "Enclose in single quotes on the shell."
+        ),
+    )
+    parser.add_argument(
+        "--target-table",
+        default=None,
+        metavar="TABLE",
+        help="Target Iceberg table name for custom_sql mode.",
+    )
+    parser.add_argument(
+        "--watermark-col",
+        default=None,
+        metavar="COL",
+        help=(
+            "Timestamp column for incremental mode watermark comparison "
+            "(default: updated_at, falling back to created_at)."
+        ),
+    )
     # Parse only known args so pytest / spark-submit extra flags are ignored.
     args, _ = parser.parse_known_args()
     return args
@@ -309,6 +350,30 @@ BATCH_SIZE      = int(os.environ.get("BATCH_SIZE",   "100000"))
 MAX_ROWS        = int(os.environ.get("MAX_ROWS", "0"))
 # --threads CLI flag takes precedence over the MAX_THREADS env var (default 8).
 MAX_THREADS     = _ARGS.threads if _ARGS.threads is not None else int(os.environ.get("MAX_THREADS", "8"))
+
+# ── Mode configuration ─────────────────────────────────────────────────────────
+# MODE: full (default) | incremental | custom_sql
+# CLI --mode takes precedence over MODE env var.
+_raw_mode = (_ARGS.mode or os.environ.get("MODE", "full")).lower()
+if _raw_mode not in ("full", "incremental", "custom_sql"):
+    print(f"ERROR: Unknown MODE {_raw_mode!r}. Choose: full, incremental, custom_sql", file=sys.stderr)
+    sys.exit(1)
+MODE: str = _raw_mode
+
+# CUSTOM_SQL: user-supplied SQL query for custom_sql mode.
+# CLI --custom-sql takes precedence over CUSTOM_SQL env var.
+CUSTOM_SQL: str | None = _ARGS.custom_sql or os.environ.get("CUSTOM_SQL")
+
+# TARGET_TABLE: Iceberg table name for custom_sql results.
+# CLI --target-table takes precedence over TARGET_TABLE env var.
+TARGET_TABLE: str | None = _ARGS.target_table or os.environ.get("TARGET_TABLE")
+
+# WATERMARK_COL: timestamp column used for incremental delta detection.
+# Overridable; defaults are tried in order: updated_at → created_at.
+WATERMARK_COL: str | None = _ARGS.watermark_col or os.environ.get("WATERMARK_COL")
+
+# DDL_DRIFT_DETECT: compare source schema vs Iceberg before copy and emit ALTER TABLEs.
+DDL_DRIFT_DETECT: bool = os.environ.get("DDL_DRIFT_DETECT", "1") == "1"
 
 # ── Table filtering env vars ───────────────────────────────────────────────────
 # INCLUDE_TABLES / TABLES: only copy these tables (comma-separated, lower-case).
@@ -2039,6 +2104,282 @@ def _copy_table(
         }
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Incremental load helpers ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _pg_read_watermark(pg: dict, source_db: str, source_schema: str, table_name: str) -> str | None:
+    """
+    Read the stored sf_extraction_ts watermark for a table from the pipeline DB.
+    Returns None if no watermark exists (table never been copied incrementally).
+    """
+    sql = (
+        "SELECT sf_extraction_ts FROM pipeline_watermarks "
+        "WHERE source_db = %s AND source_schema = %s AND table_name = %s"
+    )
+    with _pg_connect(pg) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (source_db, source_schema, table_name))
+            row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _resolve_watermark_col(schema: StructType, override: str | None) -> str | None:
+    """
+    Return the best timestamp column to use as the incremental watermark.
+
+    Priority:
+      1. Explicit WATERMARK_COL / --watermark-col override
+      2. updated_at (present in postgres.customers, postgres.orders)
+      3. created_at (fallback for append-only tables like product_reviews)
+      4. None → table has no usable watermark column; skip incremental for it
+    """
+    col_names = {f.name.lower() for f in schema.fields}
+    if override and override.lower() in col_names:
+        return override.lower()
+    if "updated_at" in col_names:
+        return "updated_at"
+    if "created_at" in col_names:
+        return "created_at"
+    return None
+
+
+def _incremental_where_clause(wm_col: str, last_ts: str | None) -> str:
+    """
+    Build a WHERE clause fragment for incremental extraction.
+
+    When last_ts is provided: wm_col > '<last_ts>'
+    When last_ts is None (first incremental run): copy all rows (empty clause).
+
+    The '>' operator (strict greater-than) avoids re-copying rows at the
+    exact boundary.  A slight overlap risk exists for rows written in the same
+    microsecond as the last watermark — acceptable for CDC-backed pipelines
+    (Debezium picks up from a precise SCN/LSN, not this timestamp).
+    """
+    if not last_ts:
+        return ""  # first run — full copy
+    return f"{wm_col} > '{last_ts}'"
+
+
+def _detect_ddl_drift(
+    spark:     SparkSession,
+    connector: "_SourceConnector",
+    conn_opts: dict,
+    table:     str,
+) -> list[dict]:
+    """
+    Compare the source table schema against the live Iceberg table schema.
+
+    Returns a list of change dicts (same format as _diff_avro_schemas):
+      {"op": "add",    "name": "col", "spark_type": DataType}
+      {"op": "remove", "name": "col"}
+      {"op": "modify", "name": "col", "spark_type": DataType}
+
+    Empty list = no drift detected.
+    Only called when DDL_DRIFT_DETECT=1 (default) and the target Iceberg table exists.
+    """
+    fqn = f"`{ICEBERG_CATALOG}`.`{ICEBERG_NAMESPACE}`.`{table}`"
+
+    try:
+        ice_schema: StructType = spark.table(fqn).schema
+    except Exception:
+        # Table doesn't exist yet — no drift to detect
+        return []
+
+    try:
+        src_schema: StructType = connector.table_schema(spark, conn_opts, table)
+        src_schema = connector.map_schema(src_schema)
+    except Exception as exc:
+        logger.warning("[%s] DDL drift: could not read source schema: %s", table, exc)
+        return []
+
+    # Exclude platform-injected snap columns from drift detection
+    _snap_cols = {"snap_id", "snap_timestamp"}
+    src_cols = {f.name.lower(): f.dataType for f in src_schema.fields if f.name.lower() not in _snap_cols}
+    ice_cols  = {f.name.lower(): f.dataType for f in ice_schema.fields  if f.name.lower() not in _snap_cols}
+
+    changes: list[dict] = []
+    for name, dtype in src_cols.items():
+        if name not in ice_cols:
+            changes.append({"op": "add",    "name": name, "spark_type": dtype})
+        elif str(dtype) != str(ice_cols[name]):
+            changes.append({"op": "modify", "name": name, "spark_type": dtype})
+    for name in ice_cols:
+        if name not in src_cols:
+            changes.append({"op": "remove", "name": name})
+
+    if changes:
+        logger.info(
+            "[%s] DDL drift detected — %d change(s): %s",
+            table, len(changes),
+            [(c["op"], c["name"]) for c in changes],
+        )
+    else:
+        logger.debug("[%s] No DDL drift.", table)
+    return changes
+
+
+def _apply_ddl_drift(
+    spark:   SparkSession,
+    table:   str,
+    changes: list[dict],
+) -> None:
+    """
+    Apply ALTER TABLE statements to the Iceberg table for each detected change.
+
+    Supported operations:
+      add    → ALTER TABLE … ADD COLUMN col type
+      remove → ALTER TABLE … DROP COLUMN col
+      modify → ALTER TABLE … ALTER COLUMN col TYPE type
+
+    Skipped in DRY_RUN mode (logs intent only).
+    """
+    if not changes:
+        return
+
+    fqn = f"`{ICEBERG_CATALOG}`.`{ICEBERG_NAMESPACE}`.`{table}`"
+
+    for chg in changes:
+        op  = chg["op"]
+        col = chg["name"]
+
+        if op == "add":
+            ice_type = chg["spark_type"].simpleString()
+            ddl = f"ALTER TABLE {fqn} ADD COLUMN `{col}` {ice_type}"
+        elif op == "remove":
+            ddl = f"ALTER TABLE {fqn} DROP COLUMN `{col}`"
+        elif op == "modify":
+            ice_type = chg["spark_type"].simpleString()
+            ddl = f"ALTER TABLE {fqn} ALTER COLUMN `{col}` TYPE {ice_type}"
+        else:
+            continue
+
+        logger.info("[%s] DDL drift ALTER: %s", table, ddl)
+        if DRY_RUN:
+            logger.info("[%s] DRY_RUN — skipping ALTER TABLE.", table)
+        else:
+            try:
+                spark.sql(ddl)
+                logger.info("[%s] DDL drift applied: %s %s", table, op, col)
+            except Exception as exc:
+                logger.warning("[%s] DDL drift ALTER failed (non-fatal): %s", table, exc)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Custom SQL mode ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _run_custom_sql(
+    spark:      SparkSession,
+    builder:    "IcebergTableBuilder",
+    connector:  "_SourceConnector",
+    conn_opts:  dict,
+    s3_bucket:  str,
+    sql_query:  str,
+    target_tbl: str,
+    pg_creds:   dict,
+    lock:       threading.Lock,
+) -> dict:
+    """
+    Execute a user-supplied SQL query against the source database and write
+    results to an Iceberg table.
+
+    Supports multi-table JOINs.  The query is passed verbatim to the
+    connector's JDBC/native read path via the 'query' option.
+
+    For MongoDB (which does not support SQL JOINs), the sql_query is
+    treated as a raw aggregation pipeline JSON string if it starts with '['.
+
+    Returns a result dict compatible with the main copy results format.
+    """
+    logger.info("[custom-sql] Target table: %s | Query: %.200s …", target_tbl, sql_query)
+
+    try:
+        # Read via connector's underlying format with the custom query.
+        # PostgreSQL, Oracle, Databricks: jdbc with 'query' option.
+        # MongoDB: aggregation pipeline via the mongodb format.
+        if connector.spark_format == "mongodb":
+            # Treat sql_query as a MongoDB aggregation pipeline
+            df: DataFrame = (
+                spark.read.format("mongodb")
+                .options(**conn_opts)
+                .option("spark.mongodb.read.aggregation.pipeline", sql_query)
+                .load()
+            )
+        else:
+            # JDBC sources: wrap in subquery for Spark JDBC compatibility
+            # (Spark JDBC requires a subquery alias when 'dbtable' is a subselect)
+            subquery = f"({sql_query}) custom_sql_result"
+            df = (
+                spark.read.format("jdbc")
+                .options(**conn_opts)
+                .option("dbtable", subquery)
+                .load()
+            )
+
+        raw_schema  = df.schema
+        mapped      = connector.map_schema(raw_schema)
+
+        # Auto-detect partition key: first column in result
+        pk_col = raw_schema.fields[0].name if raw_schema.fields else "snap_id"
+        partition_spec = [
+            IcebergTableBuilder.hours("snap_timestamp"),
+            IcebergTableBuilder.bucket(pk_col, 16),
+        ]
+
+        s3_location = (
+            f"s3://{s3_bucket}/{connector.s3_prefix}/{ICEBERG_NAMESPACE}/{target_tbl}"
+        )
+        fqn = builder.create_table(
+            catalog        = ICEBERG_CATALOG,
+            namespace      = ICEBERG_NAMESPACE,
+            table          = target_tbl,
+            schema         = mapped,
+            partition_spec = partition_spec,
+            location       = s3_location,
+        )
+
+        if DRY_RUN:
+            logger.info("[custom-sql] DRY_RUN — skipping data copy.")
+            rows_written = 0
+        else:
+            df.cache()
+            rows_written = builder.write_append(df, ICEBERG_CATALOG, ICEBERG_NAMESPACE, target_tbl)
+            df.unpersist()
+
+            # Write a watermark entry for the custom-sql result
+            sf_ts = connector.capture_ts(spark, conn_opts)
+            with lock:
+                write_watermark_iceberg(
+                    spark             = spark,
+                    catalog           = ICEBERG_CATALOG,
+                    namespace         = ICEBERG_NAMESPACE,
+                    source_db         = DATABASE,
+                    source_schema     = SCHEMAS,
+                    table_name        = target_tbl,
+                    sf_extraction_ts  = sf_ts,
+                    rows_copied       = rows_written,
+                )
+            pg_upsert_watermark(
+                pg                = pg_creds,
+                source_db         = DATABASE,
+                source_schema     = SCHEMAS,
+                table_name        = target_tbl,
+                sf_extraction_ts  = sf_ts,
+                rows_copied       = rows_written,
+                iceberg_namespace = ICEBERG_NAMESPACE,
+            )
+
+        logger.info("[custom-sql] Done — %d rows written to %s.", rows_written, fqn)
+        return {"status": "success", "rows_written": rows_written, "size_gb": 0.0,
+                "sf_extraction_ts": None, "error": None}
+
+    except Exception as exc:
+        logger.error("[custom-sql] FAILED: %s", exc, exc_info=True)
+        return {"status": "error", "rows_written": 0, "size_gb": 0.0,
+                "sf_extraction_ts": None, "error": str(exc)}
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -2047,8 +2388,8 @@ def main() -> None:
     run_id = str(uuid.uuid4())
 
     logger.info(
-        "=== starpump %s | run_id=%s user=%s db=%s schema=%s catalog=%s threads=%d ===",
-        SOURCE, run_id, USER, DATABASE, SCHEMAS, ICEBERG_CATALOG, MAX_THREADS,
+        "=== starpump %s | run_id=%s user=%s db=%s schema=%s catalog=%s threads=%d mode=%s ===",
+        SOURCE, run_id, USER, DATABASE, SCHEMAS, ICEBERG_CATALOG, MAX_THREADS, MODE,
     )
     logger.info(
         "=== Filters: include=%s  exclude=%s  max_size=%.1f GB ===",
@@ -2056,6 +2397,21 @@ def main() -> None:
         ", ".join(sorted(EXCLUDE_TABLES)) if EXCLUDE_TABLES else "none",
         MAX_TABLE_SIZE_GB,
     )
+
+    # Validate custom_sql mode requirements early
+    if MODE == "custom_sql":
+        if not CUSTOM_SQL:
+            print(
+                "ERROR: custom_sql mode requires --custom-sql or CUSTOM_SQL env var.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not TARGET_TABLE:
+            print(
+                "ERROR: custom_sql mode requires --target-table or TARGET_TABLE env var.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # ── 1. Credentials from OpenBao ───────────────────────────────────────────
     bao  = BaoSparkInit()
@@ -2109,6 +2465,17 @@ def main() -> None:
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
+    # ── 2b. Catalog namespace bootstrap (pre-flight) ──────────────────────────
+    # Ensure the target Iceberg namespace exists before any table operation.
+    # Uses 00_catalog_bootstrap.py logic directly — no separate process.
+    try:
+        from importlib import import_module as _imod
+        _cb = _imod("00_catalog_bootstrap")
+        _cb.bootstrap_single_catalog(spark, ICEBERG_CATALOG, ICEBERG_NAMESPACE)
+    except Exception as _cb_err:
+        # Non-fatal: namespace may already exist; log and continue.
+        logger.warning("[catalog-bootstrap] Pre-flight bootstrap warning: %s", _cb_err)
+
     # ── 3. Log run start in pipeline DB ──────────────────────────────────────
     try:
         pg_log_run_start(pg, run_id, DATABASE, SCHEMAS)
@@ -2123,70 +2490,195 @@ def main() -> None:
         builder = IcebergTableBuilder(spark, running_user=USER)
         builder.ensure_namespace(ICEBERG_CATALOG, ICEBERG_NAMESPACE)
 
-        # ── 4. Table discovery (via connector — source-agnostic) ──────────────
-        all_tables = connector.list_tables(spark, conn_opts)
-        if not all_tables:
-            logger.error("No tables found in %s.%s — aborting.", DATABASE, SCHEMAS)
-            sys.exit(1)
-
-        # ── 5. Size discovery (via connector — source-agnostic) ───────────────
-        sizes: dict[str, float] = {}
-        if _SIZE_FILTER_ENABLED:
-            sizes = connector.table_sizes(spark, conn_opts)
-        else:
-            logger.info("Size discovery skipped (MAX_TABLE_SIZE_GB=0).")
-
-        # ── 6. Apply filters ──────────────────────────────────────────────────
-        tables = apply_table_filters(all_tables, sizes)
-
-        # Log the full size report (shows every table + COPY/SKIP verdict)
-        log_size_report(all_tables, sizes, tables)
-
-        if not tables:
-            logger.error(
-                "No tables remain after filtering — nothing to copy. "
-                "Check INCLUDE_TABLES / EXCLUDE_TABLES / MAX_TABLE_SIZE_GB."
-            )
-            sys.exit(1)
-
-        logger.info(
-            "Copying %d/%d table(s) with %d threads, %d rows/batch%s.",
-            len(tables), len(all_tables), MAX_THREADS, BATCH_SIZE,
-            " [DRY RUN]" if DRY_RUN else "",
-        )
-
-        # ── 7. N-thread copy using a work queue ──────────────────────────────
-        # Each thread pulls the next table from the queue so they naturally
-        # pick up new work as soon as they finish.
-        work_q: queue.Queue[tuple[str, float]] = queue.Queue()
-        for tbl in tables:
-            work_q.put((tbl, sizes.get(tbl, 0.0)))
-
+        lock    = threading.Lock()
         results: dict[str, dict] = {}
-        lock = threading.Lock()
-
-        def worker() -> None:
-            while True:
-                try:
-                    tbl, size_gb = work_q.get_nowait()
-                except queue.Empty:
-                    break
-                _copy_table(
-                    spark, builder, connector, conn_opts, s3_bucket,
-                    tbl, size_gb, results, lock,
-                    pg_creds=pg,
-                )
-                work_q.task_done()
-
         t0      = time.time()
-        threads = [
-            threading.Thread(target=worker, name=f"copy-worker-{i+1}", daemon=True)
-            for i in range(min(MAX_THREADS, len(tables)))
-        ]
-        for th in threads:
-            th.start()
-        for th in threads:
-            th.join()
+
+        # ── custom_sql mode ───────────────────────────────────────────────────
+        if MODE == "custom_sql":
+            logger.info("[mode=custom_sql] Running user-supplied SQL query.")
+            result = _run_custom_sql(
+                spark      = spark,
+                builder    = builder,
+                connector  = connector,
+                conn_opts  = conn_opts,
+                s3_bucket  = s3_bucket,
+                sql_query  = CUSTOM_SQL,        # type: ignore[arg-type]
+                target_tbl = TARGET_TABLE,      # type: ignore[arg-type]
+                pg_creds   = pg,
+                lock       = lock,
+            )
+            results[TARGET_TABLE] = result  # type: ignore[index]
+            all_tables = [TARGET_TABLE]
+            tables     = [TARGET_TABLE]
+
+        else:
+            # ── 4. Table discovery (via connector — source-agnostic) ──────────
+            all_tables = connector.list_tables(spark, conn_opts)
+            if not all_tables:
+                logger.error("No tables found in %s.%s — aborting.", DATABASE, SCHEMAS)
+                sys.exit(1)
+
+            # ── 5. Size discovery (via connector — source-agnostic) ───────────
+            sizes: dict[str, float] = {}
+            if _SIZE_FILTER_ENABLED:
+                sizes = connector.table_sizes(spark, conn_opts)
+            else:
+                logger.info("Size discovery skipped (MAX_TABLE_SIZE_GB=0).")
+
+            # ── 6. Apply filters ──────────────────────────────────────────────
+            tables = apply_table_filters(all_tables, sizes)
+
+            # Log the full size report (shows every table + COPY/SKIP verdict)
+            log_size_report(all_tables, sizes, tables)
+
+            if not tables:
+                logger.error(
+                    "No tables remain after filtering — nothing to copy. "
+                    "Check INCLUDE_TABLES / EXCLUDE_TABLES / MAX_TABLE_SIZE_GB."
+                )
+                sys.exit(1)
+
+            logger.info(
+                "Copying %d/%d table(s) with %d threads, %d rows/batch%s [mode=%s].",
+                len(tables), len(all_tables), MAX_THREADS, BATCH_SIZE,
+                " [DRY RUN]" if DRY_RUN else "",
+                MODE,
+            )
+
+            # ── 7. N-thread copy using a work queue ──────────────────────────
+            # Each thread pulls the next table from the queue so they naturally
+            # pick up new work as soon as they finish.
+            work_q: queue.Queue[tuple[str, float]] = queue.Queue()
+
+            if MODE == "incremental":
+                # incremental: inject watermark WHERE clause per table
+                for tbl in tables:
+                    work_q.put((tbl, sizes.get(tbl, 0.0)))
+
+                def worker_incremental() -> None:
+                    while True:
+                        try:
+                            tbl, size_gb = work_q.get_nowait()
+                        except queue.Empty:
+                            break
+
+                        # ── DDL drift detection ───────────────────────────────
+                        if DDL_DRIFT_DETECT:
+                            drift = _detect_ddl_drift(spark, connector, conn_opts, tbl)
+                            _apply_ddl_drift(spark, tbl, drift)
+
+                        # ── Watermark-based incremental copy ──────────────────
+                        try:
+                            raw_schema = connector.table_schema(spark, conn_opts, tbl)
+                            mapped     = connector.map_schema(raw_schema)
+                            wm_col     = _resolve_watermark_col(mapped, WATERMARK_COL)
+
+                            last_ts = None
+                            if wm_col:
+                                try:
+                                    last_ts = _pg_read_watermark(
+                                        pg, DATABASE, SCHEMAS, tbl,
+                                    )
+                                except Exception as _wm_err:
+                                    logger.warning(
+                                        "[%s] Could not read watermark from pipeline DB: %s",
+                                        tbl, _wm_err,
+                                    )
+
+                            if wm_col:
+                                incr_clause = _incremental_where_clause(wm_col, last_ts)
+                                logger.info(
+                                    "[%s] Incremental mode: col=%s last_ts=%s clause='%s'",
+                                    tbl, wm_col, last_ts or "None (full)", incr_clause,
+                                )
+                            else:
+                                incr_clause = ""
+                                logger.info(
+                                    "[%s] No watermark column found — performing full copy.",
+                                    tbl,
+                                )
+
+                            # Override QUERY_FILTER for this table with watermark clause.
+                            # Combine with any existing table-level QUERY_FILTER predicates.
+                            existing_clause = _get_where_clause(tbl)
+                            if incr_clause and existing_clause:
+                                combined_clause = f"({incr_clause}) AND ({existing_clause})"
+                            elif incr_clause:
+                                combined_clause = incr_clause
+                            else:
+                                combined_clause = existing_clause
+
+                            # Temporarily patch QUERY_FILTERS for this table's copy.
+                            with lock:
+                                _saved = QUERY_FILTERS.get(tbl.lower(), "")
+                                QUERY_FILTERS[tbl.lower()] = combined_clause
+
+                        except Exception as _setup_err:
+                            logger.error(
+                                "[%s] Incremental setup failed: %s — falling back to full copy.",
+                                tbl, _setup_err,
+                            )
+                            with lock:
+                                _saved = QUERY_FILTERS.get(tbl.lower(), "")
+
+                        _copy_table(
+                            spark, builder, connector, conn_opts, s3_bucket,
+                            tbl, size_gb, results, lock,
+                            pg_creds=pg,
+                        )
+
+                        # Restore the original QUERY_FILTERS entry
+                        with lock:
+                            QUERY_FILTERS[tbl.lower()] = _saved
+
+                        work_q.task_done()
+
+                copy_threads = [
+                    threading.Thread(
+                        target=worker_incremental,
+                        name=f"incr-worker-{i+1}",
+                        daemon=True,
+                    )
+                    for i in range(min(MAX_THREADS, len(tables)))
+                ]
+
+            else:
+                # full mode — original logic
+                # ── DDL drift detection (full mode) ───────────────────────────
+                # Run before spawning threads so the schema is settled before
+                # any thread opens its table-copy.  Sequential to avoid concurrent
+                # ALTER TABLE races on the same table from parallel threads.
+                if DDL_DRIFT_DETECT:
+                    for tbl in tables:
+                        drift = _detect_ddl_drift(spark, connector, conn_opts, tbl)
+                        _apply_ddl_drift(spark, tbl, drift)
+
+                for tbl in tables:
+                    work_q.put((tbl, sizes.get(tbl, 0.0)))
+
+                def worker() -> None:
+                    while True:
+                        try:
+                            tbl, size_gb = work_q.get_nowait()
+                        except queue.Empty:
+                            break
+                        _copy_table(
+                            spark, builder, connector, conn_opts, s3_bucket,
+                            tbl, size_gb, results, lock,
+                            pg_creds=pg,
+                        )
+                        work_q.task_done()
+
+                copy_threads = [
+                    threading.Thread(target=worker, name=f"copy-worker-{i+1}", daemon=True)
+                    for i in range(min(MAX_THREADS, len(tables)))
+                ]
+
+            for th in copy_threads:
+                th.start()
+            for th in copy_threads:
+                th.join()
 
         elapsed = time.time() - t0
 
@@ -2199,9 +2691,9 @@ def main() -> None:
         logger.info("─" * 70)
         logger.info(
             "Completed in %.1fs — %d/%d copied | %d skipped (filtered) | "
-            "%d failed | %d rows written",
+            "%d failed | %d rows written [mode=%s]",
             elapsed, len(ok), len(all_tables), skipped_count,
-            len(failed), total_rows,
+            len(failed), total_rows, MODE,
         )
         for tbl, r in results.items():
             mark = "✓" if r["status"] in ("success", "dry_run") else "✗"
