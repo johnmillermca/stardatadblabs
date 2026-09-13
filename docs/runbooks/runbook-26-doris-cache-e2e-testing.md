@@ -2474,8 +2474,9 @@ kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 >
 > The oracle `tpcds.warehouse` table is used as the cold oracle dimension because it is the
 > largest populated table in `oracle.tpcds` (confirmed from T-03a) — it exercises real S3 reads
-> while the polaris `store_sales` fact table is served entirely from NVMe cache.  The join key
-> `ss_warehouse_sk → w_warehouse_sk` is a valid TPC-DS foreign key relationship.
+> while the polaris `store_sales` fact table is served entirely from NVMe cache.  `store_sales`
+> has no `ss_warehouse_sk` column; the join uses `ss_store_sk → w_warehouse_sk` as a
+> cross-catalog best-effort key (NULLs are expected and do not affect the cache performance measurement).
 
 ---
 
@@ -2623,8 +2624,10 @@ FROM
         AND i.i_category IN ('Books', 'Electronics', 'Sports')
 
     -- ── Warehouse dimension (cold — oracle) ──────────────────────────────────
+    -- store_sales has no ss_warehouse_sk; use ss_store_sk as the location FK.
+    -- Key overlap across independent data sets is low — NULLs are expected.
     LEFT JOIN oracle.tpcds.warehouse            wh
-        ON ss.ss_warehouse_sk = wh.w_warehouse_sk
+        ON ss.ss_store_sk = wh.w_warehouse_sk
 
     -- ── Customer dimension (cold — postgres) ─────────────────────────────────
     -- Best-effort join via customer_id integer.  The postgres customers table
@@ -2789,7 +2792,7 @@ FROM
         ON ss.ss_item_sk = i.i_item_sk
         AND i.i_category IN ('Books', 'Electronics', 'Sports')
     LEFT JOIN oracle.tpcds.warehouse            wh
-        ON ss.ss_warehouse_sk = wh.w_warehouse_sk
+        ON ss.ss_store_sk = wh.w_warehouse_sk
     LEFT JOIN postgres.public.customers         c
         ON ss.ss_customer_sk = c.id
     LEFT JOIN mongodb.cache_testing.orders      o
