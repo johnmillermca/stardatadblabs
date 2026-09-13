@@ -193,7 +193,10 @@ RUN mkdir -p "${SPARK_HOME}/conf" && cat > "${SPARK_HOME}/conf/spark-defaults.co
 spark.plugins                                        org.apache.gluten.GlutenPlugin
 spark.gluten.sql.columnar.backend.lib                velox
 spark.memory.offHeap.enabled                         true
-spark.memory.offHeap.size                            2g
+# Off-heap reduced from 2g → 1500m so the total per-executor footprint fits
+# within the 6 Gi regular worker pod ceiling without OOM:
+#   executor heap 3g + off-heap 1500m + JVM overhead 400m ≈ 4.9 GB  (was 5.5 GB)
+spark.memory.offHeap.size                            1500m
 
 # ── SQL extensions (Iceberg only — Delta added per-session if needed) ─────────
 spark.sql.extensions                                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
@@ -246,12 +249,44 @@ spark.sql.parquet.compression.codec                  snappy
 spark.serializer                                     org.apache.spark.serializer.KryoSerializer
 
 # ── Driver / executor sizing ──────────────────────────────────────────────────
-# Worker pods: 8 GB RAM limit, SPARK_WORKER_MEMORY=7g.
-# 3g executor + 300 MB overhead = 3.3 GB → 2 executors per worker (safe).
-# 2 executors × 2 cores = 4 tasks/worker; 3 workers = 12 total parallel tasks.
+# Regular worker pods: 6 Gi RAM limit.
+# Budget per executor:
+#   heap 3g + off-heap 1500m + JVM overhead 400m = ~4.9 GB → 1 executor/worker (safe)
+# Large worker pod: 14 Gi RAM.
+#   heap 3g + off-heap 1500m + overhead 400m = ~4.9 GB → 2 executors (safe)
+#
+# memoryOverheadFactor: Spark adds max(384m, executor.memory × factor) as overhead
+#   Default factor is 0.1 (300m on 3g).  Raising to 0.15 gives 450m — enough
+#   headroom for Gluten/Velox native allocations that happen outside off-heap.
 spark.driver.memory                                  4g
 spark.executor.memory                                3g
 spark.executor.cores                                 2
+spark.executor.memoryOverheadFactor                  0.15
+
+# ── Memory management ─────────────────────────────────────────────────────────
+# storage fraction: share of executor heap for caching/broadcast (default 0.5).
+# Lowering to 0.4 gives more room to the execution side (shuffle, sort, join)
+# which is what large JDBC batch reads exercise.
+spark.memory.storageFraction                         0.4
+
+# ── Adaptive Query Execution — enabled cluster-wide ──────────────────────────
+# Coalesces small shuffle partitions after each stage, avoids creating thousands
+# of tiny tasks that each spill a tiny amount and cause GC pressure.
+spark.sql.adaptive.enabled                           true
+spark.sql.adaptive.coalescePartitions.enabled        true
+spark.sql.adaptive.skewJoin.enabled                  true
+spark.sql.adaptive.advisoryPartitionSizeInBytes      128m
+spark.sql.adaptive.coalescePartitions.minPartitionSize 1m
+
+# ── Shuffle spill to disk before OOM ─────────────────────────────────────────
+# Forces sort-based shuffle to spill to disk when memory is tight rather than
+# failing with OOM.  Essential for large tables.
+spark.shuffle.spill                                  true
+spark.shuffle.spill.compress                         true
+spark.shuffle.compress                               true
+
+# ── Kryo buffer — handles wide rows from JDBC sources ─────────────────────────
+spark.kryoserializer.buffer.max                      256m
 
 # ── Logging config — point Spark at the baked-in log4j2.properties ───────────
 # Uses the resolved path /opt/spark (not ${SPARK_HOME}) because this heredoc

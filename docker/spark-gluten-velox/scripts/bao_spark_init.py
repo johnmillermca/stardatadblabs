@@ -437,21 +437,43 @@ class BaoSparkInit:
         #
         # When enabled (default):
         #   - spark.plugins loads GlutenPlugin (Velox backend)
-        #   - off-heap memory: 2g per executor (workers are 8 GB; safe headroom)
+        #   - off-heap memory: 1500m per executor (reduced from 2g so the total
+        #     per-executor footprint fits within the 6 Gi regular worker pod:
+        #     heap 3g + off-heap 1500m + overhead 450m ≈ 4.95 GB < 6 Gi)
         # When disabled (DISABLE_GLUTEN=1):
         #   - spark.plugins is cleared — no ClassNotFoundException at startup
-        #   - off-heap is not reserved (frees ~2 GB per executor for heap use)
+        #   - off-heap is not reserved (frees ~1.5 GB per executor for heap use)
         _gluten_disabled = os.environ.get("DISABLE_GLUTEN", "0") == "1"
+        # OFFHEAP_SIZE: override the default 1500m if the job needs more/less.
+        _offheap_size = os.environ.get("OFFHEAP_SIZE", "1500m")
         if not _gluten_disabled:
-            logger.info("Gluten/Velox enabled (default — set DISABLE_GLUTEN=1 to turn off).")
+            logger.info(
+                "Gluten/Velox enabled (off-heap=%s — set DISABLE_GLUTEN=1 to turn off).",
+                _offheap_size,
+            )
             conf.set("spark.plugins",                         "org.apache.gluten.GlutenPlugin")
             conf.set("spark.gluten.sql.columnar.backend.lib", "velox")
             conf.set("spark.memory.offHeap.enabled",          "true")
-            conf.set("spark.memory.offHeap.size",             "2g")
+            conf.set("spark.memory.offHeap.size",             _offheap_size)
         else:
             logger.info("Gluten/Velox DISABLED (DISABLE_GLUTEN=1).")
             conf.set("spark.plugins",                "")
             conf.set("spark.memory.offHeap.enabled", "false")
+
+        # ── Memory / AQE settings (OOM prevention) ────────────────────────────
+        # These mirror spark-defaults.conf but are set here so per-session
+        # SparkSession.builder() calls also benefit even if spark-defaults
+        # has not yet been reloaded (e.g. pods that predate the image rebuild).
+        conf.set("spark.executor.memoryOverheadFactor",              "0.15")
+        conf.set("spark.memory.storageFraction",                     "0.4")
+        conf.set("spark.sql.adaptive.enabled",                       "true")
+        conf.set("spark.sql.adaptive.coalescePartitions.enabled",    "true")
+        conf.set("spark.sql.adaptive.skewJoin.enabled",              "true")
+        conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes",  "134217728")  # 128m
+        conf.set("spark.shuffle.spill",                              "true")
+        conf.set("spark.shuffle.spill.compress",                     "true")
+        conf.set("spark.shuffle.compress",                           "true")
+        conf.set("spark.kryoserializer.buffer.max",                  "256m")
 
         # ── Iceberg extension ──────────────────────────────────────────────────
         conf.set(
