@@ -2295,6 +2295,39 @@ def _copy_table(
             if _pk_order:
                 logger.info("[%s] PK-ordered reads: %s", table, _pk_order)
 
+            # ── Write with snapshot-conflict retry ─────────────────────────
+            # Defined here (outside the batch loop) so it is also available to
+            # the delete-detection pass that runs after the loop exits.
+            # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
+            def _iceberg_write_with_retry(write_fn, label: str) -> None:
+                """Execute write_fn(), retrying on snapshot-conflict errors."""
+                attempt = 0
+                while True:
+                    try:
+                        write_fn()
+                        break
+                    except Exception as _w_err:  # noqa: BLE001
+                        attempt += 1
+                        err_str = str(_w_err)
+                        is_retryable = any(k in err_str for k in (
+                            "IllegalStateException",
+                            "CommitFailedException",
+                            "ValidationException",
+                            "Cannot commit",
+                            "concurrent",
+                            "conflict",
+                        ))
+                        if attempt > WRITE_MAX_RETRIES or not is_retryable:
+                            raise
+                        sleep_s = WRITE_RETRY_SLEEP_S * attempt
+                        logger.warning(
+                            "[%s] %s conflict (attempt %d/%d): %s "
+                            "— retrying in %ds …",
+                            table, label, attempt, WRITE_MAX_RETRIES,
+                            err_str[:120], sleep_s,
+                        )
+                        time.sleep(sleep_s)
+
             while True:
                 # Shrink batch to never write more than MAX_ROWS new rows total.
                 effective_batch = BATCH_SIZE
@@ -2376,38 +2409,6 @@ def _copy_table(
                         .withColumn("_change_type", lit("INSERT"))
                         .withColumn("_change_ts",   current_timestamp())
                     )
-
-                # ── Write with snapshot-conflict retry ─────────────────────────
-                # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
-                # Retrying re-reads the current snapshot and re-attempts the commit.
-                def _iceberg_write_with_retry(write_fn, label: str) -> None:
-                    """Execute write_fn(), retrying on snapshot-conflict errors."""
-                    attempt = 0
-                    while True:
-                        try:
-                            write_fn()
-                            break
-                        except Exception as _w_err:  # noqa: BLE001
-                            attempt += 1
-                            err_str = str(_w_err)
-                            is_retryable = any(k in err_str for k in (
-                                "IllegalStateException",
-                                "CommitFailedException",
-                                "ValidationException",
-                                "Cannot commit",
-                                "concurrent",
-                                "conflict",
-                            ))
-                            if attempt > WRITE_MAX_RETRIES or not is_retryable:
-                                raise
-                            sleep_s = WRITE_RETRY_SLEEP_S * attempt
-                            logger.warning(
-                                "[%s] %s conflict (attempt %d/%d): %s "
-                                "— retrying in %ds …",
-                                table, label, attempt, WRITE_MAX_RETRIES,
-                                err_str[:120], sleep_s,
-                            )
-                            time.sleep(sleep_s)
 
                 if _write_mode == "history" or not _pk_cols:
                     # history mode OR no PK available → plain append, no merge
