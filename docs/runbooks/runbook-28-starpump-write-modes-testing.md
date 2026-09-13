@@ -86,16 +86,16 @@ kubectl exec -n prod $MASTER -c spark-master -- \
   | grep -E "PK cols resolved from source catalog|PK cols:"
 ```
 
-**Expected — one line per table, source logged as "source catalog":**
+**Expected — one line per table showing source, schema, and table name:**
 ```
-[customers]       PK cols resolved from source catalog: ['id']
-[products]        PK cols resolved from source catalog: ['id']
-[orders]          PK cols resolved from source catalog: ['id']
-[product_reviews] PK cols resolved from source catalog: ['id']
+[customers]       PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=customers)
+[products]        PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=products)
+[orders]          PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=orders)
+[product_reviews] PK cols resolved from source catalog: ['id']  (source=postgres schema=public table=product_reviews)
 ```
 
-✅ Pass: every table shows `resolved from source catalog` — catalog path is active.
-❌ Fail: `No standard PK column found` warning — catalog call failed, fell to heuristic; check JDBC connectivity.
+✅ Pass: every line shows `resolved from source catalog` with `source=postgres schema=public` — catalog path is active.
+❌ Fail: `PK not found in source catalog` warning — catalog call failed, fell to heuristic; check JDBC connectivity.
 
 **Step 2 — Oracle: confirm entity-specific PKs are detected without `--pk-cols`:**
 
@@ -111,13 +111,13 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected:**
 ```
-[customers]   PK cols resolved from source catalog: ['customer_id']
-[products]    PK cols resolved from source catalog: ['product_id']
-[orders]      PK cols resolved from source catalog: ['order_id']
-[order_items] PK cols resolved from source catalog: ['item_id']
+[customers]   PK cols resolved from source catalog: ['customer_id']  (source=oracle schema=cache_testing table=customers)
+[products]    PK cols resolved from source catalog: ['product_id']   (source=oracle schema=cache_testing table=products)
+[orders]      PK cols resolved from source catalog: ['order_id']     (source=oracle schema=cache_testing table=orders)
+[order_items] PK cols resolved from source catalog: ['item_id']      (source=oracle schema=cache_testing table=order_items)
 ```
 
-✅ Pass: each table shows its real PK name from Oracle `ALL_CONSTRAINTS` — no `--pk-cols` required.
+✅ Pass: each table shows its real PK name with `source=oracle schema=cache_testing` — no `--pk-cols` required.
 ❌ Fail: wrong PK name or heuristic fallback — check `oracle.jdbc.OracleDriver` has `ALL_CONSTRAINTS` access.
 
 ---
@@ -713,7 +713,7 @@ Verifies that an explicit `--pk-cols` value beats the catalog result — useful 
 want a composite MERGE key that differs from the table's declared PK.
 
 ```bash
-# Single override — operator forces item_id even though catalog would return it anyway
+# Single override — operator forces item_id; catalog is bypassed entirely
 kubectl exec -n prod $MASTER -c spark-master -- \
   env USER=dave TOKEN=$TOKEN \
   INCLUDE_TABLES=order_items \
@@ -722,7 +722,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
     --write-mode standard \
     --pk-cols item_id \
     --watermark-col updated_at 2>&1 | grep "PK cols"
-# Expected: [order_items] PK cols: ['item_id']
+# Expected: [order_items] PK cols: ['item_id']  (source=oracle schema=cache_testing)
 # Note: no "resolved from source catalog" — override bypasses the catalog call entirely
 
 # Composite override via env var — forces a 2-column join key
@@ -734,10 +734,10 @@ kubectl exec -n prod $MASTER -c spark-master -- \
     --mode incremental \
     --write-mode standard \
     --watermark-col updated_at 2>&1 | grep "PK cols"
-# Expected: [order_items] PK cols: ['order_id', 'item_id']
+# Expected: [order_items] PK cols: ['order_id', 'item_id']  (source=oracle schema=cache_testing)
 ```
 
-✅ Pass: PK cols log matches the override exactly and does **not** show `resolved from source catalog`.
+✅ Pass: PK cols log shows `source=oracle schema=cache_testing` and does **not** contain `resolved from source catalog`.
 ❌ Fail: shows `resolved from source catalog` → override was not passed correctly.
 
 ---
@@ -852,7 +852,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 **Expected:**
 ```
-[order_line_items] PK cols resolved from source catalog: ['order_id', 'line_seq']
+[order_line_items] PK cols resolved from source catalog: ['order_id', 'line_seq']  (source=oracle schema=cache_testing table=order_line_items)
 ```
 
 **Step 3 — Update one row and confirm MERGE joins on both columns:**

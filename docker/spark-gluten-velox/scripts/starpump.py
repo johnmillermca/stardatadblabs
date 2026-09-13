@@ -2167,7 +2167,10 @@ def _copy_table(
         # Resolve PK now that schema is known
         if not _pk_cols:
             _pk_cols = _resolve_primary_keys(table, iceberg_schema, connector, spark, conn_opts)
-        logger.info("[%s] PK cols: %s", table, _pk_cols or "(none — append-only)")
+        logger.info(
+            "[%s] PK cols: %s  (source=%s schema=%s)",
+            table, _pk_cols or "(none — append-only)", SOURCE, SCHEMAS,
+        )
 
         partition_spec = _auto_partition_spec(iceberg_schema)
 
@@ -2691,8 +2694,8 @@ def _resolve_primary_keys(
             catalog_pks = connector.primary_keys(spark, opts, table)
             if catalog_pks:
                 logger.info(
-                    "[%s] PK cols resolved from source catalog: %s",
-                    table, catalog_pks,
+                    "[%s] PK cols resolved from source catalog: %s  (source=%s schema=%s table=%s)",
+                    table, catalog_pks, SOURCE, SCHEMAS, table,
                 )
                 return catalog_pks
         except Exception as exc:
@@ -2713,10 +2716,10 @@ def _resolve_primary_keys(
         return [table_id]
     if col_names:
         logger.warning(
-            "[%s] PK not found in source catalog or by name convention — "
+            "[%s] PK not found in source catalog (source=%s schema=%s) — "
             "using first column '%s' as PK. "
             "Override with --pk-cols or PK_COLS env var.",
-            table, col_names[0],
+            table, SOURCE, SCHEMAS, col_names[0],
         )
         return [col_names[0]]
     return []
