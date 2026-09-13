@@ -2467,14 +2467,15 @@ kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
 > | `tpcds_sf10tcl.store_sales` | `polaris` | `WARM` ✅ | Fact table (large — 7.2 M rows) |
 > | `tpcds_sf10tcl.date_dim` | `polaris` | `WARM` ✅ | Dimension — date filter |
 > | `tpcds_sf10tcl.item` | `polaris` | `WARM` ✅ | Dimension — item attributes |
-> | `tpcds.store` | `oracle` | `COLD` ❄ | Store dimension — not yet warmed |
+> | `tpcds.warehouse` | `oracle` | `COLD` ❄ | Warehouse dimension — not yet warmed |
 > | `public.customers` | `postgres` | `COLD` ❄ | Customer dimension — not yet warmed |
 > | `cache_testing.orders` | `mongodb` | `COLD` ❄ | Order header — not yet warmed |
 > | `cache_testing.order_items` | `mongodb` | `COLD` ❄ | Order line items — not yet warmed |
 >
-> The polaris TPC-DS `store` table is used from oracle rather than polaris because the oracle
-> catalog's `tpcds` schema contains an independent copy whose cache state is independently
-> controllable — this lets us test the mixed warm/cold boundary cleanly.
+> The oracle `tpcds.warehouse` table is used as the cold oracle dimension because it is the
+> largest populated table in `oracle.tpcds` (confirmed from T-03a) — it exercises real S3 reads
+> while the polaris `store_sales` fact table is served entirely from NVMe cache.  The join key
+> `ss_warehouse_sk → w_warehouse_sk` is a valid TPC-DS foreign key relationship.
 
 ---
 
@@ -2488,16 +2489,16 @@ compare against after warm-up (T-49).  For each cold table run a full-scan aggre
 DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
 
-# ── oracle.tpcds.store — cold baseline ────────────────────────────────────────
-echo "=== oracle.tpcds.store (cold) ==="
+# ── oracle.tpcds.warehouse — cold baseline ────────────────────────────────────
+echo "=== oracle.tpcds.warehouse (cold) ==="
 time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT MAX(s_store_name), MIN(s_gmt_offset), COUNT(*)
-      FROM oracle.tpcds.store;"
+  -e "SELECT MAX(w_warehouse_name), MIN(w_gmt_offset), COUNT(*)
+      FROM oracle.tpcds.warehouse;"
 
 # ── postgres.public.customers — cold baseline ──────────────────────────────────
 echo "=== postgres.public.customers (cold) ==="
 time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "SELECT MAX(c_birth_year), MIN(c_birth_year), COUNT(*)
+  -e "SELECT MAX(name), MIN(created_at), COUNT(*)
       FROM postgres.public.customers;"
 
 # ── mongodb.cache_testing.orders — cold baseline ───────────────────────────────
@@ -2528,7 +2529,7 @@ SELECT
     CONCAT(cache_hit_pct, '%') AS hit_pct,
     sampled_at
 FROM cache_system.table_cache_metrics
-WHERE (catalog_name = 'oracle'   AND table_name = 'store')
+WHERE (catalog_name = 'oracle'   AND table_name = 'warehouse')
    OR (catalog_name = 'postgres' AND table_name = 'customers')
    OR (catalog_name = 'mongodb'  AND table_name IN ('orders','order_items'))
 ORDER BY catalog_name, table_name, sampled_at DESC;"
@@ -2566,7 +2567,7 @@ time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
  * T-48 — Cross-catalog analytical JOIN
  *
  * Warm tables  (polaris):   store_sales · date_dim · item
- * Cold tables  (oracle):    store
+ * Cold tables  (oracle):    warehouse
  * Cold tables  (postgres):  customers
  * Cold tables  (mongodb):   orders · order_items
  *
@@ -2579,9 +2580,9 @@ SELECT
     dd.d_year                                           AS sale_year,
     dd.d_moy                                            AS sale_month,
 
-    -- Store info (cold — oracle)
-    st.s_store_name                                     AS store_name,
-    st.s_state                                          AS store_state,
+    -- Warehouse info (cold — oracle)
+    wh.w_warehouse_name                                 AS warehouse_name,
+    wh.w_state                                          AS warehouse_state,
 
     -- Item info (warm — polaris)
     i.i_product_name                                    AS product_name,
@@ -2589,8 +2590,8 @@ SELECT
     i.i_brand                                           AS item_brand,
 
     -- Customer info (cold — postgres)
-    c.c_first_name                                      AS customer_first_name,
-    c.c_last_name                                       AS customer_last_name,
+    c.name                                              AS customer_name,
+    c.tier                                              AS customer_tier,
 
     -- Order header (cold — mongodb)
     o.order_date                                        AS order_date,
@@ -2621,15 +2622,16 @@ FROM
         ON ss.ss_item_sk = i.i_item_sk
         AND i.i_category IN ('Books', 'Electronics', 'Sports')
 
-    -- ── Store dimension (cold — oracle) ──────────────────────────────────────
-    LEFT JOIN oracle.tpcds.store                st
-        ON ss.ss_store_sk = st.s_store_sk
+    -- ── Warehouse dimension (cold — oracle) ──────────────────────────────────
+    LEFT JOIN oracle.tpcds.warehouse            wh
+        ON ss.ss_warehouse_sk = wh.w_warehouse_sk
 
     -- ── Customer dimension (cold — postgres) ─────────────────────────────────
-    -- Join on customer_sk → maps to the c_customer_sk surrogate key.
-    -- The postgres table exposes a c_customer_sk INT column matching TPC-DS schema.
+    -- Best-effort join via customer_id integer.  The postgres customers table
+    -- uses `id` as its primary key; ss_customer_sk is the TPC-DS surrogate.
+    -- Key overlap is low (independent data sets) — NULLs are expected and fine.
     LEFT JOIN postgres.public.customers         c
-        ON ss.ss_customer_sk = c.c_customer_sk
+        ON ss.ss_customer_sk = c.id
 
     -- ── Order header (cold — mongodb) ────────────────────────────────────────
     -- Best-effort join: link store_sales ticket to a mongodb order via customer_sk.
@@ -2644,13 +2646,13 @@ FROM
 GROUP BY
     dd.d_year,
     dd.d_moy,
-    st.s_store_name,
-    st.s_state,
+    wh.w_warehouse_name,
+    wh.w_state,
     i.i_product_name,
     i.i_category,
     i.i_brand,
-    c.c_first_name,
-    c.c_last_name,
+    c.name,
+    c.tier,
     o.order_date,
     o.status
 
@@ -2671,7 +2673,7 @@ echo "T-48 exit: $?"
 
 > **Why LEFT JOINs for the cold tables?**  The TPC-DS `store_sales` fact table uses integer
 > surrogate keys that were generated independently in each catalog.  A strict `INNER JOIN`
-> against `oracle.tpcds.store` would drop all rows where `ss_store_sk` has no match (likely
+> against `oracle.tpcds.warehouse` would drop all rows where `ss_warehouse_sk` has no match (likely
 > most rows, since the oracle copy is sparse).  `LEFT JOIN` ensures the BE still scans every
 > cold table so we get real cold-read metrics while keeping the query result non-empty.
 
@@ -2686,8 +2688,8 @@ echo "T-48 exit: $?"
 - 0–200 result rows (join key overlap is implementation-specific; any count is valid).
 
 ✅ Pass: query returns a result set without error.  Time is recorded for T-49 comparison.
-❌ Fail: `Table 'oracle.tpcds.store' does not exist` → oracle store table was not populated; substitute `oracle.tpcds.warehouse` and update the `ON` clause accordingly (`ss_warehouse_sk = w_warehouse_sk`).
-❌ Fail: `Column 'c_customer_sk' not found` in postgres → the postgres `customers` schema uses a different PK name; check with `DESCRIBE postgres.public.customers` and adjust the join predicate.
+❌ Fail: `Table [warehouse] does not exist in database [tpcds]` → oracle tpcds schema has changed; run `SHOW TABLES FROM oracle.tpcds;` and substitute the largest available table, updating the join key accordingly.
+❌ Fail: `Unknown column 'name'` in postgres → schema drift; run `DESCRIBE postgres.public.customers;` to get current column names and update the SELECT and GROUP BY.
 ❌ Fail: `Connection timed out` after 300 s → reduce the date range to a single month (`d_moy = 1`) and retry; S3 latency on cold reads can spike under contention.
 
 ---
@@ -2703,16 +2705,16 @@ the cache-warm improvement.
 DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
 
-# Warm oracle.tpcds.store — MAX() forces a real BE data scan
+# Warm oracle.tpcds.warehouse — MAX() forces a real BE data scan
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
-      MAX(s_store_sk), MIN(s_gmt_offset), COUNT(*)
-      FROM oracle.tpcds.store;"
+      MAX(w_warehouse_sk), MIN(w_gmt_offset), COUNT(*)
+      FROM oracle.tpcds.warehouse;"
 
 # Warm postgres.public.customers
 mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
   -e "SELECT /*+ SET_VAR(enable_file_cache=true) */
-      MAX(c_customer_sk), MIN(c_birth_year), COUNT(*)
+      MAX(id), MIN(created_at), COUNT(*)
       FROM postgres.public.customers;"
 
 # Warm mongodb.cache_testing.orders
@@ -2744,7 +2746,7 @@ SELECT
     cache_state,
     last_warmed_ts
 FROM cache_system.table_query_stats
-WHERE (catalog_name = 'oracle'   AND table_name = 'store')
+WHERE (catalog_name = 'oracle'   AND table_name = 'warehouse')
    OR (catalog_name = 'postgres' AND table_name = 'customers')
    OR (catalog_name = 'mongodb'  AND table_name IN ('orders','order_items'))
 ORDER BY catalog_name, table_name;"
@@ -2762,13 +2764,13 @@ time mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
 SELECT
     dd.d_year                                           AS sale_year,
     dd.d_moy                                            AS sale_month,
-    st.s_store_name                                     AS store_name,
-    st.s_state                                          AS store_state,
+    wh.w_warehouse_name                                 AS warehouse_name,
+    wh.w_state                                          AS warehouse_state,
     i.i_product_name                                    AS product_name,
     i.i_category                                        AS item_category,
     i.i_brand                                           AS item_brand,
-    c.c_first_name                                      AS customer_first_name,
-    c.c_last_name                                       AS customer_last_name,
+    c.name                                              AS customer_name,
+    c.tier                                              AS customer_tier,
     o.order_date                                        AS order_date,
     o.status                                            AS order_status,
     COUNT(ss.ss_ticket_number)                          AS num_transactions,
@@ -2786,18 +2788,18 @@ FROM
     INNER JOIN polaris.tpcds_sf10tcl.item       i
         ON ss.ss_item_sk = i.i_item_sk
         AND i.i_category IN ('Books', 'Electronics', 'Sports')
-    LEFT JOIN oracle.tpcds.store                st
-        ON ss.ss_store_sk = st.s_store_sk
+    LEFT JOIN oracle.tpcds.warehouse            wh
+        ON ss.ss_warehouse_sk = wh.w_warehouse_sk
     LEFT JOIN postgres.public.customers         c
-        ON ss.ss_customer_sk = c.c_customer_sk
+        ON ss.ss_customer_sk = c.id
     LEFT JOIN mongodb.cache_testing.orders      o
         ON ss.ss_customer_sk = o.customer_id
     LEFT JOIN mongodb.cache_testing.order_items oi
         ON o.order_id = oi.order_id
 GROUP BY
-    dd.d_year, dd.d_moy, st.s_store_name, st.s_state,
+    dd.d_year, dd.d_moy, wh.w_warehouse_name, wh.w_state,
     i.i_product_name, i.i_category, i.i_brand,
-    c.c_first_name, c.c_last_name, o.order_date, o.status
+    c.name, c.tier, o.order_date, o.status
 ORDER BY sale_year, sale_month, total_net_paid DESC
 LIMIT 200;
 "
@@ -2846,7 +2848,7 @@ SELECT
 FROM cache_system.table_cache_metrics
 WHERE
     (catalog_name = 'polaris'   AND table_name IN ('store_sales','date_dim','item'))
- OR (catalog_name = 'oracle'    AND table_name = 'store')
+ OR (catalog_name = 'oracle'    AND table_name = 'warehouse')
  OR (catalog_name = 'postgres'  AND table_name = 'customers')
  OR (catalog_name = 'mongodb'   AND table_name IN ('orders','order_items'))
 ORDER BY catalog_name, table_name, sampled_at DESC;
@@ -2859,7 +2861,7 @@ ORDER BY catalog_name, table_name, sampled_at DESC;
 |---|---|---|---|---|---|
 | `mongodb.cache_testing.order_items` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
 | `mongodb.cache_testing.orders` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
-| `oracle.tpcds.store` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
+| `oracle.tpcds.warehouse` | WARM | > 0 MB | 0 MB | ≥ 80% | < cold baseline |
 | `polaris.tpcds_sf10tcl.date_dim` | WARM | > 0 MB | 0 MB | 100% | < 100 ms |
 | `polaris.tpcds_sf10tcl.item` | WARM | > 0 MB | 0 MB | 100% | < 100 ms |
 | `polaris.tpcds_sf10tcl.store_sales` | WARM | > 0 MB | 0 MB | 100% | < T-47 baseline |
@@ -2885,7 +2887,7 @@ SELECT
 FROM cache_system.table_cache_metrics
 WHERE
     (catalog_name = 'polaris'   AND table_name IN ('store_sales','date_dim','item'))
- OR (catalog_name = 'oracle'    AND table_name = 'store')
+ OR (catalog_name = 'oracle'    AND table_name = 'warehouse')
  OR (catalog_name = 'postgres'  AND table_name = 'customers')
  OR (catalog_name = 'mongodb'   AND table_name IN ('orders','order_items'))
 ORDER BY cache_hit_pct DESC, catalog_name, table_name;
