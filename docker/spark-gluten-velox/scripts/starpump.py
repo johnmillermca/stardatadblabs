@@ -807,6 +807,7 @@ class _SourceConnector:
     table_sizes:           Callable   # (spark, opts) -> dict[str, float]
     capture_ts:            Callable   # (spark, opts) -> str ISO-8601Z
     read_batch:            Callable   # (spark, opts, table, offset, batch_size, where_clause="") -> DataFrame
+    primary_keys:          Callable   # (spark, opts, table) -> list[str]  — real PK from source catalog
     s3_prefix:             str        # path under s3://<bucket>/
     default_database:      str
     default_schema:        str
@@ -851,6 +852,32 @@ def _sf_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
         .option("query", f'SELECT * FROM "{table.upper()}" LIMIT 1')
         .load()
     ).schema
+
+
+def _sf_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]:
+    """
+    Discover primary key columns for a Snowflake table using SHOW PRIMARY KEYS.
+
+    SHOW PRIMARY KEYS IN TABLE <name> is a Snowflake-native metadata command —
+    it does not execute a query plan, reads no data, and returns results in
+    key_sequence order so composite PKs come back correctly ordered.
+    The result set always contains a 'column_name' column regardless of schema,
+    database, or naming convention.
+    """
+    try:
+        rows = (
+            spark.read.format("net.snowflake.spark.snowflake")
+            .options(**opts)
+            .option("query", f'SHOW PRIMARY KEYS IN TABLE "{table.upper()}"')
+            .load()
+            .collect()
+        )
+        # SHOW PRIMARY KEYS result columns: created_on, database_name, schema_name,
+        # table_name, column_name, key_sequence, constraint_name, rely, comment
+        return [r["column_name"].lower() for r in rows]
+    except Exception as exc:
+        logger.debug("[%s] Snowflake SHOW PRIMARY KEYS failed (%s) — will fall back.", table, exc)
+        return []
 
 
 def _sf_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
@@ -979,6 +1006,85 @@ def _db_map_schema(raw_schema: StructType) -> StructType:
 
 
 # ── Databricks connector implementation ────────────────────────────────────────
+
+def _jdbc_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]:
+    """
+    Discover primary key columns for any JDBC-based source using the standard
+    java.sql.DatabaseMetaData.getPrimaryKeys() API.
+
+    This is the single universal implementation shared by PostgreSQL, Oracle,
+    and Databricks.  It requires no knowledge of the source database type,
+    schema naming convention, or catalog structure — the JDBC driver itself
+    resolves the metadata entirely from the connection URL and the table name.
+
+    DatabaseMetaData.getPrimaryKeys(catalog, schema, table) returns one row per
+    PK column with KEY_SEQ (1-based sequence) and COLUMN_NAME.  We sort by
+    KEY_SEQ so composite PKs come back in declaration order regardless of the
+    driver's default sort.
+
+    The connection is opened via py4j using the same URLClassLoader pattern
+    already used by _db_list_tables() — this avoids DriverManager classloader
+    isolation issues that arise when Spark loads the JAR into its own
+    MutableURLClassLoader.
+
+    Returns [] when:
+      • the table has no PK constraint defined
+      • getPrimaryKeys() raises (e.g. insufficient privileges)
+    In both cases _resolve_primary_keys() falls through to the name heuristic.
+    """
+    try:
+        jvm  = spark.sparkContext._jvm
+        gw   = spark.sparkContext._gateway
+
+        props = jvm.java.util.Properties()
+        for k, v in opts.items():
+            if k not in ("url", "driver"):
+                props.setProperty(k, str(v))
+
+        # Load the driver via its own URLClassLoader so Class.forName() works
+        # regardless of which classloader Spark used to load the JAR.
+        # _DATABRICKS_JDBC_JAR is only the Databricks path; for other drivers
+        # the JVM already has the JAR on the system classpath (they are baked
+        # into /opt/spark/jars/ and loaded by Spark at startup), so we can
+        # use DriverManager.getConnection() directly for non-Databricks drivers.
+        driver_cls = opts.get("driver", "")
+        if "databricks" in driver_cls.lower():
+            _jar_url_arr    = gw.new_array(jvm.java.net.URL, 1)
+            _jar_url_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
+            _ucl = jvm.java.net.URLClassLoader(
+                _jar_url_arr, jvm.ClassLoader.getSystemClassLoader()
+            )
+            _drv_cls  = jvm.Class.forName(driver_cls, True, _ucl)
+            _drv_inst = _drv_cls.newInstance()
+            conn = _drv_inst.connect(opts["url"], props)
+        else:
+            # PostgreSQL and Oracle JARs are on Spark's system classpath —
+            # DriverManager resolves them automatically from the URL prefix.
+            conn = jvm.java.sql.DriverManager.getConnection(
+                opts["url"], opts.get("user", ""), opts.get("password", "")
+            )
+
+        meta = conn.getMetaData()
+        # getPrimaryKeys(catalog, schema, table) — pass None for catalog and
+        # schema so the driver resolves them from the active connection context
+        # (set via currentSchema / sessionInitStatement in the JDBC URL).
+        # This means zero hardcoded schema names here.
+        rs = meta.getPrimaryKeys(None, None, table)
+        pk_rows: list[tuple[int, str]] = []
+        while rs.next():
+            seq  = rs.getInt("KEY_SEQ")
+            col  = rs.getString("COLUMN_NAME").lower()
+            pk_rows.append((seq, col))
+        rs.close()
+        conn.close()
+
+        pk_rows.sort(key=lambda x: x[0])   # sort by KEY_SEQ (declaration order)
+        return [col for _, col in pk_rows]
+
+    except Exception as exc:
+        logger.debug("[%s] JDBC getPrimaryKeys() failed (%s) — will fall back.", table, exc)
+        return []
+
 
 def _db_build_opts(bao: "BaoSparkInit") -> dict:
     """Return JDBC options for the Databricks SQL Warehouse."""
@@ -1221,6 +1327,8 @@ def _pg_list_tables(spark: SparkSession, opts: dict) -> list[str]:
     return names
 
 
+
+
 def _pg_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
     return (
         spark.read.format("jdbc")
@@ -1319,6 +1427,8 @@ def _ora_list_tables(spark: SparkSession, opts: dict) -> list[str]:
     names = sorted(r[0] for r in rows)
     logger.info("Discovered %d tables in %s.%s: %s", len(names), DATABASE, SCHEMAS, names)
     return names
+
+
 
 
 def _ora_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
@@ -1436,6 +1546,15 @@ def _mgo_list_tables(spark: SparkSession, opts: dict) -> list[str]:
         names = [DATABASE.lower()]
     logger.info("Discovered %d collections in %s: %s", len(names), SCHEMAS, names)
     return names
+
+
+def _mgo_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]:
+    """
+    MongoDB always uses _id as its primary key — it is the only indexed,
+    unique, non-nullable field that every document is guaranteed to have.
+    No catalog query needed.
+    """
+    return ["_id"]
 
 
 def _mgo_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
@@ -1582,6 +1701,7 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _sf_table_sizes,
         capture_ts             = _sf_capture_ts,
         read_batch             = _sf_read_batch,
+        primary_keys           = _sf_primary_keys,
         s3_prefix              = "tpcds",
         default_database       = "SNOWFLAKE_SAMPLE_DATA",
         default_schema         = "TPCDS_SF10TCL",
@@ -1597,6 +1717,7 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _db_table_sizes,
         capture_ts             = _db_capture_ts,
         read_batch             = _db_read_batch,
+        primary_keys           = _jdbc_primary_keys,
         s3_prefix              = "iceberg/warehouse",
         default_database       = "lakehouse",
         default_schema         = "lakehouse_db",
@@ -1612,6 +1733,7 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _pg_table_sizes,
         capture_ts             = _pg_capture_ts,
         read_batch             = _pg_read_batch,
+        primary_keys           = _jdbc_primary_keys,
         s3_prefix              = "iceberg/pg_lakehouse",   # must match Polaris warehouse allowedLocations
         default_database       = "cache_testing",
         default_schema         = "public",
@@ -1627,6 +1749,7 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _ora_table_sizes,
         capture_ts             = _ora_capture_ts,
         read_batch             = _ora_read_batch,
+        primary_keys           = _jdbc_primary_keys,
         s3_prefix              = "iceberg/ora_lakehouse",  # must match Polaris warehouse allowedLocations
         default_database       = "XEPDB1",
         default_schema         = "TPCDS",
@@ -1642,6 +1765,7 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _mgo_table_sizes,
         capture_ts             = _mgo_capture_ts,
         read_batch             = _mgo_read_batch,
+        primary_keys           = _mgo_primary_keys,
         s3_prefix              = "iceberg/mgo_lakehouse",  # must match Polaris warehouse allowedLocations
         default_database       = "cache_testing",
         default_schema         = "cache_testing",
@@ -2042,7 +2166,7 @@ def _copy_table(
 
         # Resolve PK now that schema is known
         if not _pk_cols:
-            _pk_cols = _resolve_primary_keys(table, iceberg_schema)
+            _pk_cols = _resolve_primary_keys(table, iceberg_schema, connector, spark, conn_opts)
         logger.info("[%s] PK cols: %s", table, _pk_cols or "(none — append-only)")
 
         partition_spec = _auto_partition_spec(iceberg_schema)
@@ -2525,25 +2649,60 @@ def _resolve_watermark_col(schema: StructType, override: str | None) -> str | No
     return None
 
 
-def _resolve_primary_keys(table: str, schema: StructType) -> list[str]:
+def _resolve_primary_keys(
+    table:     str,
+    schema:    StructType,
+    connector: "_SourceConnector | None" = None,
+    spark:     "SparkSession | None"     = None,
+    opts:      "dict | None"             = None,
+) -> list[str]:
     """
     Return the primary key column list for *table*, in priority order:
 
-    1. Global PRIMARY_KEYS env/CLI override (applies to all tables).
-    2. Auto-detect from schema:
-         a. 'id'               — most common convention
-         b. '<table>_id'       — e.g. 'order_id' for table 'orders'
-         c. first column       — last-resort fallback
-    3. Empty list if schema has no columns (should never happen).
+    1. Global PRIMARY_KEYS env/CLI override (--pk-cols / PK_COLS env).
+    2. connector.primary_keys(spark, opts, table) — asks the source directly:
+         PostgreSQL / Oracle  → java.sql.DatabaseMetaData.getPrimaryKeys() via
+                                py4j; no SQL, no schema-name assumptions, works
+                                for any table name and any PK arity.
+         Databricks           → same DatabaseMetaData path (PKs informational
+                                only in Unity Catalog; usually returns []).
+         Snowflake            → SHOW PRIMARY KEYS IN TABLE — native metadata
+                                command, no data scan, no schema filter.
+         MongoDB              → always ["_id"] — enforced by the storage engine.
+       Composite PKs are returned in KEY_SEQ / key_sequence order.
+    3. Name-heuristic fallback (only when step 2 returns nothing):
+         a. column named 'id'
+         b. column named '<table>_id'   e.g. 'order_id' for table 'orders'
+         c. first column in the schema  (last resort — warning logged)
+    4. Empty list when schema has no columns (should never happen).
 
     The returned names are lower-cased to match Iceberg column names.
-    The list is used for:
-      - MERGE INTO … ON t.pk = s.pk  (standard / soft_delete modes)
-      - ORDER BY pk  on source reads  (index-friendly LIMIT/OFFSET pagination)
+    Used for:
+      - MERGE INTO … ON t.pk = s.pk   (standard / soft_delete modes)
+      - ORDER BY pk on source reads   (index-friendly LIMIT/OFFSET pagination)
     """
+    # ── Priority 1: explicit CLI / env override ────────────────────────────────
     if PRIMARY_KEYS:
-        return PRIMARY_KEYS   # global override — already lower-cased at parse time
+        return PRIMARY_KEYS
 
+    # ── Priority 2: ask the source catalog ────────────────────────────────────
+    if connector is not None and spark is not None and opts is not None:
+        try:
+            catalog_pks = connector.primary_keys(spark, opts, table)
+            if catalog_pks:
+                logger.info(
+                    "[%s] PK cols resolved from source catalog: %s",
+                    table, catalog_pks,
+                )
+                return catalog_pks
+        except Exception as exc:
+            logger.debug(
+                "[%s] connector.primary_keys() raised unexpectedly (%s) — "
+                "falling back to name heuristic.",
+                table, exc,
+            )
+
+    # ── Priority 3: name heuristic (fallback) ─────────────────────────────────
     col_names = [f.name.lower() for f in schema.fields]
     col_set   = set(col_names)
 
@@ -2554,7 +2713,8 @@ def _resolve_primary_keys(table: str, schema: StructType) -> list[str]:
         return [table_id]
     if col_names:
         logger.warning(
-            "[%s] No standard PK column found — using first column '%s' as PK. "
+            "[%s] PK not found in source catalog or by name convention — "
+            "using first column '%s' as PK. "
             "Override with --pk-cols or PK_COLS env var.",
             table, col_names[0],
         )
