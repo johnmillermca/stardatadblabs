@@ -38,13 +38,13 @@ This runbook tests the three write modes introduced in starpump for handling **u
    zero hardcoded schema or table names. Works for simple and composite PKs, any table name.
 3. Name heuristic — `id` → `<table>_id` → first column (only when catalog returns nothing)
 
-| Source | Catalog API used | Example result |
-|---|---|---|
-| PostgreSQL | `DatabaseMetaData.getPrimaryKeys()` via `org.postgresql.Driver` | `['id']` |
-| Oracle | `DatabaseMetaData.getPrimaryKeys()` via `oracle.jdbc.OracleDriver` | `['customer_id']`, `['order_id', 'line_id']` |
-| Databricks | `DatabaseMetaData.getPrimaryKeys()` (informational; usually `[]`, falls to heuristic) | `['id']` |
-| Snowflake | `SHOW PRIMARY KEYS IN TABLE` via native Spark connector | `['id']` |
-| MongoDB | Always `['_id']` — enforced by the storage engine | `['_id']` |
+| Source | Catalog API used | Example result | Notes |
+|---|---|---|---|
+| PostgreSQL | `DatabaseMetaData.getPrimaryKeys()` via `org.postgresql.Driver` | `['id']` | Pass `SCHEMAS=<schema>` via `env` |
+| Oracle | `DatabaseMetaData.getPrimaryKeys()` via `oracle.jdbc.OracleDriver` | `['customer_id']`, `['order_id', 'line_seq']` | Pass `SCHEMAS=<schema>` via `env`; table name auto-uppercased for `ALL_CONSTRAINTS` |
+| Databricks | `DatabaseMetaData.getPrimaryKeys()` (informational; usually `[]`, falls to heuristic) | `['id']` | — |
+| Snowflake | `SHOW PRIMARY KEYS IN TABLE` via native Spark connector | `['id']` | — |
+| MongoDB | Always `['_id']` — enforced by the storage engine | `['_id']` | — |
 
 ---
 
@@ -101,7 +101,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   starpump oracle \
     --mode incremental \
     --write-mode standard \
@@ -347,7 +347,7 @@ EOF
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   INCLUDE_TABLES=customers \
   starpump oracle \
     --mode incremental \
@@ -500,7 +500,7 @@ EOF
 
 # Step 2 — Push into Iceberg (no --pk-cols — catalog detects product_id)
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   INCLUDE_TABLES=products \
   starpump oracle \
     --mode incremental \
@@ -517,7 +517,7 @@ EOF
 
 # Step 4 — Run soft_delete incremental again (no --pk-cols)
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   INCLUDE_TABLES=products \
   starpump oracle \
     --mode incremental \
@@ -719,7 +719,7 @@ want a composite MERGE key that differs from the table's declared PK.
 ```bash
 # Single override — operator forces item_id; catalog is bypassed entirely
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   INCLUDE_TABLES=order_items \
   starpump oracle \
     --mode incremental \
@@ -731,7 +731,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 
 # Composite override via env var — forces a 2-column join key
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   PK_COLS=order_id,item_id \
   INCLUDE_TABLES=order_items \
   starpump oracle \
@@ -846,7 +846,7 @@ EOF
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   INCLUDE_TABLES=order_line_items \
   starpump oracle \
     --mode incremental \
@@ -871,7 +871,7 @@ EXIT;
 EOF
 
 kubectl exec -n prod $MASTER -c spark-master -- \
-  env USER=dave TOKEN=$TOKEN \
+  env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing \
   INCLUDE_TABLES=order_line_items \
   starpump oracle \
     --mode incremental \
@@ -1022,7 +1022,10 @@ kubectl exec -n prod mongodb-0 -- mongosh \
 
 | Symptom | Likely Cause | Resolution |
 |---------|-------------|------------|
+| Oracle `PK not found in source catalog` warning | `SCHEMAS` not passed — Oracle ran against wrong schema | Add `SCHEMAS=<schema>` inside `env`: `env USER=dave TOKEN=$TOKEN SCHEMAS=cache_testing starpump oracle …` |
+| Oracle PKs still not found after `SCHEMAS` set | `getPrimaryKeys()` got lowercase table name | Upgrade to image `3.5.1-6` — table name is now auto-uppercased for Oracle |
 | `resolved from source catalog` missing in logs | Catalog call failed silently | Check JDBC connectivity; starpump falls back to heuristic — look for `PK cols: ['id']` without "catalog" prefix |
+| `schema=X` passed after binary name is ignored | `schema=X` is not a starpump CLI arg — silently dropped | Pass as env var: `env … SCHEMAS=X starpump oracle …` |
 | MERGE fires but 2 rows appear | PK resolved to wrong column | Check log for actual PK used; override with `--pk-cols <correct_col>` if needed |
 | Delete-detection pass never fires | Watermark clause empty (first full run) | Run one incremental pass first to establish a non-null watermark |
 | Composite PK test shows 2 rows after UPDATE | Only first PK column used in join | Confirm `_build_pk_order_clause` emits both columns; check catalog returned both in `KEY_SEQ` order |
