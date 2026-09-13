@@ -1068,8 +1068,10 @@ def _jdbc_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]
         # getPrimaryKeys(catalog, schema, table) — pass None for catalog and
         # schema so the driver resolves them from the active connection context
         # (set via currentSchema / sessionInitStatement in the JDBC URL).
-        # This means zero hardcoded schema names here.
-        rs = meta.getPrimaryKeys(None, None, table)
+        # table is lower-cased throughout starpump; Oracle's JDBC driver
+        # requires identifiers in uppercase to match ALL_CONSTRAINTS.
+        # PostgreSQL accepts both cases, so uppercasing is safe for all drivers.
+        rs = meta.getPrimaryKeys(None, None, table.upper())
         pk_rows: list[tuple[int, str]] = []
         while rs.next():
             seq  = rs.getInt("KEY_SEQ")
