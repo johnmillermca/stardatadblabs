@@ -43,7 +43,7 @@ metadata:
     pipeline.type: streaming
 data:
   SPARK_USER:              "dave"
-  TRIGGER_INTERVAL:        "10 seconds"
+  TRIGGER_INTERVAL:        "2 seconds"
   MAX_OFFSETS_PER_TRIGGER: "50000"
   MAX_RESTART_ATTEMPTS:    "10"
   RESTART_BACKOFF_BASE_S:  "5"

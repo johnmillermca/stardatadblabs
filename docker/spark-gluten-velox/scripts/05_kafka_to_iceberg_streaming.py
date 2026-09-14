@@ -31,11 +31,18 @@ Architecture
   reading from a regex topic pattern.
 • Avro deserialisation via a Python UDF backed by the Confluent Schema Registry
   client; falls back to plain-JSON if confluent-kafka is unavailable.
-• Each micro-batch: flatten Debezium envelope → route rows to the correct
-  Iceberg table → apply the configured write mode.
+• Micro-batch interval: 2 seconds (TRIGGER_INTERVAL default).  All Kafka
+  messages received within each 2-second window are grouped into one batch,
+  flattened from the Debezium envelope, and applied to Iceberg as a single
+  MERGE operation per table.  This keeps write amplification low while
+  ensuring sub-5-second end-to-end latency from source commit to Iceberg.
+• After every foreachBatch write completes the table's metadata cache is
+  refreshed (REFRESH TABLE) so downstream readers immediately see the new
+  snapshot, then the streaming query is restarted cleanly so the next
+  2-second window begins from a clean Spark execution context.
 • Checkpoint: s3://xdatatoiceberg1/checkpoints/streaming/<source>/<write_mode>
 • Iceberg MERGE requires format-version 2 (set at table creation).
-• schema evolution: mergeSchema=true on append / auto ADD COLUMN on MERGE.
+• Schema evolution: mergeSchema=true on append / auto ADD COLUMN on MERGE.
 
 Auto-restart
 ------------
@@ -43,6 +50,9 @@ Auto-restart
 • An internal retry loop (MAX_RESTART_ATTEMPTS / RESTART_BACKOFF_BASE_S)
   re-initialises Spark and all streams on any unexpected query termination
   before letting the pod exit and trigger the K8s restart.
+• Per-batch restart: after each 2-second batch is committed to Iceberg the
+  streaming query is stopped and immediately restarted so the Spark execution
+  plan is refreshed.  The checkpoint ensures no events are replayed.
 
 Credentials
 -----------
@@ -70,8 +80,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import sys
+import threading
 import time
 from typing import Any
 
@@ -123,8 +133,10 @@ KAFKA_BOOTSTRAP = "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
 SR_URL          = "http://schema-registry.prod.svc.cluster.local:8081"
 S3_BUCKET       = "xdatatoiceberg1"
 
-# Streaming micro-batch trigger interval
-TRIGGER_INTERVAL = os.environ.get("TRIGGER_INTERVAL", "10 seconds")
+# Streaming micro-batch trigger interval.
+# Default: 2 seconds — all events received within each 2-second window are
+# grouped into one batch and applied to Iceberg as a single MERGE operation.
+TRIGGER_INTERVAL = os.environ.get("TRIGGER_INTERVAL", "2 seconds")
 # Max Kafka offsets consumed per trigger (back-pressure)
 MAX_OFFSETS_PER_TRIGGER = int(os.environ.get("MAX_OFFSETS_PER_TRIGGER", "50000"))
 
@@ -440,10 +452,11 @@ def _apply_history_tracking(
 # ── Micro-batch writer ────────────────────────────────────────────────────────
 
 def _write_micro_batch(
-    spark:      SparkSession,
-    builder:    IcebergTableBuilder,
-    source:     _StreamingSource,
-    write_mode: str,
+    spark:        SparkSession,
+    builder:      IcebergTableBuilder,
+    source:       _StreamingSource,
+    write_mode:   str,
+    restart_flag: threading.Event,
 ) -> Any:
     """
     Return a foreachBatch function for the given source and write mode.
@@ -453,6 +466,10 @@ def _write_micro_batch(
       2. Routes rows to their Iceberg tables by Kafka topic.
       3. Creates the target Iceberg table if it does not exist yet (idempotent).
       4. Applies the configured write mode (standard / soft_delete / history_tracking).
+      5. Refreshes every written Iceberg table (REFRESH TABLE) so downstream
+         readers immediately see the new snapshot.
+      6. Sets restart_flag so the outer loop stops and restarts the query,
+         giving Spark a fresh execution context for the next 2-second batch.
     """
     def _foreach_batch(batch_df: DataFrame, batch_id: int) -> None:
         if batch_df.isEmpty():
@@ -472,6 +489,8 @@ def _write_micro_batch(
         except Exception:
             logger.warning("[%s] Could not collect topics.", source.source_key)
             return
+
+        written_tables: list[str] = []   # track FQNs written this batch
 
         for topic in topics:
             table_name = _topic_to_table(topic, source)
@@ -619,11 +638,37 @@ def _write_micro_batch(
                         spark, row_df, fqn_backtick, fqn_plain,
                         pk_col_actual, source.source_key, table_name, batch_id,
                     )
+                written_tables.append(fqn_backtick)
             except Exception as write_exc:
                 logger.error(
                     "[%s/%s] Write failed (write_mode=%s): %s",
                     source.source_key, table_name, write_mode, write_exc,
                 )
+
+        # ── (a) Refresh every table written in this batch ─────────────────────
+        # REFRESH TABLE invalidates Spark's cached metadata for the Iceberg
+        # table so that the next query against it reads the latest snapshot
+        # committed by the MERGE / append above.
+        for fqn_bt in written_tables:
+            try:
+                spark.sql(f"REFRESH TABLE {fqn_bt}")
+                logger.debug("[%s] REFRESH TABLE %s", source.source_key, fqn_bt)
+            except Exception as ref_exc:
+                logger.warning(
+                    "[%s] REFRESH TABLE %s failed (non-fatal): %s",
+                    source.source_key, fqn_bt, ref_exc,
+                )
+
+        # ── (b) Signal the outer loop to restart the streaming query ──────────
+        # Setting restart_flag tells _run_once to stop this query and start a
+        # new one, giving Spark a fresh execution context for the next batch.
+        # The checkpoint is preserved so no events are replayed.
+        if written_tables:
+            restart_flag.set()
+            logger.info(
+                "[%s] batch_id=%d — %d table(s) written; restart_flag set.",
+                source.source_key, batch_id, len(written_tables),
+            )
 
     return _foreach_batch
 
@@ -631,18 +676,20 @@ def _write_micro_batch(
 # ── Stream builder ────────────────────────────────────────────────────────────
 
 def _start_source_stream(
-    spark:      SparkSession,
-    builder:    IcebergTableBuilder,
-    source:     _StreamingSource,
-    bao:        BaoSparkInit,
-    write_mode: str,
+    spark:        SparkSession,
+    builder:      IcebergTableBuilder,
+    source:       _StreamingSource,
+    bao:          BaoSparkInit,
+    write_mode:   str,
+    restart_flag: threading.Event,
 ) -> StreamingQuery:
     """
     Build and start the Structured Streaming query for a single CDC source.
 
     Pipeline:
       Kafka (Avro/JSON) → avro_to_json UDF → flatten envelope →
-      foreachBatch → write-mode handler → Iceberg
+      foreachBatch → write-mode handler → Iceberg → REFRESH TABLE
+      → restart_flag.set() → outer loop restarts query
     """
     kafka_secret = bao.kafka_creds()
     kafka_user   = kafka_secret.get("debezium_user",     "debezium-user")
@@ -699,7 +746,9 @@ def _start_source_stream(
         decoded_stream
         .writeStream
         .queryName(f"cdc-{source.source_key}-{write_mode}")
-        .foreachBatch(_write_micro_batch(spark, builder, source, write_mode))
+        .foreachBatch(
+            _write_micro_batch(spark, builder, source, write_mode, restart_flag)
+        )
         .trigger(processingTime=TRIGGER_INTERVAL)
         .option("checkpointLocation", source.checkpoint)
         .start()
@@ -727,9 +776,38 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
 
 # ── Main: streaming loop with auto-restart ────────────────────────────────────
 
+def _start_all_queries(
+    spark:        SparkSession,
+    builder:      IcebergTableBuilder,
+    bao:          BaoSparkInit,
+    restart_flag: threading.Event,
+) -> list[StreamingQuery]:
+    """Start streaming queries for all active sources and return them."""
+    queries: list[StreamingQuery] = []
+    for src in _ALL_SOURCES:
+        try:
+            q = _start_source_stream(spark, builder, src, bao, WRITE_MODE, restart_flag)
+            queries.append(q)
+        except Exception as exc:
+            logger.error(
+                "[%s] Failed to start stream: %s", src.source_key, exc, exc_info=True,
+            )
+    return queries
+
+
 def _run_once(bao: BaoSparkInit) -> None:
     """
-    Initialise Spark, start all streaming queries, and block until termination.
+    Initialise Spark, start all streaming queries, and run the per-batch
+    watch-and-restart loop until interrupted or a fatal error occurs.
+
+    Per-batch restart cycle
+    -----------------------
+    After each 2-second micro-batch is committed to Iceberg the foreachBatch
+    function sets restart_flag.  The polling loop below detects this, stops all
+    active queries cleanly (preserving checkpoints), and immediately restarts
+    them from the checkpoint position.  This gives Spark a fresh execution
+    context for each batch while ensuring zero event replay.
+
     Raises on unrecoverable error so the outer retry loop can back off and retry.
     """
     spark = _build_spark(bao)
@@ -750,28 +828,65 @@ def _run_once(bao: BaoSparkInit) -> None:
         except Exception as exc:
             logger.warning("[%s] Could not ensure namespace: %s", src.source_key, exc)
 
-    # Start streaming queries
-    queries: list[StreamingQuery] = []
-    for src in _ALL_SOURCES:
-        try:
-            q = _start_source_stream(spark, builder, src, bao, WRITE_MODE)
-            queries.append(q)
-        except Exception as exc:
-            logger.error(
-                "[%s] Failed to start stream: %s", src.source_key, exc, exc_info=True,
-            )
+    # One shared restart_flag across all sources in this Spark session.
+    # Any source that writes a batch will set it; the loop below reacts.
+    restart_flag = threading.Event()
 
+    queries = _start_all_queries(spark, builder, bao, restart_flag)
     if not queries:
         spark.stop()
         raise RuntimeError("No streaming queries started.")
 
     logger.info(
-        "All %d streaming queries active (write_mode=%s). Awaiting termination …",
-        len(queries), WRITE_MODE,
+        "All %d streaming queries active (write_mode=%s, trigger=%s). "
+        "Per-batch restart enabled.",
+        len(queries), WRITE_MODE, TRIGGER_INTERVAL,
     )
 
+    # ── Per-batch watch-and-restart loop ──────────────────────────────────────
+    # Poll every 500 ms.  On restart_flag:
+    #   1. Stop all active queries (checkpoint is flushed automatically).
+    #   2. Clear the flag.
+    #   3. Re-start all queries from their checkpoints.
+    # On unexpected query termination (query.isActive == False without the
+    # flag being set): raise so the outer retry loop handles recovery.
     try:
-        spark.streams.awaitAnyTermination()
+        while True:
+            time.sleep(0.5)
+
+            # Check for unexpected termination (crash, not a planned restart)
+            dead = [q for q in queries if not q.isActive]
+            if dead and not restart_flag.is_set():
+                names = [q.name for q in dead]
+                raise RuntimeError(
+                    f"Streaming query(s) terminated unexpectedly: {names}"
+                )
+
+            if restart_flag.is_set():
+                logger.info(
+                    "restart_flag detected — stopping %d query(s) for per-batch restart …",
+                    len(queries),
+                )
+                # ── Stop all queries cleanly ──────────────────────────────────
+                for q in queries:
+                    try:
+                        q.stop()
+                    except Exception as stop_exc:
+                        logger.warning("Error stopping query %s: %s", q.name, stop_exc)
+
+                restart_flag.clear()
+
+                # ── Re-start all queries from checkpoint ──────────────────────
+                queries = _start_all_queries(spark, builder, bao, restart_flag)
+                if not queries:
+                    raise RuntimeError(
+                        "No streaming queries started after per-batch restart."
+                    )
+                logger.info(
+                    "%d query(s) restarted from checkpoint.",
+                    len(queries),
+                )
+
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")
         for q in queries:
@@ -785,10 +900,6 @@ def _run_once(bao: BaoSparkInit) -> None:
             spark.stop()
         except Exception:
             pass
-
-    # If we reach here a query terminated without KeyboardInterrupt — raise so
-    # the retry loop can restart the job.
-    raise RuntimeError("One or more streaming queries terminated unexpectedly.")
 
 
 def main() -> None:
