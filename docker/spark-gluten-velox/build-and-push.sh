@@ -2,9 +2,15 @@
 # =============================================================================
 # build-and-push.sh — Build spark-gluten-velox image and push to private registry
 # Usage:
-#   bash docker/spark-gluten-velox/build-and-push.sh          # normal build
-#   bash docker/spark-gluten-velox/build-and-push.sh --no-cache
-#   bash docker/spark-gluten-velox/build-and-push.sh --air-gap  # offline build
+#   bash docker/spark-gluten-velox/build-and-push.sh           # always --no-cache
+#   bash docker/spark-gluten-velox/build-and-push.sh --air-gap # offline build
+#
+# NOTE: --no-cache is always on.  Podman's layer cache matches on content hash
+# not mtime, so editing a Python script that sits after many heavy RUN/COPY
+# steps (JARs, pip installs) produces an identical digest for those layers and
+# the changed script layer can be silently reused from cache, causing the node
+# to pull a stale image even after a tag bump.  Always building without cache
+# guarantees a unique digest and forces containerd to pull fresh on every push.
 # =============================================================================
 set -euo pipefail
 
@@ -27,17 +33,15 @@ else
 fi
 log "Container runtime: ${RUNTIME}"
 
-BUILD_ARGS=()
+BUILD_ARGS=(--no-cache)   # always; see header comment
 DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
 
 # Handle flags
-NO_CACHE=false
 AIR_GAP=false
 for arg in "$@"; do
   case "${arg}" in
-    --no-cache) NO_CACHE=true ;;
-    --air-gap)  AIR_GAP=true ;;
-    *) die "Unknown flag: ${arg}  (valid: --no-cache, --air-gap)" ;;
+    --air-gap) AIR_GAP=true ;;
+    *) die "Unknown flag: ${arg}  (valid: --air-gap)" ;;
   esac
 done
 
@@ -51,9 +55,7 @@ if [[ "${AIR_GAP}" == true ]]; then
   log "Air-gap Dockerfile written to ${DOCKERFILE}"
 fi
 
-[[ "${NO_CACHE}" == true ]] && BUILD_ARGS+=(--no-cache)
-
-log "Building ${FULL_IMAGE} ..."
+log "Building ${FULL_IMAGE} (--no-cache) ..."
 "${RUNTIME}" build \
   "${BUILD_ARGS[@]}" \
   -f "${DOCKERFILE}" \
