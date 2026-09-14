@@ -151,53 +151,6 @@ Environment variables
   MAX_THREADS         Parallel copy threads         (default: 8)
                       Overridden by --threads N on the CLI.
 
-Update / delete tracking (incremental mode only)
--------------------------------------------------
-  WRITE_MODE          Controls how updates and deletes are materialised in Iceberg.
-                      CLI: --write-mode  (takes precedence over WRITE_MODE env var).
-
-                      standard (default — SCD Type 0)
-                        Each incremental batch performs a MERGE INTO by primary key:
-                          • source rows present  → UPDATE existing Iceberg row (upsert)
-                          • source rows absent   → hard DELETE from Iceberg
-                        After every upsert batch the pipeline runs a delete-detection
-                        pass: collects live PKs from the source window and removes any
-                        Iceberg row whose PK is not present.
-
-                      soft_delete
-                        Same MERGE upsert pass as standard.
-                        Rows that vanish from the source window are NOT physically
-                        deleted; instead starpump sets:
-                          is_deleted = true
-                          deleted_at = current_timestamp()
-                        These two columns are added to the Iceberg table automatically
-                        on the first run (mergeSchema=true).  Consumers filter with
-                          WHERE is_deleted IS NOT TRUE
-                        to see the live dataset.
-
-                      history  (SCD Type 2 / audit log)
-                        Every row read from the source is appended as a NEW Iceberg
-                        row.  No rows are ever updated or deleted.  Two extra columns
-                        are added:
-                          _change_type STRING   — always 'INSERT' in batch mode
-                          _change_ts   TIMESTAMP
-                        Use this mode when you need a full audit trail of all states.
-
-  PK_COLS             Comma-separated primary key column(s) used for the MERGE JOIN
-                      and for ORDER BY on source reads (index-friendly pagination).
-                      CLI: --pk-cols  (takes precedence over PK_COLS env var).
-                      Auto-detected when not set: id → <table>_id → first column.
-                      Example: PK_COLS=order_id,line_id
-
-  DELETED_AT_COL      Column name written by soft_delete mode (default: deleted_at).
-                      Change if your schema already uses a different column name.
-
-  WATERMARK_COL       Timestamp column for incremental delta extraction.
-                      CLI: --watermark-col  (takes precedence over WATERMARK_COL env).
-                      Auto-detected when not set: updated_at → created_at.
-                      Note: starpump uses >= (inclusive) on the watermark so that any
-                      row updated at the exact boundary timestamp is never skipped.
-
 Usage
 -----
   # Copy all Snowflake tables ≤ 3 GB (default 8 threads):
@@ -337,31 +290,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--write-mode",
-        choices=["standard", "soft_delete", "history"],
-        default=None,
-        metavar="MODE",
-        help=(
-            "How updates and deletes are materialised in Iceberg (incremental only).\n"
-            "  standard    — MERGE INTO: upsert by PK, hard-delete matching rows (SCD Type 0).\n"
-            "  soft_delete — MERGE INTO: upsert by PK, mark deletes with is_deleted=true + deleted_at.\n"
-            "  history     — INSERT ALL events (inserts, updates, deletes) as new Iceberg rows;\n"
-            "                adds _change_type (INSERT/UPDATE/DELETE) + _change_ts columns.\n"
-            "Default: standard."
-        ),
-    )
-    parser.add_argument(
-        "--pk-cols",
-        default=None,
-        metavar="COLS",
-        help=(
-            "Comma-separated primary key column(s) used for MERGE JOIN and ordered reads.\n"
-            "Example: --pk-cols id  or  --pk-cols order_id,line_id\n"
-            "If omitted, starpump auto-detects: id → <table>_id → first column.\n"
-            "Override via PK_COLS env var (same format)."
-        ),
-    )
-    parser.add_argument(
         "--custom-sql",
         default=None,
         metavar="SQL",
@@ -453,37 +381,6 @@ TARGET_TABLE: str | None = _ARGS.target_table or os.environ.get("TARGET_TABLE")
 # WATERMARK_COL: timestamp column used for incremental delta detection.
 # Overridable; defaults are tried in order: updated_at → created_at.
 WATERMARK_COL: str | None = _ARGS.watermark_col or os.environ.get("WATERMARK_COL")
-
-# WRITE_MODE: controls how updates/deletes are materialised in Iceberg (incremental mode).
-#   standard    — MERGE INTO by PK: upsert live rows, hard-delete removed rows (SCD Type 0).
-#   soft_delete — MERGE INTO by PK: upsert live rows, set is_deleted=true + deleted_at on
-#                 rows that are no longer in the source window (no physical row removal).
-#   history     — INSERT every read row as a new Iceberg row, tagging each with
-#                 _change_type (INSERT / UPDATE / DELETE) and _change_ts.  Keeps full
-#                 history; never deletes or overwrites Iceberg rows.
-# CLI --write-mode takes precedence over WRITE_MODE env var.
-_raw_write_mode = (_ARGS.write_mode or os.environ.get("WRITE_MODE", "standard")).lower()
-if _raw_write_mode not in ("standard", "soft_delete", "history"):
-    print(
-        f"ERROR: Unknown WRITE_MODE {_raw_write_mode!r}. "
-        "Choose: standard, soft_delete, history",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-WRITE_MODE: str = _raw_write_mode
-
-# PRIMARY_KEYS: comma-separated column name(s) used as the MERGE join key and
-# for ORDER BY on source reads (index-friendly pagination).
-# CLI --pk-cols takes precedence over PK_COLS env var.
-# When neither is set, _resolve_primary_keys() auto-detects per table at copy time.
-_raw_pk_cols = _ARGS.pk_cols or os.environ.get("PK_COLS", "")
-PRIMARY_KEYS: list[str] = (
-    [c.strip().lower() for c in _raw_pk_cols.split(",") if c.strip()]
-    if _raw_pk_cols else []
-)
-
-# DELETED_AT_COL: timestamp column written when WRITE_MODE=soft_delete marks a row deleted.
-DELETED_AT_COL: str = os.environ.get("DELETED_AT_COL", "deleted_at")
 
 # DDL_DRIFT_DETECT: compare source schema vs Iceberg before copy and emit ALTER TABLEs.
 DDL_DRIFT_DETECT: bool = os.environ.get("DDL_DRIFT_DETECT", "1") == "1"
@@ -807,7 +704,6 @@ class _SourceConnector:
     table_sizes:           Callable   # (spark, opts) -> dict[str, float]
     capture_ts:            Callable   # (spark, opts) -> str ISO-8601Z
     read_batch:            Callable   # (spark, opts, table, offset, batch_size, where_clause="") -> DataFrame
-    primary_keys:          Callable   # (spark, opts, table) -> list[str]  — real PK from source catalog
     s3_prefix:             str        # path under s3://<bucket>/
     default_database:      str
     default_schema:        str
@@ -852,32 +748,6 @@ def _sf_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
         .option("query", f'SELECT * FROM "{table.upper()}" LIMIT 1')
         .load()
     ).schema
-
-
-def _sf_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]:
-    """
-    Discover primary key columns for a Snowflake table using SHOW PRIMARY KEYS.
-
-    SHOW PRIMARY KEYS IN TABLE <name> is a Snowflake-native metadata command —
-    it does not execute a query plan, reads no data, and returns results in
-    key_sequence order so composite PKs come back correctly ordered.
-    The result set always contains a 'column_name' column regardless of schema,
-    database, or naming convention.
-    """
-    try:
-        rows = (
-            spark.read.format("net.snowflake.spark.snowflake")
-            .options(**opts)
-            .option("query", f'SHOW PRIMARY KEYS IN TABLE "{table.upper()}"')
-            .load()
-            .collect()
-        )
-        # SHOW PRIMARY KEYS result columns: created_on, database_name, schema_name,
-        # table_name, column_name, key_sequence, constraint_name, rely, comment
-        return [r["column_name"].lower() for r in rows]
-    except Exception as exc:
-        logger.debug("[%s] Snowflake SHOW PRIMARY KEYS failed (%s) — will fall back.", table, exc)
-        return []
 
 
 def _sf_table_sizes(spark: SparkSession, opts: dict) -> dict[str, float]:
@@ -937,20 +807,19 @@ def _sf_read_batch(
     offset: int,
     batch_size: int,
     where_clause: str = "",
-    order_clause: str = "",
 ) -> DataFrame:
     """
     Read one batch from Snowflake.
-    where_clause — optional SQL predicate (without WHERE keyword) from QUERY_FILTER.
-    order_clause — optional ORDER BY fragment from _build_pk_order_clause(); when
-                   provided it replaces the generic ORDER BY (SELECT NULL) so reads
-                   walk the PK index for stable LIMIT/OFFSET pagination.
+    Snowflake connector uses double-quoted, UPPER-cased table names.
+    ORDER BY (SELECT NULL) avoids any driver-side sort artefacts while still
+    producing a stable page cursor for LIMIT / OFFSET pagination.
+    where_clause is an optional SQL predicate fragment (without WHERE keyword)
+    injected from QUERY_FILTER to copy only matching rows.
     """
     where = f" WHERE {where_clause}" if where_clause else ""
-    order = order_clause if order_clause else "ORDER BY (SELECT NULL)"
     query = (
         f'SELECT * FROM "{table.upper()}"{where} '
-        f"{order} "
+        f"ORDER BY (SELECT NULL) "
         f"LIMIT {batch_size} OFFSET {offset}"
     )
     return (
@@ -1006,87 +875,6 @@ def _db_map_schema(raw_schema: StructType) -> StructType:
 
 
 # ── Databricks connector implementation ────────────────────────────────────────
-
-def _jdbc_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]:
-    """
-    Discover primary key columns for any JDBC-based source using the standard
-    java.sql.DatabaseMetaData.getPrimaryKeys() API.
-
-    This is the single universal implementation shared by PostgreSQL, Oracle,
-    and Databricks.  It requires no knowledge of the source database type,
-    schema naming convention, or catalog structure — the JDBC driver itself
-    resolves the metadata entirely from the connection URL and the table name.
-
-    DatabaseMetaData.getPrimaryKeys(catalog, schema, table) returns one row per
-    PK column with KEY_SEQ (1-based sequence) and COLUMN_NAME.  We sort by
-    KEY_SEQ so composite PKs come back in declaration order regardless of the
-    driver's default sort.
-
-    The connection is opened via py4j using the same URLClassLoader pattern
-    already used by _db_list_tables() — this avoids DriverManager classloader
-    isolation issues that arise when Spark loads the JAR into its own
-    MutableURLClassLoader.
-
-    Returns [] when:
-      • the table has no PK constraint defined
-      • getPrimaryKeys() raises (e.g. insufficient privileges)
-    In both cases _resolve_primary_keys() falls through to the name heuristic.
-    """
-    try:
-        jvm  = spark.sparkContext._jvm
-        gw   = spark.sparkContext._gateway
-
-        props = jvm.java.util.Properties()
-        for k, v in opts.items():
-            if k not in ("url", "driver"):
-                props.setProperty(k, str(v))
-
-        # Load the driver via its own URLClassLoader so Class.forName() works
-        # regardless of which classloader Spark used to load the JAR.
-        # _DATABRICKS_JDBC_JAR is only the Databricks path; for other drivers
-        # the JVM already has the JAR on the system classpath (they are baked
-        # into /opt/spark/jars/ and loaded by Spark at startup), so we can
-        # use DriverManager.getConnection() directly for non-Databricks drivers.
-        driver_cls = opts.get("driver", "")
-        if "databricks" in driver_cls.lower():
-            _jar_url_arr    = gw.new_array(jvm.java.net.URL, 1)
-            _jar_url_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
-            _ucl = jvm.java.net.URLClassLoader(
-                _jar_url_arr, jvm.ClassLoader.getSystemClassLoader()
-            )
-            _drv_cls  = jvm.Class.forName(driver_cls, True, _ucl)
-            _drv_inst = _drv_cls.newInstance()
-            conn = _drv_inst.connect(opts["url"], props)
-        else:
-            # PostgreSQL and Oracle JARs are on Spark's system classpath —
-            # DriverManager resolves them automatically from the URL prefix.
-            conn = jvm.java.sql.DriverManager.getConnection(
-                opts["url"], opts.get("user", ""), opts.get("password", "")
-            )
-
-        meta = conn.getMetaData()
-        # getPrimaryKeys(catalog, schema, table) — pass None for catalog and
-        # schema so the driver resolves them from the active connection context
-        # (set via currentSchema / sessionInitStatement in the JDBC URL).
-        # table is lower-cased throughout starpump; Oracle's JDBC driver
-        # requires identifiers in uppercase to match ALL_CONSTRAINTS.
-        # PostgreSQL accepts both cases, so uppercasing is safe for all drivers.
-        rs = meta.getPrimaryKeys(None, None, table.upper())
-        pk_rows: list[tuple[int, str]] = []
-        while rs.next():
-            seq  = rs.getInt("KEY_SEQ")
-            col  = rs.getString("COLUMN_NAME").lower()
-            pk_rows.append((seq, col))
-        rs.close()
-        conn.close()
-
-        pk_rows.sort(key=lambda x: x[0])   # sort by KEY_SEQ (declaration order)
-        return [col for _, col in pk_rows]
-
-    except Exception as exc:
-        logger.debug("[%s] JDBC getPrimaryKeys() failed (%s) — will fall back.", table, exc)
-        return []
-
 
 def _db_build_opts(bao: "BaoSparkInit") -> dict:
     """Return JDBC options for the Databricks SQL Warehouse."""
@@ -1201,7 +989,6 @@ def _db_read_batch(
     offset: int,
     batch_size: int,
     where_clause: str = "",
-    order_clause: str = "",
 ) -> DataFrame:
     """
     Read one batch from Databricks via py4j JDBC on the driver, then create a
@@ -1231,7 +1018,6 @@ def _db_read_batch(
 
     where_clause is an optional SQL predicate fragment (without WHERE keyword)
     injected from QUERY_FILTER to copy only matching rows.
-    order_clause is an optional ORDER BY fragment from _build_pk_order_clause().
     """
     schema = spark.read.format("jdbc") \
         .options(**opts) \
@@ -1255,9 +1041,8 @@ def _db_read_batch(
     conn = _driver_inst.connect(opts["url"], props)
 
     where = f" WHERE {where_clause}" if where_clause else ""
-    order = f" {order_clause}" if order_clause else ""
     sql = (
-        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}`{where}{order} "
+        f"SELECT * FROM `{DATABASE}`.`{SCHEMAS}`.`{table}`{where} "
         f"LIMIT {batch_size} OFFSET {offset}"
     )
     stmt = conn.createStatement()
@@ -1329,8 +1114,6 @@ def _pg_list_tables(spark: SparkSession, opts: dict) -> list[str]:
     return names
 
 
-
-
 def _pg_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
     return (
         spark.read.format("jdbc")
@@ -1380,13 +1163,11 @@ def _pg_read_batch(
     offset: int,
     batch_size: int,
     where_clause: str = "",
-    order_clause: str = "",
 ) -> DataFrame:
     where = f" WHERE {where_clause}" if where_clause else ""
-    order = order_clause if order_clause else "ORDER BY 1"
     query = (
         f'SELECT * FROM "{SCHEMAS}"."{table}"{where} '
-        f"{order} "
+        f"ORDER BY 1 "
         f"LIMIT {batch_size} OFFSET {offset}"
     )
     return (
@@ -1429,8 +1210,6 @@ def _ora_list_tables(spark: SparkSession, opts: dict) -> list[str]:
     names = sorted(r[0] for r in rows)
     logger.info("Discovered %d tables in %s.%s: %s", len(names), DATABASE, SCHEMAS, names)
     return names
-
-
 
 
 def _ora_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
@@ -1484,14 +1263,12 @@ def _ora_read_batch(
     offset: int,
     batch_size: int,
     where_clause: str = "",
-    order_clause: str = "",
 ) -> DataFrame:
     where = f" WHERE {where_clause}" if where_clause else ""
-    order = order_clause if order_clause else "ORDER BY 1"
     # Oracle 12c+ OFFSET/FETCH syntax (standard SQL:2008)
     query = (
         f'SELECT * FROM "{SCHEMAS.upper()}"."{table.upper()}"{where} '
-        f"{order} "
+        f"ORDER BY 1 "
         f"OFFSET {offset} ROWS FETCH NEXT {batch_size} ROWS ONLY"
     )
     return (
@@ -1548,15 +1325,6 @@ def _mgo_list_tables(spark: SparkSession, opts: dict) -> list[str]:
         names = [DATABASE.lower()]
     logger.info("Discovered %d collections in %s: %s", len(names), SCHEMAS, names)
     return names
-
-
-def _mgo_primary_keys(spark: SparkSession, opts: dict, table: str) -> list[str]:
-    """
-    MongoDB always uses _id as its primary key — it is the only indexed,
-    unique, non-nullable field that every document is guaranteed to have.
-    No catalog query needed.
-    """
-    return ["_id"]
 
 
 def _mgo_table_schema(spark: SparkSession, opts: dict, table: str) -> StructType:
@@ -1655,7 +1423,6 @@ def _mgo_read_batch(
     offset: int,
     batch_size: int,
     where_clause: str = "",
-    order_clause: str = "",   # MongoDB has no SQL ORDER BY; parameter kept for API compatibility
 ) -> DataFrame:
     """
     Read one batch from a MongoDB collection via the Spark MongoDB connector 10.x.
@@ -1703,7 +1470,6 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _sf_table_sizes,
         capture_ts             = _sf_capture_ts,
         read_batch             = _sf_read_batch,
-        primary_keys           = _sf_primary_keys,
         s3_prefix              = "tpcds",
         default_database       = "SNOWFLAKE_SAMPLE_DATA",
         default_schema         = "TPCDS_SF10TCL",
@@ -1719,7 +1485,6 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _db_table_sizes,
         capture_ts             = _db_capture_ts,
         read_batch             = _db_read_batch,
-        primary_keys           = _jdbc_primary_keys,
         s3_prefix              = "iceberg/warehouse",
         default_database       = "lakehouse",
         default_schema         = "lakehouse_db",
@@ -1735,7 +1500,6 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _pg_table_sizes,
         capture_ts             = _pg_capture_ts,
         read_batch             = _pg_read_batch,
-        primary_keys           = _jdbc_primary_keys,
         s3_prefix              = "iceberg/pg_lakehouse",   # must match Polaris warehouse allowedLocations
         default_database       = "cache_testing",
         default_schema         = "public",
@@ -1751,7 +1515,6 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _ora_table_sizes,
         capture_ts             = _ora_capture_ts,
         read_batch             = _ora_read_batch,
-        primary_keys           = _jdbc_primary_keys,
         s3_prefix              = "iceberg/ora_lakehouse",  # must match Polaris warehouse allowedLocations
         default_database       = "XEPDB1",
         default_schema         = "TPCDS",
@@ -1767,7 +1530,6 @@ _CONNECTORS: dict[str, _SourceConnector] = {
         table_sizes            = _mgo_table_sizes,
         capture_ts             = _mgo_capture_ts,
         read_batch             = _mgo_read_batch,
-        primary_keys           = _mgo_primary_keys,
         s3_prefix              = "iceberg/mgo_lakehouse",  # must match Polaris warehouse allowedLocations
         default_database       = "cache_testing",
         default_schema         = "cache_testing",
@@ -2083,54 +1845,20 @@ def _auto_partition_spec(schema: StructType) -> list[dict]:
 # ── Single-table copy worker ───────────────────────────────────────────────────
 
 def _copy_table(
-    spark:      SparkSession,
-    builder:    IcebergTableBuilder,
-    connector:  "_SourceConnector",
-    conn_opts:  dict,
-    s3_bucket:  str,
-    table:      str,
-    size_gb:    float,
-    results:    dict,
-    lock:       threading.Lock,
-    pg_creds:   dict,
-    pk_cols:    list[str] | None = None,
-    write_mode: str | None       = None,
+    spark:     SparkSession,
+    builder:   IcebergTableBuilder,
+    connector: "_SourceConnector",
+    conn_opts: dict,
+    s3_bucket: str,
+    table:     str,
+    size_gb:   float,
+    results:   dict,
+    lock:      threading.Lock,
+    pg_creds:  dict,
 ) -> None:
     """
     Copy one table from the source database → Iceberg (called inside a thread).
     Source-agnostic: all source-specific I/O goes through *connector*.
-
-    Write modes (WRITE_MODE / --write-mode)
-    ----------------------------------------
-    standard (default, SCD Type 0)
-      Incremental run: MERGE INTO Iceberg by PK.
-        - Rows present in the source window → UPDATE (upsert).
-        - Rows that vanished from the source window → hard DELETE from Iceberg.
-      Full run: plain append (no prior Iceberg rows exist).
-
-    soft_delete
-      Same MERGE upsert pass as standard.
-      Vanished rows are NOT physically deleted — instead starpump sets
-        is_deleted = true
-        deleted_at = current_timestamp()
-      on any Iceberg row whose PK is no longer in the source window.
-      Adds is_deleted BOOLEAN + deleted_at TIMESTAMP columns to Iceberg DDL
-      automatically on first run (via mergeSchema=true).
-
-    history (SCD Type 2 / audit log)
-      Every source row in the window is appended as a new Iceberg row tagged with
-        _change_type STRING  (INSERT / UPDATE / DELETE — not set in batch mode;
-                              always INSERT here since we see only live rows)
-        _change_ts   TIMESTAMP
-      Rows are never updated or deleted in Iceberg; the full history accumulates.
-
-    Primary key resolution (pk_cols)
-    ---------------------------------
-    pk_cols is resolved before calling _copy_table by the caller (incremental
-    worker).  If None, _resolve_primary_keys() is called here as a fallback.
-    PK columns are used for:
-      1. The ON clause of MERGE INTO.
-      2. ORDER BY on source reads so LIMIT/OFFSET is index-friendly.
 
     Watermark flow
     --------------
@@ -2150,63 +1878,13 @@ def _copy_table(
     err              = None
     sf_extraction_ts = None
 
-    # Resolve write_mode / pk_cols for this call (caller may override globals)
-    _write_mode = (write_mode or WRITE_MODE).lower()
-    # pk_cols resolved after schema discovery below — placeholder here
-    _pk_cols: list[str] = pk_cols if pk_cols is not None else []
-
-    # ── Write with snapshot-conflict retry ─────────────────────────────────
-    # Defined at function scope (not inside the `else: not DRY_RUN` branch) so
-    # it is always bound before the delete-detection pass can reference it.
-    # Fixes: UnboundLocalError — cannot access local variable
-    #        '_iceberg_write_with_retry' where it is not associated with a value.
-    def _iceberg_write_with_retry(write_fn, label: str) -> None:
-        """Execute write_fn(), retrying on snapshot-conflict errors."""
-        attempt = 0
-        while True:
-            try:
-                write_fn()
-                break
-            except Exception as _w_err:  # noqa: BLE001
-                attempt += 1
-                err_str = str(_w_err)
-                is_retryable = any(k in err_str for k in (
-                    "IllegalStateException",
-                    "CommitFailedException",
-                    "ValidationException",
-                    "Cannot commit",
-                    "concurrent",
-                    "conflict",
-                ))
-                if attempt > WRITE_MAX_RETRIES or not is_retryable:
-                    raise
-                sleep_s = WRITE_RETRY_SLEEP_S * attempt
-                logger.warning(
-                    "[%s] %s conflict (attempt %d/%d): %s "
-                    "— retrying in %ds …",
-                    table, label, attempt, WRITE_MAX_RETRIES,
-                    err_str[:120], sleep_s,
-                )
-                time.sleep(sleep_s)
-
     try:
-        logger.info(
-            "[%s] START: %.1f GB | discovering schema … (write_mode=%s)",
-            table, size_gb, _write_mode,
-        )
+        logger.info("[%s] START: %.1f GB | discovering schema …", table, size_gb)
         raw_schema = connector.table_schema(spark, conn_opts, table)
 
         # Map source types → Spark/Iceberg types via the connector's own mapper.
         # Each connector defines exactly how its native types translate.
         iceberg_schema = connector.map_schema(raw_schema)
-
-        # Resolve PK now that schema is known
-        if not _pk_cols:
-            _pk_cols = _resolve_primary_keys(table, iceberg_schema, connector, spark, conn_opts)
-        logger.info(
-            "[%s] PK cols: %s  (source=%s schema=%s)",
-            table, _pk_cols or "(none — append-only)", SOURCE, SCHEMAS,
-        )
 
         partition_spec = _auto_partition_spec(iceberg_schema)
 
@@ -2233,21 +1911,8 @@ def _copy_table(
             # copy can be resumed from the last committed Iceberg row count.
             # Databricks JDBC does not (no guaranteed order without ORDER BY),
             # so it always reads from offset 0 regardless of prior runs.
-            #
-            # IMPORTANT: Resume-at-offset only makes sense for FULL copies.
-            # In incremental mode a watermark WHERE clause is already injected
-            # into QUERY_FILTERS, so the paginated read is over the *filtered
-            # window* — not the full table.  spark.table(fqn).count() returns
-            # the total Iceberg row count across ALL prior runs, which is
-            # meaningless as an offset into the current (much smaller) filtered
-            # window.  Using it as such causes the batch loop to skip the
-            # entire window (offset > window size → first batch is empty →
-            # 0 new rows written) AND the watermark to be written back with
-            # the same old extraction_ts, so no rows ever advance.
-            # Fix: skip resume-at-offset whenever a watermark filter is active.
-            _has_wm_filter = bool(_get_where_clause(table))
             already_written = 0
-            if connector.supports_offset_resume and not _has_wm_filter:
+            if connector.supports_offset_resume:
                 try:
                     already_written = spark.table(fqn).count()
                 except Exception:
@@ -2277,22 +1942,50 @@ def _copy_table(
                     )
                 else:
                     # No prior watermark (first run crashed before writing one).
-                    # Capture a fresh ts but do NOT write it yet — only write on
-                    # success so a subsequent failure cannot poison the watermark.
                     sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                     logger.info(
                         "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
                         "fresh extraction_ts=%s, starting at offset=%d.",
                         table, already_written, sf_extraction_ts, already_written,
                     )
+                    try:
+                        pg_upsert_watermark(
+                            pg                = pg_creds,
+                            source_db         = DATABASE,
+                            source_schema     = SCHEMAS,
+                            table_name        = table,
+                            sf_extraction_ts  = sf_extraction_ts,
+                            rows_copied       = already_written,
+                            iceberg_namespace = ICEBERG_NAMESPACE,
+                        )
+                        logger.info("[%s] Early watermark written to pipeline DB (resume fallback).", table)
+                    except Exception as _pg_err:
+                        logger.warning(
+                            "[%s] Could not write early watermark to pipeline DB: %s",
+                            table, _pg_err,
+                        )
             else:
-                # Incremental run (watermark filter active) or fresh full copy:
-                # capture a fresh CDC sync-point from the source NOW, before the
-                # first batch.  Written to the pipeline DB only on success (below).
-                # Never written here — writing before the copy completes means a
-                # failed run permanently advances the watermark past un-copied rows.
+                # Fresh run (or full re-read for non-resumable connectors):
+                # capture CDC sync-point from the source BEFORE the first batch.
                 sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                 logger.info("[%s] extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
+
+                try:
+                    pg_upsert_watermark(
+                        pg                = pg_creds,
+                        source_db         = DATABASE,
+                        source_schema     = SCHEMAS,
+                        table_name        = table,
+                        sf_extraction_ts  = sf_extraction_ts,
+                        rows_copied       = 0,
+                        iceberg_namespace = ICEBERG_NAMESPACE,
+                    )
+                    logger.info("[%s] Early watermark written to pipeline DB.", table)
+                except Exception as _pg_err:
+                    logger.warning(
+                        "[%s] Could not write early watermark to pipeline DB: %s",
+                        table, _pg_err,
+                    )
 
             # ── Batched sequential copy ────────────────────────────────────
             iceberg_cols  = [f.name for f in iceberg_schema.fields]
@@ -2301,18 +1994,6 @@ def _copy_table(
             where_clause  = _get_where_clause(table)
             if where_clause:
                 logger.info("[%s] QUERY_FILTER active — WHERE %s", table, where_clause)
-
-            # PK-ordered reads: replace generic "ORDER BY 1" used by the connectors
-            # with "ORDER BY pk1, pk2 …" so LIMIT/OFFSET walks the PK index.
-            # Passed to the connector via a connector-level ORDER BY override stored
-            # in conn_opts temporarily; connectors that don't use it ignore the key.
-            # We inject it only when the source supports offset-resume (SQL sources).
-            _pk_order = (
-                _build_pk_order_clause(_pk_cols, source_key=SOURCE)
-                if connector.supports_offset_resume else ""
-            )
-            if _pk_order:
-                logger.info("[%s] PK-ordered reads: %s", table, _pk_order)
 
             while True:
                 # Shrink batch to never write more than MAX_ROWS new rows total.
@@ -2336,7 +2017,6 @@ def _copy_table(
                         batch = connector.read_batch(
                             spark, conn_opts, table, offset, read_batch_sz,
                             where_clause=where_clause,
-                            order_clause=_pk_order,
                         )
                         # Cache before count() so the source cursor is opened once.
                         # Without this, count() + writeTo().append() each trigger a
@@ -2381,53 +2061,48 @@ def _copy_table(
 
                 # Inject snap audit values
                 # snap_id: unique BIGINT per row using Spark's monotonically_increasing_id().
-                # snap_timestamp: wall-clock at write time, same for all rows in batch.
+                # This produces a 64-bit integer that is unique and monotonically
+                # increasing across all rows and partitions within the batch — not
+                # a scalar constant (which would give every row the same value).
+                # snap_timestamp: wall-clock at write time, same for all rows in
+                # the batch (correct — it marks when the batch was written).
                 final = (
                     aligned
                     .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
                     .withColumn("snap_timestamp",  current_timestamp())
                 )
 
-                # ── history mode: tag with _change_type / _change_ts then INSERT ──
-                if _write_mode == "history":
-                    final = (
-                        final
-                        .withColumn("_change_type", lit("INSERT"))
-                        .withColumn("_change_ts",   current_timestamp())
-                    )
-
-                if _write_mode == "history" or not _pk_cols:
-                    # history mode OR no PK available → plain append, no merge
-                    _iceberg_write_with_retry(
-                        lambda: final.writeTo(fqn).option("mergeSchema", "true").append(),
-                        "writeTo().append()",
-                    )
-                else:
-                    # standard / soft_delete — MERGE upsert pass ─────────────
-                    # Materialise `final` before registering the temp view.
-                    # `final` contains monotonically_increasing_id() and
-                    # current_timestamp() — both non-deterministic.  Iceberg's
-                    # MERGE planner requires the source side to be deterministic
-                    # (INVALID_NON_DETERMINISTIC_EXPRESSIONS).  Caching forces
-                    # Spark to evaluate those expressions once into concrete
-                    # values; the temp view then references only stored data.
-                    final.cache()
-                    final.count()   # force materialisation
-                    _tmp = f"_starpump_src_{table.replace('.','_')}"
-                    final.createOrReplaceTempView(_tmp)
-                    merge_sql = _build_merge_sql(
-                        fqn        = fqn,
-                        pk_cols    = _pk_cols,
-                        data_cols  = [],    # UPDATE SET * — data_cols unused for upsert
-                        write_mode = _write_mode,
-                        tmp_view   = _tmp,
-                    )
-                    _iceberg_write_with_retry(
-                        lambda: spark.sql(merge_sql),
-                        "MERGE INTO (upsert)",
-                    )
-                    spark.catalog.dropTempView(_tmp)
-                    final.unpersist()
+                # ── Write with snapshot-conflict retry ─────────────────────────
+                # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
+                # Occurs when multiple threads commit to the same table and the
+                # snapshot ID changes between scan-time and commit-time.
+                # Retrying re-reads the current snapshot and re-attempts the commit.
+                write_attempt = 0
+                while True:
+                    try:
+                        final.writeTo(fqn).option("mergeSchema", "true").append()
+                        break
+                    except Exception as write_err:  # noqa: BLE001
+                        write_attempt += 1
+                        err_str = str(write_err)
+                        is_retryable = any(k in err_str for k in (
+                            "IllegalStateException",
+                            "CommitFailedException",
+                            "ValidationException",
+                            "Cannot commit",
+                            "concurrent",
+                            "conflict",
+                        ))
+                        if write_attempt > WRITE_MAX_RETRIES or not is_retryable:
+                            raise
+                        sleep_s = WRITE_RETRY_SLEEP_S * write_attempt
+                        logger.warning(
+                            "[%s] writeTo().append() conflict (attempt %d/%d): %s "
+                            "— retrying in %ds …",
+                            table, write_attempt, WRITE_MAX_RETRIES,
+                            err_str[:120], sleep_s,
+                        )
+                        time.sleep(sleep_s)
 
                 batch.unpersist()
 
@@ -2445,118 +2120,6 @@ def _copy_table(
                     break   # MongoDB: no server-side offset — one pass only
 
             logger.info("[%s] DONE — %d rows written (total incl. prior runs).", table, rows_total)
-
-            # ── Delete-detection pass (standard / soft_delete, incremental only) ─
-            # After the MERGE upsert loop we have pushed all live rows from the
-            # source window (updated_at >= last_ts) into Iceberg.  Any Iceberg row
-            # whose PK is NOT in that live window was deleted from the source since
-            # the last run and must be actioned now.
-            #
-            # Strategy:
-            #   1. Re-read the full source window (same WHERE clause) and collect
-            #      PKs into a temp view called _starpump_live_pks_<table>.
-            #   2. MERGE INTO Iceberg: any Iceberg row whose PK is absent from
-            #      the live-PK view is treated as deleted.
-            #
-            # This pass runs only when:
-            #   • write_mode is standard or soft_delete  (history never deletes)
-            #   • we have at least one PK column
-            #   • a watermark was used (where_clause is not empty, meaning this
-            #     is an incremental run — not a first-time full copy)
-            #   • source supports SQL (not MongoDB — no reliable full-scan PK extract)
-            _wc_for_del = _get_where_clause(table)   # current effective where clause
-            _should_del_pass = (
-                _write_mode in ("standard", "soft_delete")
-                and _pk_cols
-                and _wc_for_del                        # only when a watermark is active
-                and connector.supports_offset_resume   # SQL sources only
-                and not DRY_RUN
-            )
-            if _should_del_pass:
-                logger.info(
-                    "[%s] Delete-detection pass (write_mode=%s) — "
-                    "collecting live PKs from source window …",
-                    table, _write_mode,
-                )
-                try:
-                    # Read only the PK columns from the source for the whole window.
-                    # This is a single full-window scan — not paginated.
-                    pk_select = ", ".join(f'"{c.upper() if SOURCE=="oracle" else c}"' for c in _pk_cols)
-                    del_where = f" WHERE {_wc_for_del}"
-                    if SOURCE == "postgres":
-                        pk_query = f'SELECT {pk_select} FROM "{SCHEMAS}"."{table}"{del_where}'
-                    elif SOURCE == "oracle":
-                        pk_query = f'SELECT {pk_select} FROM "{SCHEMAS.upper()}"."{table.upper()}"{del_where}'
-                    elif SOURCE in ("snowflake",):
-                        pk_select_sf = ", ".join(f'"{c.upper()}"' for c in _pk_cols)
-                        pk_query = f'SELECT {pk_select_sf} FROM "{table.upper()}"{del_where}'
-                    else:
-                        pk_query = f'SELECT {pk_select} FROM `{DATABASE}`.`{SCHEMAS}`.`{table}`{del_where}'
-
-                    live_pk_df = (
-                        spark.read.format(connector.spark_format)
-                        .options(**conn_opts)
-                        .option("query" if connector.spark_format != "jdbc"
-                                else "query", pk_query)
-                        .load()
-                    )
-                    live_pk_df.cache()
-                    live_pk_count = live_pk_df.count()
-                    logger.info(
-                        "[%s] Live PK count in source window: %d",
-                        table, live_pk_count,
-                    )
-
-                    _live_tmp = f"_starpump_live_pks_{table.replace('.','_')}"
-                    live_pk_df.createOrReplaceTempView(_live_tmp)
-
-                    on_clause = " AND ".join(
-                        f"t.`{c}` = s.`{c}`" for c in _pk_cols
-                    )
-
-                    if _write_mode == "standard":
-                        # Hard DELETE: remove Iceberg rows not in live-PK set.
-                        # No is_deleted guard — standard mode never adds that
-                        # column; the filter would raise UNRESOLVED_COLUMN.
-                        del_sql = f"""
-                            MERGE INTO {fqn} t
-                            USING (
-                                SELECT t2.*
-                                FROM {fqn} t2
-                                LEFT ANTI JOIN {_live_tmp} s
-                                ON {on_clause.replace('t.`', 't2.`')}
-                            ) gone
-                            ON {on_clause.replace('s.`', 'gone.`')}
-                            WHEN MATCHED THEN DELETE
-                        """.strip()
-                    else:
-                        # soft_delete: mark vanished rows is_deleted=true
-                        del_sql = _build_merge_sql(
-                            fqn        = fqn,
-                            pk_cols    = _pk_cols,
-                            data_cols  = [],   # signals soft-delete pass
-                            write_mode = "soft_delete",
-                            tmp_view   = (
-                                f"(SELECT t2.* FROM {fqn} t2 "
-                                f"LEFT ANTI JOIN {_live_tmp} s "
-                                f"ON {on_clause.replace('t.`','t2.`').replace('s.`','s.`')} "
-                                f"WHERE t2.`is_deleted` IS NULL OR t2.`is_deleted` = false)"
-                            ),
-                        )
-
-                    def _del_fn() -> None:
-                        spark.sql(del_sql)
-
-                    _iceberg_write_with_retry(_del_fn, "MERGE INTO (delete pass)")
-                    live_pk_df.unpersist()
-                    spark.catalog.dropTempView(_live_tmp)
-                    logger.info("[%s] Delete-detection pass complete.", table)
-
-                except Exception as _del_err:
-                    logger.warning(
-                        "[%s] Delete-detection pass failed (non-fatal): %s",
-                        table, _del_err,
-                    )
 
             # ── Stamp sf_extraction_ts onto the Iceberg table property ─────
             spark.sql(
@@ -2652,192 +2215,21 @@ def _resolve_watermark_col(schema: StructType, override: str | None) -> str | No
     return None
 
 
-def _resolve_primary_keys(
-    table:     str,
-    schema:    StructType,
-    connector: "_SourceConnector | None" = None,
-    spark:     "SparkSession | None"     = None,
-    opts:      "dict | None"             = None,
-) -> list[str]:
-    """
-    Return the primary key column list for *table*, in priority order:
-
-    1. Global PRIMARY_KEYS env/CLI override (--pk-cols / PK_COLS env).
-    2. connector.primary_keys(spark, opts, table) — asks the source directly:
-         PostgreSQL / Oracle  → java.sql.DatabaseMetaData.getPrimaryKeys() via
-                                py4j; no SQL, no schema-name assumptions, works
-                                for any table name and any PK arity.
-         Databricks           → same DatabaseMetaData path (PKs informational
-                                only in Unity Catalog; usually returns []).
-         Snowflake            → SHOW PRIMARY KEYS IN TABLE — native metadata
-                                command, no data scan, no schema filter.
-         MongoDB              → always ["_id"] — enforced by the storage engine.
-       Composite PKs are returned in KEY_SEQ / key_sequence order.
-    3. Name-heuristic fallback (only when step 2 returns nothing):
-         a. column named 'id'
-         b. column named '<table>_id'   e.g. 'order_id' for table 'orders'
-         c. first column in the schema  (last resort — warning logged)
-    4. Empty list when schema has no columns (should never happen).
-
-    The returned names are lower-cased to match Iceberg column names.
-    Used for:
-      - MERGE INTO … ON t.pk = s.pk   (standard / soft_delete modes)
-      - ORDER BY pk on source reads   (index-friendly LIMIT/OFFSET pagination)
-    """
-    # ── Priority 1: explicit CLI / env override ────────────────────────────────
-    if PRIMARY_KEYS:
-        return PRIMARY_KEYS
-
-    # ── Priority 2: ask the source catalog ────────────────────────────────────
-    if connector is not None and spark is not None and opts is not None:
-        try:
-            catalog_pks = connector.primary_keys(spark, opts, table)
-            if catalog_pks:
-                logger.info(
-                    "[%s] PK cols resolved from source catalog: %s  (source=%s schema=%s table=%s)",
-                    table, catalog_pks, SOURCE, SCHEMAS, table,
-                )
-                return catalog_pks
-        except Exception as exc:
-            logger.debug(
-                "[%s] connector.primary_keys() raised unexpectedly (%s) — "
-                "falling back to name heuristic.",
-                table, exc,
-            )
-
-    # ── Priority 3: name heuristic (fallback) ─────────────────────────────────
-    col_names = [f.name.lower() for f in schema.fields]
-    col_set   = set(col_names)
-
-    if "id" in col_set:
-        return ["id"]
-    table_id = f"{table.lower()}_id"
-    if table_id in col_set:
-        return [table_id]
-    if col_names:
-        logger.warning(
-            "[%s] PK not found in source catalog (source=%s schema=%s) — "
-            "using first column '%s' as PK. "
-            "Override with --pk-cols or PK_COLS env var.",
-            table, SOURCE, SCHEMAS, col_names[0],
-        )
-        return [col_names[0]]
-    return []
-
-
 def _incremental_where_clause(wm_col: str, last_ts: str | None) -> str:
     """
     Build a WHERE clause fragment for incremental extraction.
 
-    When last_ts is provided:  wm_col >= '<last_ts>'
+    When last_ts is provided: wm_col > '<last_ts>'
     When last_ts is None (first incremental run): copy all rows (empty clause).
 
-    '>=' (inclusive) is intentional — it re-reads rows at the exact watermark
-    boundary so that any row whose updated_at equals the last watermark is
-    picked up again.  Without this, a row updated in the same microsecond as
-    the previous run's capture_ts could be skipped forever.
-
-    The MERGE INTO in standard/soft_delete modes is idempotent for the
-    boundary rows (they simply overwrite themselves), so the slight re-read
-    of the boundary second carries no correctness risk.
-
-    IMPORTANT — deleted rows:
-    A WHERE updated_at >= last_ts clause only fetches rows still present in
-    the source.  Rows hard-deleted from the source vanish and will NOT appear
-    in this query result.  starpump handles this per WRITE_MODE:
-      standard    — after the MERGE upsert pass, a second DELETE pass removes
-                    Iceberg rows whose PK is no longer in the source window
-                    (rows where updated_at >= last_ts are the "live window").
-      soft_delete — same second pass, but marks rows with is_deleted=true
-                    instead of physically deleting them.
-      history     — no delete handling needed; all rows are inserted as-is.
+    The '>' operator (strict greater-than) avoids re-copying rows at the
+    exact boundary.  A slight overlap risk exists for rows written in the same
+    microsecond as the last watermark — acceptable for CDC-backed pipelines
+    (Debezium picks up from a precise SCN/LSN, not this timestamp).
     """
     if not last_ts:
         return ""  # first run — full copy
-    return f"{wm_col} >= '{last_ts}'"
-
-
-def _build_pk_order_clause(pk_cols: list[str], source_key: str = "") -> str:
-    """
-    Build an ORDER BY fragment from a list of PK column names.
-
-    Used to make LIMIT/OFFSET pagination index-friendly on sources that have
-    a B-tree index on the PK (PostgreSQL, Oracle, Snowflake, Databricks).
-    The ORDER BY guarantees a stable cursor: each page starts exactly where
-    the previous one ended, so OFFSET N skips the right rows even if new rows
-    are inserted concurrently.
-
-    Returns empty string for MongoDB (no SQL ORDER BY) or when pk_cols is empty.
-    """
-    if not pk_cols or source_key == "mongodb":
-        return ""
-    cols = ", ".join(f'"{c}"' for c in pk_cols)
-    return f"ORDER BY {cols}"
-
-
-def _build_merge_sql(
-    fqn:        str,
-    pk_cols:    list[str],
-    data_cols:  list[str],
-    write_mode: str,
-    tmp_view:   str = "_starpump_src",
-) -> str:
-    """
-    Generate an Iceberg MERGE INTO statement for standard or soft_delete modes.
-
-    Parameters
-    ----------
-    fqn         Fully-qualified Iceberg table name (backtick-quoted).
-    pk_cols     Primary key column(s) — used in the ON clause.
-    data_cols   All non-PK, non-snap data columns (used in UPDATE SET).
-    write_mode  'standard' or 'soft_delete'.
-    tmp_view    Name of the Spark temporary view holding the source batch.
-
-    Generated SQL structure (standard)
-    ------------------------------------
-        MERGE INTO <fqn> t
-        USING <tmp_view> s
-        ON  t.pk1 = s.pk1 AND t.pk2 = s.pk2
-        WHEN MATCHED THEN UPDATE SET t.col = s.col, …, t.snap_timestamp = s.snap_timestamp
-        WHEN NOT MATCHED THEN INSERT *
-
-    Generated SQL structure (soft_delete — called for the "delete" pass)
-    -----------------------------------------------------------------------
-        MERGE INTO <fqn> t
-        USING <tmp_view> s          ← source = PKs of deleted rows
-        ON  t.pk1 = s.pk1
-        WHEN MATCHED AND t.is_deleted IS DISTINCT FROM true
-        THEN UPDATE SET t.is_deleted = true, t.deleted_at = current_timestamp()
-
-    Note: the "delete pass" SQL is returned only when write_mode='soft_delete'
-    AND the caller passes data_cols=[] to signal this is the deletion sub-pass.
-    The main upsert pass is always the same UPDATE SET * / INSERT * form.
-    """
-    on_clause = " AND ".join(f"t.`{c}` = s.`{c}`" for c in pk_cols)
-
-    if write_mode == "soft_delete" and not data_cols:
-        # ── Soft-delete pass: mark vanished rows as deleted ──────────────────
-        return f"""
-            MERGE INTO {fqn} t
-            USING {tmp_view} s
-            ON {on_clause}
-            WHEN MATCHED AND (t.`is_deleted` IS NULL OR t.`is_deleted` = false)
-            THEN UPDATE SET
-                t.`is_deleted`          = true,
-                t.`{DELETED_AT_COL}`    = current_timestamp(),
-                t.`snap_timestamp`      = current_timestamp()
-        """.strip()
-
-    # ── Upsert pass: UPDATE existing rows, INSERT new rows ───────────────────
-    # Always use UPDATE SET * — Iceberg resolves column alignment by name.
-    # This handles schema evolution (new source columns added) automatically.
-    return f"""
-        MERGE INTO {fqn} t
-        USING {tmp_view} s
-        ON {on_clause}
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
-    """.strip()
+    return f"{wm_col} > '{last_ts}'"
 
 
 def _detect_ddl_drift(
@@ -3248,17 +2640,10 @@ def main() -> None:
                             _apply_ddl_drift(spark, tbl, drift)
 
                         # ── Watermark-based incremental copy ──────────────────
-                        _tbl_pk: list[str] = []
                         try:
                             raw_schema = connector.table_schema(spark, conn_opts, tbl)
                             mapped     = connector.map_schema(raw_schema)
                             wm_col     = _resolve_watermark_col(mapped, WATERMARK_COL)
-
-                            # Resolve PK here so it is available for both the
-                            # ORDER BY on reads and the MERGE ON clause in _copy_table.
-                            _tbl_pk = _resolve_primary_keys(
-                                tbl, mapped, connector, spark, conn_opts
-                            )
 
                             last_ts = None
                             if wm_col:
@@ -3275,10 +2660,8 @@ def main() -> None:
                             if wm_col:
                                 incr_clause = _incremental_where_clause(wm_col, last_ts)
                                 logger.info(
-                                    "[%s] Incremental mode: col=%s last_ts=%s "
-                                    "clause='%s' pk=%s write_mode=%s",
-                                    tbl, wm_col, last_ts or "None (full)",
-                                    incr_clause, _tbl_pk, WRITE_MODE,
+                                    "[%s] Incremental mode: col=%s last_ts=%s clause='%s'",
+                                    tbl, wm_col, last_ts or "None (full)", incr_clause,
                                 )
                             else:
                                 incr_clause = ""
@@ -3313,9 +2696,7 @@ def main() -> None:
                         _copy_table(
                             spark, builder, connector, conn_opts, s3_bucket,
                             tbl, size_gb, results, lock,
-                            pg_creds   = pg,
-                            pk_cols    = _tbl_pk or None,
-                            write_mode = WRITE_MODE,
+                            pg_creds=pg,
                         )
 
                         # Restore the original QUERY_FILTERS entry
