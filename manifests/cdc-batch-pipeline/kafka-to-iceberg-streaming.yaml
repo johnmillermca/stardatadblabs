@@ -1,0 +1,329 @@
+# =============================================================================
+# kafka-to-iceberg-streaming.yaml
+#
+# Kubernetes Deployment + ConfigMap for the Kafka→Iceberg CDC streaming consumer.
+#
+# Three write modes are supported, one Deployment per mode:
+#
+#   kafka-to-iceberg-standard         — SCD Type 0, MERGE + hard delete
+#   kafka-to-iceberg-soft-delete      — MERGE upsert, soft-delete flag on DELETE
+#   kafka-to-iceberg-history-tracking — append-only, full row history
+#
+# Only ONE Deployment should be active at a time (they all consume from the same
+# Kafka topics).  Use kubectl scale to enable/disable:
+#
+#   kubectl scale deployment kafka-to-iceberg-standard -n prod --replicas=1
+#   kubectl scale deployment kafka-to-iceberg-soft-delete -n prod --replicas=0
+#   kubectl scale deployment kafka-to-iceberg-history-tracking -n prod --replicas=0
+#
+# Auto-restart
+# ─────────────
+# Kubernetes restartPolicy (built into Deployment): Always.
+# The Deployment restart policy means a failing pod is restarted automatically.
+# Additionally, the Python script itself implements an exponential-backoff
+# internal retry loop (MAX_RESTART_ATTEMPTS=10, RESTART_BACKOFF_BASE_S=5,
+# RESTART_BACKOFF_MAX_S=120) before exiting — giving K8s a chance to see a
+# terminated pod and restart it.
+#
+# Namespaces: prod
+# Image: uses the existing spark-gluten-velox image which already contains
+#        05_kafka_to_iceberg_streaming.py, bao_spark_init.py, and all JARs.
+# =============================================================================
+
+# ── ConfigMap: shared streaming config ───────────────────────────────────────
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-to-iceberg-config
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.type: streaming
+data:
+  SPARK_USER:              "dave"
+  TRIGGER_INTERVAL:        "10 seconds"
+  MAX_OFFSETS_PER_TRIGGER: "50000"
+  MAX_RESTART_ATTEMPTS:    "10"
+  RESTART_BACKOFF_BASE_S:  "5"
+  RESTART_BACKOFF_MAX_S:   "120"
+  DRY_RUN:                 "0"
+  ADDR:                    "http://openbao.prod.svc.cluster.local:8200"
+
+# ── Deployment: standard write mode ──────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-standard
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.write-mode: standard
+    pipeline.type: streaming
+  annotations:
+    # Document the restart policy semantics inline for operators
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "SCD Type 0 — MERGE upsert + hard delete"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.write-mode: standard
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.write-mode: standard
+    spec:
+      # restartPolicy for pods in a Deployment must be Always.
+      # K8s restarts the pod automatically on any non-zero exit code.
+      restartPolicy: Always
+      serviceAccountName: spark-service-account
+      # Allow generous time for the Spark session to flush and checkpoint
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/scripts && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: WRITE_MODE
+              value: standard
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          # Liveness: check that the Spark driver process is alive by verifying
+          # the streaming process is still running (the pod stays alive as long
+          # as the python process is running; K8s restarts it when it exits).
+
+# ── Deployment: soft_delete write mode ───────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-soft-delete
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.write-mode: soft-delete
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "MERGE upsert + soft-delete flag (is_deleted, deleted_at)"
+spec:
+  replicas: 0            # disabled by default — scale to 1 to activate
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.write-mode: soft-delete
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.write-mode: soft-delete
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-service-account
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/scripts && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: WRITE_MODE
+              value: soft_delete
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+
+# ── Deployment: history_tracking write mode ───────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-history-tracking
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.write-mode: history-tracking
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "Append-only — every CDC event inserted with _change_type + _change_ts"
+spec:
+  replicas: 0            # disabled by default — scale to 1 to activate
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.write-mode: history-tracking
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.write-mode: history-tracking
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-service-account
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/scripts && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: WRITE_MODE
+              value: history_tracking
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "4"

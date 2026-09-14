@@ -64,6 +64,14 @@ This runbook provides step-by-step validation procedures for the complete Starpu
 | 8.1 | Idempotency | Catalog bootstrap re-run is a no-op |
 | 8.2 | Idempotency | Starpump full re-run does not duplicate rows |
 | 8.3 | Idempotency | Debezium re-registration is idempotent |
+| 9.1 | Write Modes | Streaming manifests applied, ConfigMap present |
+| 9.2 | Write Modes | Invalid `WRITE_MODE` rejected at startup |
+| 9.3 | Write Modes | `standard`: upsert on UPDATE, hard delete on DELETE |
+| 9.4 | Write Modes | `soft_delete`: DELETE sets `is_deleted=true`, `deleted_at` |
+| 9.5 | Write Modes | `history_tracking`: all events appended with `_change_type` |
+| 9.6 | Write Modes | Auto-restart: pod restarts after crash, K8s restart count ≥ 1 |
+| 9.7 | Write Modes | Interactive wrapper handles arg / env / invalid mode |
+| 9.8 | Write Modes | Oracle + MongoDB: write-mode extra columns present |
 
 ---
 
@@ -1339,3 +1347,435 @@ spark.stop()
 | `schema-changes.*` topic has no messages | Debezium not capturing DDL | Ensure `include.schema.changes=true` in connector config; check connector log |
 | Streaming job OOM | Too many offsets per trigger | Reduce `MAX_OFFSETS_PER_TRIGGER` (default 50000) |
 | Incremental load copies 0 rows | Watermark column not found | Set `WATERMARK_COL=created_at` (or the actual timestamp column name) |
+
+
+---
+
+## Test 9 — Kafka→Iceberg Streaming: Write Mode End-to-End Testing
+
+> **What this section covers:** End-to-end validation of all three CDC write modes
+> (`standard`, `soft_delete`, `history_tracking`) for the
+> `05_kafka_to_iceberg_streaming.py` consumer.
+>
+> **Prerequisites:** Test 1 (pre-flight), Test 2 (starpump full load), and
+> Test 3 (Debezium connectors RUNNING) must all have passed first.
+>
+> **Write modes:**
+> | Mode | INSERT/UPDATE | DELETE | Extra columns |
+> |---|---|---|---|
+> | `standard` | MERGE upsert by PK | Hard delete (row removed) | — |
+> | `soft_delete` | MERGE upsert by PK | Set `is_deleted=true`, `deleted_at=now()` | `is_deleted`, `deleted_at` |
+> | `history_tracking` | Always INSERT | Always INSERT (row appended) | `_change_type`, `_change_ts` |
+
+---
+
+### T-9.1 — Pre-flight: streaming consumer script and manifests present
+
+```bash
+# Verify the streaming script is present in the image
+spark_exec ls -la /opt/spark/scripts/05_kafka_to_iceberg_streaming.py
+spark_exec ls -la /opt/spark/scripts/start_cdc_streaming.sh
+
+# Verify the Kubernetes manifest is present
+ls -la manifests/cdc-batch-pipeline/kafka-to-iceberg-streaming.yaml
+
+# Apply the ConfigMap + Deployment manifests (if not already applied)
+kubectl apply -f manifests/cdc-batch-pipeline/kafka-to-iceberg-streaming.yaml
+# Expected:
+#   configmap/kafka-to-iceberg-config created (or unchanged)
+#   deployment.apps/kafka-to-iceberg-standard created (or unchanged)
+#   deployment.apps/kafka-to-iceberg-soft-delete created (or unchanged)
+#   deployment.apps/kafka-to-iceberg-history-tracking created (or unchanged)
+```
+
+✅ Pass: all three deployments created, `kafka-to-iceberg-config` ConfigMap present.
+❌ Fail: YAML syntax error → run `kubectl apply --dry-run=client -f ...` to identify the issue.
+
+---
+
+### T-9.2 — Validate `WRITE_MODE` env-var handling
+
+```bash
+# Attempt to start with an invalid write mode — must exit 1 immediately
+spark_exec bash -c "
+  cd /opt/spark/scripts && \
+  WRITE_MODE=invalid python3 05_kafka_to_iceberg_streaming.py; \
+  echo \"Exit code: \$?\"
+"
+# Expected:
+#   ERROR: WRITE_MODE='invalid' is not valid. Choose: standard, soft_delete, history_tracking
+#   Exit code: 1
+```
+
+✅ Pass: non-zero exit code + helpful error message.
+
+---
+
+### T-9.3 — Write mode: `standard` — INSERT + UPDATE → upsert, DELETE → hard delete
+
+**Step 1 — Start the standard-mode streaming consumer (foreground for testing):**
+
+```bash
+# Scale up the standard deployment (or run directly for testing):
+kubectl scale deployment kafka-to-iceberg-standard -n prod --replicas=1
+kubectl rollout status deployment/kafka-to-iceberg-standard -n prod --timeout=120s
+
+# Verify pod is Running
+kubectl get pod -n prod -l pipeline.write-mode=standard
+```
+
+**Step 2 — Insert a new row into PostgreSQL source:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.products (sku, name, category, price, stock_qty, weight_kg, created_at)
+VALUES ('CDC-STD-001', 'Standard Mode Test Widget', 'Testing', 9.99, 5, 0.1, NOW());
+SELECT id, sku FROM products WHERE sku='CDC-STD-001';
+" 2>/dev/null
+```
+
+**Step 3 — Wait up to 60 s and verify the INSERT appeared in Iceberg:**
+
+```bash
+sleep 60
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t93-std')).getOrCreate()
+df = spark.sql(\"SELECT sku, name, snap_timestamp FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='CDC-STD-001'\")
+df.show()
+spark.stop()
+"
+# Expected: 1 row, sku=CDC-STD-001
+```
+
+**Step 4 — UPDATE the row and verify upsert (same PK, updated value):**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+UPDATE public.products SET price = 19.99 WHERE sku='CDC-STD-001';
+"
+sleep 60
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t93-upd')).getOrCreate()
+df = spark.sql(\"SELECT sku, price FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='CDC-STD-001'\")
+df.show()
+# Verify exactly 1 row (not 2 — upsert replaced the old value)
+count = spark.sql(\"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='CDC-STD-001'\").collect()[0]['n']
+print(f'Row count for CDC-STD-001: {count} (expected: 1)')
+spark.stop()
+"
+# Expected: price=19.99, row count=1 (upsert — not append)
+```
+
+**Step 5 — DELETE the row and verify hard delete:**
+
+```bash
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+DELETE FROM public.products WHERE sku='CDC-STD-001';
+"
+sleep 60
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t93-del')).getOrCreate()
+count = spark.sql(\"SELECT COUNT(*) AS n FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='CDC-STD-001'\").collect()[0]['n']
+print(f'Row count after DELETE: {count} (expected: 0 — hard deleted)')
+spark.stop()
+"
+# Expected: 0 rows — hard delete removed the row from Iceberg
+```
+
+✅ Pass: INSERT lands in Iceberg within 60 s; UPDATE upserts (row count stays 1, price updated);
+DELETE removes row entirely (count=0).
+
+❌ Fail: row count > 1 after UPDATE → MERGE not working; check Iceberg format-version is 2
+(`SHOW CREATE TABLE` should show `'format-version' = '2'`).
+
+❌ Fail: row still present after DELETE → `WHEN MATCHED THEN DELETE` not executing;
+check Debezium `tombstones.on.delete=false` and that `op=d` events are arriving.
+
+---
+
+### T-9.4 — Write mode: `soft_delete` — DELETE sets `is_deleted` flag
+
+**Step 1 — Switch to soft_delete mode (scale standard down, soft_delete up):**
+
+```bash
+kubectl scale deployment kafka-to-iceberg-standard    -n prod --replicas=0
+kubectl scale deployment kafka-to-iceberg-soft-delete -n prod --replicas=1
+kubectl rollout status deployment/kafka-to-iceberg-soft-delete -n prod --timeout=120s
+```
+
+**Step 2 — Insert, then delete a row:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.products (sku, name, category, price, stock_qty, weight_kg, created_at)
+VALUES ('CDC-SOFT-001', 'Soft Delete Test Widget', 'Testing', 7.77, 3, 0.1, NOW());
+"
+sleep 60   # wait for INSERT to land
+
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+DELETE FROM public.products WHERE sku='CDC-SOFT-001';
+"
+sleep 60   # wait for DELETE event to land
+```
+
+**Step 3 — Verify the row is still present but marked is_deleted=true:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t94-soft')).getOrCreate()
+df = spark.sql(\"SELECT sku, is_deleted, deleted_at FROM \`postgres\`.\`cache_testing\`.\`products\` WHERE sku='CDC-SOFT-001'\")
+df.show(truncate=False)
+spark.stop()
+"
+# Expected:
+#   sku=CDC-SOFT-001  is_deleted=true  deleted_at=<recent timestamp>
+# (row NOT physically removed — soft-delete flag set)
+```
+
+**Step 4 — Verify `is_deleted` and `deleted_at` columns exist on the table:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t94-cols')).getOrCreate()
+cols = [r['col_name'] for r in spark.sql(\"DESCRIBE TABLE \`postgres\`.\`cache_testing\`.\`products\`\").collect()]
+print('is_deleted:', 'is_deleted' in cols)
+print('deleted_at:', 'deleted_at' in cols)
+spark.stop()
+"
+# Expected:
+#   is_deleted: True
+#   deleted_at: True
+```
+
+✅ Pass: row present after DELETE; `is_deleted=true`; `deleted_at` is a recent timestamp.
+
+❌ Fail: `is_deleted` column missing → table was created before soft_delete mode; drop and
+re-create the Iceberg table so the schema includes the extra columns, then replay from Kafka.
+
+---
+
+### T-9.5 — Write mode: `history_tracking` — every event appended with `_change_type`
+
+**Step 1 — Switch to history_tracking mode:**
+
+```bash
+kubectl scale deployment kafka-to-iceberg-soft-delete        -n prod --replicas=0
+kubectl scale deployment kafka-to-iceberg-history-tracking   -n prod --replicas=1
+kubectl rollout status deployment/kafka-to-iceberg-history-tracking -n prod --timeout=120s
+```
+
+**Step 2 — Execute INSERT, UPDATE, DELETE in sequence:**
+
+```bash
+PG_POD=$(kubectl get pod -n prod -l app=postgresql -o name | head -1)
+
+# INSERT
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+INSERT INTO public.products (sku, name, category, price, stock_qty, weight_kg, created_at)
+VALUES ('CDC-HIST-001', 'History Test Widget', 'Testing', 5.55, 2, 0.1, NOW());
+"
+sleep 60
+
+# UPDATE
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+UPDATE public.products SET price = 6.66 WHERE sku='CDC-HIST-001';
+"
+sleep 60
+
+# DELETE
+kubectl exec -n prod "$PG_POD" -- psql -U postgres -d cache_testing -c "
+DELETE FROM public.products WHERE sku='CDC-HIST-001';
+"
+sleep 60
+```
+
+**Step 3 — Verify 3 rows in Iceberg (one per event), with correct `_change_type`:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t95-hist')).getOrCreate()
+df = spark.sql(\"\"\"
+    SELECT sku, price, _change_type, _change_ts
+    FROM \`postgres\`.\`cache_testing\`.\`products\`
+    WHERE sku='CDC-HIST-001'
+    ORDER BY _change_ts
+\"\"\")
+df.show(truncate=False)
+count = df.count()
+print(f'Total rows for CDC-HIST-001: {count} (expected: 3 — INSERT + UPDATE + DELETE)')
+spark.stop()
+"
+# Expected output:
+#   sku=CDC-HIST-001  price=5.55  _change_type=INSERT   _change_ts=<ts1>
+#   sku=CDC-HIST-001  price=6.66  _change_type=UPDATE   _change_ts=<ts2>
+#   sku=CDC-HIST-001  price=6.66  _change_type=DELETE   _change_ts=<ts3>
+#   Total rows: 3
+```
+
+**Step 4 — Verify `_change_type` and `_change_ts` columns exist on the table:**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t95-cols')).getOrCreate()
+cols = [r['col_name'] for r in spark.sql(\"DESCRIBE TABLE \`postgres\`.\`cache_testing\`.\`products\`\").collect()]
+print('_change_type:', '_change_type' in cols)
+print('_change_ts:  ', '_change_ts'   in cols)
+spark.stop()
+"
+# Expected:
+#   _change_type: True
+#   _change_ts:   True
+```
+
+✅ Pass: exactly 3 rows for the test SKU; `_change_type` values are INSERT, UPDATE, DELETE in order.
+
+❌ Fail: only 1 or 2 rows → check the Debezium connector `skipped.operations` config (must be `none`)
+and verify the streaming query is active.
+
+❌ Fail: `_change_type=UNKNOWN` → Debezium `op` field is not `c/u/d` — check connector config for
+`capture.mode` (MongoDB) or `snapshot.mode` (Oracle/Postgres).
+
+---
+
+### T-9.6 — Auto-restart: streaming job restarts on failure
+
+**Step 1 — Force-kill the streaming pod and verify K8s restarts it:**
+
+```bash
+# Get the current pod name
+STREAM_POD=$(kubectl get pod -n prod -l app=kafka-to-iceberg -o name | head -1)
+echo "Current pod: $STREAM_POD"
+
+# Force-kill the pod (simulates crash)
+kubectl delete pod -n prod "$STREAM_POD" --grace-period=0 --force
+
+# Wait for replacement pod to start
+sleep 15
+kubectl get pod -n prod -l app=kafka-to-iceberg
+# Expected: a NEW pod in Running state (K8s restarted it automatically)
+
+# Verify restart count
+kubectl get pod -n prod -l app=kafka-to-iceberg -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}'
+# Expected: 1 (at least one restart recorded)
+```
+
+✅ Pass: new pod started within 30 s; restart count ≥ 1.
+❌ Fail: pod stays in `CrashLoopBackOff` → check `kubectl logs -n prod <pod>` for Python errors;
+most likely a missing JAR or OpenBao auth failure on restart.
+
+---
+
+### T-9.7 — Interactive wrapper: `start_cdc_streaming.sh`
+
+```bash
+# Test argument-mode (non-interactive — no TTY needed):
+spark_exec bash -c "
+  cd /opt/spark/scripts && \
+  DRY_RUN=1 WRITE_MODE='' bash start_cdc_streaming.sh soft_delete
+"
+# Expected:
+#   ════════════════════════════════════════════════════════
+#    Kafka → Iceberg CDC Streaming Consumer
+#   ════════════════════════════════════════════════════════
+#   Write mode   : soft_delete (from argument)
+#   Starting streaming consumer …
+#   … DRY_RUN — no writes performed …
+```
+
+```bash
+# Test env-var mode (WRITE_MODE already set):
+spark_exec bash -c "
+  cd /opt/spark/scripts && \
+  DRY_RUN=1 WRITE_MODE=history_tracking bash start_cdc_streaming.sh
+"
+# Expected: writes mode = history_tracking (from WRITE_MODE env)
+```
+
+```bash
+# Test invalid mode:
+spark_exec bash -c "
+  cd /opt/spark/scripts && \
+  bash start_cdc_streaming.sh bad_mode; echo \"Exit: \$?\"
+"
+# Expected: ERROR message + Exit: 1
+```
+
+✅ Pass: all three sub-cases behave as expected.
+
+---
+
+### T-9.8 — Oracle and MongoDB: write modes apply to all sources
+
+Repeat **T-9.3** (standard) or **T-9.5** (history_tracking) against the Oracle or MongoDB source
+to confirm write modes are source-agnostic.
+
+**Oracle quick check (history_tracking):**
+
+```bash
+# Verify Oracle streaming produces _change_type rows for tpcds tables
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t98-ora')).getOrCreate()
+# Check if _change_type column is present (only if history_tracking mode was active)
+cols = [r['col_name'] for r in spark.sql(\"DESCRIBE TABLE \`oracle\`.\`tpcds\`.\`warehouse\`\").collect()]
+print('_change_type present:', '_change_type' in cols)
+spark.stop()
+"
+```
+
+**MongoDB quick check (soft_delete):**
+
+```bash
+spark_exec python3 -c "
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf('t98-mgo')).getOrCreate()
+cols = [r['col_name'] for r in spark.sql(\"DESCRIBE TABLE \`mongodb\`.\`cache_testing\`.\`products\`\").collect()]
+print('is_deleted present:', 'is_deleted' in cols)
+print('deleted_at present:', 'deleted_at' in cols)
+spark.stop()
+"
+```
+
+✅ Pass: expected extra columns present for the active write mode.
+
+---
+
+### T-9 Test Checklist Summary
+
+| # | Test | Expected result |
+|---|---|---|
+| 9.1 | Manifests applied | 3 Deployments + ConfigMap created |
+| 9.2 | Invalid WRITE_MODE | Exit 1 + error message |
+| 9.3 | standard: INSERT/UPDATE/DELETE | Upsert works, hard delete removes row |
+| 9.4 | soft_delete: DELETE | Row kept, `is_deleted=true`, `deleted_at` set |
+| 9.5 | history_tracking: 3 events | 3 rows in Iceberg, correct `_change_type` |
+| 9.6 | Auto-restart on pod kill | New pod starts, restart count increments |
+| 9.7 | Interactive wrapper | Arg/env/invalid-mode all handled correctly |
+| 9.8 | Oracle + MongoDB write modes | Extra columns present for active mode |
