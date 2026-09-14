@@ -2277,52 +2277,22 @@ def _copy_table(
                     )
                 else:
                     # No prior watermark (first run crashed before writing one).
+                    # Capture a fresh ts but do NOT write it yet — only write on
+                    # success so a subsequent failure cannot poison the watermark.
                     sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                     logger.info(
                         "[%s] RESUME: %d rows in Iceberg but no prior watermark — "
                         "fresh extraction_ts=%s, starting at offset=%d.",
                         table, already_written, sf_extraction_ts, already_written,
                     )
-                    try:
-                        pg_upsert_watermark(
-                            pg                = pg_creds,
-                            source_db         = DATABASE,
-                            source_schema     = SCHEMAS,
-                            table_name        = table,
-                            sf_extraction_ts  = sf_extraction_ts,
-                            rows_copied       = already_written,
-                            iceberg_namespace = ICEBERG_NAMESPACE,
-                        )
-                        logger.info("[%s] Early watermark written to pipeline DB (resume fallback).", table)
-                    except Exception as _pg_err:
-                        logger.warning(
-                            "[%s] Could not write early watermark to pipeline DB: %s",
-                            table, _pg_err,
-                        )
             else:
                 # Incremental run (watermark filter active) or fresh full copy:
-                # always capture a fresh CDC sync-point from the source NOW,
-                # before the first batch.  This becomes the new watermark that
-                # gets written at the end of the run, advancing the window.
+                # capture a fresh CDC sync-point from the source NOW, before the
+                # first batch.  Written to the pipeline DB only on success (below).
+                # Never written here — writing before the copy completes means a
+                # failed run permanently advances the watermark past un-copied rows.
                 sf_extraction_ts = connector.capture_ts(spark, conn_opts)
                 logger.info("[%s] extraction_ts=%s (CDC sync point)", table, sf_extraction_ts)
-
-                try:
-                    pg_upsert_watermark(
-                        pg                = pg_creds,
-                        source_db         = DATABASE,
-                        source_schema     = SCHEMAS,
-                        table_name        = table,
-                        sf_extraction_ts  = sf_extraction_ts,
-                        rows_copied       = 0,
-                        iceberg_namespace = ICEBERG_NAMESPACE,
-                    )
-                    logger.info("[%s] Early watermark written to pipeline DB.", table)
-                except Exception as _pg_err:
-                    logger.warning(
-                        "[%s] Could not write early watermark to pipeline DB: %s",
-                        table, _pg_err,
-                    )
 
             # ── Batched sequential copy ────────────────────────────────────
             iceberg_cols  = [f.name for f in iceberg_schema.fields]
@@ -2545,7 +2515,9 @@ def _copy_table(
                     )
 
                     if _write_mode == "standard":
-                        # Hard DELETE: remove Iceberg rows not in live-PK set
+                        # Hard DELETE: remove Iceberg rows not in live-PK set.
+                        # No is_deleted guard — standard mode never adds that
+                        # column; the filter would raise UNRESOLVED_COLUMN.
                         del_sql = f"""
                             MERGE INTO {fqn} t
                             USING (
@@ -2553,7 +2525,6 @@ def _copy_table(
                                 FROM {fqn} t2
                                 LEFT ANTI JOIN {_live_tmp} s
                                 ON {on_clause.replace('t.`', 't2.`')}
-                                WHERE t2.`is_deleted` IS NULL OR t2.`is_deleted` = false
                             ) gone
                             ON {on_clause.replace('s.`', 'gone.`')}
                             WHEN MATCHED THEN DELETE
