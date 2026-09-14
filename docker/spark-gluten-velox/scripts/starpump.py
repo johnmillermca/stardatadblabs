@@ -2434,6 +2434,15 @@ def _copy_table(
                     )
                 else:
                     # standard / soft_delete — MERGE upsert pass ─────────────
+                    # Materialise `final` before registering the temp view.
+                    # `final` contains monotonically_increasing_id() and
+                    # current_timestamp() — both non-deterministic.  Iceberg's
+                    # MERGE planner requires the source side to be deterministic
+                    # (INVALID_NON_DETERMINISTIC_EXPRESSIONS).  Caching forces
+                    # Spark to evaluate those expressions once into concrete
+                    # values; the temp view then references only stored data.
+                    final.cache()
+                    final.count()   # force materialisation
                     _tmp = f"_starpump_src_{table.replace('.','_')}"
                     final.createOrReplaceTempView(_tmp)
                     merge_sql = _build_merge_sql(
@@ -2448,6 +2457,7 @@ def _copy_table(
                         "MERGE INTO (upsert)",
                     )
                     spark.catalog.dropTempView(_tmp)
+                    final.unpersist()
 
                 batch.unpersist()
 
