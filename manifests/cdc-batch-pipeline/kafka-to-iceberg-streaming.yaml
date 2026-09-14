@@ -82,18 +82,18 @@ spec:
       # restartPolicy for pods in a Deployment must be Always.
       # K8s restarts the pod automatically on any non-zero exit code.
       restartPolicy: Always
-      serviceAccountName: spark-service-account
+      serviceAccountName: spark-cleanup
       # Allow generous time for the Spark session to flush and checkpoint
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:latest
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-12
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
             - -c
             - |
-              cd /opt/spark/scripts && \
+              cd /opt/spark/work-dir && \
               exec python3 05_kafka_to_iceberg_streaming.py
           env:
             - name: USER
@@ -176,17 +176,17 @@ spec:
         pipeline.write-mode: soft-delete
     spec:
       restartPolicy: Always
-      serviceAccountName: spark-service-account
+      serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:latest
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-12
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
             - -c
             - |
-              cd /opt/spark/scripts && \
+              cd /opt/spark/work-dir && \
               exec python3 05_kafka_to_iceberg_streaming.py
           env:
             - name: USER
@@ -266,17 +266,17 @@ spec:
         pipeline.write-mode: history-tracking
     spec:
       restartPolicy: Always
-      serviceAccountName: spark-service-account
+      serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:latest
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-12
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
             - -c
             - |
-              cd /opt/spark/scripts && \
+              cd /opt/spark/work-dir && \
               exec python3 05_kafka_to_iceberg_streaming.py
           env:
             - name: USER
