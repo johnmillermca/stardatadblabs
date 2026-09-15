@@ -16,6 +16,16 @@
 #   kubectl scale deployment kafka-to-iceberg-soft-delete -n prod --replicas=0
 #   kubectl scale deployment kafka-to-iceberg-history-tracking -n prod --replicas=0
 #
+# Script delivery
+# ───────────────
+# 05_kafka_to_iceberg_streaming.py is NOT baked into the spark-gluten-velox
+# image.  It is delivered via the kafka-to-iceberg-script ConfigMap and
+# mounted into every pod at /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+# (overlaying the image filesystem at that path).
+# To update the script: kubectl create configmap kafka-to-iceberg-script
+#   --from-file=... --dry-run=client -o yaml | kubectl apply -f -
+# Running pods pick up the new version on their next restart.
+#
 # Auto-restart
 # ─────────────
 # Kubernetes restartPolicy (built into Deployment): Always.
@@ -26,8 +36,6 @@
 # terminated pod and restart it.
 #
 # Namespaces: prod
-# Image: uses the existing spark-gluten-velox image which already contains
-#        05_kafka_to_iceberg_streaming.py, bao_spark_init.py, and all JARs.
 # =============================================================================
 
 # ── ConfigMap: shared streaming config ───────────────────────────────────────
@@ -50,6 +58,19 @@ data:
   RESTART_BACKOFF_MAX_S:   "120"
   DRY_RUN:                 "0"
   ADDR:                    "http://openbao.prod.svc.cluster.local:8200"
+  # Peak-hour performance tuning
+  # MERGE_PARALLELISM: shuffle partitions for MERGE ops (raise during peak loads)
+  MERGE_PARALLELISM:            "8"
+  # COALESCE_BEFORE_MERGE: coalesce batch partitions before MERGE to reduce small files
+  COALESCE_BEFORE_MERGE:        "4"
+  # ADAPTIVE_COALESCE_TARGET: AQE target bytes per post-shuffle partition (64 MB)
+  ADAPTIVE_COALESCE_TARGET:     "67108864"
+  # TRANSFORM_PIPELINE: comma-separated StarTransform steps applied before write-mode handler.
+  # Available: deduplicate, add_processing_time, add_op_label, add_source_tag, mask_pii
+  # Leave empty ("") to disable all transforms (default).
+  TRANSFORM_PIPELINE:           ""
+  # PII_COLUMNS: comma-separated column names to SHA-256 hash when mask_pii is active.
+  PII_COLUMNS:                  "email,phone,phone_number,ssn,credit_card"
 
 # ── Deployment: standard write mode ──────────────────────────────────────────
 
@@ -137,16 +158,54 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
           resources:
             requests:
               memory: "4Gi"
-              cpu: "1"
+              cpu: "2"
             limits:
               memory: "8Gi"
               cpu: "4"
-          # Liveness: check that the Spark driver process is alive by verifying
-          # the streaming process is still running (the pod stays alive as long
-          # as the python process is running; K8s restarts it when it exits).
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
 
 # ── Deployment: soft_delete write mode ───────────────────────────────────────
 
@@ -230,13 +289,54 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
           resources:
             requests:
               memory: "4Gi"
-              cpu: "1"
+              cpu: "2"
             limits:
               memory: "8Gi"
               cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
 
 # ── Deployment: history_tracking write mode ───────────────────────────────────
 
@@ -320,10 +420,51 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
           resources:
             requests:
               memory: "4Gi"
-              cpu: "1"
+              cpu: "2"
             limits:
               memory: "8Gi"
               cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script

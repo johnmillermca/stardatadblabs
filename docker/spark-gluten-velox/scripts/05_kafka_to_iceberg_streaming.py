@@ -4,55 +4,79 @@
 ================================
 Spark Structured Streaming consumer — Debezium CDC → Iceberg via Polaris REST.
 
-Three write modes, configurable per-run via the WRITE_MODE environment variable
-(or selected interactively when running start_cdc_streaming.sh):
+Three write modes, configurable per-run via the WRITE_MODE environment variable:
 
   standard         SCD Type 0 — MERGE INTO Iceberg by PK.
-                   INSERT/UPDATE → upsert (overwrite matched + insert new).
-                   DELETE        → hard delete the matched row from Iceberg.
+                   INSERT/UPDATE (op c/u/r) → upsert (match update + insert new).
+                   DELETE        (op d)     → hard delete the matched row.
 
   soft_delete      MERGE upsert for INSERT/UPDATE.
                    DELETE event  → set is_deleted=true, deleted_at=<now()>.
                    Row is never physically removed.
 
   history_tracking Always INSERT into Iceberg — never UPDATE or DELETE.
-                   Every CDC event appended with _change_type (INSERT/UPDATE/DELETE)
-                   and _change_ts columns to preserve full row history.
+                   Every CDC event appended with:
+                     _change_type  (INSERT/UPDATE/DELETE)
+                     _change_ts    (wall-clock at pipeline processing time)
+                     before_*      columns (before image from source DB for UPDATE/DELETE)
+                     after_*       columns (after  image from source DB for INSERT/UPDATE)
+                   Full row-level before/after history preserved.
 
 Source → topic → Iceberg target mapping
 ----------------------------------------
   postgres  : postgres.cache_testing.*  → postgres.cache_testing.<table>
   oracle    : oracle.tpcds.*            → oracle.tpcds.<table>
+              oracle.cache_testing.*    → oracle.cache_testing.<table>
   mongodb   : mongodb.cache_testing.*   → mongodb.cache_testing.<table>
 
-Architecture
+star_transform integration
+--------------------------
+A TRANSFORM_PIPELINE env-var (comma-separated step names) allows optional
+StarTransform steps to run on every micro-batch before the write-mode handler:
+
+  TRANSFORM_PIPELINE=deduplicate,add_processing_time,mask_pii
+
+Available built-in pipeline step names (see TRANSFORM_REGISTRY below):
+  deduplicate          — last-write-wins dedup per PK within the batch
+  add_processing_time  — inject proc_time TIMESTAMP
+  add_op_label         — inject human-readable op_label (INSERT/UPDATE/DELETE)
+  add_source_tag       — inject source_system STRING
+  mask_pii             — SHA-256 hash columns listed in PII_COLUMNS env-var
+
+For custom transformations call StarTransform functions directly inside a
+custom foreachBatch hook and pass it via the CUSTOM_TRANSFORM_MODULE env-var.
+
+Performance (peak-hour) tuning
+-------------------------------
+• MAX_OFFSETS_PER_TRIGGER   — cap Kafka offsets per micro-batch (back-pressure)
+• TRIGGER_INTERVAL          — micro-batch window (default 2 seconds)
+• MERGE_PARALLELISM         — spark.sql.shuffle.partitions for MERGE operations
+• COALESCE_BEFORE_MERGE     — coalesce batch partitions before MERGE (reduces
+                              small-file write amplification under high load)
+• ADAPTIVE_COALESCE_TARGET  — target bytes per post-shuffle partition (AQE)
+
+Snap columns
 ------------
-• One Spark Structured Streaming query per source (three queries total), each
-  reading from a regex topic pattern.
-• Avro deserialisation via a Python UDF backed by the Confluent Schema Registry
-  client; falls back to plain-JSON if confluent-kafka is unavailable.
-• Micro-batch interval: 2 seconds (TRIGGER_INTERVAL default).  All Kafka
-  messages received within each 2-second window are grouped into one batch,
-  flattened from the Debezium envelope, and applied to Iceberg as a single
-  MERGE operation per table.  This keeps write amplification low while
-  ensuring sub-5-second end-to-end latency from source commit to Iceberg.
-• After every foreachBatch write completes the table's metadata cache is
-  refreshed (REFRESH TABLE) so downstream readers immediately see the new
-  snapshot, then the streaming query is restarted cleanly so the next
-  2-second window begins from a clean Spark execution context.
-• Checkpoint: s3://xdatatoiceberg1/checkpoints/streaming/<source>/<write_mode>
-• Iceberg MERGE requires format-version 2 (set at table creation).
-• Schema evolution: mergeSchema=true on append / auto ADD COLUMN on MERGE.
+• snap_id        BIGINT    — monotonically_increasing_id() per row (unique within batch)
+• snap_timestamp TIMESTAMP — current_timestamp() at write time (same for all rows in batch)
+Both are injected per write-mode handler, not by IcebergTableBuilder.write_append(),
+so MERGE operations (standard/soft_delete) can include them in SET clauses.
+
+Iceberg partitioning (applied at table creation)
+-------------------------------------------------
+  hours(snap_timestamp)   — hourly partition for time-range pruning
+  bucket(16, <pk_col>)    — 16 hash buckets within each hour for data distribution
+
+Checkpoints
+-----------
+  s3://xdatatoiceberg1/checkpoints/streaming/<source>/<write_mode>
 
 Auto-restart
 ------------
-• Kubernetes restartPolicy: Always ensures the pod restarts on failure.
-• An internal retry loop (MAX_RESTART_ATTEMPTS / RESTART_BACKOFF_BASE_S)
-  re-initialises Spark and all streams on any unexpected query termination
-  before letting the pod exit and trigger the K8s restart.
-• Per-batch restart: after each 2-second batch is committed to Iceberg the
-  streaming query is stopped and immediately restarted so the Spark execution
-  plan is refreshed.  The checkpoint ensures no events are replayed.
+• Kubernetes restartPolicy: Always (pod-level).
+• Internal exponential-backoff retry loop (MAX_RESTART_ATTEMPTS / RESTART_BACKOFF_BASE_S).
+• Per-batch restart: after each committed micro-batch the streaming query is
+  stopped and immediately restarted from checkpoint — fresh Spark context per batch.
 
 Credentials
 -----------
@@ -60,18 +84,12 @@ All from OpenBao via BaoSparkInit — never hardcoded.
 
 Usage
 -----
-  # Run all three sources with standard write mode (default):
   SPARK_USER=dave WRITE_MODE=standard python3 05_kafka_to_iceberg_streaming.py
-
-  # Soft-delete mode, postgres only:
   SPARK_USER=dave WRITE_MODE=soft_delete SOURCE=postgres \\
-    python3 05_kafka_to_iceberg_streaming.py
-
-  # History-tracking mode:
+      python3 05_kafka_to_iceberg_streaming.py
   SPARK_USER=dave WRITE_MODE=history_tracking \\
-    python3 05_kafka_to_iceberg_streaming.py
-
-  # Dry-run (stream, do not write to Iceberg):
+      TRANSFORM_PIPELINE=deduplicate,add_processing_time \\
+      python3 05_kafka_to_iceberg_streaming.py
   DRY_RUN=1 SPARK_USER=dave python3 05_kafka_to_iceberg_streaming.py
 """
 
@@ -98,6 +116,7 @@ from pyspark.sql.types import (
 
 from bao_spark_init import BaoSparkInit
 from spark_iceberg_utils import IcebergTableBuilder
+from star_transform import StarTransform as ST
 from importlib import import_module as _imod
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -125,7 +144,7 @@ WRITE_MODE  = os.environ.get("WRITE_MODE", _WRITE_MODE_STANDARD).lower()
 _SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
 
 # Auto-restart loop config
-MAX_RESTART_ATTEMPTS  = int(os.environ.get("MAX_RESTART_ATTEMPTS", "10"))
+MAX_RESTART_ATTEMPTS   = int(os.environ.get("MAX_RESTART_ATTEMPTS", "10"))
 RESTART_BACKOFF_BASE_S = float(os.environ.get("RESTART_BACKOFF_BASE_S", "5"))
 RESTART_BACKOFF_MAX_S  = float(os.environ.get("RESTART_BACKOFF_MAX_S", "120"))
 
@@ -134,11 +153,35 @@ SR_URL          = "http://schema-registry.prod.svc.cluster.local:8081"
 S3_BUCKET       = "xdatatoiceberg1"
 
 # Streaming micro-batch trigger interval.
-# Default: 2 seconds — all events received within each 2-second window are
-# grouped into one batch and applied to Iceberg as a single MERGE operation.
 TRIGGER_INTERVAL = os.environ.get("TRIGGER_INTERVAL", "2 seconds")
-# Max Kafka offsets consumed per trigger (back-pressure)
+
+# Back-pressure: max Kafka offsets consumed per trigger.
 MAX_OFFSETS_PER_TRIGGER = int(os.environ.get("MAX_OFFSETS_PER_TRIGGER", "50000"))
+
+# Peak-hour performance tuning
+# Number of shuffle partitions used during MERGE operations.
+# Lower = fewer tasks = faster for small-medium batches; raise for large peak batches.
+MERGE_PARALLELISM = int(os.environ.get("MERGE_PARALLELISM", "8"))
+
+# Coalesce batch DataFrame partitions to this count before MERGE.
+# Avoids writing many small Parquet files under high write amplification.
+COALESCE_BEFORE_MERGE = int(os.environ.get("COALESCE_BEFORE_MERGE", "4"))
+
+# AQE adaptive coalesce target bytes per post-shuffle partition (64 MB default).
+ADAPTIVE_COALESCE_TARGET = os.environ.get("ADAPTIVE_COALESCE_TARGET", "67108864")
+
+# ── StarTransform pipeline config ─────────────────────────────────────────────
+# Comma-separated list of built-in transform step names to apply before
+# each write-mode handler.  Example: "deduplicate,add_processing_time"
+_TRANSFORM_PIPELINE_ENV = os.environ.get("TRANSFORM_PIPELINE", "").strip()
+_TRANSFORM_STEPS = [s.strip() for s in _TRANSFORM_PIPELINE_ENV.split(",") if s.strip()]
+
+# PII columns to hash when the "mask_pii" step is in TRANSFORM_PIPELINE.
+_PII_COLUMNS = [
+    c.strip()
+    for c in os.environ.get("PII_COLUMNS", "email,phone,phone_number,ssn,credit_card").split(",")
+    if c.strip()
+]
 
 
 # ── Validate write mode ───────────────────────────────────────────────────────
@@ -158,11 +201,11 @@ class _StreamingSource:
     def __init__(
         self,
         source_key:    str,
-        topic_pattern: str,        # regex: subscribed by Kafka source
+        topic_pattern: str,
         catalog:       str,
         namespace:     str,
-        pk_col:        str,        # primary key column name for MERGE conditions
-        s3_prefix:     str,        # path under s3://<bucket>/
+        pk_col:        str,
+        s3_prefix:     str,
     ) -> None:
         self.source_key    = source_key
         self.topic_pattern = topic_pattern
@@ -186,7 +229,7 @@ _ALL_SOURCES: list[_StreamingSource] = [
     ),
     _StreamingSource(
         source_key    = "oracle",
-        topic_pattern = "oracle\\.tpcds\\..*",
+        topic_pattern = "oracle\\.(tpcds|cache_testing|TPCDS|CACHE_TESTING)\\..*",
         catalog       = "oracle",
         namespace     = "tpcds",
         pk_col        = "id",
@@ -214,18 +257,15 @@ if _SOURCE_FILTER:
 
 
 # ── Debezium envelope schema ───────────────────────────────────────────────────
-# Debezium wraps CDC events in an envelope:
-#   { "before": {...}, "after": {...}, "op": "c/u/d/r", "source": {...}, "ts_ms": <N> }
-# We use a string-typed schema here (payload arrives as JSON string after
-# Avro deserialisation because Debezium uses a nested JSON-in-Avro pattern
-# for the payload fields when schema.registry is in use).
+# Debezium envelope: { before, after, op, source, ts_ms }
+# before and after arrive as JSON strings (nested JSON-in-Avro pattern).
 
 _DEBEZIUM_ENVELOPE_SCHEMA = StructType([
-    StructField("before",  StringType(), True),   # JSON string of before image
-    StructField("after",   StringType(), True),   # JSON string of after  image
+    StructField("before",  StringType(), True),   # JSON: before image (UPDATE/DELETE)
+    StructField("after",   StringType(), True),   # JSON: after  image (INSERT/UPDATE)
     StructField("op",      StringType(), True),   # c=create, u=update, d=delete, r=read
-    StructField("source",  StringType(), True),   # JSON string with source metadata
-    StructField("ts_ms",   LongType(),   True),   # event timestamp in millis
+    StructField("source",  StringType(), True),   # JSON: source metadata
+    StructField("ts_ms",   LongType(),   True),   # source-side event timestamp millis
 ])
 
 
@@ -234,7 +274,8 @@ _DEBEZIUM_ENVELOPE_SCHEMA = StructType([
 def _build_avro_deserialize_udf(_sr_url: str) -> Any:
     """
     Build a Python UDF that deserialises a Confluent Avro-encoded byte array
-    (with the 5-byte magic header) to a JSON string.
+    (5-byte magic header: 0x00 + 4-byte schema ID + avro payload) to a JSON string.
+    Falls back to UTF-8 decode if the magic byte is absent (plain JSON mode).
     """
     import io
     import struct as _struct
@@ -243,8 +284,8 @@ def _build_avro_deserialize_udf(_sr_url: str) -> Any:
         if raw_bytes is None:
             return None
         try:
-            # Confluent wire format: magic byte (0x00) + 4-byte schema ID + avro payload
             if len(raw_bytes) < 5 or raw_bytes[0] != 0:
+                # Not Confluent wire format — treat as plain UTF-8 JSON
                 return raw_bytes.decode("utf-8", errors="replace")
             from confluent_kafka.schema_registry import SchemaRegistryClient
             _sr = SchemaRegistryClient({"url": _sr_url})
@@ -268,20 +309,70 @@ def _build_avro_deserialize_udf(_sr_url: str) -> Any:
 
 def _topic_to_table(topic: str, source: _StreamingSource) -> str:
     """
-    Derive the Iceberg table name from a Kafka topic.
+    Derive the Iceberg table name from a Kafka topic name.
     e.g. "postgres.cache_testing.customers" → "customers"
+         "oracle.tpcds.CALL_CENTER"         → "call_center"
     """
-    prefix = source.topic_pattern.replace("\\.", ".").replace(".*", "")
-    return topic.replace(prefix, "").lower()
+    import re
+    # Strip the source prefix (e.g. "oracle.(tpcds|cache_testing).")
+    # Use a simple split: take the last segment and lowercase it.
+    parts = topic.split(".")
+    return parts[-1].lower() if parts else ""
 
 
-# ── Write-mode helpers ────────────────────────────────────────────────────────
+def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
+    """
+    Derive the Iceberg namespace from a Kafka topic name.
+    e.g. "oracle.tpcds.INCOME_BAND"     → "tpcds"
+         "oracle.cache_testing.ORDERS"  → "cache_testing"
+         "postgres.cache_testing.orders"→ "cache_testing"
+    """
+    parts = topic.split(".")
+    # parts[0]=prefix (oracle/postgres/mongodb), parts[1]=namespace, parts[2]=table
+    return parts[1].lower() if len(parts) >= 3 else source.namespace
+
+
+# ── StarTransform built-in pipeline registry ──────────────────────────────────
+
+def _build_transform_pipeline(
+    source_key: str,
+    pk_col:     str,
+) -> list[tuple[Any, dict]]:
+    """
+    Build the list of (fn, kwargs) steps from TRANSFORM_STEPS env config.
+    Called once per source at stream startup.
+    """
+    registry: dict[str, tuple[Any, dict]] = {
+        "deduplicate":         (ST.deduplicate,         {"pk": pk_col, "order_col": "kafka_ts"}),
+        "add_processing_time": (ST.add_processing_time, {}),
+        "add_op_label":        (ST.add_op_label,        {}),
+        "add_source_tag":      (ST.add_source_tag,      {"source_system": source_key}),
+        "mask_pii":            (ST.mask_columns,        {"columns": _PII_COLUMNS}),
+    }
+    steps = []
+    for step_name in _TRANSFORM_STEPS:
+        if step_name in registry:
+            steps.append(registry[step_name])
+        else:
+            logger.warning(
+                "[%s] Unknown TRANSFORM_PIPELINE step %r — skipped. "
+                "Available: %s",
+                source_key, step_name, list(registry.keys()),
+            )
+    if steps:
+        logger.info(
+            "[%s] StarTransform pipeline: %s",
+            source_key, [s for s in _TRANSFORM_STEPS if s in registry],
+        )
+    return steps
+
+
+# ── Write-mode handlers ────────────────────────────────────────────────────────
 
 def _apply_standard(
-    spark:       SparkSession,
-    payload_df:  DataFrame,
+    spark:        SparkSession,
+    payload_df:   DataFrame,
     fqn_backtick: str,
-    fqn_plain:    str,
     pk_col:       str,
     source_key:   str,
     table_name:   str,
@@ -289,74 +380,88 @@ def _apply_standard(
 ) -> None:
     """
     SCD Type 0 — MERGE INTO Iceberg by PK.
-    INSERT/UPDATE (op c/u/r) → MATCHED UPDATE + NOT MATCHED INSERT (upsert).
-    DELETE        (op d)     → MATCHED DELETE.
+
+    INSERT/UPDATE/snapshot (op c/u/r):
+      MERGE MATCHED     → UPDATE all columns including snap_id + snap_timestamp
+      MERGE NOT MATCHED → INSERT all columns
+
+    DELETE (op d):
+      MERGE MATCHED → DELETE row from Iceberg (hard delete)
     """
+    spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
+
     inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
     deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
         final_df = (
             inserts
+            .coalesce(COALESCE_BEFORE_MERGE)
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
             .withColumn("snap_timestamp", current_timestamp())
         )
-        # MERGE upsert: match on pk_col, update all cols on match, insert on no match
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceTempView(tmp_view)
-
-        # Build SET clause dynamically from the DataFrame schema
         set_clause = ", ".join(
-            f"t.{f.name} = s.{f.name}"
+            f"t.`{f.name}` = s.`{f.name}`"
             for f in final_df.schema.fields
         )
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
             USING {tmp_view} AS s
-            ON t.{pk_col} = s.{pk_col}
+            ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
             WHEN NOT MATCHED THEN INSERT *
         """)
         logger.info(
-            "[%s/%s][standard] batch_id=%d upsert rows=%d",
+            "[%s/%s][standard] batch=%d upsert rows=%d",
             source_key, table_name, batch_id, final_df.count(),
         )
 
     if not deletes.isEmpty():
         del_view = f"__cdc_delete_{source_key}_{table_name}_{batch_id}"
-        deletes.select(pk_col).createOrReplaceTempView(del_view)
+        deletes.select(pk_col).coalesce(1).createOrReplaceTempView(del_view)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
             USING {del_view} AS s
-            ON t.{pk_col} = s.{pk_col}
+            ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN DELETE
         """)
         logger.info(
-            "[%s/%s][standard] batch_id=%d hard-delete rows=%d",
+            "[%s/%s][standard] batch=%d hard-delete rows=%d",
             source_key, table_name, batch_id, deletes.count(),
         )
 
 
 def _apply_soft_delete(
-    spark:       SparkSession,
-    payload_df:  DataFrame,
+    spark:        SparkSession,
+    payload_df:   DataFrame,
     fqn_backtick: str,
-    fqn_plain:    str,
     pk_col:       str,
     source_key:   str,
     table_name:   str,
     batch_id:     int,
 ) -> None:
     """
-    MERGE upsert for INSERT/UPDATE.
-    DELETE event → set is_deleted=true, deleted_at=now().  Row never physically removed.
+    SCD soft-delete — MERGE upsert for INSERT/UPDATE; flag-only for DELETE.
+
+    INSERT/UPDATE/snapshot (op c/u/r):
+      MERGE MATCHED     → UPDATE all columns; is_deleted=false, deleted_at=NULL
+      MERGE NOT MATCHED → INSERT with is_deleted=false, deleted_at=NULL
+
+    DELETE (op d):
+      MERGE MATCHED → UPDATE SET is_deleted=true, deleted_at=<now>
+      Row is never physically removed from Iceberg.
     """
+    spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
+
     inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
     deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
         final_df = (
             inserts
+            .coalesce(COALESCE_BEFORE_MERGE)
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
             .withColumn("snap_timestamp", current_timestamp())
             .withColumn("is_deleted",     lit(False).cast(BooleanType()))
@@ -365,74 +470,114 @@ def _apply_soft_delete(
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceTempView(tmp_view)
         set_clause = ", ".join(
-            f"t.{f.name} = s.{f.name}"
+            f"t.`{f.name}` = s.`{f.name}`"
             for f in final_df.schema.fields
         )
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
             USING {tmp_view} AS s
-            ON t.{pk_col} = s.{pk_col}
+            ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
             WHEN NOT MATCHED THEN INSERT *
         """)
         logger.info(
-            "[%s/%s][soft_delete] batch_id=%d upsert rows=%d",
+            "[%s/%s][soft_delete] batch=%d upsert rows=%d",
             source_key, table_name, batch_id, final_df.count(),
         )
 
     if not deletes.isEmpty():
         del_view = f"__cdc_softdel_{source_key}_{table_name}_{batch_id}"
-        # Only pk_col + soft-delete flags needed to match and update
         soft_del_df = (
             deletes.select(pk_col)
-            .withColumn("is_deleted", lit(True).cast(BooleanType()))
-            .withColumn("deleted_at", current_timestamp())
+            .coalesce(1)
+            .withColumn("is_deleted",     lit(True).cast(BooleanType()))
+            .withColumn("deleted_at",     current_timestamp())
+            .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+            .withColumn("snap_timestamp", current_timestamp())
         )
         soft_del_df.createOrReplaceTempView(del_view)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
             USING {del_view} AS s
-            ON t.{pk_col} = s.{pk_col}
+            ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET
-                t.is_deleted = true,
-                t.deleted_at = s.deleted_at
+                t.is_deleted     = s.is_deleted,
+                t.deleted_at     = s.deleted_at,
+                t.snap_id        = s.snap_id,
+                t.snap_timestamp = s.snap_timestamp
         """)
         logger.info(
-            "[%s/%s][soft_delete] batch_id=%d soft-delete rows=%d",
+            "[%s/%s][soft_delete] batch=%d soft-delete rows=%d",
             source_key, table_name, batch_id, deletes.count(),
         )
 
 
 def _apply_history_tracking(
-    spark:       SparkSession,
-    payload_df:  DataFrame,
+    spark:        SparkSession,
+    payload_df:   DataFrame,
     fqn_backtick: str,
     fqn_plain:    str,
     pk_col:       str,
     source_key:   str,
     table_name:   str,
     batch_id:     int,
+    before_schema: Any,
+    after_schema:  Any,
 ) -> None:
     """
-    Always INSERT into Iceberg — never UPDATE or DELETE.
-    Each event appended with _change_type (INSERT/UPDATE/DELETE) and _change_ts.
-    Full row history is preserved.
+    Append-only history tracking — every CDC event is a new Iceberg row.
+
+    Columns injected on every row:
+      _change_type   STRING     — INSERT / UPDATE / DELETE
+      _change_ts     TIMESTAMP  — pipeline processing time
+      snap_id        BIGINT     — unique row id within batch
+      snap_timestamp TIMESTAMP  — write-time wall clock
+
+    For UPDATE and DELETE events the before image (source DB state prior to
+    the change) is preserved alongside the after image:
+      before_<col>   — value before the change  (NULL for INSERT)
+      after_<col>    — value after  the change  (NULL for DELETE)
+
+    This produces a complete audit trail: from any snapshot of the Iceberg
+    table you can reconstruct the full change history for any row.
     """
-    # Map Debezium op codes to human-readable change types
+    # Map op codes to human-readable change types
     typed_df = payload_df.withColumn(
         "_change_type",
         F.when(col("_op") == "c", lit("INSERT"))
          .when(col("_op") == "u", lit("UPDATE"))
          .when(col("_op") == "d", lit("DELETE"))
-         .when(col("_op") == "r", lit("INSERT"))   # snapshot read treated as INSERT
+         .when(col("_op") == "r", lit("INSERT"))
          .otherwise(lit("UNKNOWN")),
     ).withColumn(
         "_change_ts",
         current_timestamp(),
-    ).drop("_op", "kafka_ts")
+    )
+
+    # Expand before / after JSON strings into typed columns.
+    # "after"  is present for INSERT and UPDATE (the new row state).
+    # "before" is present for UPDATE and DELETE (the old row state).
+    result_df = typed_df
+    if before_schema is not None and "before" in typed_df.columns:
+        parsed_before = from_json(col("before"), before_schema)
+        for field in before_schema.fields:
+            result_df = result_df.withColumn(
+                f"before_{field.name}", parsed_before[field.name]
+            )
+        result_df = result_df.drop("before")
+
+    if after_schema is not None and "after" in result_df.columns:
+        parsed_after = from_json(col("after"), after_schema)
+        for field in after_schema.fields:
+            result_df = result_df.withColumn(
+                f"after_{field.name}", parsed_after[field.name]
+            )
+        result_df = result_df.drop("after")
 
     final_df = (
-        typed_df
+        result_df
+        .drop("_op", "kafka_ts")
+        .coalesce(COALESCE_BEFORE_MERGE)
         .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
         .withColumn("snap_timestamp", current_timestamp())
     )
@@ -444,7 +589,7 @@ def _apply_history_tracking(
         .append()
     )
     logger.info(
-        "[%s/%s][history_tracking] batch_id=%d appended rows=%d",
+        "[%s/%s][history_tracking] batch=%d appended rows=%d",
         source_key, table_name, batch_id, final_df.count(),
     )
 
@@ -457,89 +602,123 @@ def _write_micro_batch(
     source:       _StreamingSource,
     write_mode:   str,
     restart_flag: threading.Event,
+    transform_steps: list[tuple[Any, dict]],
 ) -> Any:
     """
     Return a foreachBatch function for the given source and write mode.
 
-    For each micro-batch DataFrame the returned function:
-      1. Flattens the Debezium envelope (parses "after" / "before" JSON).
-      2. Routes rows to their Iceberg tables by Kafka topic.
-      3. Creates the target Iceberg table if it does not exist yet (idempotent).
-      4. Applies the configured write mode (standard / soft_delete / history_tracking).
-      5. Refreshes every written Iceberg table (REFRESH TABLE) so downstream
-         readers immediately see the new snapshot.
-      6. Sets restart_flag so the outer loop stops and restarts the query,
-         giving Spark a fresh execution context for the next 2-second batch.
+    For each micro-batch:
+      1. Route rows by topic.
+      2. Decode Debezium envelope (before / after / op / ts_ms).
+      3. Apply optional StarTransform pipeline steps.
+      4. Auto-create Iceberg table if it does not exist.
+      5. Apply write-mode handler (standard / soft_delete / history_tracking).
+      6. REFRESH TABLE for all written tables.
+      7. Set restart_flag for per-batch Spark context refresh.
     """
     def _foreach_batch(batch_df: DataFrame, batch_id: int) -> None:
         if batch_df.isEmpty():
             return
 
         if DRY_RUN:
-            count = batch_df.count()
             logger.info(
-                "[%s] DRY_RUN batch_id=%d rows=%d — skipping write.",
-                source.source_key, batch_id, count,
+                "[%s] DRY_RUN batch=%d rows=%d — skipping write.",
+                source.source_key, batch_id, batch_df.count(),
             )
             return
 
-        # Deduplicate by topic to minimise schema-inference calls
-        try:
-            topics = [r[0] for r in batch_df.select("topic").distinct().collect()]
-        except Exception:
-            logger.warning("[%s] Could not collect topics.", source.source_key)
+        # Route by topic — one DataFrame per Kafka topic (= one Iceberg table)
+        topic_map = ST.route_by_topic(batch_df)
+        if not topic_map:
             return
 
-        written_tables: list[str] = []   # track FQNs written this batch
+        written_tables: list[str] = []
 
-        for topic in topics:
+        for topic, topic_df in topic_map.items():
             table_name = _topic_to_table(topic, source)
+            namespace  = _topic_to_namespace(topic, source)
             if not table_name:
                 continue
 
-            topic_df = batch_df.filter(col("topic") == topic)
-
-            # ── Extract Debezium payload ─────────────────────────────────────
+            # ── Decode Debezium envelope ──────────────────────────────────────
             env_df = topic_df.select(
                 from_json(col("value_json"), _DEBEZIUM_ENVELOPE_SCHEMA).alias("env"),
                 col("topic"),
                 col("timestamp").alias("kafka_ts"),
             ).filter(col("env").isNotNull())
 
-            # For INSERT/UPDATE: use "after"; for DELETE: use "before"
-            # op: c=create, u=update, r=read(snapshot), d=delete
-            payload_df = env_df.select(
-                F.when(
-                    col("env.op").isin("c", "u", "r"),
-                    col("env.after"),
-                ).when(
-                    col("env.op") == "d",
-                    col("env.before"),
-                ).alias("payload_json"),
+            # Carry both before and after through the pipeline:
+            # history_tracking uses both; standard/soft_delete only need "after"
+            # (for INSERT/UPDATE) and pk from "before" (for DELETE).
+            full_envelope_df = env_df.select(
+                col("env.before").alias("before"),
+                col("env.after").alias("after"),
                 col("env.op").alias("_op"),
+                col("env.ts_ms").alias("ts_ms"),
+                col("kafka_ts"),
+            ).filter(col("_op").isNotNull())
+
+            # For standard / soft_delete: the working payload is "after" for
+            # INSERT/UPDATE and "before" for DELETE (pk lookup only).
+            payload_df = full_envelope_df.select(
+                F.when(
+                    col("_op").isin("c", "u", "r"),
+                    col("after"),
+                ).when(
+                    col("_op") == "d",
+                    col("before"),
+                ).alias("payload_json"),
+                col("_op"),
                 col("kafka_ts"),
             ).filter(col("payload_json").isNotNull())
 
             if payload_df.isEmpty():
                 continue
 
-            # ── Infer schema from the batch ──────────────────────────────────
+            # ── Infer schema from batch ───────────────────────────────────────
             try:
                 inferred_schema = spark.read.json(
                     payload_df.select("payload_json").rdd.map(lambda r: r[0])
                 ).schema
             except Exception as exc:
                 logger.warning(
-                    "[%s/%s] Could not infer schema: %s — skipping batch.",
+                    "[%s/%s] Schema inference failed: %s — skipping.",
                     source.source_key, table_name, exc,
                 )
                 continue
 
-            # ── Augment schema for the write mode ────────────────────────────
-            # soft_delete: ensure is_deleted / deleted_at columns exist
-            # history_tracking: ensure _change_type / _change_ts columns exist
-            # These are added via mergeSchema=true on first write; we declare
-            # them here so the CREATE TABLE path includes them upfront.
+            # ── Parse payload JSON → typed DataFrame ──────────────────────────
+            try:
+                row_df = payload_df.select(
+                    from_json(col("payload_json"), inferred_schema).alias("data"),
+                    col("_op"),
+                    col("kafka_ts"),
+                ).select("data.*", "_op", "kafka_ts")
+            except Exception as exc:
+                logger.warning(
+                    "[%s/%s] JSON parse failed: %s", source.source_key, table_name, exc,
+                )
+                continue
+
+            # ── Apply StarTransform pipeline steps ────────────────────────────
+            if transform_steps:
+                try:
+                    row_df = ST.apply_pipeline(row_df, transform_steps)
+                except Exception as exc:
+                    logger.error(
+                        "[%s/%s] StarTransform pipeline failed: %s",
+                        source.source_key, table_name, exc,
+                    )
+                    continue
+
+            # ── PK column name (case-insensitive) ─────────────────────────────
+            pk_col_actual = source.pk_col
+            for f in inferred_schema.fields:
+                if f.name.lower() == source.pk_col.lower():
+                    pk_col_actual = f.name
+                    break
+
+            # ── Build write-mode-specific extra schema fields ─────────────────
             extra_fields: list[StructField] = [
                 StructField("snap_id",        LongType(),      True),
                 StructField("snap_timestamp", TimestampType(), True),
@@ -554,101 +733,136 @@ def _write_micro_batch(
                     StructField("_change_type", StringType(),    True),
                     StructField("_change_ts",   TimestampType(), True),
                 ]
+                # before_* and after_* columns are added via mergeSchema=true
+                # at append time — not declared at table creation (schema evolves).
 
-            full_schema = StructType(
-                inferred_schema.fields + extra_fields
-            )
+            full_schema = StructType(inferred_schema.fields + extra_fields)
 
-            # ── Create Iceberg table if needed ────────────────────────────────
-            fqn_backtick = f"`{source.catalog}`.`{source.namespace}`.`{table_name}`"
-            fqn_plain    = f"{source.catalog}.{source.namespace}.{table_name}"
-            try:
-                spark.sql(f"DESCRIBE TABLE {fqn_backtick}")
-                table_exists = True
-            except Exception:
-                table_exists = False
+            # ── Auto-create Iceberg table if needed ───────────────────────────
+            fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{table_name}`"
+            fqn_plain    = f"{source.catalog}.{namespace}.{table_name}"
 
+            table_exists = builder.table_exists(source.catalog, namespace, table_name)
             if not table_exists:
                 pk_col_exists = any(
                     f.name.lower() == source.pk_col.lower()
                     for f in inferred_schema.fields
                 )
-                pk_for_bucket = source.pk_col if pk_col_exists else "snap_id"
-                partition_spec = [
-                    IcebergTableBuilder.hours("snap_timestamp"),
-                    IcebergTableBuilder.bucket(pk_for_bucket, 16),
-                ]
+                pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
                 s3_location = (
                     f"s3://{S3_BUCKET}/{source.s3_prefix}"
-                    f"/{source.namespace}/{table_name}"
+                    f"/{namespace}/{table_name}"
+                )
+                # For history_tracking tables add "_hist" suffix to distinguish
+                # them from the standard/soft-delete tables for the same source.
+                effective_table = (
+                    f"{table_name}_hist"
+                    if write_mode == _WRITE_MODE_HISTORY_TRACKING
+                    else table_name
+                )
+                effective_fqn_bt = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
+                effective_fqn_pl = f"{source.catalog}.{namespace}.{effective_table}"
+                effective_loc    = (
+                    f"s3://{S3_BUCKET}/{source.s3_prefix}"
+                    f"/{namespace}/{effective_table}"
                 )
                 try:
                     builder.create_table(
                         catalog        = source.catalog,
-                        namespace      = source.namespace,
-                        table          = table_name,
+                        namespace      = namespace,
+                        table          = effective_table,
                         schema         = full_schema,
-                        partition_spec = partition_spec,
-                        location       = s3_location,
+                        partition_spec = [
+                            IcebergTableBuilder.hours("snap_timestamp"),
+                            IcebergTableBuilder.bucket(pk_for_bucket, 16),
+                        ],
+                        location       = effective_loc,
+                        extra_properties={
+                            "pipeline.write-mode": write_mode,
+                            "pipeline.source":     source.source_key,
+                        },
                     )
                     logger.info(
-                        "[%s/%s] Created Iceberg table (write_mode=%s).",
-                        source.source_key, table_name, write_mode,
+                        "[%s/%s] Created Iceberg table (mode=%s).",
+                        source.source_key, effective_table, write_mode,
                     )
+                    fqn_backtick = effective_fqn_bt
+                    fqn_plain    = effective_fqn_pl
+                    table_name   = effective_table
                 except Exception as create_exc:
                     logger.warning(
                         "[%s/%s] Table creation failed (may already exist): %s",
-                        source.source_key, table_name, create_exc,
+                        source.source_key, effective_table, create_exc,
                     )
-
-            # ── Parse payload JSON → DataFrame ────────────────────────────────
-            try:
-                row_df = payload_df.select(
-                    from_json(col("payload_json"), inferred_schema).alias("data"),
-                    col("_op"),
-                    col("kafka_ts"),
-                ).select("data.*", "_op", "kafka_ts")
-            except Exception as exc:
-                logger.warning(
-                    "[%s/%s] JSON parse failed: %s", source.source_key, table_name, exc,
-                )
-                continue
-
-            # Derive pk_col name (case-insensitive match against actual schema)
-            pk_col_actual = source.pk_col
-            for f in inferred_schema.fields:
-                if f.name.lower() == source.pk_col.lower():
-                    pk_col_actual = f.name
-                    break
+            else:
+                # For history_tracking use the _hist suffixed table name
+                if write_mode == _WRITE_MODE_HISTORY_TRACKING:
+                    effective_table = f"{table_name}_hist"
+                    if not builder.table_exists(source.catalog, namespace, effective_table):
+                        logger.warning(
+                            "[%s/%s] Expected _hist table not found; using base table.",
+                            source.source_key, effective_table,
+                        )
+                    else:
+                        fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
+                        fqn_plain    = f"{source.catalog}.{namespace}.{effective_table}"
+                        table_name   = effective_table
 
             # ── Apply write mode ──────────────────────────────────────────────
             try:
                 if write_mode == _WRITE_MODE_STANDARD:
                     _apply_standard(
-                        spark, row_df, fqn_backtick, fqn_plain,
+                        spark, row_df, fqn_backtick,
                         pk_col_actual, source.source_key, table_name, batch_id,
                     )
                 elif write_mode == _WRITE_MODE_SOFT_DELETE:
                     _apply_soft_delete(
-                        spark, row_df, fqn_backtick, fqn_plain,
+                        spark, row_df, fqn_backtick,
                         pk_col_actual, source.source_key, table_name, batch_id,
                     )
                 elif write_mode == _WRITE_MODE_HISTORY_TRACKING:
-                    _apply_history_tracking(
-                        spark, row_df, fqn_backtick, fqn_plain,
-                        pk_col_actual, source.source_key, table_name, batch_id,
+                    # For history_tracking we pass the full envelope rows
+                    # (before + after) from the envelope DataFrame.
+                    envelope_rows = full_envelope_df.filter(
+                        F.col("_op").isin("c", "u", "d", "r")
                     )
+                    # Enrich envelope rows with typed before/after schemas
+                    try:
+                        after_schema = spark.read.json(
+                            envelope_rows
+                            .filter(col("after").isNotNull())
+                            .select("after")
+                            .rdd.map(lambda r: r[0])
+                        ).schema if not envelope_rows.filter(col("after").isNotNull()).isEmpty() else None
+                    except Exception:
+                        after_schema = None
+
+                    try:
+                        before_schema = spark.read.json(
+                            envelope_rows
+                            .filter(col("before").isNotNull())
+                            .select("before")
+                            .rdd.map(lambda r: r[0])
+                        ).schema if not envelope_rows.filter(col("before").isNotNull()).isEmpty() else None
+                    except Exception:
+                        before_schema = None
+
+                    _apply_history_tracking(
+                        spark, envelope_rows, fqn_backtick, fqn_plain,
+                        pk_col_actual, source.source_key, table_name, batch_id,
+                        before_schema=before_schema,
+                        after_schema=after_schema,
+                    )
+
                 written_tables.append(fqn_backtick)
             except Exception as write_exc:
                 logger.error(
-                    "[%s/%s] Write failed (write_mode=%s): %s",
+                    "[%s/%s] Write failed (mode=%s): %s",
                     source.source_key, table_name, write_mode, write_exc,
+                    exc_info=True,
                 )
 
-        # ── (a) Refresh every table written in this batch ─────────────────────
-        # REFRESH TABLE invalidates Spark's cached metadata for the Iceberg
-        # table so that the next query against it reads the latest snapshot
-        # committed by the MERGE / append above.
+        # ── Refresh written tables ────────────────────────────────────────────
         for fqn_bt in written_tables:
             try:
                 spark.sql(f"REFRESH TABLE {fqn_bt}")
@@ -659,14 +873,11 @@ def _write_micro_batch(
                     source.source_key, fqn_bt, ref_exc,
                 )
 
-        # ── (b) Signal the outer loop to restart the streaming query ──────────
-        # Setting restart_flag tells _run_once to stop this query and start a
-        # new one, giving Spark a fresh execution context for the next batch.
-        # The checkpoint is preserved so no events are replayed.
+        # ── Signal per-batch restart ──────────────────────────────────────────
         if written_tables:
             restart_flag.set()
             logger.info(
-                "[%s] batch_id=%d — %d table(s) written; restart_flag set.",
+                "[%s] batch=%d — %d table(s) written; restart_flag set.",
                 source.source_key, batch_id, len(written_tables),
             )
 
@@ -687,9 +898,9 @@ def _start_source_stream(
     Build and start the Structured Streaming query for a single CDC source.
 
     Pipeline:
-      Kafka (Avro/JSON) → avro_to_json UDF → flatten envelope →
-      foreachBatch → write-mode handler → Iceberg → REFRESH TABLE
-      → restart_flag.set() → outer loop restarts query
+      Kafka (Avro/JSON) → avro_to_json UDF → flatten Debezium envelope →
+      optional StarTransform steps → write-mode handler → Iceberg →
+      REFRESH TABLE → restart_flag.set()
     """
     kafka_secret = bao.kafka_creds()
     kafka_user   = kafka_secret.get("debezium_user",     "debezium-user")
@@ -709,10 +920,12 @@ def _start_source_stream(
         "startingOffsets":                "latest",
         "maxOffsetsPerTrigger":           str(MAX_OFFSETS_PER_TRIGGER),
         "failOnDataLoss":                 "false",
-        # Consumer performance tuning
-        "kafka.fetch.min.bytes":          "65536",
-        "kafka.fetch.wait.max.ms":        "500",
-        "kafka.max.poll.records":         "500",
+        # Consumer throughput tuning for peak-hour workloads
+        "kafka.fetch.min.bytes":          "131072",    # 128 KB min fetch (reduced round-trips)
+        "kafka.fetch.wait.max.ms":        "500",       # max wait for min bytes
+        "kafka.max.poll.records":         "2000",      # records per poll (up from 500)
+        "kafka.max.partition.fetch.bytes": "2097152",  # 2 MB per partition per fetch
+        "kafka.receive.buffer.bytes":     "1048576",   # 1 MB socket receive buffer
     }
 
     raw_stream = (
@@ -722,12 +935,11 @@ def _start_source_stream(
         .load()
     )
 
-    # Apply the Avro deserialisation UDF to the binary value column
+    # Avro deserialisation UDF
     try:
         from confluent_kafka.schema_registry import SchemaRegistryClient  # noqa: F401
         avro_udf = _build_avro_deserialize_udf(SR_URL)
     except ImportError:
-        # confluent-kafka not available — fall back to treating value as UTF-8 JSON
         logger.warning(
             "[%s] confluent-kafka not available; treating Kafka values as plain JSON.",
             source.source_key,
@@ -742,12 +954,17 @@ def _start_source_stream(
         avro_udf(col("topic").cast(StringType()), col("value")),
     )
 
+    # Build the StarTransform pipeline for this source
+    transform_steps = _build_transform_pipeline(source.source_key, source.pk_col)
+
     query = (
         decoded_stream
         .writeStream
         .queryName(f"cdc-{source.source_key}-{write_mode}")
         .foreachBatch(
-            _write_micro_batch(spark, builder, source, write_mode, restart_flag)
+            _write_micro_batch(
+                spark, builder, source, write_mode, restart_flag, transform_steps
+            )
         )
         .trigger(processingTime=TRIGGER_INTERVAL)
         .option("checkpointLocation", source.checkpoint)
@@ -755,7 +972,7 @@ def _start_source_stream(
     )
 
     logger.info(
-        "[%s] Streaming query started | write_mode=%s | pattern=%s | checkpoint=%s",
+        "[%s] Streaming query started | mode=%s | pattern=%s | checkpoint=%s",
         source.source_key, write_mode, source.topic_pattern, source.checkpoint,
     )
     return query
@@ -769,6 +986,20 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
         "spark.jars.packages",
         "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1",
     )
+    # Peak-hour AQE tuning
+    conf.set("spark.sql.adaptive.enabled",                               "true")
+    conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
+    conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize",   "33554432")   # 32 MB
+    conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes",          ADAPTIVE_COALESCE_TARGET)
+    conf.set("spark.sql.adaptive.skewJoin.enabled",                      "true")
+    conf.set("spark.sql.shuffle.partitions",                             str(MERGE_PARALLELISM))
+    # Iceberg write performance
+    conf.set("spark.sql.iceberg.write.fanout.enabled",                   "true")
+    conf.set("spark.sql.iceberg.merge.cardinality-check.enabled",        "false")
+    # Reduce Spark driver → executor serialisation overhead for micro-batches
+    conf.set("spark.serializer",                                         "org.apache.spark.serializer.KryoSerializer")
+    conf.set("spark.kryoserializer.buffer.max",                          "256m")
+
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
@@ -782,7 +1013,6 @@ def _start_all_queries(
     bao:          BaoSparkInit,
     restart_flag: threading.Event,
 ) -> list[StreamingQuery]:
-    """Start streaming queries for all active sources and return them."""
     queries: list[StreamingQuery] = []
     for src in _ALL_SOURCES:
         try:
@@ -799,20 +1029,9 @@ def _run_once(bao: BaoSparkInit) -> None:
     """
     Initialise Spark, start all streaming queries, and run the per-batch
     watch-and-restart loop until interrupted or a fatal error occurs.
-
-    Per-batch restart cycle
-    -----------------------
-    After each 2-second micro-batch is committed to Iceberg the foreachBatch
-    function sets restart_flag.  The polling loop below detects this, stops all
-    active queries cleanly (preserving checkpoints), and immediately restarts
-    them from the checkpoint position.  This gives Spark a fresh execution
-    context for each batch while ensuring zero event replay.
-
-    Raises on unrecoverable error so the outer retry loop can back off and retry.
     """
     spark = _build_spark(bao)
 
-    # Catalog bootstrap pre-flight
     try:
         cb = _imod("00_catalog_bootstrap")
         cb.bootstrap_all_catalogs(spark, bao, fail_fast=False)
@@ -821,40 +1040,29 @@ def _run_once(bao: BaoSparkInit) -> None:
 
     builder = IcebergTableBuilder(spark, running_user=SPARK_USER)
 
-    # Ensure namespaces exist for all active sources
     for src in _ALL_SOURCES:
         try:
             builder.ensure_namespace(src.catalog, src.namespace)
         except Exception as exc:
             logger.warning("[%s] Could not ensure namespace: %s", src.source_key, exc)
 
-    # One shared restart_flag across all sources in this Spark session.
-    # Any source that writes a batch will set it; the loop below reacts.
     restart_flag = threading.Event()
-
     queries = _start_all_queries(spark, builder, bao, restart_flag)
     if not queries:
         spark.stop()
         raise RuntimeError("No streaming queries started.")
 
     logger.info(
-        "All %d streaming queries active (write_mode=%s, trigger=%s). "
-        "Per-batch restart enabled.",
+        "All %d streaming queries active (mode=%s, trigger=%s, "
+        "merge_parallelism=%d, coalesce=%d). Per-batch restart enabled.",
         len(queries), WRITE_MODE, TRIGGER_INTERVAL,
+        MERGE_PARALLELISM, COALESCE_BEFORE_MERGE,
     )
 
-    # ── Per-batch watch-and-restart loop ──────────────────────────────────────
-    # Poll every 500 ms.  On restart_flag:
-    #   1. Stop all active queries (checkpoint is flushed automatically).
-    #   2. Clear the flag.
-    #   3. Re-start all queries from their checkpoints.
-    # On unexpected query termination (query.isActive == False without the
-    # flag being set): raise so the outer retry loop handles recovery.
     try:
         while True:
             time.sleep(0.5)
 
-            # Check for unexpected termination (crash, not a planned restart)
             dead = [q for q in queries if not q.isActive]
             if dead and not restart_flag.is_set():
                 names = [q.name for q in dead]
@@ -864,28 +1072,20 @@ def _run_once(bao: BaoSparkInit) -> None:
 
             if restart_flag.is_set():
                 logger.info(
-                    "restart_flag detected — stopping %d query(s) for per-batch restart …",
+                    "restart_flag — stopping %d query(s) for per-batch restart …",
                     len(queries),
                 )
-                # ── Stop all queries cleanly ──────────────────────────────────
                 for q in queries:
                     try:
                         q.stop()
                     except Exception as stop_exc:
-                        logger.warning("Error stopping query %s: %s", q.name, stop_exc)
+                        logger.warning("Error stopping %s: %s", q.name, stop_exc)
 
                 restart_flag.clear()
-
-                # ── Re-start all queries from checkpoint ──────────────────────
                 queries = _start_all_queries(spark, builder, bao, restart_flag)
                 if not queries:
-                    raise RuntimeError(
-                        "No streaming queries started after per-batch restart."
-                    )
-                logger.info(
-                    "%d query(s) restarted from checkpoint.",
-                    len(queries),
-                )
+                    raise RuntimeError("No streaming queries started after restart.")
+                logger.info("%d query(s) restarted from checkpoint.", len(queries))
 
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")
@@ -906,22 +1106,19 @@ def main() -> None:
     os.environ["SPARK_USER"] = SPARK_USER
 
     logger.info(
-        "=== Kafka→Iceberg Streaming | user=%s | write_mode=%s | sources=%s | dry_run=%s ===",
-        SPARK_USER,
-        WRITE_MODE,
+        "=== Kafka→Iceberg | user=%s | mode=%s | sources=%s | "
+        "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d ===",
+        SPARK_USER, WRITE_MODE,
         [s.source_key for s in _ALL_SOURCES],
-        DRY_RUN,
+        _TRANSFORM_STEPS or "none",
+        DRY_RUN, TRIGGER_INTERVAL, MAX_OFFSETS_PER_TRIGGER,
     )
 
     bao = BaoSparkInit()
-
-    # ── Auto-restart loop ────────────────────────────────────────────────────
     attempt = 0
     while attempt < MAX_RESTART_ATTEMPTS:
         try:
             _run_once(bao)
-            # _run_once only returns normally on KeyboardInterrupt (re-raised) or
-            # successful clean shutdown — exit loop.
             break
         except KeyboardInterrupt:
             logger.info("Streaming job stopped by user.")
