@@ -65,7 +65,9 @@
 WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 DATABRICKS_CATALOG = "lakehouse"
 SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
+NOTEBOOK_VERSION   = "2026-09-05-v4"   # bump on every upload to confirm correct version is running
 
+print(f"Notebook version   : {NOTEBOOK_VERSION}")
 print(f"Warehouse root     : {WAREHOUSE_ROOT}")
 print(f"Databricks catalog : {DATABRICKS_CATALOG}")
 
@@ -561,7 +563,14 @@ for tbl, snap in SNAPSHOTS.items():
     db_name    = snap["db_name"]
     tbl_name   = snap["table_name"]
     live_files = snap.get("live_files", [])
-    uc_view    = f"{DATABRICKS_CATALOG}.{db_name}.vw_{tbl_name}_latest"
+    # Sanitise: replace dots and leading underscores in name segments so the
+    # resulting UC view identifier is always a clean 3-part name.
+    # e.g. db_name="demo", tbl_name="customers" → lakehouse.demo.vw_customers_latest
+    # Dots in either segment would create a 4-part name and cause
+    # REQUIRES_SINGLE_PART_NAMESPACE (SQLSTATE 42K05).
+    safe_db   = db_name.replace(".", "_").lstrip("_")
+    safe_tbl  = tbl_name.replace(".", "_").lstrip("_")
+    uc_view   = f"{DATABRICKS_CATALOG}.{safe_db}.vw_{safe_tbl}_latest"
     snap_id    = snap["snapshot_id"]
     snap_ts    = snap["last_updated"]
 
