@@ -65,7 +65,7 @@
 WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 DATABRICKS_CATALOG = "lakehouse"
 SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
-NOTEBOOK_VERSION   = "2026-09-15-v6"   # bump on every upload to confirm correct version is running
+NOTEBOOK_VERSION   = "2026-09-15-v7"   # bump on every upload to confirm correct version is running
 
 print(f"Notebook version   : {NOTEBOOK_VERSION}")
 print(f"Warehouse root     : {WAREHOUSE_ROOT}")
@@ -229,18 +229,12 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
         # never write version-hint.text to S3 — Polaris stores snapshot state
         # internally).
         #
-        # CRITICAL: do NOT sort by modificationTime — S3 object modification
-        # timestamps are unreliable for Polaris-written tables because Polaris
-        # may write metadata files out of wall-clock order or with identical
-        # timestamps.  Sort by the version number in the filename instead:
-        #   v1.metadata.json  → 1
-        #   v2.metadata.json  → 2   ← always monotonically increasing
-        #   00008-xxxx.metadata.json → 0 (non-versioned, treated as oldest)
-        #
-        # The highest version number is always the most recent metadata file.
+        # Sort by modificationTime — the S3 last-modified timestamp reported by
+        # dbutils.fs.ls().  The file with the highest timestamp is the most
+        # recently written metadata file and therefore the current one.
         print(
             f"  [{table_name}] version-hint.text not found; "
-            f"falling back to version-number sort"
+            f"falling back to modificationTime sort"
         )
         all_files  = dbutils.fs.ls(meta_path)
         meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
@@ -249,13 +243,7 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
                 f"[{table_name}] No *.metadata.json found under {meta_path}"
             )
 
-        def _meta_version(f) -> int:
-            """Extract version number from vN.metadata.json; -1 for non-versioned files."""
-            import re
-            m = re.match(r"^v(\d+)\.metadata\.json$", f.name)
-            return int(m.group(1)) if m else -1
-
-        meta_files.sort(key=_meta_version, reverse=True)
+        meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
         latest_meta_path = _norm(meta_files[0].path)
         meta_name        = meta_files[0].name
 
