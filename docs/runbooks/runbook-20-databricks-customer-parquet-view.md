@@ -1046,10 +1046,20 @@ GROUP  BY customer_id HAVING COUNT(*) > 1;
 
 ```python
 # JupyterHub notebook — insert one new customer
+# Column order: customer_id, full_name, email, phone_number, date_of_birth,
+#               national_id, street_address, city, country_code, ip_address,
+#               salary, customer_tier, is_active, created_at, updated_at
+# Note: snap_id and snap_timestamp are injected by the pipeline — do NOT supply them.
 spark.sql("""
     INSERT INTO databricks.lakehouse_db.customer
-    VALUES (99901, 'DML Test User', 'dmltest@example.com',
-            'Sydney', 'gold', 75000.00, current_timestamp())
+        (customer_id, full_name, email, phone_number, date_of_birth,
+         national_id, street_address, city, country_code, ip_address,
+         salary, customer_tier, is_active, created_at, updated_at)
+    VALUES
+        (99901, 'DML Test User', 'dmltest@example.com', '555-0199',
+         DATE '1990-06-15', 'NID-99901', '1 Test St', 'Sydney', 'AU',
+         '10.0.0.1', 75000.00, 'gold', 1,
+         current_timestamp(), current_timestamp())
 """)
 print("✅ INSERT done")
 ```
@@ -1084,12 +1094,20 @@ SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
 # JupyterHub notebook — update the row inserted in 9-3
 spark.sql("""
     MERGE INTO databricks.lakehouse_db.customer AS t
-    USING (SELECT 99901 AS customer_id) AS s
+    USING (
+        SELECT
+            99901                          AS customer_id,
+            'dmltest_updated@example.com'  AS email,
+            'Melbourne'                    AS city,
+            99000.00                       AS salary,
+            current_timestamp()            AS updated_at
+    ) AS s
     ON t.customer_id = s.customer_id
     WHEN MATCHED THEN UPDATE SET
-        email      = 'dmltest_updated@example.com',
-        city       = 'Melbourne',
-        salary     = 99000.00
+        t.email      = s.email,
+        t.city       = s.city,
+        t.salary     = s.salary,
+        t.updated_at = s.updated_at
 """)
 print("✅ UPDATE done")
 ```
@@ -1130,7 +1148,7 @@ GROUP  BY customer_id HAVING COUNT(*) > 1;
 **Step 1 — Delete the test row in JupyterHub (PySpark)**
 
 ```python
-# JupyterHub notebook — delete the row
+# JupyterHub notebook — delete the row inserted in 9-3
 spark.sql("""
     DELETE FROM databricks.lakehouse_db.customer
     WHERE  customer_id = 99901
