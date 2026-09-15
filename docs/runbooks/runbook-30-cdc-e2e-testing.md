@@ -1121,82 +1121,440 @@ db.customers.deleteOne({ customer_id: 9003 });
 
 ---
 
-## 8. Section 7 — Schema Evolution Test
+## 8. Section 7 — Schema Evolution (DDL) Tests
 
-**Purpose:** Verify that adding a column in PostgreSQL propagates through Debezium and is accepted by Iceberg via `mergeSchema`.
+**Purpose:** Verify that DDL changes (ADD COLUMN, DROP COLUMN, ALTER COLUMN type, RENAME COLUMN)
+propagate through Debezium and are handled correctly by Iceberg via `mergeSchema=true`.
 
-> **Note:** Schema changes propagate via the `schema-changes.postgres` Kafka topic. Iceberg handles the new column through `mergeSchema=true` on the Spark write. After evolution, the column will be NULL for rows written before the ALTER.
+> **How DDL flows through the pipeline:**
+> 1. DDL executes on source DB
+> 2. Debezium captures the DDL event and publishes a schema-change message to `schema-changes.<source>`
+> 3. The Avro schema for the topic is updated in Schema Registry (new schema ID issued)
+> 4. On the next DML event after the DDL, the Debezium message carries the new schema ID
+> 5. The executor-level SR cache fetches the new schema on first encounter (one HTTP GET)
+> 6. Spark's `mergeSchema=true` on the Iceberg write adds the new column automatically
+> 7. Pre-DDL rows have `NULL` for the new column
 
-### Step 1 — Record current column list
+---
 
-```sql
-SELECT column_name, data_type
+### Test 7a — PostgreSQL: ADD COLUMN
+
+**Scenario:** Add a `loyalty_tier` column to `customers`. Verify it propagates to Iceberg.
+
+#### Step 1 — Baseline
+
+```bash
+# Record current PostgreSQL schema
+psql -h postgresql.prod.svc.cluster.local -U rbac -d cache_testing -c "
+SELECT column_name, data_type, character_maximum_length
 FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'customers'
-ORDER BY ordinal_position;
+ORDER BY ordinal_position;"
 ```
 
-Also check Iceberg schema:
 ```sql
+-- Record current Iceberg schema (run in Spark SQL / notebook)
 DESCRIBE postgres.cache_testing.customers;
 ```
 
-### Step 2 — Add a column in PostgreSQL
-
-```sql
--- psql (must be run as a superuser or table owner)
-ALTER TABLE customers ADD COLUMN loyalty_tier VARCHAR(20);
-COMMIT;
+```bash
+# Check current Schema Registry subjects for this table
+curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects \
+  | jq '[.[] | select(startswith("postgres.cache_testing.customers"))]'
 ```
 
-### Step 3 — Insert a row that uses the new column
+#### Step 2 — Add the column in PostgreSQL
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at, loyalty_tier)
-VALUES (8888, 'SchemaEvo', 'Test', 'evo@example.com', '555-8888', NOW(), 'GOLD');
-COMMIT;
+ALTER TABLE public.customers ADD COLUMN loyalty_tier VARCHAR(20) DEFAULT NULL;
+COMMENT ON COLUMN public.customers.loyalty_tier IS 'Customer loyalty programme tier';
 ```
 
-### Step 4 — Wait and verify schema evolution in Iceberg
+#### Step 3 — Insert a row using the new column
+
+```sql
+-- psql
+INSERT INTO public.customers (name, email, phone, address, city, country, created_at, loyalty_tier)
+VALUES ('SchemaEvo Test', 'evo@example.com', '555-0001', '1 Test St', 'Sydney', 'AU', NOW(), 'GOLD');
+-- Note the id returned; use it in the verification below
+```
+
+#### Step 4 — Verify in Schema Registry
+
+```bash
+# Wait for Debezium to publish the new schema (usually within 2–3 seconds of first DML)
+sleep 5
+
+# List versions for this topic — should show a new version number
+curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions
+# Expected: [1, 2]  ← version 2 is the evolved schema with loyalty_tier
+
+# Inspect the new schema — confirm loyalty_tier is present
+curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions/latest \
+  | jq '.schema | fromjson | .fields[] | select(.name == "loyalty_tier")'
+# Expected:
+# {
+#   "name": "loyalty_tier",
+#   "type": ["null","string"],
+#   "default": null
+# }
+```
+
+#### Step 5 — Verify in Iceberg
 
 ```bash
 sleep 10
 ```
 
 ```sql
--- The Iceberg table schema should now include loyalty_tier
+-- Iceberg schema should now include loyalty_tier (run in Spark SQL)
 DESCRIBE postgres.cache_testing.customers;
-```
+-- Expected: loyalty_tier  string  (or varchar(20))
 
-**Expected:** `loyalty_tier` column appears in the Iceberg schema with type `string` (or `varchar`).
-
-```sql
-SELECT customer_id, loyalty_tier
+-- The inserted row should have loyalty_tier = 'GOLD'
+SELECT id, name, loyalty_tier, snap_timestamp
 FROM postgres.cache_testing.customers
-WHERE customer_id = 8888;
-```
+WHERE email = 'evo@example.com';
+-- Expected: loyalty_tier = 'GOLD'
 
-**Expected:** `customer_id = 8888`, `loyalty_tier = 'GOLD'`.
-
-```sql
--- Rows written before the ALTER TABLE should have loyalty_tier = NULL
-SELECT customer_id, loyalty_tier
+-- Pre-DDL rows have NULL for the new column
+SELECT id, loyalty_tier
 FROM postgres.cache_testing.customers
-WHERE customer_id != 8888
+WHERE email != 'evo@example.com'
 LIMIT 5;
+-- Expected: loyalty_tier = NULL for all rows
 ```
 
-**Expected:** `loyalty_tier = NULL` for pre-evolution rows.
-
-### Step 5 — Cleanup
+#### Step 6 — Cleanup
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 8888; COMMIT;
--- Optionally drop the column if no longer needed in the test environment
--- ALTER TABLE customers DROP COLUMN loyalty_tier;
+DELETE FROM public.customers WHERE email = 'evo@example.com';
 ```
+
+---
+
+### Test 7b — PostgreSQL: DROP COLUMN
+
+> **Warning:** Iceberg does NOT physically drop the column when Debezium detects a DROP. The column
+> remains in the Iceberg schema and returns `NULL` for all future rows. This is expected and safe.
+> Physical removal from Iceberg requires an explicit `ALTER TABLE ... DROP COLUMN` in Spark SQL.
+
+#### Step 1 — Drop the column added in 7a (or use a dispensable column)
+
+```sql
+-- psql — drop the loyalty_tier column we just added
+ALTER TABLE public.customers DROP COLUMN loyalty_tier;
+```
+
+#### Step 2 — Insert a row after the DROP
+
+```sql
+-- psql — insert without loyalty_tier (it no longer exists in PostgreSQL)
+INSERT INTO public.customers (name, email, phone, address, city, country, created_at)
+VALUES ('PostDrop Test', 'postdrop@example.com', '555-0002', '2 Drop St', 'Melbourne', 'AU', NOW());
+```
+
+#### Step 3 — Verify behaviour in Iceberg
+
+```bash
+sleep 10
+```
+
+```sql
+-- Iceberg: loyalty_tier column still present but NULL for the new row
+SELECT id, name, loyalty_tier
+FROM postgres.cache_testing.customers
+WHERE email = 'postdrop@example.com';
+-- Expected: loyalty_tier = NULL  (column still in Iceberg schema, value absent)
+
+-- Confirm Schema Registry issued a new version (dropped field)
+-- The new version will no longer contain loyalty_tier in the Avro schema
+```
+
+```bash
+curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions \
+  | jq 'length'
+# Expected: 3  (version 1=original, 2=added loyalty_tier, 3=dropped loyalty_tier)
+```
+
+#### Step 4 — (Optional) Remove the column from Iceberg too
+
+```sql
+-- Spark SQL — only run if you want to physically remove the column from Iceberg
+ALTER TABLE postgres.cache_testing.customers DROP COLUMN loyalty_tier;
+```
+
+#### Step 5 — Cleanup
+
+```sql
+-- psql
+DELETE FROM public.customers WHERE email = 'postdrop@example.com';
+```
+
+---
+
+### Test 7c — PostgreSQL: ALTER COLUMN (widen VARCHAR)
+
+> **Scenario:** Widen a VARCHAR column. Debezium emits the new Avro schema. Iceberg type widens
+> automatically (string → string is compatible; narrowing would fail).
+
+#### Step 1 — Widen the `address` column from VARCHAR(255) to TEXT
+
+```sql
+-- psql
+ALTER TABLE public.customers ALTER COLUMN address TYPE TEXT;
+```
+
+#### Step 2 — Insert a row with a long address
+
+```sql
+-- psql
+INSERT INTO public.customers (name, email, phone, address, city, country, created_at)
+VALUES (
+  'LongAddr Test',
+  'longaddr@example.com',
+  '555-0003',
+  'This is a very long address that would exceed a typical VARCHAR(255) limit but fits in TEXT type perfectly fine for testing schema evolution',
+  'Brisbane', 'AU', NOW()
+);
+```
+
+#### Step 3 — Verify
+
+```bash
+sleep 10
+```
+
+```sql
+-- Iceberg: address type should be string (unchanged — both map to string)
+DESCRIBE postgres.cache_testing.customers;
+
+-- Row with long address should be readable
+SELECT id, LEFT(address, 50) AS addr_preview
+FROM postgres.cache_testing.customers
+WHERE email = 'longaddr@example.com';
+```
+
+```bash
+# Schema Registry: new version for customers-value with address type = "string" (same effective type)
+curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions/latest \
+  | jq '.schema | fromjson | .fields[] | select(.name == "address")'
+```
+
+#### Step 4 — Cleanup
+
+```sql
+-- psql
+DELETE FROM public.customers WHERE email = 'longaddr@example.com';
+```
+
+---
+
+### Test 7d — Oracle: ADD COLUMN via LogMiner
+
+> **Note:** Oracle DDL is captured by Debezium via LogMiner. The DDL event appears in
+> `schema-changes.oracle`. The Oracle connector must be running and in streaming (not snapshot) phase.
+
+#### Step 1 — Add a column to CACHE_TESTING.CUSTOMERS in Oracle
+
+```bash
+kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
+sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
+ALTER TABLE CACHE_TESTING.CUSTOMERS ADD (loyalty_points NUMBER(10) DEFAULT 0);
+COMMIT;
+SELECT column_name, data_type, data_length
+FROM dba_tab_columns
+WHERE owner = 'CACHE_TESTING' AND table_name = 'CUSTOMERS'
+ORDER BY column_id;
+EXIT;
+EOF
+"
+```
+
+#### Step 2 — Insert a row with the new column
+
+```bash
+kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
+sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
+INSERT INTO CACHE_TESTING.CUSTOMERS
+  (id, name, email, phone, address, city, country, created_at, updated_at, loyalty_points)
+VALUES
+  (9999001, 'OraSchemaEvo', 'oraevo@example.com', '555-9001',
+   '1 Oracle St', 'Sydney', 'AU', SYSDATE, SYSDATE, 500);
+COMMIT;
+EXIT;
+EOF
+"
+```
+
+#### Step 3 — Verify the DDL event reached Kafka
+
+```bash
+# Check schema-changes.oracle topic for the ALTER TABLE event
+# (consume last message from the schema-change topic)
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=debezium-connect -o jsonpath='{.items[0].metadata.name}') -- \
+  bash -c "
+kafka-console-consumer.sh \
+  --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
+  --topic schema-changes.oracle \
+  --from-beginning \
+  --max-messages 50 \
+  --consumer-property security.protocol=SASL_PLAINTEXT \
+  --consumer-property sasl.mechanism=SCRAM-SHA-512 \
+  --consumer-property 'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"debezium-user\" password=\"i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H\";' \
+  2>/dev/null | grep -i 'loyalty_points' | head -5"
+# Expected: JSON containing 'loyalty_points' in the DDL event
+```
+
+#### Step 4 — Verify in Iceberg
+
+```bash
+sleep 15   # Oracle LogMiner has slightly higher latency than PostgreSQL WAL
+```
+
+```sql
+-- Spark SQL
+DESCRIBE oracle.cache_testing.customers;
+-- Expected: loyalty_points  bigint  (Oracle NUMBER maps to bigint/decimal)
+
+SELECT id, name, loyalty_points, snap_timestamp
+FROM oracle.cache_testing.customers
+WHERE id = 9999001;
+-- Expected: loyalty_points = 500
+```
+
+#### Step 5 — Cleanup
+
+```bash
+kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
+sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
+DELETE FROM CACHE_TESTING.CUSTOMERS WHERE id = 9999001;
+COMMIT;
+-- Leave the column in place for subsequent tests; drop only if needed:
+-- ALTER TABLE CACHE_TESTING.CUSTOMERS DROP COLUMN loyalty_points;
+EXIT;
+EOF
+"
+```
+
+---
+
+### Test 7e — MongoDB: New Field (implicit schema evolution)
+
+> **MongoDB is schemaless** — there is no DDL. When a document gains a new field,
+> Debezium emits the full document with the new field in the `after` JSON string.
+> Iceberg picks it up via `mergeSchema=true` on the next write.
+
+#### Step 1 — Insert a document with an extra field
+
+```bash
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
+  mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
+  --quiet --eval '
+db.customers.insertOne({
+  name:         "MongoSchemaEvo",
+  email:        "mongoevo@example.com",
+  phone:        "555-0004",
+  address:      "1 Mongo St",
+  city:         "Perth",
+  country:      "AU",
+  loyalty_tier: "PLATINUM",      // ← new field not previously seen
+  referral_code: "REF2025XYZ",   // ← another new field
+  created_at:   new Date(),
+  updated_at:   new Date()
+});
+'
+```
+
+#### Step 2 — Verify in Iceberg
+
+```bash
+sleep 10
+```
+
+```sql
+-- Spark SQL: both new fields should appear via mergeSchema
+DESCRIBE mongodb.cache_testing.customers;
+-- Expected: loyalty_tier and referral_code columns now present
+
+SELECT _id, name, loyalty_tier, referral_code, snap_timestamp
+FROM mongodb.cache_testing.customers
+WHERE email = 'mongoevo@example.com';
+-- Expected: loyalty_tier = 'PLATINUM', referral_code = 'REF2025XYZ'
+
+-- Pre-evolution rows have NULL for the new fields
+SELECT _id, loyalty_tier, referral_code
+FROM mongodb.cache_testing.customers
+WHERE email != 'mongoevo@example.com'
+LIMIT 3;
+-- Expected: NULL for both columns in older rows
+```
+
+#### Step 3 — Cleanup
+
+```bash
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
+  mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
+  --quiet --eval 'db.customers.deleteOne({ email: "mongoevo@example.com" });'
+```
+
+---
+
+### Test 7f — Schema Registry Version History Verification
+
+After running tests 7a–7e, verify the complete schema version history in the Schema Registry:
+
+```bash
+# List all subjects (topics that have registered schemas)
+curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects | jq 'sort'
+
+# For each customers topic — list all schema versions
+for SUBJECT in \
+  "postgres.cache_testing.customers-value" \
+  "oracle.cache_testing.customers-value" \
+  "mongodb.cache_testing.customers-value"; do
+  echo "=== $SUBJECT ==="
+  VERSIONS=$(curl -s "http://schema-registry.prod.svc.cluster.local:8081/subjects/${SUBJECT}/versions")
+  echo "Versions: $VERSIONS"
+  # Show field names in the latest version
+  curl -s "http://schema-registry.prod.svc.cluster.local:8081/subjects/${SUBJECT}/versions/latest" \
+    | jq '.schema | fromjson | .fields[].name'
+  echo ""
+done
+```
+
+**Expected output for postgres.cache_testing.customers-value:**
+```
+Versions: [1,2,3,4]   ← one per schema change made in tests 7a–7c
+Field names in latest version include all original fields (loyalty_tier absent if dropped in 7b)
+```
+
+**Confirm the executor-level SR cache was effective — check Spark logs:**
+```bash
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l pipeline.write-mode=standard -o jsonpath='{.items[0].metadata.name}') \
+  | grep "avro_to_json\|schema_id\|SR_CLIENT" | tail -20
+# Expected: schema_id fetch logged only once per NEW schema ID,
+# NOT once per message (absence of repeated fetch logs = cache is working)
+```
+
+---
+
+### DDL Tests Summary
+
+| Test | Source | DDL Operation | Debezium behaviour | Iceberg outcome |
+|---|---|---|---|---|
+| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | New Avro schema version registered in SR | Column added via `mergeSchema`; old rows = NULL |
+| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | New Avro schema without the field | Column kept in Iceberg; future rows = NULL |
+| **7c** | PostgreSQL | `ALTER COLUMN address TYPE TEXT` | New Avro schema; type string → string | No Iceberg type change (both = string) |
+| **7d** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | DDL in `schema-changes.oracle`; new Avro schema | Column added via `mergeSchema`; old rows = NULL |
+| **7e** | MongoDB | New field in document (no DDL) | Full document in `after` with new field | Column added via `mergeSchema`; old docs = NULL |
+| **7f** | All | Schema Registry audit | — | All versions visible; SR cache verified |
 
 ---
 
