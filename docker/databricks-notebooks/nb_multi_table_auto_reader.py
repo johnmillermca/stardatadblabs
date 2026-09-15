@@ -65,7 +65,7 @@
 WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 DATABRICKS_CATALOG = "lakehouse"
 SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
-NOTEBOOK_VERSION   = "2026-09-05-v4"   # bump on every upload to confirm correct version is running
+NOTEBOOK_VERSION   = "2026-09-05-v5"   # bump on every upload to confirm correct version is running
 
 print(f"Notebook version   : {NOTEBOOK_VERSION}")
 print(f"Warehouse root     : {WAREHOUSE_ROOT}")
@@ -519,92 +519,87 @@ print("  └──────────────────────�
 # COMMAND ----------
 
 # =============================================================================
-# Cell 5b — Optional: promote temp views to persistent Unity Catalog views
+# Cell 5b — Persist snapshot as Unity Catalog Delta table (cross-session)
 # =============================================================================
-# Run this cell explicitly ONLY after Cell 5 has just refreshed the temp views
-# in this session.  DO NOT leave this cell on auto-run — the UC view it creates
-# embeds a reference to the snapshot resolved in Cell 5.  If you query the UC
-# view from a different session (or after a new Iceberg write), it will serve
-# stale data because the temp view it proxies does not exist in that session.
+# WHY Delta table instead of a SQL VIEW over read_files()
+# ─────────────────────────────────────────────────────────
+# read_files() in Databricks SQL is unreliable for multi-file use:
+#   • Multiple positional paths → UNKNOWN_POSITIONAL_ARGUMENT (SQLSTATE 4274K)
+#   • path => array(...)        → REQUIRED_PARAMETER_NOT_FOUND (SQLSTATE 4274K)
+# Both failures are runtime-version-dependent and not fixable in SQL alone.
 #
-# WHY THE PREVIOUS APPROACH WAS WRONG
-# ─────────────────────────────────────
-# The previous version did:
-#   CREATE OR REPLACE VIEW uc_view AS SELECT * FROM temp_view
+# The correct cross-session approach is to write the resolved snapshot data
+# directly as a Unity Catalog Delta table using spark.write.
+# This is:
+#   • 100% reliable on every Databricks runtime
+#   • Immediately queryable from the SQL Editor and any other session
+#   • Self-contained — no temp view dependency, no session lifetime issue
+#   • Reflects exactly the live files from the Iceberg snapshot at run time
 #
-# This looks correct but fails silently in two ways:
-#   1. Temp views are session-scoped.  From any other session the UC view
-#      resolves to "table not found" (or worse: an older temp view registered
-#      by a previous run if the view name was reused).
-#   2. Even within the same session, the temp view's underlying parquet file
-#      list is frozen to the snapshot at Cell 5 run time.  A DELETE or UPDATE
-#      committed in Spark after Cell 5 ran is NOT reflected — the deleted row
-#      is still in one of the live files and still shows in the view.
+# Table name pattern : <catalog>.<db>.snap_<table>_latest
+# (prefixed snap_ to distinguish from the Iceberg source table)
 #
-# THE FIX
-# ────────
-# Write the resolved live_files directly into the UC view as a read_files()
-# call.  This makes the view self-contained (no temp view dependency) and
-# documents exactly which snapshot it was built from in its COMMENT.
-# The trade-off: the view is still a point-in-time snapshot — it does not
-# auto-refresh.  Re-run Cells 2 → 5b after every Iceberg write.
+# Re-run Cells 2 → 5b after every Iceberg write to refresh.
 
-# Switch the session to the Unity Catalog before issuing any CREATE VIEW DDL.
-# Without this, Databricks resolves 3-part names (catalog.schema.view) against
-# spark_catalog (the legacy Hive metastore) instead of the UC catalog, which
-# causes REQUIRES_SINGLE_PART_NAMESPACE (SQLSTATE 42K05) because spark_catalog
-# only accepts single-part names.
+# USE CATALOG so CREATE TABLE DDL targets Unity Catalog, not spark_catalog.
 spark.sql(f"USE CATALOG {DATABRICKS_CATALOG}")
 
-print("Promoting temp views to Unity Catalog persistent views …")
+print("Writing Iceberg snapshot data to Unity Catalog Delta tables …")
 print("─" * 60)
 
 for tbl, snap in SNAPSHOTS.items():
     db_name    = snap["db_name"]
     tbl_name   = snap["table_name"]
     live_files = snap.get("live_files", [])
-    # Sanitise: replace dots and leading underscores in name segments so the
-    # resulting UC view identifier is always a clean 3-part name.
-    # e.g. db_name="demo", tbl_name="customers" → lakehouse.demo.vw_customers_latest
-    # Dots in either segment would create a 4-part name and cause
-    # REQUIRES_SINGLE_PART_NAMESPACE (SQLSTATE 42K05).
-    safe_db   = db_name.replace(".", "_").lstrip("_")
-    safe_tbl  = tbl_name.replace(".", "_").lstrip("_")
-    uc_view   = f"{DATABRICKS_CATALOG}.{safe_db}.vw_{safe_tbl}_latest"
     snap_id    = snap["snapshot_id"]
     snap_ts    = snap["last_updated"]
 
+    # Sanitise name segments — dots and leading underscores break UC identifiers.
+    safe_db  = db_name.replace(".", "_").lstrip("_")
+    safe_tbl = tbl_name.replace(".", "_").lstrip("_")
+    uc_table = f"{DATABRICKS_CATALOG}.{safe_db}.snap_{safe_tbl}_latest"
+
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{safe_db}")
+
     if not live_files:
-        # Empty table — create a view that returns zero rows.
-        # Use a VALUES clause so no temp view dependency exists.
-        spark.sql(f"""
-            CREATE OR REPLACE VIEW {uc_view}
-            COMMENT 'Iceberg snapshot view for {tbl} — snapshot {snap_id} ({snap_ts}) — EMPTY'
-            AS SELECT CAST(NULL AS STRING) AS _empty WHERE FALSE
-        """)
+        # Empty snapshot — write a zero-row Delta table so the name always exists.
+        empty_df = spark.createDataFrame([], schema="snap_file STRING")
+        (
+            empty_df.write
+            .format("delta")
+            .mode("overwrite")
+            .option("overwriteSchema", "true")
+            .saveAsTable(uc_table)
+        )
+        row_count = 0
     else:
-        # Build the file list as a SQL array literal: array('s3://...', 's3://...', ...)
-        # read_files() requires path => <array> — multiple positional string args are
-        # NOT supported and raise UNKNOWN_POSITIONAL_ARGUMENT (SQLSTATE 4274K).
-        # Using array() wraps all paths in a single named argument — no size limit,
-        # works for any number of files, no temp view dependency, cross-session safe.
-        file_array_sql = "array(" + ", ".join(f"'{p}'" for p in live_files) + ")"
-        spark.sql(f"""
-            CREATE OR REPLACE VIEW {uc_view}
-            COMMENT 'Iceberg snapshot view for {tbl} — snapshot {snap_id} ({snap_ts}) — {len(live_files)} live files'
-            AS SELECT * FROM read_files(path => {file_array_sql}, format => 'parquet', mergeSchema => true)
-        """)
+        # Read the exact live parquet files for this snapshot and overwrite the
+        # Delta table.  mergeSchema handles tables whose schema evolved over time.
+        df = (
+            spark.read
+                 .option("mergeSchema", "true")
+                 .parquet(*live_files)
+        )
+        (
+            df.write
+            .format("delta")
+            .mode("overwrite")
+            .option("overwriteSchema", "true")
+            .saveAsTable(uc_table)
+        )
+        row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {uc_table}").collect()[0]["n"]
 
-    print(f"  ✅ {uc_view}")
-    print(f"     snapshot={snap_id}  ({snap_ts})  files={len(live_files)}")
+    print(f"  ✅ {uc_table}")
+    print(f"     snapshot={snap_id}  ({snap_ts})")
+    print(f"     rows={row_count:,}  live_files={len(live_files)}")
+    print()
 
-print()
 print("─" * 60)
-print(f"✅ {len(SNAPSHOTS)} Unity Catalog view(s) created/refreshed")
+print(f"✅ {len(SNAPSHOTS)} Unity Catalog Delta table(s) written/refreshed")
 print()
-print("  ⚠️  These views are point-in-time snapshots of the Iceberg table.")
+print("  ⚠️  These tables are point-in-time snapshots of the Iceberg data.")
 print("  Re-run Cells 2 → 5b after any Iceberg write (INSERT/UPDATE/DELETE)")
-print("  to pick up the new snapshot and remove deleted/updated rows.")
+print("  to overwrite with the new snapshot.")
 
 # COMMAND ----------
 
@@ -755,14 +750,18 @@ print("Cell 9 — single-table registration: SKIPPED (manual-only cell, all code
 #     print(f"   snapshot={snap_info['snapshot_id']}")
 #     print(f"   rows={row_count:,}  live_files={len(live_files)}")
 #
-# # Promote to Unity Catalog view — uses read_files(path => array(...)) directly
-# file_array_sql = "array(" + ", ".join(f"'{p}'" for p in live_files) + ")"
-# spark.sql(f"""
-#     CREATE OR REPLACE VIEW {uc_view}
-#     COMMENT 'Iceberg snapshot view for {NEW_TABLE_KEY} — snapshot {snap_info["snapshot_id"]}'
-#     AS SELECT * FROM read_files(path => {file_array_sql}, format => 'parquet', mergeSchema => true)
-# """)
-# print(f"✅ Unity Catalog view REGISTERED: {uc_view}")
+# # Write snapshot as a Unity Catalog Delta table (reliable on all runtimes).
+# # read_files() in SQL is broken for multi-file use — use spark.write instead.
+# uc_table = f"{DATABRICKS_CATALOG}.{db_name}.snap_{table_name}_latest"
+# df = spark.read.option("mergeSchema", "true").parquet(*live_files)
+# (
+#     df.write
+#     .format("delta")
+#     .mode("overwrite")
+#     .option("overwriteSchema", "true")
+#     .saveAsTable(uc_table)
+# )
+# print(f"✅ Unity Catalog Delta table REGISTERED: {uc_table}")
 #
 # print()
 # print("  Re-run Cells 2 → 5b after every Iceberg write to keep the view current.")
