@@ -515,37 +515,75 @@ print("  └──────────────────────�
 # =============================================================================
 # Cell 5b — Optional: promote temp views to persistent Unity Catalog views
 # =============================================================================
-# Run this cell if you need the views to persist across sessions or be
-# visible from other Databricks notebooks / SQL warehouses.
+# Run this cell explicitly ONLY after Cell 5 has just refreshed the temp views
+# in this session.  DO NOT leave this cell on auto-run — the UC view it creates
+# embeds a reference to the snapshot resolved in Cell 5.  If you query the UC
+# view from a different session (or after a new Iceberg write), it will serve
+# stale data because the temp view it proxies does not exist in that session.
 #
-# This creates a thin Unity Catalog VIEW that SELECTs from the temp view.
-# Re-run Cells 2 → 5 + this cell after any Iceberg write (INSERT/UPDATE/DELETE)
-# to refresh both the temp view and the Unity Catalog view.
+# WHY THE PREVIOUS APPROACH WAS WRONG
+# ─────────────────────────────────────
+# The previous version did:
+#   CREATE OR REPLACE VIEW uc_view AS SELECT * FROM temp_view
 #
-# NOTE: Unity Catalog views reference the temp view by name. They are valid
-# only while the temp view exists in this session. For cross-session use,
-# the temp view must be re-registered before querying the UC view.
+# This looks correct but fails silently in two ways:
+#   1. Temp views are session-scoped.  From any other session the UC view
+#      resolves to "table not found" (or worse: an older temp view registered
+#      by a previous run if the view name was reused).
+#   2. Even within the same session, the temp view's underlying parquet file
+#      list is frozen to the snapshot at Cell 5 run time.  A DELETE or UPDATE
+#      committed in Spark after Cell 5 ran is NOT reflected — the deleted row
+#      is still in one of the live files and still shows in the view.
+#
+# THE FIX
+# ────────
+# Write the resolved live_files directly into the UC view as a read_files()
+# call.  This makes the view self-contained (no temp view dependency) and
+# documents exactly which snapshot it was built from in its COMMENT.
+# The trade-off: the view is still a point-in-time snapshot — it does not
+# auto-refresh.  Re-run Cells 2 → 5b after every Iceberg write.
 
 print("Promoting temp views to Unity Catalog persistent views …")
 print("─" * 60)
 
 for tbl, snap in SNAPSHOTS.items():
-    temp_view = snap["temp_view"]
-    db_name   = snap["db_name"]
-    tbl_name  = snap["table_name"]
-    uc_view   = f"{DATABRICKS_CATALOG}.{db_name}.vw_{tbl_name}_latest"
+    db_name    = snap["db_name"]
+    tbl_name   = snap["table_name"]
+    live_files = snap.get("live_files", [])
+    uc_view    = f"{DATABRICKS_CATALOG}.{db_name}.vw_{tbl_name}_latest"
+    snap_id    = snap["snapshot_id"]
+    snap_ts    = snap["last_updated"]
 
-    spark.sql(f"""
-        CREATE OR REPLACE VIEW {uc_view}
-        COMMENT 'Iceberg snapshot view for {tbl} — snapshot {snap["snapshot_id"]} ({snap["last_updated"]})'
-        AS SELECT * FROM {temp_view}
-    """)
+    if not live_files:
+        # Empty table — create a view that returns zero rows.
+        # Use a VALUES clause so no temp view dependency exists.
+        spark.sql(f"""
+            CREATE OR REPLACE VIEW {uc_view}
+            COMMENT 'Iceberg snapshot view for {tbl} — snapshot {snap_id} ({snap_ts}) — EMPTY'
+            AS SELECT CAST(NULL AS STRING) AS _empty WHERE FALSE
+        """)
+    else:
+        # Build the file list as a comma-separated string of quoted S3 paths.
+        # read_files() is Databricks-native and accepts multiple literal paths.
+        # This embeds the exact live file set for this snapshot — no temp view
+        # dependency, no stale-session risk.
+        file_list_sql = ", ".join(f"'{p}'" for p in live_files)
+        spark.sql(f"""
+            CREATE OR REPLACE VIEW {uc_view}
+            COMMENT 'Iceberg snapshot view for {tbl} — snapshot {snap_id} ({snap_ts}) — {len(live_files)} live files'
+            AS SELECT * FROM read_files({file_list_sql}, format => 'parquet', mergeSchema => true)
+        """)
 
-    print(f"  ✅ {uc_view}  (backed by temp view {temp_view})")
+    print(f"  ✅ {uc_view}")
+    print(f"     snapshot={snap_id}  ({snap_ts})  files={len(live_files)}")
 
 print()
 print("─" * 60)
 print(f"✅ {len(SNAPSHOTS)} Unity Catalog view(s) created/refreshed")
+print()
+print("  ⚠️  These views are point-in-time snapshots of the Iceberg table.")
+print("  Re-run Cells 2 → 5b after any Iceberg write (INSERT/UPDATE/DELETE)")
+print("  to pick up the new snapshot and remove deleted/updated rows.")
 
 # COMMAND ----------
 
@@ -579,6 +617,9 @@ print("═" * 70)
 # =============================================================================
 # Cell 7 — Optional: cache a view into NVMe disk cache
 # =============================================================================
+# ⚠️  DO NOT run this cell as part of a full notebook run-all.
+#     Run it manually ONLY when you explicitly want to warm the NVMe cache.
+#
 # Databricks Photon clusters expose a local NVMe-backed disk cache.
 # Running CACHE TABLE scans the temp view once and stores the decompressed
 # columnar data on the executor's local NVMe.
@@ -587,96 +628,120 @@ print("═" * 70)
 # stale data from the previous snapshot.  Always run Cell 8 (UNCACHE + re-warm)
 # after a Cell 5 refresh if you use the NVMe cache.
 
-VIEW_TO_CACHE = "lakehouse_db__customer__latest"   # temp view name from Cell 5
+# ── Uncomment and run manually to cache a single view ─────────────────────
+# VIEW_TO_CACHE = "lakehouse_db__customer__latest"   # temp view name from Cell 5
+# print(f"Caching {VIEW_TO_CACHE} into NVMe disk cache …")
+# spark.sql(f"CACHE TABLE {VIEW_TO_CACHE}")
+# print(f"✅ Cache warm for {VIEW_TO_CACHE}")
 
-print(f"Caching {VIEW_TO_CACHE} into NVMe disk cache …")
-spark.sql(f"CACHE TABLE {VIEW_TO_CACHE}")
-print(f"✅ Cache warm for {VIEW_TO_CACHE}")
-
-# ── Or cache ALL discovered views ─────────────────────────────────────────
-# print("Caching all discovered views into NVMe disk cache …")
+# ── Or uncomment to cache ALL discovered views ─────────────────────────────
 # for tbl, snap in SNAPSHOTS.items():
 #     print(f"  Caching {snap['temp_view']} …")
 #     spark.sql(f"CACHE TABLE {snap['temp_view']}")
 # print("✅ All views cached")
+
+print("Cell 7 — NVMe cache warm: SKIPPED (manual-only cell, all code commented out)")
 
 # COMMAND ----------
 
 # =============================================================================
 # Cell 8 — Optional: invalidate NVMe cache after a new Iceberg snapshot
 # =============================================================================
+# ⚠️  DO NOT run this cell as part of a full notebook run-all.
+#     Run it manually ONLY after a Cell 5 refresh when you have an active
+#     NVMe cache that needs to be invalidated and re-warmed.
 
-VIEW_TO_RECACHE = "lakehouse_db__customer__latest"   # temp view name from Cell 5
+# ── Uncomment and run manually to re-warm a single view ───────────────────
+# VIEW_TO_RECACHE = "lakehouse_db__customer__latest"   # temp view name from Cell 5
+# print(f"Re-warming NVMe cache for {VIEW_TO_RECACHE} …")
+# spark.sql(f"UNCACHE TABLE IF EXISTS {VIEW_TO_RECACHE}")
+# spark.sql(f"CACHE TABLE {VIEW_TO_RECACHE}")
+# print(f"✅ NVMe cache refreshed for {VIEW_TO_RECACHE}")
 
-print(f"Re-warming NVMe cache for {VIEW_TO_RECACHE} …")
-spark.sql(f"UNCACHE TABLE IF EXISTS {VIEW_TO_RECACHE}")
-spark.sql(f"CACHE TABLE {VIEW_TO_RECACHE}")
-print(f"✅ NVMe cache refreshed for {VIEW_TO_RECACHE}")
-
-# ── Or re-warm ALL views ───────────────────────────────────────────────────
+# ── Or uncomment to re-warm ALL views ─────────────────────────────────────
 # for tbl, snap in SNAPSHOTS.items():
 #     print(f"  Re-warming {snap['temp_view']} …")
 #     spark.sql(f"UNCACHE TABLE IF EXISTS {snap['temp_view']}")
 #     spark.sql(f"CACHE TABLE {snap['temp_view']}")
 # print("✅ All views re-warmed")
 
+print("Cell 8 — NVMe cache re-warm: SKIPPED (manual-only cell, all code commented out)")
+
 # COMMAND ----------
 
 # =============================================================================
 # Cell 9 — Sample: manually register the view for ONE new table on first run
 # =============================================================================
+# ⚠️  DO NOT run this cell as part of a full notebook run-all.
+#     Run it manually ONLY when you need to register a single new table
+#     without doing a full discovery pass.
+#
 # USE THIS WHEN:
 #   • You just created a new Iceberg table in Spark and want the view
 #     immediately without waiting for the next full notebook run.
 #
-# Set NEW_TABLE_KEY and run — the table is resolved and the temp view (and
-# optionally the Unity Catalog view) are registered.
+# Set NEW_TABLE_KEY, uncomment all lines below, and run this cell alone.
 
-NEW_TABLE_KEY      = "analytics_db.product"
-WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
-DATABRICKS_CATALOG = "lakehouse"
+# NEW_TABLE_KEY      = "analytics_db.product"   # ← change to your table
+# WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
+# DATABRICKS_CATALOG = "lakehouse"
+#
+# db_name, table_name = NEW_TABLE_KEY.split(".", 1)
+#
+# meta_path = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{table_name}/metadata/"
+# temp_view = f"{db_name}__{table_name}__latest"
+# uc_view   = f"{DATABRICKS_CATALOG}.{db_name}.vw_{table_name}_latest"
+#
+# print(f"New table  : {NEW_TABLE_KEY}")
+# print(f"Meta path  : {meta_path}")
+# print(f"Temp view  : {temp_view}")
 
-db_name, table_name = NEW_TABLE_KEY.split(".", 1)
+print("Cell 9 — single-table registration: SKIPPED (manual-only cell, all code commented out)")
 
-meta_path = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{table_name}/metadata/"
-temp_view = f"{db_name}__{table_name}__latest"
-uc_view   = f"{DATABRICKS_CATALOG}.{db_name}.vw_{table_name}_latest"
+# ── Full Cell 9 body — all commented out, safe to run-all ─────────────────
+# Uncomment the entire block below and run this cell alone when needed.
 
-print(f"New table  : {NEW_TABLE_KEY}")
-print(f"Meta path  : {meta_path}")
-print(f"Temp view  : {temp_view}")
-print(f"UC view    : {uc_view}")
-print()
-
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{db_name}")
-print(f"✅ Schema {DATABRICKS_CATALOG}.{db_name} ready")
-
-print()
-snap_info  = resolve_live_files(NEW_TABLE_KEY, meta_path)
-live_files = snap_info["live_files"]
-
-if not live_files:
-    spark.createDataFrame([], schema="snap_file STRING").createOrReplaceTempView(temp_view)
-    print(f"✅ Temp view REGISTERED (empty — no live files yet)")
-else:
-    (
-        spark.read
-             .option("mergeSchema", "true")
-             .parquet(*live_files)
-             .createOrReplaceTempView(temp_view)
-    )
-    row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {temp_view}").collect()[0]["n"]
-    print(f"✅ Temp view REGISTERED")
-    print(f"   snapshot={snap_info['snapshot_id']}")
-    print(f"   rows={row_count:,}  live_files={len(live_files)}")
-
-# Promote to Unity Catalog view (optional — comment out if not needed)
-spark.sql(f"""
-    CREATE OR REPLACE VIEW {uc_view}
-    COMMENT 'Iceberg snapshot view for {NEW_TABLE_KEY} — snapshot {snap_info["snapshot_id"]}'
-    AS SELECT * FROM {temp_view}
-""")
-print(f"✅ Unity Catalog view REGISTERED: {uc_view}")
-
-print()
-print("  Re-run Cells 2 → 5 after every Iceberg write to keep the view current.")
+# db_name, table_name = NEW_TABLE_KEY.split(".", 1)
+# meta_path = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{table_name}/metadata/"
+# temp_view = f"{db_name}__{table_name}__latest"
+# uc_view   = f"{DATABRICKS_CATALOG}.{db_name}.vw_{table_name}_latest"
+#
+# print(f"New table  : {NEW_TABLE_KEY}")
+# print(f"Meta path  : {meta_path}")
+# print(f"Temp view  : {temp_view}")
+# print(f"UC view    : {uc_view}")
+# print()
+#
+# spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{db_name}")
+# print(f"✅ Schema {DATABRICKS_CATALOG}.{db_name} ready")
+#
+# print()
+# snap_info  = resolve_live_files(NEW_TABLE_KEY, meta_path)
+# live_files = snap_info["live_files"]
+#
+# if not live_files:
+#     spark.createDataFrame([], schema="snap_file STRING").createOrReplaceTempView(temp_view)
+#     print(f"✅ Temp view REGISTERED (empty — no live files yet)")
+# else:
+#     (
+#         spark.read
+#              .option("mergeSchema", "true")
+#              .parquet(*live_files)
+#              .createOrReplaceTempView(temp_view)
+#     )
+#     row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {temp_view}").collect()[0]["n"]
+#     print(f"✅ Temp view REGISTERED")
+#     print(f"   snapshot={snap_info['snapshot_id']}")
+#     print(f"   rows={row_count:,}  live_files={len(live_files)}")
+#
+# # Promote to Unity Catalog view — uses read_files() directly (no temp view dependency)
+# file_list_sql = ", ".join(f"'{p}'" for p in live_files)
+# spark.sql(f"""
+#     CREATE OR REPLACE VIEW {uc_view}
+#     COMMENT 'Iceberg snapshot view for {NEW_TABLE_KEY} — snapshot {snap_info["snapshot_id"]}'
+#     AS SELECT * FROM read_files({file_list_sql}, format => 'parquet', mergeSchema => true)
+# """)
+# print(f"✅ Unity Catalog view REGISTERED: {uc_view}")
+#
+# print()
+# print("  Re-run Cells 2 → 5b after every Iceberg write to keep the view current.")
