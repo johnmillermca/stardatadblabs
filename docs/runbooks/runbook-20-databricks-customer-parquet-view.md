@@ -1120,61 +1120,44 @@ Gluten: DISABLED (required for Iceberg UPDATE/DELETE)
 
 ---
 
-### 9-1 — Confirm schema and objects exist
+### 9-1 — Confirm table is reachable + note baseline
 
-```sql
-SHOW SCHEMAS IN lakehouse;
--- ✅ lakehouse_db listed
-```
-
-> **Note:** `SHOW VIEWS IN lakehouse.lakehouse_db` is not supported on Serverless compute.
-> Use `spark.catalog.tableExists()` in a Databricks notebook instead:
+Run in **JupyterHub** (after Section 9-0 session is ready):
 
 ```python
-print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
-# ✅ True
+# Confirm catalog connectivity and note the baseline count before any changes
+baseline = spark.sql(
+    "SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer"
+).collect()[0]["n"]
+print(f"Baseline row count : {baseline}")
+
+# Confirm no pre-existing test row
+existing = spark.sql(
+    "SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901"
+).collect()[0]["n"]
+print(f"Rows with id=99901 : {existing}  (expected: 0)")
+```
+
+Expected:
+```
+Baseline row count : 1000
+Rows with id=99901 : 0
 ```
 
 ---
 
-### 9-2 — Baseline row count (before any changes)
+### 9-2 — INSERT
 
-```sql
-SELECT COUNT(*) AS customer_rows
-FROM   lakehouse.lakehouse_db.vw_customer_latest;
--- ✅ Note this number — e.g. 1000
-```
-
-Also run the duplicate check to confirm the view is clean before testing:
-
-```sql
-SELECT customer_id, COUNT(*) AS dup_count
-FROM   lakehouse.lakehouse_db.vw_customer_latest
-GROUP  BY customer_id HAVING COUNT(*) > 1;
--- ✅ Expected: 0 rows  (no duplicates)
-```
-
----
-
-### 9-3 — INSERT test
-
-> **Why `spark.sql("INSERT INTO … VALUES …")` fails**
-> `snap_id` and `snap_timestamp` are part of the physical Iceberg table schema but
-> are **not** Iceberg-level defaults — they are Spark execution-time expressions
-> (`monotonically_increasing_id()` / `current_timestamp()`) injected only by
-> `IcebergTableBuilder.write_append()`. A raw SQL INSERT that omits them fails with
-> `CANNOT_FIND_DATA`. Always use `write_append()` or a DataFrame write for any
-> direct write to these tables.
-
-**Step 1 — Insert a test row in JupyterHub (PySpark)**
+Run in **JupyterHub**:
 
 ```python
 import datetime
 from pyspark.sql import Row
 from spark_iceberg_utils import IcebergTableBuilder
 
-# Build a single-row DataFrame — do NOT include snap_id / snap_timestamp;
-# write_append() injects them automatically.
+# snap_id and snap_timestamp must NOT be supplied — write_append() injects them.
+# raw spark.sql("INSERT INTO ... VALUES ...") fails with CANNOT_FIND_DATA if
+# snap_id is missing. Always use write_append() for inserts on this platform.
 row = Row(
     customer_id   = 99901,
     full_name     = "DML Test User",
@@ -1194,42 +1177,43 @@ row = Row(
 )
 df = spark.createDataFrame([row])
 
-# running_user="dave" is required — SPARK_USER env-var is not set in JupyterHub sessions
-builder = IcebergTableBuilder(spark, running_user="dave")
-builder.write_append(df, catalog="databricks", namespace="lakehouse_db", table="customer")
-print("✅ INSERT done — snap_id and snap_timestamp auto-injected by write_append()")
+# running_user="dave" required — SPARK_USER env-var is not set in JupyterHub
+IcebergTableBuilder(spark, running_user="dave").write_append(
+    df, catalog="databricks", namespace="lakehouse_db", table="customer"
+)
+
+# Verify immediately via the Iceberg catalog
+spark.sql("""
+    SELECT customer_id, full_name, email, city, salary, snap_id, snap_timestamp
+    FROM   databricks.lakehouse_db.customer
+    WHERE  customer_id = 99901
+""").show(truncate=False)
+
+after = spark.sql(
+    "SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer"
+).collect()[0]["n"]
+print(f"Row count after INSERT: {after}  (expected: {baseline + 1})")
 ```
 
-**Step 2 — Refresh the Databricks view**
-
-In `nb_multi_table_auto_reader.py`, re-run **Cells 2 → 5**.
-
-**Step 3 — Verify in Databricks SQL console**
-
-```sql
-SELECT customer_id, full_name, email, city, customer_tier, salary, snap_id, snap_timestamp
-FROM   lakehouse.lakehouse_db.vw_customer_latest
-WHERE  customer_id = 99901;
+Expected:
 ```
-
-✅ Expected: **1 row** — `full_name='DML Test User'`, `email='dmltest@example.com'`,
-`salary=75000.00`, `snap_id` is a non-null BIGINT, `snap_timestamp` is a non-null TIMESTAMP.
-
-```sql
--- Row count must be exactly 1 more than the baseline
-SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
--- ✅ Expected: baseline + 1
++----------+--------------+--------------------+------+---------+-------------------+------------------------+
+|customer_id|full_name    |email               |city  |salary   |snap_id            |snap_timestamp          |
++----------+--------------+--------------------+------+---------+-------------------+------------------------+
+|99901     |DML Test User |dmltest@example.com |Sydney|75000.0  |<non-null BIGINT>  |<non-null TIMESTAMP>    |
++----------+--------------+--------------------+------+---------+-------------------+------------------------+
+Row count after INSERT: 1001
 ```
 
 ---
 
-### 9-4 — UPDATE test
+### 9-3 — UPDATE
 
-**Step 1 — Update the test row in JupyterHub (PySpark)**
+Run in **JupyterHub**:
 
 ```python
-# Direct Iceberg UPDATE — supported on format-version=2 tables (copy-on-write).
-# Iceberg rewrites the affected data file and marks the old one DELETED in the manifest.
+# Direct Iceberg UPDATE — works on format-version=2 copy-on-write tables.
+# Requires Gluten to be DISABLED in the session (done in 9-0).
 spark.sql("""
     UPDATE databricks.lakehouse_db.customer
     SET    email      = 'dmltest_updated@example.com',
@@ -1238,103 +1222,103 @@ spark.sql("""
            updated_at = current_timestamp()
     WHERE  customer_id = 99901
 """)
-print("UPDATE done")
-```
 
-**Step 2 — Confirm the update in JupyterHub immediately (Iceberg catalog)**
-
-```python
-# Verify via the Iceberg catalog directly — no Databricks refresh needed for this check
+# Verify immediately — must show new values, exactly 1 row (no duplicate)
 spark.sql("""
-    SELECT customer_id, full_name, email, city, salary
+    SELECT customer_id, email, city, salary
     FROM   databricks.lakehouse_db.customer
     WHERE  customer_id = 99901
 """).show(truncate=False)
-# Expected: 1 row — email='dmltest_updated@example.com', city='Melbourne', salary=99000.0
 
-row_count = spark.sql("""
-    SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901
-""").collect()[0]["n"]
-print(f"Rows for customer 99901 after UPDATE: {row_count}  (expected: 1 — no duplicates)")
+n = spark.sql(
+    "SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901"
+).collect()[0]["n"]
+print(f"Rows for id=99901 after UPDATE: {n}  (expected: 1 — no duplicates)")
 ```
 
-**Step 3 — Refresh the Databricks view, then verify there too**
-
-Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`, then in the Databricks SQL console:
-
-```sql
-SELECT customer_id, full_name, email, city, salary
-FROM   lakehouse.lakehouse_db.vw_customer_latest
-WHERE  customer_id = 99901;
--- Expected: 1 row, email='dmltest_updated@example.com', city='Melbourne', salary=99000.0
-
--- Duplicate check — must be 0 (old file excluded by snapshot resolver)
-SELECT customer_id, COUNT(*) AS dup_count
-FROM   lakehouse.lakehouse_db.vw_customer_latest
-WHERE  customer_id = 99901
-GROUP  BY customer_id HAVING COUNT(*) > 1;
--- Expected: 0 rows
+Expected:
+```
++----------+-----------------------------+---------+---------+
+|customer_id|email                       |city     |salary   |
++----------+-----------------------------+---------+---------+
+|99901     |dmltest_updated@example.com |Melbourne|99000.0  |
++----------+-----------------------------+---------+---------+
+Rows for id=99901 after UPDATE: 1
 ```
 
-> **If the old row is still there / dup_count = 2:**
-> Cell 4 of `nb_multi_table_auto_reader.py` should print `Dead files: 1`.
-> If it prints `Dead files: 0` the snapshot was not refreshed — re-run Cells 2 → 5.
+> If UPDATE returns 0 rows or still shows the old value — Gluten is still active
+> in the session. Re-run 9-0 and confirm the output says `Gluten: DISABLED`.
 
 ---
 
-### 9-5 — DELETE test
+### 9-4 — DELETE
 
-**Step 1 — Delete the test row in JupyterHub (PySpark)**
+Run in **JupyterHub**:
 
 ```python
-# Direct Iceberg DELETE — copy-on-write: rewrites data file without the row,
-# marks the old file DELETED in the manifest snapshot.
+# Direct Iceberg DELETE — copy-on-write, requires Gluten DISABLED (done in 9-0).
 spark.sql("""
     DELETE FROM databricks.lakehouse_db.customer
     WHERE  customer_id = 99901
 """)
-print("DELETE done")
+
+# Verify immediately — row must be gone, total count back to baseline
+gone = spark.sql(
+    "SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901"
+).collect()[0]["n"]
+total = spark.sql(
+    "SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer"
+).collect()[0]["n"]
+print(f"Rows for id=99901 after DELETE : {gone}   (expected: 0)")
+print(f"Total rows after DELETE        : {total}  (expected: {baseline})")
 ```
 
-**Step 2 — Confirm the deletion in JupyterHub immediately (Iceberg catalog)**
-
-```python
-# Verify via the Iceberg catalog directly — row must be gone before refreshing the view
-gone = spark.sql("""
-    SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901
-""").collect()[0]["n"]
-print(f"Rows for customer 99901 after DELETE: {gone}  (expected: 0)")
-
-total = spark.sql("""
-    SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer
-""").collect()[0]["n"]
-print(f"Total rows after DELETE: {total}  (expected: baseline − 1)")
+Expected:
+```
+Rows for id=99901 after DELETE : 0
+Total rows after DELETE        : 1000
 ```
 
-**Step 3 — Refresh the Databricks view, then verify there too**
+> If the row count does not change — Gluten is still active. Re-run 9-0.
 
-Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`, then in the Databricks SQL console:
+---
+
+### 9-5 — Refresh Databricks view and verify all three operations
+
+After completing 9-2, 9-3, 9-4 above, refresh the Databricks view to confirm
+all three changes are reflected there too.
+
+In **`nb_multi_table_auto_reader.py`**, re-run **Cells 2 → 5**.
+Cell 4 output should show:
+
+```
+[lakehouse_db.customer]  snapshot=<new_id>
+  Live files   : <n>
+  Dead files   : 2  ← at least 2: one from UPDATE, one from DELETE
+```
+
+Then in the **Databricks SQL console**:
 
 ```sql
--- Row must be gone
-SELECT customer_id, full_name, email
+-- Must return 0 rows — row was deleted
+SELECT customer_id, full_name, email, city, salary
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id = 99901;
--- Expected: 0 rows
 
--- Total count must be back to baseline
-SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
--- Expected: same as 9-2 baseline
+-- Must equal the original baseline (e.g. 1000)
+SELECT COUNT(*) AS customer_rows
+FROM   lakehouse.lakehouse_db.vw_customer_latest;
+
+-- Must return 0 rows — no duplicates from the UPDATE
+SELECT customer_id, COUNT(*) AS dup_count
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY customer_id HAVING COUNT(*) > 1;
 ```
 
-> **If the deleted row still appears in the Databricks view:**
-> 1. Check the JupyterHub Step 2 output first — if it already shows `0 rows`,
->    the DELETE worked in Iceberg. The view just needs refreshing.
-> 2. Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
-> 3. Cell 4 must print `Dead files: >= 1` — that confirms the old file was
->    tombstoned and will be excluded from the refreshed view.
-> 4. If `Dead files: 0` after the DELETE, the snapshot was not committed —
->    check the JupyterHub DELETE output for errors.
+> **If the deleted/updated row still appears after refreshing:**
+> Confirm Cell 4 printed `Dead files >= 1`. If it shows `Dead files: 0`
+> the Iceberg snapshot was not committed — check the JupyterHub step output
+> for errors before running the view refresh.
 
 ---
 
