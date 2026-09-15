@@ -1004,6 +1004,97 @@ Select warehouse: **Serverless Starter Warehouse**.
 
 ---
 
+### 9-0 — Start a fresh Spark session (run this first, every time)
+
+> ⚠️ If you ran `spark.stop()` at the end of Section 2, or restarted the JupyterHub
+> kernel, the SparkContext is dead. You will see:
+> `IllegalStateException: Cannot call methods on a stopped SparkContext`
+> Run this cell to build a fresh session before any DML step.
+
+```python
+import os, urllib.request, json
+from pyspark.sql import SparkSession
+
+# ── Step 1: load credentials from OpenBao ────────────────────────────────────
+OPENBAO_ADDR  = "http://openbao.prod.svc.cluster.local:8200"
+OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxxxxxxxxxxx"   # ← paste fresh token
+
+def bao(path, field):
+    req = urllib.request.Request(
+        f"{OPENBAO_ADDR}/v1/{path}",
+        headers={"X-Vault-Token": OPENBAO_TOKEN}
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())["data"]["data"][field]
+
+S3_KEY         = bao("secret/data/platform/s3",      "access_key")
+S3_SECRET      = bao("secret/data/platform/s3",      "secret_key")
+S3_ENDPOINT    = bao("secret/data/platform/s3",      "endpoint")
+POLARIS_ID     = bao("secret/data/platform/polaris", "spark_svc_id")
+POLARIS_SECRET = bao("secret/data/platform/polaris", "spark_svc_secret")
+
+# ── Step 2: stop any stale / dead SparkContext ────────────────────────────────
+_s = SparkSession.getActiveSession()
+if _s:
+    try:
+        _s.stop()
+        print("Stopped previous session")
+    except Exception:
+        pass
+
+# ── Step 3: build a fresh session ────────────────────────────────────────────
+DRIVER_IP   = os.environ["SPARK_LOCAL_IP"]
+POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+
+spark = SparkSession.builder \
+    .master("spark://spark-master-internal.prod.svc.cluster.local:17077") \
+    .appName("jupyter-dml-test") \
+    .config("spark.driver.host",        DRIVER_IP) \
+    .config("spark.driver.bindAddress", DRIVER_IP) \
+    .config("spark.executor.memory",    "2g") \
+    .config("spark.driver.memory",      "2g") \
+    .config("spark.pyspark.python",        "python3.11") \
+    .config("spark.pyspark.driver.python", "python3.11") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.databricks",
+            "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.databricks.type",             "rest") \
+    .config("spark.sql.catalog.databricks.uri",              POLARIS_URI) \
+    .config("spark.sql.catalog.databricks.oauth2-server-uri",
+            f"{POLARIS_URI}/v1/oauth/tokens") \
+    .config("spark.sql.catalog.databricks.credential",
+            f"{POLARIS_ID}:{POLARIS_SECRET}") \
+    .config("spark.sql.catalog.databricks.scope",            "PRINCIPAL_ROLE:ALL") \
+    .config("spark.sql.catalog.databricks.warehouse",        "star_lakehouse") \
+    .config("spark.sql.catalog.databricks.rest.auth.type",   "oauth2") \
+    .config("spark.sql.catalog.databricks.s3.access-key-id",     S3_KEY) \
+    .config("spark.sql.catalog.databricks.s3.secret-access-key", S3_SECRET) \
+    .config("spark.sql.catalog.databricks.s3.endpoint",          S3_ENDPOINT) \
+    .config("spark.sql.catalog.databricks.s3.path-style-access", "true") \
+    .config("spark.sql.catalog.databricks.client.region",        "us-east-2") \
+    .config("spark.hadoop.fs.s3a.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
+    .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
+    .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
+    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
+    .config("spark.plugins",                         "org.apache.gluten.GlutenPlugin") \
+    .config("spark.gluten.sql.columnar.backend.lib", "velox") \
+    .config("spark.memory.offHeap.enabled",          "true") \
+    .config("spark.memory.offHeap.size",             "2g") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("WARN")
+print("✅ Spark", spark.version, "ready —", DRIVER_IP)
+```
+
+✅ Expected: `✅ Spark 3.5.x ready — 10.244.x.x`
+
+> When done with all DML tests run `spark.stop()` to release cluster cores.
+
+---
+
 ### 9-1 — Confirm schema and objects exist
 
 ```sql
