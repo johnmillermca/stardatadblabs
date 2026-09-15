@@ -26,23 +26,37 @@ Functions are pure (no side-effects on Iceberg), composable, and chainable:
 
 Functions
 ---------
-  filter_op          — keep only specific Debezium op codes (c/u/d/r)
-  deduplicate        — keep last event per PK within a micro-batch
-  add_processing_time— inject proc_time TIMESTAMP column (wall-clock)
-  rename_columns     — rename a dict of {old: new} columns
-  cast_columns       — cast a dict of {col: spark_type} columns
-  drop_columns       — drop a list of column names
-  mask_columns       — SHA-256 hash sensitive columns (PII masking)
-  add_source_tag     — inject source_system STRING column
-  add_op_label       — inject human-readable op_label (INSERT/UPDATE/DELETE)
-  flatten_json_col   — expand a JSON string column into top-level columns
-  enrich_from_broadcast — left join a streaming batch against a broadcast dim
-  aggregate_counts   — count events by (pk_col, op) within the batch
-  pivot_before_after — side-by-side before/after columns from Debezium envelope
-  filter_columns     — keep only listed columns (projection)
-  null_coalesce      — coalesce(col, default_value) for nullable columns
-  route_by_topic     — split a multi-topic DataFrame into a dict keyed by topic
-  apply_pipeline     — chain a list of (fn, kwargs) tuples sequentially
+  filter_op              — keep only specific Debezium op codes (c/u/d/r)
+  deduplicate            — keep last event per PK within a micro-batch
+  add_processing_time    — inject proc_time TIMESTAMP column (wall-clock)
+  rename_columns         — rename a dict of {old: new} columns
+  cast_columns           — cast a dict of {col: spark_type} columns
+  drop_columns           — drop a list of column names
+  mask_columns           — SHA-256 hash sensitive columns (PII masking)
+  add_source_tag         — inject source_system STRING column
+  add_op_label           — inject human-readable op_label (INSERT/UPDATE/DELETE)
+  flatten_json_col       — expand a JSON string column into top-level columns
+  enrich_from_broadcast  — left join a streaming batch against a broadcast dim
+  aggregate_counts       — count events by (pk_col, op) within the batch
+  pivot_before_after     — side-by-side before/after columns from Debezium envelope
+  filter_columns         — keep only listed columns (projection)
+  null_coalesce          — coalesce(col, default_value) for nullable columns
+  route_by_topic         — split a multi-topic DataFrame into a dict keyed by topic
+  apply_pipeline         — chain a list of (fn, kwargs) tuples sequentially
+
+  ── Aggregate functions (batch-level summaries → separate Iceberg tables) ──
+  windowed_aggregate     — group-by + multi-agg (sum/avg/min/max/count) over any columns
+  rolling_sum            — cumulative sum of a numeric column, ordered by order_col
+  rolling_avg            — cumulative average of a numeric column, ordered by order_col
+  count_distinct_per_key — count distinct values of value_col per group_col
+  top_n_per_group        — keep top-N rows per group by a rank column
+  event_rate             — events-per-second throughput metric for the current batch
+
+  ── Multi-topic join functions (cross-topic enrichment → Iceberg) ──
+  stream_join            — inner/left join two batches on a shared key column
+  temporal_join          — join two batches keeping closest-in-time match per key
+  multi_topic_union      — UNION ALL multiple DataFrames with a source_topic tag
+  join_and_tag_source    — join + add topic-name columns for full provenance
 
 These functions are intentionally stateless within the batch.  For
 cross-batch state (e.g. windowed aggregations), use Spark's native
@@ -548,6 +562,527 @@ class StarTransform:
                 logger.error("apply_pipeline: step %r failed: %s", fn, exc, exc_info=True)
                 raise
         return df
+
+
+    # =========================================================================
+    # ── AGGREGATE FUNCTIONS ───────────────────────────────────────────────────
+    # =========================================================================
+
+    # ── General windowed / grouped aggregation ────────────────────────────────
+
+    @staticmethod
+    def windowed_aggregate(
+        group_cols: list[str],
+        agg_specs: list[tuple[str, str, str]],
+        batch_ts_col: str = "proc_batch_ts",
+    ) -> Any:
+        """
+        Group-by *group_cols* and compute multiple aggregations in one pass.
+
+        *agg_specs* is a list of (column, function, alias) triples.
+        Supported functions: ``sum``, ``avg``, ``min``, ``max``, ``count``,
+        ``count_distinct``, ``first``, ``last``, ``stddev``, ``variance``.
+
+        A ``proc_batch_ts`` TIMESTAMP column (wall-clock) is added so every
+        summary row carries the batch time — essential for time-series queries
+        against the Iceberg aggregate table.
+
+        Returns a **summary** DataFrame — write it to a separate Iceberg table,
+        not to the original events table.
+
+        Example::
+
+            agg_df = ST.windowed_aggregate(
+                ["country", "_op"],
+                [("total_amount", "sum", "total_revenue"),
+                 ("id",           "count", "event_count"),
+                 ("total_amount", "avg",   "avg_order_value")],
+            )(batch_df)
+            agg_df.writeTo("postgres.e2e_testing.orders_agg_summary").append()
+        """
+        _FN_MAP = {
+            "sum":            lambda c: F.sum(c),
+            "avg":            lambda c: F.avg(c),
+            "min":            lambda c: F.min(c),
+            "max":            lambda c: F.max(c),
+            "count":          lambda c: F.count(c),
+            "count_distinct": lambda c: F.countDistinct(c),
+            "first":          lambda c: F.first(c, ignorenulls=True),
+            "last":           lambda c: F.last(c, ignorenulls=True),
+            "stddev":         lambda c: F.stddev(c),
+            "variance":       lambda c: F.variance(c),
+        }
+
+        def _agg(df: DataFrame) -> DataFrame:
+            exprs = []
+            for src_col, fn_name, alias in agg_specs:
+                fn_name_lower = fn_name.lower()
+                if fn_name_lower not in _FN_MAP:
+                    raise ValueError(
+                        f"windowed_aggregate: unsupported function {fn_name!r}. "
+                        f"Choose from {sorted(_FN_MAP)}."
+                    )
+                if src_col not in df.columns:
+                    logger.warning(
+                        "windowed_aggregate: column %r not found — skipped.", src_col
+                    )
+                    continue
+                exprs.append(_FN_MAP[fn_name_lower](F.col(src_col)).alias(alias))
+            if not exprs:
+                return df
+            return (
+                df.groupBy([F.col(c) for c in group_cols])
+                  .agg(*exprs)
+                  .withColumn(batch_ts_col, F.current_timestamp())
+            )
+        return _agg
+
+    # ── Rolling (cumulative) sum ───────────────────────────────────────────────
+
+    @staticmethod
+    def rolling_sum(
+        value_col: str,
+        order_col: str = "kafka_ts",
+        partition_cols: list[str] | None = None,
+        out_col: str | None = None,
+    ) -> Any:
+        """
+        Add a cumulative **sum** of *value_col* ordered by *order_col* using a
+        window that spans all preceding rows up to and including the current
+        one (``ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW``).
+
+        *partition_cols* — optional list of columns to partition the window by
+        (e.g. ``["customer_id"]`` for a per-customer running total).
+        *out_col* — name of the new column (default: ``<value_col>_rolling_sum``).
+
+        Example::
+
+            df = df.transform(
+                ST.rolling_sum("total_amount", "kafka_ts", ["customer_id"])
+            )
+            # new column: total_amount_rolling_sum
+        """
+        from pyspark.sql import Window
+
+        output = out_col or f"{value_col}_rolling_sum"
+
+        def _rsum(df: DataFrame) -> DataFrame:
+            spec = Window.orderBy(F.col(order_col)).rowsBetween(
+                Window.unboundedPreceding, Window.currentRow
+            )
+            if partition_cols:
+                spec = spec.partitionBy([F.col(c) for c in partition_cols])
+            return df.withColumn(output, F.sum(F.col(value_col)).over(spec))
+        return _rsum
+
+    # ── Rolling (cumulative) average ──────────────────────────────────────────
+
+    @staticmethod
+    def rolling_avg(
+        value_col: str,
+        order_col: str = "kafka_ts",
+        partition_cols: list[str] | None = None,
+        out_col: str | None = None,
+    ) -> Any:
+        """
+        Add a cumulative **average** of *value_col* ordered by *order_col*.
+
+        Uses the same unbounded-preceding window as :py:meth:`rolling_sum`.
+        *partition_cols* and *out_col* behave identically.
+
+        Example::
+
+            df = df.transform(
+                ST.rolling_avg("total_amount", "kafka_ts", ["customer_id"])
+            )
+            # new column: total_amount_rolling_avg
+        """
+        from pyspark.sql import Window
+
+        output = out_col or f"{value_col}_rolling_avg"
+
+        def _ravg(df: DataFrame) -> DataFrame:
+            spec = Window.orderBy(F.col(order_col)).rowsBetween(
+                Window.unboundedPreceding, Window.currentRow
+            )
+            if partition_cols:
+                spec = spec.partitionBy([F.col(c) for c in partition_cols])
+            return df.withColumn(output, F.avg(F.col(value_col)).over(spec))
+        return _ravg
+
+    # ── Count distinct values per group key ───────────────────────────────────
+
+    @staticmethod
+    def count_distinct_per_key(
+        group_col: str,
+        value_col: str,
+        out_col: str | None = None,
+        batch_ts_col: str = "proc_batch_ts",
+    ) -> Any:
+        """
+        For each distinct value of *group_col*, count the number of **distinct**
+        values of *value_col* within the micro-batch.
+
+        Returns a **summary** DataFrame with columns:
+        ``(group_col, out_col, proc_batch_ts)``.
+
+        Write the result to a dedicated audit/metrics Iceberg table.
+
+        Example::
+
+            distinct_df = ST.count_distinct_per_key("country", "id")(batch_df)
+            # columns: country, id_distinct_count, proc_batch_ts
+            distinct_df.writeTo("postgres.e2e_testing.customers_country_stats").append()
+        """
+        output = out_col or f"{value_col}_distinct_count"
+
+        def _cdpk(df: DataFrame) -> DataFrame:
+            return (
+                df.groupBy(F.col(group_col))
+                  .agg(F.countDistinct(F.col(value_col)).alias(output))
+                  .withColumn(batch_ts_col, F.current_timestamp())
+            )
+        return _cdpk
+
+    # ── Top-N rows per group ───────────────────────────────────────────────────
+
+    @staticmethod
+    def top_n_per_group(
+        group_col: str,
+        rank_col: str,
+        n: int = 5,
+        ascending: bool = False,
+    ) -> Any:
+        """
+        Within each value of *group_col*, keep the top *n* rows ranked by
+        *rank_col* (descending by default — set ``ascending=True`` for bottom-N).
+
+        Uses a window ``row_number()`` so ties are broken deterministically by
+        Spark's row ordering rather than discarding rows arbitrarily.
+
+        Useful for "top 5 highest-value orders per country" type queries.
+
+        Example::
+
+            df = df.transform(ST.top_n_per_group("country", "total_amount", n=3))
+            # result contains at most 3 rows per country (highest total_amount)
+        """
+        from pyspark.sql import Window
+
+        def _top_n(df: DataFrame) -> DataFrame:
+            order_expr = (
+                F.col(rank_col).asc() if ascending else F.col(rank_col).desc()
+            )
+            w = Window.partitionBy(F.col(group_col)).orderBy(order_expr)
+            return (
+                df.withColumn("__rn", F.row_number().over(w))
+                  .filter(F.col("__rn") <= n)
+                  .drop("__rn")
+            )
+        return _top_n
+
+    # ── Event-rate metric ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def event_rate(
+        ts_col: str = "kafka_ts",
+        out_col: str = "events_per_second",
+        batch_ts_col: str = "proc_batch_ts",
+    ) -> Any:
+        """
+        Compute the overall **events-per-second** throughput for the current
+        micro-batch from the timestamps in *ts_col*.
+
+        The result is a single-row summary DataFrame with columns:
+        ``(event_count, batch_duration_seconds, events_per_second, min_ts,
+        max_ts, proc_batch_ts)``.
+
+        Intended for side-writes to a monitoring/metrics Iceberg table.
+
+        Example::
+
+            rate_df = ST.event_rate("kafka_ts")(batch_df)
+            rate_df.writeTo("postgres.e2e_testing.pipeline_event_rate").append()
+        """
+        def _rate(df: DataFrame) -> DataFrame:
+            agg_df = df.agg(
+                F.count("*").alias("event_count"),
+                F.min(F.col(ts_col)).alias("min_ts"),
+                F.max(F.col(ts_col)).alias("max_ts"),
+            )
+            # batch_duration_seconds = (max_ts – min_ts) in seconds; guard div/0
+            return (
+                agg_df
+                .withColumn(
+                    "batch_duration_seconds",
+                    F.greatest(
+                        (
+                            F.col("max_ts").cast("double")
+                            - F.col("min_ts").cast("double")
+                        ),
+                        F.lit(1.0),
+                    ),
+                )
+                .withColumn(
+                    out_col,
+                    F.col("event_count") / F.col("batch_duration_seconds"),
+                )
+                .withColumn(batch_ts_col, F.current_timestamp())
+            )
+        return _rate
+
+    # =========================================================================
+    # ── MULTI-TOPIC JOIN FUNCTIONS ────────────────────────────────────────────
+    # =========================================================================
+
+    # ── Direct batch-to-batch join ────────────────────────────────────────────
+
+    @staticmethod
+    def stream_join(
+        right_df: DataFrame,
+        join_col: str | list[str],
+        how: str = "inner",
+        left_prefix: str = "",
+        right_prefix: str = "right_",
+    ) -> Any:
+        """
+        Join the current micro-batch DataFrame against *right_df* (another
+        Kafka topic batch or any DataFrame) on *join_col*.
+
+        Column name collisions (excluding *join_col* itself) are resolved by
+        prefixing the right side's columns with *right_prefix* (default
+        ``'right_'``).  Set *left_prefix* to also prefix the left side.
+
+        Both DataFrames must have been routed from their respective Kafka topics
+        using :py:meth:`route_by_topic` before calling this function.
+
+        *how* supports the full Spark join-type vocabulary: ``inner``,
+        ``left``, ``right``, ``outer``, ``left_semi``, ``left_anti``.
+
+        Example::
+
+            topic_dfs = ST.route_by_topic(batch_df)
+            orders_df  = topic_dfs.get("postgres.public.orders", spark.createDataFrame([], orders_schema))
+            products_df = topic_dfs.get("postgres.public.products", spark.createDataFrame([], products_schema))
+
+            joined = ST.stream_join(products_df, "product_id", how="left")(orders_df)
+            joined.writeTo("postgres.e2e_testing.orders_products_joined").append()
+        """
+        join_keys = [join_col] if isinstance(join_col, str) else list(join_col)
+
+        def _join(left: DataFrame) -> DataFrame:
+            # Determine overlapping non-key columns
+            left_non_key  = [c for c in left.columns     if c not in join_keys]
+            right_non_key = [c for c in right_df.columns if c not in join_keys]
+            overlap = set(left_non_key) & set(right_non_key)
+
+            # Build renamed right DataFrame
+            right_renamed = right_df
+            for col_name in overlap:
+                right_renamed = right_renamed.withColumnRenamed(
+                    col_name, f"{right_prefix}{col_name}"
+                )
+            # Optionally prefix left side
+            left_renamed = left
+            if left_prefix:
+                for col_name in overlap:
+                    left_renamed = left_renamed.withColumnRenamed(
+                        col_name, f"{left_prefix}{col_name}"
+                    )
+
+            return left_renamed.join(right_renamed, on=join_keys, how=how)
+        return _join
+
+    # ── Temporal (nearest-in-time) join ───────────────────────────────────────
+
+    @staticmethod
+    def temporal_join(
+        right_df: DataFrame,
+        key_col: str,
+        left_ts_col: str  = "kafka_ts",
+        right_ts_col: str = "kafka_ts",
+        tolerance_ms: int | None = None,
+        right_prefix: str = "right_",
+    ) -> Any:
+        """
+        For each row in the left batch, find the **closest-in-time** matching
+        row in *right_df* sharing the same *key_col* value.
+
+        Steps:
+        1. Cross-join-free: broadcast *right_df* and join on *key_col*.
+        2. Compute absolute timestamp delta ``|left_ts – right_ts|`` in ms.
+        3. If *tolerance_ms* is set, drop matches whose delta exceeds it.
+        4. Keep only the closest right-side match per left row (min delta wins).
+
+        This is the micro-batch equivalent of a Flink event-time temporal join —
+        it does **not** maintain cross-batch state; use it for same-batch
+        enrichment where both sides arrive in the same micro-batch.
+
+        Overlapping non-key, non-ts columns in *right_df* are prefixed with
+        *right_prefix*.
+
+        Example::
+
+            enriched = ST.temporal_join(
+                right_df=payments_df,
+                key_col="order_id",
+                left_ts_col="kafka_ts",
+                right_ts_col="kafka_ts",
+                tolerance_ms=5000,
+            )(orders_df)
+            enriched.writeTo("postgres.e2e_testing.orders_payments_temporal").append()
+        """
+        from pyspark.sql import Window
+
+        def _temporal(left: DataFrame) -> DataFrame:
+            # Resolve column collisions on the right side
+            right_renamed = right_df
+            overlap = (
+                set(right_df.columns)
+                - {key_col, right_ts_col}
+            ) & set(left.columns)
+            for col_name in overlap:
+                right_renamed = right_renamed.withColumnRenamed(
+                    col_name, f"{right_prefix}{col_name}"
+                )
+            # Rename right ts col to avoid ambiguity
+            right_ts_alias = f"__right_{right_ts_col}"
+            right_renamed = right_renamed.withColumnRenamed(right_ts_col, right_ts_alias)
+
+            joined = left.join(F.broadcast(right_renamed), on=key_col, how="left")
+
+            # Compute delta in milliseconds (timestamps stored as LongType ms)
+            joined = joined.withColumn(
+                "__ts_delta_ms",
+                F.abs(
+                    F.col(left_ts_col).cast("long")
+                    - F.col(right_ts_alias).cast("long")
+                ),
+            )
+
+            if tolerance_ms is not None:
+                joined = joined.filter(
+                    F.col("__ts_delta_ms").isNull()
+                    | (F.col("__ts_delta_ms") <= tolerance_ms)
+                )
+
+            # Keep only the single closest right-side match per left row
+            # Use a synthetic row identity to partition over
+            w = (
+                Window
+                .partitionBy(F.col(key_col), F.col(left_ts_col))
+                .orderBy(F.col("__ts_delta_ms").asc_nulls_last())
+            )
+            return (
+                joined
+                .withColumn("__closest_rn", F.row_number().over(w))
+                .filter(F.col("__closest_rn") == 1)
+                .drop("__closest_rn", "__ts_delta_ms", right_ts_alias)
+            )
+        return _temporal
+
+    # ── UNION ALL multiple topic DataFrames ───────────────────────────────────
+
+    @staticmethod
+    def multi_topic_union(
+        topic_dfs: dict[str, DataFrame],
+        tag_col: str = "source_topic",
+        harmonise_schema: bool = True,
+    ) -> DataFrame:
+        """
+        UNION ALL multiple DataFrames (typically from :py:meth:`route_by_topic`)
+        into a single DataFrame and inject a *tag_col* STRING column carrying
+        the original topic name.
+
+        When *harmonise_schema* is ``True`` (default), missing columns are
+        added as ``NULL`` casts so all DataFrames share the same schema before
+        the union — required when topics have slightly different column sets.
+
+        Pass the result directly to an Iceberg ``append()`` write to build a
+        unified multi-source events table.
+
+        Example::
+
+            topic_dfs = ST.route_by_topic(batch_df)
+            unified = ST.multi_topic_union(topic_dfs)
+            unified.writeTo("postgres.e2e_testing.all_topics_union").append()
+        """
+        if not topic_dfs:
+            raise ValueError("multi_topic_union: topic_dfs dict is empty.")
+
+        tagged: list[DataFrame] = []
+        for topic_name, tdf in topic_dfs.items():
+            tagged.append(tdf.withColumn(tag_col, F.lit(topic_name)))
+
+        if not harmonise_schema:
+            result = tagged[0]
+            for tdf in tagged[1:]:
+                result = result.unionByName(tdf, allowMissingColumns=True)
+            return result
+
+        # Collect the full superset of column names (preserving first-seen order)
+        all_cols: list[str] = []
+        seen: set[str] = set()
+        for tdf in tagged:
+            for c in tdf.columns:
+                if c not in seen:
+                    all_cols.append(c)
+                    seen.add(c)
+
+        harmonised: list[DataFrame] = []
+        for tdf in tagged:
+            missing = [c for c in all_cols if c not in tdf.columns]
+            for c in missing:
+                tdf = tdf.withColumn(c, F.lit(None).cast(StringType()))
+            harmonised.append(tdf.select(all_cols))
+
+        result = harmonised[0]
+        for tdf in harmonised[1:]:
+            result = result.union(tdf)
+        return result
+
+    # ── Join two topic batches and tag both sides with provenance ─────────────
+
+    @staticmethod
+    def join_and_tag_source(
+        right_df: DataFrame,
+        join_col: str | list[str],
+        left_topic: str,
+        right_topic: str,
+        how: str = "inner",
+        right_prefix: str = "right_",
+    ) -> Any:
+        """
+        Join two topic DataFrames on *join_col* and add ``left_topic`` and
+        ``right_topic`` STRING columns that carry the names of the originating
+        Kafka topics for full data-lineage provenance in the Iceberg table.
+
+        This is a thin wrapper around :py:meth:`stream_join` that adds the
+        provenance columns after the join.
+
+        Example::
+
+            result = ST.join_and_tag_source(
+                right_df=inventory_df,
+                join_col="product_id",
+                left_topic="postgres.public.orders",
+                right_topic="postgres.public.inventory",
+                how="left",
+            )(orders_df)
+            result.writeTo("postgres.e2e_testing.orders_inventory_joined").append()
+        """
+        _join_fn = StarTransform.stream_join(
+            right_df, join_col, how=how, right_prefix=right_prefix
+        )
+
+        def _tag_join(df: DataFrame) -> DataFrame:
+            joined = _join_fn(df)
+            return (
+                joined
+                .withColumn("left_topic",  F.lit(left_topic))
+                .withColumn("right_topic", F.lit(right_topic))
+            )
+        return _tag_join
 
 
 # ─────────────────────────────────────────────────────────────────────────────

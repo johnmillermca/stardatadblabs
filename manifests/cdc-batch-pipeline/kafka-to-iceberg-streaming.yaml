@@ -71,6 +71,14 @@ data:
   TRANSFORM_PIPELINE:           ""
   # PII_COLUMNS: comma-separated column names to SHA-256 hash when mask_pii is active.
   PII_COLUMNS:                  "email,phone,phone_number,ssn,credit_card"
+  # TARGET_NAMESPACE: when set, overrides the Iceberg namespace derived from the Kafka topic
+  # for ALL sources (postgres + oracle + mongodb) so every table lands in one namespace.
+  # Production: leave empty "" — each topic routes to its own namespace (cache_testing/tpcds).
+  # E2E testing: set to "e2e_testing" so all three databases write into e2e_testing.
+  #   postgres.cache_testing.customers → postgres.e2e_testing.customers
+  #   oracle.cache_testing.CUSTOMERS   → oracle.e2e_testing.customers
+  #   mongodb.cache_testing.customers  → mongodb.e2e_testing.customers
+  TARGET_NAMESPACE:             ""
 
 # ── Deployment: standard write mode ──────────────────────────────────────────
 
@@ -183,6 +191,11 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
           resources:
             requests:
               memory: "4Gi"
@@ -314,6 +327,11 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
           resources:
             requests:
               memory: "4Gi"
@@ -445,6 +463,11 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
           resources:
             requests:
               memory: "4Gi"

@@ -143,6 +143,15 @@ DRY_RUN     = os.environ.get("DRY_RUN", "0") == "1"
 WRITE_MODE  = os.environ.get("WRITE_MODE", _WRITE_MODE_STANDARD).lower()
 _SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
 
+# Optional namespace override — when set, ALL topics from ALL sources are written
+# into this Iceberg namespace instead of the namespace derived from the Kafka topic.
+# Use-case: E2E testing — set TARGET_NAMESPACE=e2e_testing so that
+#   postgres.cache_testing.customers  → postgres.e2e_testing.customers
+#   oracle.cache_testing.CUSTOMERS    → oracle.e2e_testing.customers
+#   mongodb.cache_testing.customers   → mongodb.e2e_testing.customers
+# Leave empty ("") in production so each topic routes to its own namespace.
+_TARGET_NAMESPACE = os.environ.get("TARGET_NAMESPACE", "").strip()
+
 # Auto-restart loop config
 MAX_RESTART_ATTEMPTS   = int(os.environ.get("MAX_RESTART_ATTEMPTS", "10"))
 RESTART_BACKOFF_BASE_S = float(os.environ.get("RESTART_BACKOFF_BASE_S", "5"))
@@ -380,10 +389,21 @@ def _topic_to_table(topic: str, source: _StreamingSource) -> str:
 def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
     """
     Derive the Iceberg namespace from a Kafka topic name.
-    e.g. "oracle.tpcds.INCOME_BAND"     → "tpcds"
-         "oracle.cache_testing.ORDERS"  → "cache_testing"
-         "postgres.cache_testing.orders"→ "cache_testing"
+
+    When TARGET_NAMESPACE is set (e.g. "e2e_testing"), that value is returned
+    unconditionally for every topic and every source — all three databases
+    (postgres, oracle, mongodb) write into the same target namespace:
+        postgres.cache_testing.customers  → postgres.e2e_testing.customers
+        oracle.cache_testing.CUSTOMERS    → oracle.e2e_testing.customers
+        mongodb.cache_testing.customers   → mongodb.e2e_testing.customers
+
+    When TARGET_NAMESPACE is empty the namespace is derived from the topic:
+        e.g. "oracle.tpcds.INCOME_BAND"      → "tpcds"
+             "oracle.cache_testing.ORDERS"   → "cache_testing"
+             "postgres.cache_testing.orders" → "cache_testing"
     """
+    if _TARGET_NAMESPACE:
+        return _TARGET_NAMESPACE
     parts = topic.split(".")
     # parts[0]=prefix (oracle/postgres/mongodb), parts[1]=namespace, parts[2]=table
     return parts[1].lower() if len(parts) >= 3 else source.namespace
@@ -1102,6 +1122,25 @@ def _run_once(bao: BaoSparkInit) -> None:
             builder.ensure_namespace(src.catalog, src.namespace)
         except Exception as exc:
             logger.warning("[%s] Could not ensure namespace: %s", src.source_key, exc)
+
+    # When TARGET_NAMESPACE is set, pre-create that namespace in every active
+    # catalog so the first micro-batch does not fail on a missing namespace.
+    if _TARGET_NAMESPACE:
+        logger.info(
+            "TARGET_NAMESPACE=%r — ensuring override namespace in all active catalogs.",
+            _TARGET_NAMESPACE,
+        )
+        for src in _ALL_SOURCES:
+            try:
+                builder.ensure_namespace(src.catalog, _TARGET_NAMESPACE)
+                logger.info(
+                    "[%s] Namespace '%s' ready.", src.source_key, _TARGET_NAMESPACE
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Could not ensure namespace %r: %s",
+                    src.source_key, _TARGET_NAMESPACE, exc,
+                )
 
     restart_flag = threading.Event()
     queries = _start_all_queries(spark, builder, bao, restart_flag)
