@@ -391,6 +391,10 @@ print("✅ resolve_live_files() defined (production-scale: version-hint.text + b
 # Cell 4 — Resolve live file list for every discovered table
 # =============================================================================
 
+# Set the active catalog to the UC catalog so all subsequent DDL (CREATE SCHEMA,
+# CREATE VIEW) resolves against Unity Catalog, not spark_catalog (Hive metastore).
+spark.sql(f"USE CATALOG {DATABRICKS_CATALOG}")
+
 print("─" * 60)
 print("Resolving Iceberg snapshots and live data files …")
 print("─" * 60)
@@ -542,6 +546,13 @@ print("  └──────────────────────�
 # documents exactly which snapshot it was built from in its COMMENT.
 # The trade-off: the view is still a point-in-time snapshot — it does not
 # auto-refresh.  Re-run Cells 2 → 5b after every Iceberg write.
+
+# Switch the session to the Unity Catalog before issuing any CREATE VIEW DDL.
+# Without this, Databricks resolves 3-part names (catalog.schema.view) against
+# spark_catalog (the legacy Hive metastore) instead of the UC catalog, which
+# causes REQUIRES_SINGLE_PART_NAMESPACE (SQLSTATE 42K05) because spark_catalog
+# only accepts single-part names.
+spark.sql(f"USE CATALOG {DATABRICKS_CATALOG}")
 
 print("Promoting temp views to Unity Catalog persistent views …")
 print("─" * 60)
