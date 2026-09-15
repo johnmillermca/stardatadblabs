@@ -269,24 +269,37 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
             f"manifest-list entry. Cannot resolve live files."
         )
 
+    # ── Path normalisation helper ─────────────────────────────────────────────
+    # Spark writes all paths in Iceberg metadata as s3a:// (Hadoop S3A protocol).
+    # Databricks read_files() and spark.read require s3:// (AWS SDK / Unity
+    # Catalog external location).  ALL paths — manifest-list, manifest files,
+    # and data file paths — must be normalised to s3:// before use, so that
+    # DELETED and EXISTING/ADDED entries for the same physical file share the
+    # same dict key.  Without this, a file recorded as s3a://... in one manifest
+    # and s3://... in another would never match, the DELETED status would be
+    # missed, and the tombstoned file would still appear in the view.
+    def _norm(p: str) -> str:
+        return p.replace("s3a://", "s3://") if p else p
+
     # ── Step 3: read the manifest-list (Avro) — get all manifest paths ────────
     # The manifest-list is a single Avro file. Each row has a field
     # "manifest_path" pointing to an individual manifest Avro file.
+    manifest_list_path_norm = _norm(manifest_list_path)
     try:
-        manifest_list_df = spark.read.format("avro").load(manifest_list_path)
+        manifest_list_df = spark.read.format("avro").load(manifest_list_path_norm)
         manifest_paths   = [
-            row["manifest_path"]
+            _norm(row["manifest_path"])
             for row in manifest_list_df.select("manifest_path").collect()
         ]
     except Exception as exc:
         raise RuntimeError(
             f"[{table_name}] Failed to read manifest-list at "
-            f"{manifest_list_path}: {exc}"
+            f"{manifest_list_path_norm}: {exc}"
         ) from exc
 
     # ── Step 4: read each manifest and resolve final status per file path ─────
     #
-    # file_status: { file_path → status }
+    # file_status: { normalised_s3_path → status }
     #   status 0 = DELETED  (file is tombstoned — never include in view)
     #   status 1 = EXISTING (file is live, carried from an earlier snapshot)
     #   status 2 = ADDED    (file is live, new in this snapshot)
@@ -297,12 +310,10 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
     #   • ADDED(2) takes priority over EXISTING(1) if both appear (shouldn't
     #     happen in a well-formed table, but guard anyway).
     #   • We only emit content=0 (DATA) files — skip content=1/2 (delete files).
-    #
-    # This dict approach is the duplicate-prevention mechanism: a file seen as
-    # EXISTING in manifest A and DELETED in manifest B will end up as DELETED
-    # in file_status and will not be included in the final live_files list.
+    #   • ALL paths are normalised via _norm() before insertion so that s3a://
+    #     and s3:// variants of the same path always match the same dict key.
 
-    file_status: dict = {}   # { normalised_file_path: status_int }
+    file_status: dict = {}   # { normalised_s3_path: status_int }
 
     for manifest_path in manifest_paths:
         try:
@@ -330,9 +341,13 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
             if data_file.get("content", 0) != 0:
                 continue
 
-            file_path = data_file.get("file_path")
-            if not file_path:
+            raw_path = data_file.get("file_path")
+            if not raw_path:
                 continue
+
+            # Normalise to s3:// so DELETED/EXISTING entries for the same
+            # physical file always share the same key in file_status.
+            file_path = _norm(raw_path)
 
             # DELETED(0) wins: once a file is marked deleted it cannot become live
             # again in this snapshot.  ADDED(2) > EXISTING(1) for any remaining ties.
@@ -347,8 +362,9 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
                 file_status[file_path] = 2
             # else: keep existing_status as-is
 
-    # Emit only paths whose final resolved status is EXISTING(1) or ADDED(2)
-    live_files     = [p for p, s in file_status.items() if s in (1, 2)]
+    # Emit only paths whose final resolved status is EXISTING(1) or ADDED(2).
+    # Paths are already normalised to s3:// — no further conversion needed in Cell 5.
+    live_files      = [p for p, s in file_status.items() if s in (1, 2)]
     skipped_deleted = sum(1 for s in file_status.values() if s == 0)
 
     print(
@@ -457,15 +473,8 @@ for tbl, snap in SNAPSHOTS.items():
 
     else:
         # Build a comma-separated, single-quoted file list for read_files().
-        # read_files() accepts a list literal: read_files('path1','path2',...)
-        # We must convert s3a:// → s3:// if Spark wrote with s3a protocol,
-        # because Databricks read_files expects s3:// (DBFS / Unity paths).
-        def _normalise(p: str) -> str:
-            return p.replace("s3a://", "s3://")
-
-        file_list_sql = ", ".join(
-            f"'{_normalise(f)}'" for f in live_files
-        )
+        # Paths are already normalised to s3:// by resolve_live_files() (_norm).
+        file_list_sql = ", ".join(f"'{f}'" for f in live_files)
 
         spark.sql(f"""
             CREATE OR REPLACE VIEW {view}
@@ -650,10 +659,8 @@ if not live_files:
     """)
     print(f"✅ View CREATED (empty — no live files yet)")
 else:
-    def _normalise(p: str) -> str:
-        return p.replace("s3a://", "s3://")
-
-    file_list_sql = ", ".join(f"'{_normalise(f)}'" for f in live_files)
+    # Paths already normalised to s3:// by resolve_live_files()
+    file_list_sql = ", ".join(f"'{f}'" for f in live_files)
 
     spark.sql(f"""
         CREATE OR REPLACE VIEW {view}
