@@ -6,7 +6,7 @@
 | **Service** | k8s-platform / databricks |
 | **Owner** | Platform Team |
 | **Status** | Active |
-| **Last Updated** | 2026-08-31 (fix: snap_id / snap_timestamp columns; SHOW VIEWS replaced with spark.catalog.tableExists()) |
+| **Last Updated** | 2026-09-04 (fix: UPDATEs and DELETEs not visible — replaced `read_files(data/)` glob with Iceberg snapshot resolver; `CREATE OR REPLACE VIEW` on every refresh) |
 
 ---
 
@@ -353,8 +353,10 @@ read_files('s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/dat
 > **This section is superseded by Section 8.**
 > The auto-discovery notebook ([`nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)) scans the entire S3 warehouse root and refreshes **all** tables in one pass — no per-table code required.
 >
-> **To refresh after any Spark write:** re-run **Cells 2 and 4** of the notebook.
-> The views point at the `data/` directory and pick up new parquet files automatically on the next query — no notebook re-run is needed for the view itself.
+> **To refresh after any INSERT, UPDATE, or DELETE:** re-run **Cells 2 → 5** of the notebook.
+> Cell 4 re-resolves the live file list from the current Iceberg snapshot.
+> Cell 5 rebuilds each view over exactly those files (`CREATE OR REPLACE VIEW`).
+> Without re-running Cell 5, the view still reflects the old snapshot.
 >
 > See **[Section 8 → How to run](#8-auto-discovery-notebook--all-tables-from-s3-in-one-pass)** for full steps.
 
@@ -776,9 +778,47 @@ Harmless — Hadoop looks for an optional metrics file that does not exist. Igno
 
 **Notebook:** [`docker/databricks-notebooks/nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)
 
-This **single notebook** scans the entire S3 warehouse root, discovers every Iceberg table automatically, and — for each one — creates a view and refreshes a Delta audit table. **No table names are ever hardcoded.** Adding a new Iceberg table requires no code change; the next notebook run picks it up automatically.
+This **single notebook** scans the entire S3 warehouse root, discovers every Iceberg table automatically, and — for each one — resolves the current Iceberg snapshot and creates a view over exactly the live data files. **No table names are ever hardcoded.** Adding a new Iceberg table requires no code change; the next notebook run picks it up automatically.
 
 Upload to Databricks at `https://dbc-48ef5678-3df7.cloud.databricks.com` and attach to a cluster with Unity Catalog enabled.
+
+---
+
+### Why the old approach broke UPDATEs and DELETEs
+
+The previous notebook used `read_files('data/', format=>'parquet')` — a raw directory glob that reads every `.parquet` file ever written into the table's `data/` folder. This works for INSERT-only workloads but is fundamentally incompatible with Iceberg MERGE/UPDATE/DELETE semantics:
+
+| Operation | What Iceberg writes to S3 | What raw glob sees |
+|---|---|---|
+| **INSERT** | New data file appended to `data/` | ✅ New rows visible |
+| **UPDATE** | New data file (updated row) + old file marked `DELETED` in the manifest | ❌ Both old **and** new files read — duplicate rows |
+| **DELETE** | Old file marked `DELETED` in the manifest; original parquet unchanged | ❌ Deleted row still visible — delete never propagates |
+
+Iceberg's delete semantics live in the **manifest**, not in the filesystem. A blind `data/*.parquet` glob never reads the manifest, so it has no way to know which files are live.
+
+---
+
+### The fix — custom Iceberg snapshot resolver
+
+The notebook now implements a lightweight Iceberg metadata reader in pure Python (no Polaris / catalog connector needed), following exactly the same steps the Iceberg reader uses internally:
+
+```
+metadata.json
+    └── current-snapshot-id  ──► snapshots[]  ──► manifest-list  (Avro)
+                                                        └── manifest files[]  (Avro)
+                                                                └── data_file entries
+                                                                        status=0 DELETED  ← excluded
+                                                                        status=1 EXISTING ← kept ✅
+                                                                        status=2 ADDED    ← kept ✅
+```
+
+**Step 1** — Read the latest `*.metadata.json` → get `current-snapshot-id`.
+**Step 2** — Find the `manifest-list` Avro file path for that snapshot.
+**Step 3** — Read the manifest-list (Avro) → collect all manifest file paths.
+**Step 4** — Read each manifest (Avro) → collect `data_file.file_path` for entries where `status ∈ {1, 2}` (EXISTING or ADDED) and `content == 0` (DATA files, not delete files).
+**Step 5** — Build the view: `read_files('file1','file2',…, format=>'parquet')` over exactly those files.
+
+The view now points at the exact set of live files the current snapshot declares — so UPDATE rewrites and DELETE tombstones are correctly reflected.
 
 ---
 
@@ -791,7 +831,7 @@ s3://stardata-databricks/iceberg/warehouse/          ← WAREHOUSE_ROOT (Cell 1)
 │
 ├── lakehouse_db/                                     ← Level 1: database folder
 │   ├── customer/                                     ← Level 2: table folder
-│   │   ├── metadata/  *.metadata.json  ✅ included
+│   │   ├── metadata/  *.metadata.json + manifests  ✅ included
 │   │   └── data/      *.parquet
 │   ├── customer_orders/                              ← also included
 │   ├── product/                                      ← new table → auto-picked up
@@ -808,26 +848,23 @@ For every folder that contains at least one `*.metadata.json` the notebook deriv
 | Field | Derived value (example) |
 |---|---|
 | `view` | `lakehouse.lakehouse_db.vw_customer_latest` |
-| `data_path` | `s3://.../lakehouse_db/customer/data/` |
 | `meta_path` | `s3://.../lakehouse_db/customer/metadata/` |
+| `live_files` | `['s3://.../data/00000-1-abc.parquet', …]` |
 
 Folders that have **no** `*.metadata.json` (staging folders, Delta tables, checkpoints) are silently skipped.
 
 ---
 
-### Zero-downtime design
-
-Two objects are created per table and each has its own refresh strategy:
-
-#### Views — `vw_<table>_latest`
+### View design — snapshot-pinned, refreshed on every run
 
 | Principle | Detail |
 |---|---|
-| **Points at `data/` directory, not a snapshot path** | `read_files('s3://.../customer/data/', format=>'parquet')` — every query reads whatever `.parquet` files exist at that moment; new Iceberg snapshots add files to the same directory |
-| **`CREATE VIEW IF NOT EXISTS` — created once, never replaced** | First run creates the view. Every subsequent run detects it exists and skips — no DDL lock, no interruption to in-flight queries |
-| **New data visible automatically** | After Spark appends a new Iceberg snapshot the next `SELECT` against the view returns the new rows — no notebook re-run, no DDL change |
+| **Points at exact live files, not a directory glob** | `read_files('file1','file2',…, format=>'parquet')` — only files that the current snapshot declares as live |
+| **`CREATE OR REPLACE VIEW` on every run** | Because the live file list changes after every Iceberg write, the view definition must change too. `CREATE OR REPLACE` is instantaneous and safe to re-run |
+| **INSERT/UPDATE/DELETE all work correctly** | Old files marked DELETED in the manifest are excluded from the view; rewritten files (ADDED) are included |
+| **Empty tables handled** | If a table has no snapshots yet, a zero-row placeholder view is created |
 
-> To change the view definition (e.g. add a column): `ALTER VIEW lakehouse.lakehouse_db.vw_customer_latest AS SELECT ...`
+---
 
 ### Cell map
 
@@ -835,12 +872,12 @@ Two objects are created per table and each has its own refresh strategy:
 |---|---|---|
 | **Cell 1** | Set `WAREHOUSE_ROOT`, `DATABRICKS_CATALOG`, and `SKIP_TABLES` — the only three settings | Once per session |
 | **Cell 2** | S3 directory scan: walks `WAREHOUSE_ROOT/<db>/<table>/`, confirms `metadata/*.metadata.json` exists, builds `TABLE_CONFIGS` | ✅ Every refresh |
-| **Cell 3** | `resolve_latest_snapshot()` helper defined | Once per session |
-| **Cell 4** | Loops: picks latest `*.metadata.json` per table for diagnostics, ensures each schema exists | ✅ Every refresh |
-| **Cell 5** | Loops: `CREATE VIEW IF NOT EXISTS` — first run creates; all subsequent runs are a no-op | First run only (per table) |
+| **Cell 3** | `resolve_live_files()` defined — parses metadata JSON → manifest-list → manifests → live file list | Once per session |
+| **Cell 4** | Calls `resolve_live_files()` per table; ensures schemas exist; builds `SNAPSHOTS` dict | ✅ Every refresh |
+| **Cell 5** | `CREATE OR REPLACE VIEW` per table over the exact live file list from Cell 4 | ✅ Every refresh |
 | **Cell 6** | Summary report — row counts and snapshot timestamps for every view | Optional |
 | **Cell 7** | Optional: `CACHE SELECT` to warm a view into NVMe disk cache | Optional |
-| **Cell 8** | Optional: `UNCACHE` + `CACHE SELECT` to re-warm NVMe cache after a new snapshot | Optional |
+| **Cell 8** | Optional: `UNCACHE` + `CACHE SELECT` to re-warm NVMe cache after a Cell 5 refresh | Optional |
 
 ---
 
@@ -860,67 +897,67 @@ SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp
 
 ### How to run
 
-**First time:**
-1. Run **Cells 1 → 6** in order — views are created
+**First time and every subsequent refresh (after any INSERT, UPDATE, or DELETE):**
+1. Run **Cells 1 → 6** in order
 
-**Every subsequent refresh (after any Spark write to any table):**
-- Re-run **Cells 2 and 4** only (discovery + snapshot diagnostics)
-- Cell 5 prints `EXISTS (no DDL change — zero downtime preserved)` for every view and does nothing
-
-> Views **never need re-running** for new data to appear — they pick up new parquet files automatically on the next user query.
+> **Why all cells every time?**
+> Cell 4 re-resolves the live file list from the current snapshot.
+> Cell 5 rebuilds the view over exactly those files (`CREATE OR REPLACE`).
+> Without re-running Cell 5, the view still points at the old snapshot's files.
 
 ---
 
-### Expected Cell 2 output (warehouse with two databases, three tables)
+### Expected Cell 4 output (snapshot + live file resolution)
 
 ```
 ────────────────────────────────────────────────────────────
-Auto-discovered 3 Iceberg table(s):
-  lakehouse_db.customer               view → vw_customer_latest
-  lakehouse_db.customer_orders        view → vw_customer_orders_latest
-  analytics_db.sales                  view → vw_sales_latest
+Resolving Iceberg snapshots and live data files …
 ────────────────────────────────────────────────────────────
+
+  [lakehouse_db.customer]  snapshot=3778523514688560751
+    Meta file    : 00003-....metadata.json
+    Last updated : 2026-09-03 14:22:11 UTC
+    Manifests    : 2
+    Live files   : 4
+    Dead files   : 1 (excluded — DELETE/UPDATE tombstones)
+
+  [lakehouse_db.customer_orders]  snapshot=7123456789012345678
+    Meta file    : 00001-....metadata.json
+    Last updated : 2026-09-03 13:00:00 UTC
+    Manifests    : 1
+    Live files   : 2
+    Dead files   : 0 (excluded — DELETE/UPDATE tombstones)
+
+────────────────────────────────────────────────────────────
+✅ All 2 table(s) resolved successfully
 ```
 
-### Expected Cell 4 output (snapshot resolution)
+> **`Dead files: 1`** means one parquet file was written by a previous snapshot and has since been superseded by an UPDATE or DELETE. It is excluded from the view — the deleted/updated row will NOT appear.
 
-```
-────────────────────────────────────────────────────────────
-Resolving latest Iceberg snapshots …
-────────────────────────────────────────────────────────────
-  [lakehouse_db.customer] 2 snapshot(s) found
-    Latest file  : 00001-....metadata.json
-    Snapshot ID  : 3778523514688560751
-    Last updated : 2026-09-02 12:34:56 UTC
-    Data path    : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer/data/
-
-  [lakehouse_db.customer_orders] 1 snapshot(s) found
-    Latest file  : 00000-....metadata.json
-    Snapshot ID  : 7123456789012345678
-    Last updated : 2026-09-02 13:00:00 UTC
-    Data path    : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_orders/data/
-
-────────────────────────────────────────────────────────────
-✅ All 3 table(s) resolved successfully
-```
-
-### Expected Cell 5 output — first run
+### Expected Cell 5 output
 
 ```
   ✅ lakehouse.lakehouse_db.vw_customer_latest
-     status=CREATED
-     rows=1,000  src=s3://.../lakehouse_db/customer/data/
-```
+     REFRESHED — snapshot 3778523514688560751
+     rows=999  live_files=4
 
-### Expected Cell 5 output — every subsequent run
+  ✅ lakehouse.lakehouse_db.vw_customer_orders_latest
+     REFRESHED — snapshot 7123456789012345678
+     rows=5,000  live_files=2
 
-```
-  ✅ lakehouse.lakehouse_db.vw_customer_latest
-     status=EXISTS (no DDL change — zero downtime preserved)
-     rows=1,100  src=s3://.../lakehouse_db/customer/data/
-```
+────────────────────────────────────────────────────────────
+✅ 2 view(s) created/refreshed
 
-> `rows=1,100` reflects the 100-row insert — already visible without any DDL change to the view.
+  ┌─ HOW UPDATES AND DELETES NOW WORK ──────────────────────────┐
+  │  The view lists ONLY the parquet files that belong to the   │
+  │  current Iceberg snapshot (resolved from the manifest).     │
+  │  • INSERT  → new file added to manifest (ADDED)             │
+  │  • UPDATE  → old file marked DELETED; new file is ADDED     │
+  │  • DELETE  → old file marked DELETED; rewritten file ADDED  │
+  │  Dead files (status=DELETED) are excluded from the view.    │
+  │  Re-run Cells 2 → 5 after any Iceberg write to refresh.     │
+  └─────────────────────────────────────────────────────────────┘
+```
 
 ### Expected Cell 6 summary report
 
@@ -930,11 +967,12 @@ Resolving latest Iceberg snapshots …
 ══════════════════════════════════════════════════════════════════════
   TABLE                                ROWS  SNAPSHOT UPDATED
 ──────────────────────────────────────────────────────────────────────
-  lakehouse_db.customer               1,100  2026-09-03 12:34:56 UTC
+  lakehouse_db.customer                 999  2026-09-03 14:22:11 UTC
   lakehouse_db.customer_orders        5,000  2026-09-03 13:00:00 UTC
 ══════════════════════════════════════════════════════════════════════
-  Re-run Cells 2 + 4 any time new data lands in S3.
-  (Views auto-reflect new parquet files — no Cell 5 re-run needed.)
+  Re-run Cells 2 → 5 after any Iceberg write (INSERT/UPDATE/DELETE).
+  Each run resolves the current snapshot and refreshes the view over
+  exactly the live data files — UPDATEs and DELETEs are reflected.
 ══════════════════════════════════════════════════════════════════════
 ```
 
@@ -944,8 +982,8 @@ Every auto-created view selects all parquet columns plus two added by the view d
 
 | Column | Type | Source |
 |---|---|---|
-| *(all source columns)* | (as in parquet) | read from `data/*.parquet` |
-| `snap_file` | STRING | `_metadata.file_path` — S3 path of the parquet file |
+| *(all source columns)* | (as in parquet) | live data files from current Iceberg snapshot |
+| `snap_file` | STRING | `_metadata.file_path` — S3 path of the parquet file containing this row |
 | `snap_file_size` | BIGINT | `_metadata.file_size` — parquet file size in bytes |
 
 ---
