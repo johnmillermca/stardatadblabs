@@ -1042,41 +1042,61 @@ GROUP  BY customer_id HAVING COUNT(*) > 1;
 
 ### 9-3 — INSERT test
 
+> **Why `spark.sql("INSERT INTO … VALUES …")` fails**
+> `snap_id` and `snap_timestamp` are part of the physical Iceberg table schema but
+> are **not** Iceberg-level defaults — they are Spark execution-time expressions
+> (`monotonically_increasing_id()` / `current_timestamp()`) injected only by
+> `IcebergTableBuilder.write_append()`. A raw SQL INSERT that omits them fails with
+> `CANNOT_FIND_DATA`. Always use `write_append()` or a DataFrame write for any
+> direct write to these tables.
+
 **Step 1 — Insert a test row in JupyterHub (PySpark)**
 
 ```python
-# JupyterHub notebook — insert one new customer
-# Column order: customer_id, full_name, email, phone_number, date_of_birth,
-#               national_id, street_address, city, country_code, ip_address,
-#               salary, customer_tier, is_active, created_at, updated_at
-# Note: snap_id and snap_timestamp are injected by the pipeline — do NOT supply them.
-spark.sql("""
-    INSERT INTO databricks.lakehouse_db.customer
-        (customer_id, full_name, email, phone_number, date_of_birth,
-         national_id, street_address, city, country_code, ip_address,
-         salary, customer_tier, is_active, created_at, updated_at)
-    VALUES
-        (99901, 'DML Test User', 'dmltest@example.com', '555-0199',
-         DATE '1990-06-15', 'NID-99901', '1 Test St', 'Sydney', 'AU',
-         '10.0.0.1', 75000.00, 'gold', 1,
-         current_timestamp(), current_timestamp())
-""")
-print("✅ INSERT done")
+import datetime
+from pyspark.sql import Row
+from spark_iceberg_utils import IcebergTableBuilder
+
+# Build a single-row DataFrame — do NOT include snap_id / snap_timestamp;
+# write_append() injects them automatically.
+row = Row(
+    customer_id   = 99901,
+    full_name     = "DML Test User",
+    email         = "dmltest@example.com",
+    phone_number  = "555-0199",
+    date_of_birth = datetime.date(1990, 6, 15),
+    national_id   = "NID-99901",
+    street_address= "1 Test St",
+    city          = "Sydney",
+    country_code  = "AU",
+    ip_address    = "10.0.0.1",
+    salary        = 75000.00,
+    customer_tier = "gold",
+    is_active     = 1,
+    created_at    = datetime.datetime.utcnow(),
+    updated_at    = datetime.datetime.utcnow(),
+)
+df = spark.createDataFrame([row])
+
+builder = IcebergTableBuilder(spark)
+builder.write_append(df, catalog="databricks", namespace="lakehouse_db", table="customer")
+print("✅ INSERT done — snap_id and snap_timestamp auto-injected by write_append()")
 ```
 
 **Step 2 — Refresh the Databricks view**
 
-In the `nb_multi_table_auto_reader.py` notebook, re-run **Cells 2 → 5**.
+In `nb_multi_table_auto_reader.py`, re-run **Cells 2 → 5**.
 
 **Step 3 — Verify in Databricks SQL console**
 
 ```sql
-SELECT customer_id, full_name, email, city, customer_tier, salary
+SELECT customer_id, full_name, email, city, customer_tier, salary, snap_id, snap_timestamp
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id = 99901;
 ```
 
-✅ Expected: **1 row** — `full_name='DML Test User'`, `email='dmltest@example.com'`, `salary=75000.00`
+✅ Expected: **1 row** — `full_name='DML Test User'`, `email='dmltest@example.com'`,
+`salary=75000.00`, `snap_id` is a non-null BIGINT, `snap_timestamp` is a non-null TIMESTAMP.
 
 ```sql
 -- Row count must be exactly 1 more than the baseline
@@ -1091,16 +1111,17 @@ SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
 **Step 1 — Update the test row in JupyterHub (PySpark)**
 
 ```python
-# JupyterHub notebook — update the row inserted in 9-3
+# Read the existing row, apply changes, re-write via MERGE
+# Iceberg MERGE is the correct UPDATE path — write_append() is for INSERT-only.
 spark.sql("""
     MERGE INTO databricks.lakehouse_db.customer AS t
     USING (
         SELECT
-            99901                          AS customer_id,
-            'dmltest_updated@example.com'  AS email,
-            'Melbourne'                    AS city,
-            99000.00                       AS salary,
-            current_timestamp()            AS updated_at
+            CAST(99901 AS INT)                    AS customer_id,
+            'dmltest_updated@example.com'         AS email,
+            'Melbourne'                           AS city,
+            CAST(99000.00 AS DOUBLE)              AS salary,
+            current_timestamp()                   AS updated_at
     ) AS s
     ON t.customer_id = s.customer_id
     WHEN MATCHED THEN UPDATE SET
@@ -1130,16 +1151,16 @@ WHERE  customer_id = 99901;
 - `salary = 99000.00`
 
 ```sql
--- Duplicate check — must still be 0 after the UPDATE
+-- Duplicate check — must be 0 after the UPDATE
 SELECT customer_id, COUNT(*) AS dup_count
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id = 99901
 GROUP  BY customer_id HAVING COUNT(*) > 1;
--- ✅ Expected: 0 rows  (old row excluded from view by snapshot resolver)
+-- ✅ Expected: 0 rows  (old file excluded by snapshot resolver)
 ```
 
-> If this returns 1 row with `dup_count = 2` the snapshot resolver is not excluding
-> the old file correctly. Re-check that Cells 2 → 5 were re-run after the UPDATE.
+> If `dup_count = 2` the snapshot resolver excluded the wrong file. Confirm
+> Cells 2 → 5 completed without error and that `Dead files ≥ 1` in Cell 4 output.
 
 ---
 
@@ -1148,7 +1169,7 @@ GROUP  BY customer_id HAVING COUNT(*) > 1;
 **Step 1 — Delete the test row in JupyterHub (PySpark)**
 
 ```python
-# JupyterHub notebook — delete the row inserted in 9-3
+# Iceberg DELETE — no write_append() needed, this is a pure Iceberg operation
 spark.sql("""
     DELETE FROM databricks.lakehouse_db.customer
     WHERE  customer_id = 99901
@@ -1175,9 +1196,9 @@ SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
 -- ✅ Expected: same as baseline from 9-2
 ```
 
-> If the deleted row still appears, the snapshot resolver is reading a stale file.
-> Confirm Cells 2 → 5 completed without errors and check the `Dead files` count
-> printed by Cell 4 — it must be ≥ 1 after the DELETE.
+> If the deleted row still appears, confirm Cell 4 printed `Dead files ≥ 1`.
+> If `Dead files = 0` after a DELETE, re-check the Iceberg write mode —
+> the table must use Copy-on-Write (default) not Merge-on-Read.
 
 ---
 
