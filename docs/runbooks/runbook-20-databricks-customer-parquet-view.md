@@ -1078,7 +1078,8 @@ row = Row(
 )
 df = spark.createDataFrame([row])
 
-builder = IcebergTableBuilder(spark)
+# running_user="dave" is required — SPARK_USER env-var is not set in JupyterHub sessions
+builder = IcebergTableBuilder(spark, running_user="dave")
 builder.write_append(df, catalog="databricks", namespace="lakehouse_db", table="customer")
 print("✅ INSERT done — snap_id and snap_timestamp auto-injected by write_append()")
 ```
