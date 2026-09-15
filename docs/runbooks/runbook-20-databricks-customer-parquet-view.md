@@ -1203,56 +1203,57 @@ SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
 **Step 1 — Update the test row in JupyterHub (PySpark)**
 
 ```python
-# Read the existing row, apply changes, re-write via MERGE
-# Iceberg MERGE is the correct UPDATE path — write_append() is for INSERT-only.
+# Direct Iceberg UPDATE — supported on format-version=2 tables (copy-on-write).
+# Iceberg rewrites the affected data file and marks the old one DELETED in the manifest.
 spark.sql("""
-    MERGE INTO databricks.lakehouse_db.customer AS t
-    USING (
-        SELECT
-            CAST(99901 AS INT)                    AS customer_id,
-            'dmltest_updated@example.com'         AS email,
-            'Melbourne'                           AS city,
-            CAST(99000.00 AS DOUBLE)              AS salary,
-            current_timestamp()                   AS updated_at
-    ) AS s
-    ON t.customer_id = s.customer_id
-    WHEN MATCHED THEN UPDATE SET
-        t.email      = s.email,
-        t.city       = s.city,
-        t.salary     = s.salary,
-        t.updated_at = s.updated_at
+    UPDATE databricks.lakehouse_db.customer
+    SET    email      = 'dmltest_updated@example.com',
+           city       = 'Melbourne',
+           salary     = 99000.00,
+           updated_at = current_timestamp()
+    WHERE  customer_id = 99901
 """)
-print("✅ UPDATE done")
+print("UPDATE done")
 ```
 
-**Step 2 — Refresh the Databricks view**
+**Step 2 — Confirm the update in JupyterHub immediately (Iceberg catalog)**
 
-Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
+```python
+# Verify via the Iceberg catalog directly — no Databricks refresh needed for this check
+spark.sql("""
+    SELECT customer_id, full_name, email, city, salary
+    FROM   databricks.lakehouse_db.customer
+    WHERE  customer_id = 99901
+""").show(truncate=False)
+# Expected: 1 row — email='dmltest_updated@example.com', city='Melbourne', salary=99000.0
 
-**Step 3 — Verify in Databricks SQL console**
+row_count = spark.sql("""
+    SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901
+""").collect()[0]["n"]
+print(f"Rows for customer 99901 after UPDATE: {row_count}  (expected: 1 — no duplicates)")
+```
+
+**Step 3 — Refresh the Databricks view, then verify there too**
+
+Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`, then in the Databricks SQL console:
 
 ```sql
 SELECT customer_id, full_name, email, city, salary
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id = 99901;
-```
+-- Expected: 1 row, email='dmltest_updated@example.com', city='Melbourne', salary=99000.0
 
-✅ Expected: **exactly 1 row** (no duplicate old row) with:
-- `email = 'dmltest_updated@example.com'`
-- `city  = 'Melbourne'`
-- `salary = 99000.00`
-
-```sql
--- Duplicate check — must be 0 after the UPDATE
+-- Duplicate check — must be 0 (old file excluded by snapshot resolver)
 SELECT customer_id, COUNT(*) AS dup_count
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id = 99901
 GROUP  BY customer_id HAVING COUNT(*) > 1;
--- ✅ Expected: 0 rows  (old file excluded by snapshot resolver)
+-- Expected: 0 rows
 ```
 
-> If `dup_count = 2` the snapshot resolver excluded the wrong file. Confirm
-> Cells 2 → 5 completed without error and that `Dead files ≥ 1` in Cell 4 output.
+> **If the old row is still there / dup_count = 2:**
+> Cell 4 of `nb_multi_table_auto_reader.py` should print `Dead files: 1`.
+> If it prints `Dead files: 0` the snapshot was not refreshed — re-run Cells 2 → 5.
 
 ---
 
@@ -1261,36 +1262,54 @@ GROUP  BY customer_id HAVING COUNT(*) > 1;
 **Step 1 — Delete the test row in JupyterHub (PySpark)**
 
 ```python
-# Iceberg DELETE — no write_append() needed, this is a pure Iceberg operation
+# Direct Iceberg DELETE — copy-on-write: rewrites data file without the row,
+# marks the old file DELETED in the manifest snapshot.
 spark.sql("""
     DELETE FROM databricks.lakehouse_db.customer
     WHERE  customer_id = 99901
 """)
-print("✅ DELETE done")
+print("DELETE done")
 ```
 
-**Step 2 — Refresh the Databricks view**
+**Step 2 — Confirm the deletion in JupyterHub immediately (Iceberg catalog)**
 
-Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
+```python
+# Verify via the Iceberg catalog directly — row must be gone before refreshing the view
+gone = spark.sql("""
+    SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer WHERE customer_id = 99901
+""").collect()[0]["n"]
+print(f"Rows for customer 99901 after DELETE: {gone}  (expected: 0)")
 
-**Step 3 — Verify in Databricks SQL console**
+total = spark.sql("""
+    SELECT COUNT(*) AS n FROM databricks.lakehouse_db.customer
+""").collect()[0]["n"]
+print(f"Total rows after DELETE: {total}  (expected: baseline − 1)")
+```
+
+**Step 3 — Refresh the Databricks view, then verify there too**
+
+Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`, then in the Databricks SQL console:
 
 ```sql
+-- Row must be gone
 SELECT customer_id, full_name, email
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id = 99901;
--- ✅ Expected: 0 rows  (row is gone)
-```
+-- Expected: 0 rows
 
-```sql
--- Row count must be back to the original baseline
+-- Total count must be back to baseline
 SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
--- ✅ Expected: same as baseline from 9-2
+-- Expected: same as 9-2 baseline
 ```
 
-> If the deleted row still appears, confirm Cell 4 printed `Dead files ≥ 1`.
-> If `Dead files = 0` after a DELETE, re-check the Iceberg write mode —
-> the table must use Copy-on-Write (default) not Merge-on-Read.
+> **If the deleted row still appears in the Databricks view:**
+> 1. Check the JupyterHub Step 2 output first — if it already shows `0 rows`,
+>    the DELETE worked in Iceberg. The view just needs refreshing.
+> 2. Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
+> 3. Cell 4 must print `Dead files: >= 1` — that confirms the old file was
+>    tombstoned and will be excluded from the refreshed view.
+> 4. If `Dead files: 0` after the DELETE, the snapshot was not committed —
+>    check the JupyterHub DELETE output for errors.
 
 ---
 
