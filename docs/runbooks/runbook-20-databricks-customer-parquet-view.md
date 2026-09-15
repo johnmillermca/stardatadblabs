@@ -16,11 +16,16 @@ The `customer` Iceberg table is written by Spark Gluten on the k8s cluster and s
 This runbook covers two ways to read it:
 
 - **Section 2** — Read from **JupyterHub** using PySpark (query via Iceberg catalog)
-- **Section 3** — Read and verify from the **Databricks SQL console** (via `read_files()` and a persistent view)
+- **Section 3** — Read and verify from the **Databricks SQL console** (via `read_files()` and a snapshot-resolved view)
 - **Section 5** — **Insert 100 more rows** from JupyterHub and see them live in Databricks (end-to-end walk-through)
-- **Section 8** — **Auto-discovery notebook** — scans the entire S3 warehouse root, discovers every Iceberg table automatically (no table names hardcoded), creates views once with zero-downtime
-- **Section 9** — **DML test steps** — SQL queries to verify the latest data in Databricks
+- **Section 8** — **Auto-discovery notebook** — scans the entire S3 warehouse root, discovers every Iceberg table automatically, resolves the current Iceberg snapshot and rebuilds views over live files only
+- **Section 9** — **DML test steps** — INSERT, UPDATE, and DELETE end-to-end verification in Databricks
 - **Section 10** — **NVMe disk cache** — how to cache views into local NVMe storage to eliminate S3 round-trips
+
+> ⚠️ **Important — refresh required after every write**
+> The views built by the auto-discovery notebook list the exact parquet files from the current Iceberg snapshot.
+> After any INSERT, UPDATE, or DELETE in Spark/JupyterHub, re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`
+> to refresh the view. Without this step the view reflects the previous snapshot.
 
 ```
 Spark Gluten (k8s)           S3: stardata-databricks
@@ -988,13 +993,14 @@ Every auto-created view selects all parquet columns plus two added by the view d
 
 ---
 
-## 9. DML test steps — verify latest data in Databricks
+## 9. DML test steps — INSERT, UPDATE, DELETE end-to-end verification
 
-**File:** [`docker/databricks-notebooks/dml_test_steps.sql`](../../docker/databricks-notebooks/dml_test_steps.sql)
+This section proves that INSERT, UPDATE, and DELETE operations in JupyterHub (Spark / Iceberg) are correctly reflected in the Databricks view after running **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
+
+**Prerequisite:** `nb_multi_table_auto_reader.py` has been uploaded to Databricks and Cells 1 → 6 have been run at least once.
 
 Open the Databricks SQL console at `https://dbc-48ef5678-3df7.cloud.databricks.com/sql/editor`.
 Select warehouse: **Serverless Starter Warehouse**.
-Run the blocks below in order. Expected results are shown after each query.
 
 ---
 
@@ -1005,38 +1011,159 @@ SHOW SCHEMAS IN lakehouse;
 -- ✅ lakehouse_db listed
 ```
 
-> **Note:** `SHOW VIEWS IN lakehouse.lakehouse_db` does not support cross-catalog
-> 3-part schema references on Serverless compute. Use `spark.catalog.tableExists()`
-> with the fully-qualified 3-part name instead:
+> **Note:** `SHOW VIEWS IN lakehouse.lakehouse_db` is not supported on Serverless compute.
+> Use `spark.catalog.tableExists()` in a Databricks notebook instead:
 
 ```python
-# Run in a Databricks notebook
 print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
 # ✅ True
-
-print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_orders_latest"))
-# ✅ True
 ```
 
 ---
 
-### 9-2 — Row counts
+### 9-2 — Baseline row count (before any changes)
 
 ```sql
--- customer
 SELECT COUNT(*) AS customer_rows
 FROM   lakehouse.lakehouse_db.vw_customer_latest;
-
--- customer_orders
-SELECT COUNT(*) AS orders_rows
-FROM   lakehouse.lakehouse_db.vw_customer_orders_latest;
+-- ✅ Note this number — e.g. 1000
 ```
 
-✅ Expected: `customer_rows` = 1000 (or 1100 after the 100-row insert); `orders_rows` reflects the latest snapshot.
+Also run the duplicate check to confirm the view is clean before testing:
+
+```sql
+SELECT customer_id, COUNT(*) AS dup_count
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+GROUP  BY customer_id HAVING COUNT(*) > 1;
+-- ✅ Expected: 0 rows  (no duplicates)
+```
 
 ---
 
-### 9-3 — Spot-check: first 10 and last 10 rows (customer view)
+### 9-3 — INSERT test
+
+**Step 1 — Insert a test row in JupyterHub (PySpark)**
+
+```python
+# JupyterHub notebook — insert one new customer
+spark.sql("""
+    INSERT INTO databricks.lakehouse_db.customer
+    VALUES (99901, 'DML Test User', 'dmltest@example.com',
+            'Sydney', 'gold', 75000.00, current_timestamp())
+""")
+print("✅ INSERT done")
+```
+
+**Step 2 — Refresh the Databricks view**
+
+In the `nb_multi_table_auto_reader.py` notebook, re-run **Cells 2 → 5**.
+
+**Step 3 — Verify in Databricks SQL console**
+
+```sql
+SELECT customer_id, full_name, email, city, customer_tier, salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id = 99901;
+```
+
+✅ Expected: **1 row** — `full_name='DML Test User'`, `email='dmltest@example.com'`, `salary=75000.00`
+
+```sql
+-- Row count must be exactly 1 more than the baseline
+SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
+-- ✅ Expected: baseline + 1
+```
+
+---
+
+### 9-4 — UPDATE test
+
+**Step 1 — Update the test row in JupyterHub (PySpark)**
+
+```python
+# JupyterHub notebook — update the row inserted in 9-3
+spark.sql("""
+    MERGE INTO databricks.lakehouse_db.customer AS t
+    USING (SELECT 99901 AS customer_id) AS s
+    ON t.customer_id = s.customer_id
+    WHEN MATCHED THEN UPDATE SET
+        email      = 'dmltest_updated@example.com',
+        city       = 'Melbourne',
+        salary     = 99000.00
+""")
+print("✅ UPDATE done")
+```
+
+**Step 2 — Refresh the Databricks view**
+
+Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
+
+**Step 3 — Verify in Databricks SQL console**
+
+```sql
+SELECT customer_id, full_name, email, city, salary
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id = 99901;
+```
+
+✅ Expected: **exactly 1 row** (no duplicate old row) with:
+- `email = 'dmltest_updated@example.com'`
+- `city  = 'Melbourne'`
+- `salary = 99000.00`
+
+```sql
+-- Duplicate check — must still be 0 after the UPDATE
+SELECT customer_id, COUNT(*) AS dup_count
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id = 99901
+GROUP  BY customer_id HAVING COUNT(*) > 1;
+-- ✅ Expected: 0 rows  (old row excluded from view by snapshot resolver)
+```
+
+> If this returns 1 row with `dup_count = 2` the snapshot resolver is not excluding
+> the old file correctly. Re-check that Cells 2 → 5 were re-run after the UPDATE.
+
+---
+
+### 9-5 — DELETE test
+
+**Step 1 — Delete the test row in JupyterHub (PySpark)**
+
+```python
+# JupyterHub notebook — delete the row
+spark.sql("""
+    DELETE FROM databricks.lakehouse_db.customer
+    WHERE  customer_id = 99901
+""")
+print("✅ DELETE done")
+```
+
+**Step 2 — Refresh the Databricks view**
+
+Re-run **Cells 2 → 5** of `nb_multi_table_auto_reader.py`.
+
+**Step 3 — Verify in Databricks SQL console**
+
+```sql
+SELECT customer_id, full_name, email
+FROM   lakehouse.lakehouse_db.vw_customer_latest
+WHERE  customer_id = 99901;
+-- ✅ Expected: 0 rows  (row is gone)
+```
+
+```sql
+-- Row count must be back to the original baseline
+SELECT COUNT(*) AS customer_rows FROM lakehouse.lakehouse_db.vw_customer_latest;
+-- ✅ Expected: same as baseline from 9-2
+```
+
+> If the deleted row still appears, the snapshot resolver is reading a stale file.
+> Confirm Cells 2 → 5 completed without errors and check the `Dead files` count
+> printed by Cell 4 — it must be ≥ 1 after the DELETE.
+
+---
+
+### 9-6 — Spot-check: first 10 and last 10 rows
 
 ```sql
 -- First 10
@@ -1050,24 +1177,9 @@ FROM   lakehouse.lakehouse_db.vw_customer_latest
 ORDER  BY customer_id DESC LIMIT 10;
 ```
 
-✅ Last 10: highest IDs are `1100` after the 100-row insert (seed=99 names and cities).
-
 ---
 
-### 9-4 — Confirm new rows are visible (after 100-row insert into customer)
-
-```sql
-SELECT customer_id, full_name, city, customer_tier, ROUND(salary,2) AS salary
-FROM   lakehouse.lakehouse_db.vw_customer_latest
-WHERE  customer_id BETWEEN 1095 AND 1100
-ORDER  BY customer_id;
-```
-
-✅ Expected: 6 rows with IDs 1095–1100.
-
----
-
-### 9-5 — Batch audit: prove both insert batches are in the customer view
+### 9-7 — Batch audit: confirm all insert batches present
 
 ```sql
 SELECT
@@ -1081,6 +1193,7 @@ ORDER  BY insert_date;
 ```
 
 ✅ Expected:
+
 | insert_date | first_id | last_id | row_count |
 |---|---|---|---|
 | 2026-01-xx | 1 | 1000 | 1000 |
@@ -1088,7 +1201,7 @@ ORDER  BY insert_date;
 
 ---
 
-### 9-6 — Tier distribution (customer view)
+### 9-8 — Tier distribution
 
 ```sql
 SELECT customer_tier, COUNT(*) AS cnt, ROUND(AVG(salary),2) AS avg_salary
@@ -1098,7 +1211,7 @@ GROUP  BY customer_tier ORDER BY cnt DESC;
 
 ---
 
-### 9-7 — Data quality checks (customer)
+### 9-9 — Full data quality check
 
 ```sql
 -- No duplicate customer_ids
@@ -1113,7 +1226,7 @@ FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_id IS NULL;
 -- ✅ Expected: 0
 
--- All tiers are valid
+-- All tiers valid
 SELECT COUNT(*) AS invalid_tier_rows
 FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  customer_tier NOT IN ('standard','silver','gold','platinum');
@@ -1125,10 +1238,6 @@ FROM   lakehouse.lakehouse_db.vw_customer_latest
 WHERE  salary < 30000 OR salary > 200000;
 -- ✅ Expected: 0
 ```
-
----
-
-> **Full DML file:** [`docker/databricks-notebooks/dml_test_steps.sql`](../../docker/databricks-notebooks/dml_test_steps.sql)
 
 ---
 
