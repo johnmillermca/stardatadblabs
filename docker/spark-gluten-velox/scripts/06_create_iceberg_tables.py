@@ -2,48 +2,83 @@
 """
 06_create_iceberg_tables.py
 ===========================
-Bootstrap script — creates all Iceberg tables for the CDC → Iceberg pipeline.
+Bootstrap script — creates ALL Iceberg tables for the CDC → Iceberg pipeline.
 
-Creates tables for ALL three write modes × ALL three source systems:
+Table layout
+============
 
-  standard         — SCD Type 0 upsert + hard delete
-                     Tables: <catalog>.<namespace>.<table>
-                     Columns: source cols + snap_id + snap_timestamp
+Production tables  (namespace: cache_testing / tpcds)
+------------------------------------------------------
+These replicate live CDC data and are intended to stay permanently.
 
-  soft_delete      — Upsert + soft-delete flags
-                     Tables: <catalog>.<namespace>.<table>  (same table name as standard)
-                     Extra columns: is_deleted BOOLEAN, deleted_at TIMESTAMP
-                     NOTE: standard and soft_delete share the same table; the
-                     pipeline writes to it in the configured mode. The extra
-                     columns are always present so the table works with either mode.
+  <catalog>.cache_testing.<table>_std    — standard  (SCD Type 0 upsert + hard delete)
+  <catalog>.cache_testing.<table>_sd     — soft_delete (upsert + is_deleted flag)
+  <catalog>.cache_testing.<table>_hist   — history_tracking (append-only, before/after)
 
-  history_tracking — Append-only full history
-                     Tables: <catalog>.<namespace>.<table>_hist
-                     Extra columns: _change_type STRING, _change_ts TIMESTAMP,
-                                    before_* (schema-evolved at runtime),
-                                    after_*  (schema-evolved at runtime)
+Each source has its own copy of every table, so the same Kafka topic can fan-out
+into three independent Iceberg tables simultaneously when all three write-mode
+deployments are active.
+
+Test tables  (namespace: test_standard / test_soft_delete / test_history / test_transforms)
+-------------------------------------------------------------------------------------------
+Dedicated long-lived test tables that are NEVER mixed with production data.
+These are used exclusively by runbook-30 E2E tests and StarTransform unit tests.
+They can be truncated/reset between test runs without affecting production.
+
+  <catalog>.test_standard.<table>             — standard mode test target
+  <catalog>.test_soft_delete.<table>          — soft_delete mode test target
+  <catalog>.test_history.<table>_hist         — history_tracking test target
+
+StarTransform test tables  (namespace: test_transforms)
+--------------------------------------------------------
+One dedicated Iceberg table per StarTransform function, fed from
+postgres.cache_testing.customers and postgres.cache_testing.products.
+
+  postgres.test_transforms.customers_dedup       — deduplicate() test
+  postgres.test_transforms.customers_masked       — mask_columns() (PII hashed) test
+  postgres.test_transforms.customers_proc_time    — add_processing_time() test
+  postgres.test_transforms.customers_op_label     — add_op_label() test
+  postgres.test_transforms.customers_source_tag   — add_source_tag() test
+  postgres.test_transforms.customers_filter_ins   — filter_op(["c","u"]) test
+  postgres.test_transforms.customers_filter_del   — filter_op(["d"]) test (deletes only)
+  postgres.test_transforms.orders_enriched        — enrich_from_broadcast() join products
+  postgres.test_transforms.customers_before_after — pivot_before_after() (history columns)
+  postgres.test_transforms.customers_nullcoal     — null_coalesce() test
+  postgres.test_transforms.event_counts           — aggregate_counts() test
+
+Naming convention
+-----------------
+  _std   = standard write mode
+  _sd    = soft_delete write mode
+  _hist  = history_tracking write mode (always append)
+  no suffix in test_* namespaces (mode is implied by namespace)
 
 Partitioning (all tables)
 --------------------------
   hours(snap_timestamp)   — hourly partitions for time-range pruning
-  bucket(16, <pk_col>)    — 16 hash buckets within each hour
+  bucket(16, <pk_col>)    — 16-way hash bucket on primary key
 
-snap columns
-------------
+Snap columns (all tables)
+--------------------------
   snap_id        BIGINT     — unique row id injected at write time
   snap_timestamp TIMESTAMP  — write-time wall clock (hourly partition key)
 
 Usage
 -----
-  # Create all tables (dry-run first to preview DDL):
+  # Dry-run — preview all DDL without writing anything:
   SPARK_USER=dave DRY_RUN=1 python3 06_create_iceberg_tables.py
+
+  # Create all tables:
   SPARK_USER=dave python3 06_create_iceberg_tables.py
 
-  # Create tables for one source only:
-  SPARK_USER=dave SOURCE=postgres python3 06_create_iceberg_tables.py
+  # Only production tables for one source:
+  SPARK_USER=dave TABLE_GROUP=prod SOURCE=postgres python3 06_create_iceberg_tables.py
 
-  # Create tables for one write mode only:
-  SPARK_USER=dave WRITE_MODE=history_tracking python3 06_create_iceberg_tables.py
+  # Only test tables:
+  SPARK_USER=dave TABLE_GROUP=test python3 06_create_iceberg_tables.py
+
+  # Only StarTransform test tables:
+  SPARK_USER=dave TABLE_GROUP=transforms python3 06_create_iceberg_tables.py
 """
 
 from __future__ import annotations
@@ -55,7 +90,7 @@ import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType, IntegerType, LongType, StringType,
-    StructField, StructType, TimestampType, DoubleType, DateType,
+    StructField, StructType, TimestampType, DoubleType,
 )
 
 from bao_spark_init import BaoSparkInit
@@ -68,111 +103,105 @@ logging.basicConfig(
 )
 logger = logging.getLogger("create-iceberg-tables")
 
-SPARK_USER = os.environ.get("SPARK_USER", "dave")
-DRY_RUN    = os.environ.get("DRY_RUN", "0") == "1"
-SOURCE_FILTER    = os.environ.get("SOURCE", "").lower()
-WRITE_MODE_FILTER = os.environ.get("WRITE_MODE", "").lower()
-S3_BUCKET  = "xdatatoiceberg1"
+SPARK_USER    = os.environ.get("SPARK_USER", "dave")
+DRY_RUN       = os.environ.get("DRY_RUN", "0") == "1"
+SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
+# TABLE_GROUP: all | prod | test | transforms
+TABLE_GROUP   = os.environ.get("TABLE_GROUP", "all").lower()
+S3_BUCKET     = "xdatatoiceberg1"
 
-# ── Table definitions ──────────────────────────────────────────────────────────
-# Each entry: (catalog, namespace, table, pk_col, s3_prefix, schema)
-# schema = source-only columns (snap_id + snap_timestamp added automatically).
-# soft_delete extra cols (is_deleted, deleted_at) added below.
-# history_tracking extra cols (_change_type, _change_ts) added below.
-# before_* / after_* for history_tracking evolve at runtime via mergeSchema.
+_S = StructField  # brevity alias
 
-_S = StructField  # alias for brevity
 
-# ── PostgreSQL: cache_testing ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# BASE SCHEMAS  (source columns only — snap_id/snap_timestamp added by builder)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────────
 _PG_CUSTOMERS = StructType([
-    _S("id",            LongType(),      False),
-    _S("name",          StringType(),    True),
-    _S("email",         StringType(),    True),
-    _S("phone",         StringType(),    True),
-    _S("address",       StringType(),    True),
-    _S("city",          StringType(),    True),
-    _S("country",       StringType(),    True),
-    _S("created_at",    TimestampType(), True),
-    _S("updated_at",    TimestampType(), True),
+    _S("id",         LongType(),      False),
+    _S("name",       StringType(),    True),
+    _S("email",      StringType(),    True),
+    _S("phone",      StringType(),    True),
+    _S("address",    StringType(),    True),
+    _S("city",       StringType(),    True),
+    _S("country",    StringType(),    True),
+    _S("created_at", TimestampType(), True),
+    _S("updated_at", TimestampType(), True),
 ])
 
 _PG_PRODUCTS = StructType([
-    _S("id",            LongType(),      False),
-    _S("name",          StringType(),    True),
-    _S("category",      StringType(),    True),
-    _S("price",         DoubleType(),    True),
-    _S("stock",         IntegerType(),   True),
-    _S("created_at",    TimestampType(), True),
-    _S("updated_at",    TimestampType(), True),
+    _S("id",         LongType(),      False),
+    _S("name",       StringType(),    True),
+    _S("category",   StringType(),    True),
+    _S("price",      DoubleType(),    True),
+    _S("stock",      IntegerType(),   True),
+    _S("created_at", TimestampType(), True),
+    _S("updated_at", TimestampType(), True),
 ])
 
 _PG_PRODUCT_REVIEWS = StructType([
-    _S("id",            LongType(),      False),
-    _S("product_id",    LongType(),      True),
-    _S("customer_id",   LongType(),      True),
-    _S("rating",        IntegerType(),   True),
-    _S("review_text",   StringType(),    True),
-    _S("created_at",    TimestampType(), True),
+    _S("id",          LongType(),      False),
+    _S("product_id",  LongType(),      True),
+    _S("customer_id", LongType(),      True),
+    _S("rating",      IntegerType(),   True),
+    _S("review_text", StringType(),    True),
+    _S("created_at",  TimestampType(), True),
 ])
 
 _PG_ORDERS = StructType([
-    _S("id",            LongType(),      False),
-    _S("customer_id",   LongType(),      True),
-    _S("status",        StringType(),    True),
-    _S("total_amount",  DoubleType(),    True),
-    _S("created_at",    TimestampType(), True),
-    _S("updated_at",    TimestampType(), True),
+    _S("id",           LongType(),      False),
+    _S("customer_id",  LongType(),      True),
+    _S("status",       StringType(),    True),
+    _S("total_amount", DoubleType(),    True),
+    _S("created_at",   TimestampType(), True),
+    _S("updated_at",   TimestampType(), True),
 ])
 
-# ── Oracle: CACHE_TESTING ──────────────────────────────────────────────────────
+# ── Oracle CACHE_TESTING ───────────────────────────────────────────────────────
 _ORA_CT_CUSTOMERS = StructType([
-    _S("id",             LongType(),      False),
-    _S("name",           StringType(),    True),
-    _S("email",          StringType(),    True),
-    _S("phone",          StringType(),    True),
-    _S("address",        StringType(),    True),
-    _S("city",           StringType(),    True),
-    _S("country",        StringType(),    True),
-    _S("created_at",     TimestampType(), True),
-    _S("updated_at",     TimestampType(), True),
+    _S("id",         LongType(),      False),
+    _S("name",       StringType(),    True),
+    _S("email",      StringType(),    True),
+    _S("phone",      StringType(),    True),
+    _S("address",    StringType(),    True),
+    _S("city",       StringType(),    True),
+    _S("country",    StringType(),    True),
+    _S("created_at", TimestampType(), True),
+    _S("updated_at", TimestampType(), True),
 ])
-
 _ORA_CT_PRODUCTS = StructType([
-    _S("id",             LongType(),      False),
-    _S("name",           StringType(),    True),
-    _S("category",       StringType(),    True),
-    _S("price",          DoubleType(),    True),
-    _S("stock",          IntegerType(),   True),
-    _S("created_at",     TimestampType(), True),
-    _S("updated_at",     TimestampType(), True),
+    _S("id",         LongType(),      False),
+    _S("name",       StringType(),    True),
+    _S("category",   StringType(),    True),
+    _S("price",      DoubleType(),    True),
+    _S("stock",      IntegerType(),   True),
+    _S("created_at", TimestampType(), True),
+    _S("updated_at", TimestampType(), True),
 ])
-
 _ORA_CT_ORDERS = StructType([
-    _S("id",             LongType(),      False),
-    _S("customer_id",    LongType(),      True),
-    _S("status",         StringType(),    True),
-    _S("total_amount",   DoubleType(),    True),
-    _S("created_at",     TimestampType(), True),
-    _S("updated_at",     TimestampType(), True),
+    _S("id",           LongType(),      False),
+    _S("customer_id",  LongType(),      True),
+    _S("status",       StringType(),    True),
+    _S("total_amount", DoubleType(),    True),
+    _S("created_at",   TimestampType(), True),
+    _S("updated_at",   TimestampType(), True),
 ])
-
 _ORA_CT_ORDER_ITEMS = StructType([
-    _S("id",             LongType(),      False),
-    _S("order_id",       LongType(),      True),
-    _S("product_id",     LongType(),      True),
-    _S("quantity",       IntegerType(),   True),
-    _S("unit_price",     DoubleType(),    True),
+    _S("id",         LongType(),    False),
+    _S("order_id",   LongType(),    True),
+    _S("product_id", LongType(),    True),
+    _S("quantity",   IntegerType(), True),
+    _S("unit_price", DoubleType(),  True),
 ])
-
 _ORA_CT_PRODUCT_REVIEWS = StructType([
-    _S("id",             LongType(),      False),
-    _S("product_id",     LongType(),      True),
-    _S("customer_id",    LongType(),      True),
-    _S("rating",         IntegerType(),   True),
-    _S("review_text",    StringType(),    True),
-    _S("created_at",     TimestampType(), True),
+    _S("id",          LongType(),      False),
+    _S("product_id",  LongType(),      True),
+    _S("customer_id", LongType(),      True),
+    _S("rating",      IntegerType(),   True),
+    _S("review_text", StringType(),    True),
+    _S("created_at",  TimestampType(), True),
 ])
-
 _ORA_CT_INVENTORY_EVENTS = StructType([
     _S("id",             LongType(),      False),
     _S("product_id",     LongType(),      True),
@@ -181,22 +210,20 @@ _ORA_CT_INVENTORY_EVENTS = StructType([
     _S("event_ts",       TimestampType(), True),
 ])
 
-# ── Oracle: TPCDS ──────────────────────────────────────────────────────────────
+# ── Oracle TPCDS ───────────────────────────────────────────────────────────────
 _ORA_TPCDS_INCOME_BAND = StructType([
-    _S("ib_income_band_sk", LongType(),   False),
-    _S("ib_lower_bound",    LongType(),   True),
-    _S("ib_upper_bound",    LongType(),   True),
+    _S("ib_income_band_sk", LongType(), False),
+    _S("ib_lower_bound",    LongType(), True),
+    _S("ib_upper_bound",    LongType(), True),
 ])
-
 _ORA_TPCDS_SHIP_MODE = StructType([
-    _S("sm_ship_mode_sk",   LongType(),   False),
-    _S("sm_ship_mode_id",   StringType(), True),
-    _S("sm_type",           StringType(), True),
-    _S("sm_code",           StringType(), True),
-    _S("sm_carrier",        StringType(), True),
-    _S("sm_contract",       StringType(), True),
+    _S("sm_ship_mode_sk", LongType(),   False),
+    _S("sm_ship_mode_id", StringType(), True),
+    _S("sm_type",         StringType(), True),
+    _S("sm_code",         StringType(), True),
+    _S("sm_carrier",      StringType(), True),
+    _S("sm_contract",     StringType(), True),
 ])
-
 _ORA_TPCDS_WAREHOUSE = StructType([
     _S("w_warehouse_sk",    LongType(),   False),
     _S("w_warehouse_id",    StringType(), True),
@@ -209,13 +236,11 @@ _ORA_TPCDS_WAREHOUSE = StructType([
     _S("w_country",         StringType(), True),
     _S("w_gmt_offset",      DoubleType(), True),
 ])
-
 _ORA_TPCDS_REASON = StructType([
-    _S("r_reason_sk",       LongType(),   False),
-    _S("r_reason_id",       StringType(), True),
-    _S("r_reason_desc",     StringType(), True),
+    _S("r_reason_sk",   LongType(),   False),
+    _S("r_reason_id",   StringType(), True),
+    _S("r_reason_desc", StringType(), True),
 ])
-
 _ORA_TPCDS_CALL_CENTER = StructType([
     _S("cc_call_center_sk", LongType(),   False),
     _S("cc_call_center_id", StringType(), True),
@@ -231,50 +256,45 @@ _ORA_TPCDS_CALL_CENTER = StructType([
     _S("cc_gmt_offset",     DoubleType(), True),
     _S("cc_tax_percentage", DoubleType(), True),
 ])
-
 _ORA_TPCDS_WEB_SITE = StructType([
-    _S("web_site_sk",       LongType(),   False),
-    _S("web_site_id",       StringType(), True),
-    _S("web_name",          StringType(), True),
-    _S("web_class",         StringType(), True),
-    _S("web_employees",     LongType(),   True),
-    _S("web_city",          StringType(), True),
-    _S("web_county",        StringType(), True),
-    _S("web_state",         StringType(), True),
-    _S("web_zip",           StringType(), True),
-    _S("web_country",       StringType(), True),
-    _S("web_gmt_offset",    DoubleType(), True),
-    _S("web_tax_percentage",DoubleType(), True),
+    _S("web_site_sk",        LongType(),   False),
+    _S("web_site_id",        StringType(), True),
+    _S("web_name",           StringType(), True),
+    _S("web_class",          StringType(), True),
+    _S("web_employees",      LongType(),   True),
+    _S("web_city",           StringType(), True),
+    _S("web_county",         StringType(), True),
+    _S("web_state",          StringType(), True),
+    _S("web_zip",            StringType(), True),
+    _S("web_country",        StringType(), True),
+    _S("web_gmt_offset",     DoubleType(), True),
+    _S("web_tax_percentage", DoubleType(), True),
 ])
-
 _ORA_TPCDS_WEB_PAGE = StructType([
-    _S("wp_web_page_sk",    LongType(),   False),
-    _S("wp_web_page_id",    StringType(), True),
-    _S("wp_char_count",     LongType(),   True),
-    _S("wp_link_count",     LongType(),   True),
-    _S("wp_image_count",    LongType(),   True),
-    _S("wp_max_ad_count",   LongType(),   True),
-    _S("wp_type",           StringType(), True),
+    _S("wp_web_page_sk",  LongType(),   False),
+    _S("wp_web_page_id",  StringType(), True),
+    _S("wp_char_count",   LongType(),   True),
+    _S("wp_link_count",   LongType(),   True),
+    _S("wp_image_count",  LongType(),   True),
+    _S("wp_max_ad_count", LongType(),   True),
+    _S("wp_type",         StringType(), True),
 ])
-
 _ORA_TPCDS_HOUSEHOLD_DEMOGRAPHICS = StructType([
-    _S("hd_demo_sk",           LongType(),   False),
-    _S("hd_income_band_sk",    LongType(),   True),
-    _S("hd_buy_potential",     StringType(), True),
-    _S("hd_dep_count",         LongType(),   True),
-    _S("hd_vehicle_count",     LongType(),   True),
+    _S("hd_demo_sk",        LongType(),   False),
+    _S("hd_income_band_sk", LongType(),   True),
+    _S("hd_buy_potential",  StringType(), True),
+    _S("hd_dep_count",      LongType(),   True),
+    _S("hd_vehicle_count",  LongType(),   True),
 ])
-
 _ORA_TPCDS_CATALOG_PAGE = StructType([
-    _S("cp_catalog_page_sk",   LongType(),   False),
-    _S("cp_catalog_page_id",   StringType(), True),
-    _S("cp_department",        StringType(), True),
-    _S("cp_catalog_number",    LongType(),   True),
-    _S("cp_catalog_page_number",LongType(),  True),
-    _S("cp_description",       StringType(), True),
-    _S("cp_type",              StringType(), True),
+    _S("cp_catalog_page_sk",     LongType(),   False),
+    _S("cp_catalog_page_id",     StringType(), True),
+    _S("cp_department",          StringType(), True),
+    _S("cp_catalog_number",      LongType(),   True),
+    _S("cp_catalog_page_number", LongType(),   True),
+    _S("cp_description",         StringType(), True),
+    _S("cp_type",                StringType(), True),
 ])
-
 _ORA_TPCDS_PROMOTION = StructType([
     _S("p_promo_sk",           LongType(),   False),
     _S("p_promo_id",           StringType(), True),
@@ -292,207 +312,423 @@ _ORA_TPCDS_PROMOTION = StructType([
     _S("p_response_target",    LongType(),   True),
 ])
 
-# ── MongoDB: cache_testing ─────────────────────────────────────────────────────
+# ── MongoDB ────────────────────────────────────────────────────────────────────
 _MGO_CUSTOMERS = StructType([
-    _S("_id",           StringType(),    False),
-    _S("name",          StringType(),    True),
-    _S("email",         StringType(),    True),
-    _S("phone",         StringType(),    True),
-    _S("address",       StringType(),    True),
-    _S("city",          StringType(),    True),
-    _S("country",       StringType(),    True),
-    _S("created_at",    TimestampType(), True),
-    _S("updated_at",    TimestampType(), True),
+    _S("_id",        StringType(),    False),
+    _S("name",       StringType(),    True),
+    _S("email",      StringType(),    True),
+    _S("phone",      StringType(),    True),
+    _S("address",    StringType(),    True),
+    _S("city",       StringType(),    True),
+    _S("country",    StringType(),    True),
+    _S("created_at", TimestampType(), True),
+    _S("updated_at", TimestampType(), True),
 ])
-
 _MGO_PRODUCTS = StructType([
-    _S("_id",           StringType(),    False),
-    _S("name",          StringType(),    True),
-    _S("category",      StringType(),    True),
-    _S("price",         DoubleType(),    True),
-    _S("stock",         IntegerType(),   True),
-    _S("created_at",    TimestampType(), True),
-    _S("updated_at",    TimestampType(), True),
+    _S("_id",        StringType(),    False),
+    _S("name",       StringType(),    True),
+    _S("category",   StringType(),    True),
+    _S("price",      DoubleType(),    True),
+    _S("stock",      IntegerType(),   True),
+    _S("created_at", TimestampType(), True),
+    _S("updated_at", TimestampType(), True),
 ])
 
-# ── Master table registry ──────────────────────────────────────────────────────
-# (source_key, catalog, namespace, table, pk_col, s3_prefix, schema)
-_TABLE_REGISTRY = [
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODE-SPECIFIC EXTRA COLUMNS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SD_EXTRA = [                                          # soft_delete additions
+    _S("is_deleted", BooleanType(),  True),
+    _S("deleted_at", TimestampType(), True),
+]
+_HIST_EXTRA = [                                        # history_tracking additions
+    _S("_change_type", StringType(),    True),         # INSERT / UPDATE / DELETE
+    _S("_change_ts",   TimestampType(), True),         # pipeline processing time
+    # before_* / after_* columns added at runtime via mergeSchema
+]
+
+
+def _with_extra(base: StructType, extras: list[StructField]) -> StructType:
+    existing = {f.name for f in base.fields}
+    return StructType(base.fields + [f for f in extras if f.name not in existing])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TABLE REGISTRIES
+# ═══════════════════════════════════════════════════════════════════════════════
+# Each entry is a dict:
+#   group      : "prod" | "test" | "transforms"
+#   source_key : "postgres" | "oracle" | "mongodb"
+#   catalog    : Polaris catalog name
+#   namespace  : Iceberg namespace
+#   table      : Iceberg table name (no backticks)
+#   pk_col     : primary key column for MERGE + bucket partitioning
+#   s3_prefix  : path under s3://<S3_BUCKET>/
+#   schema     : StructType (base + mode extras already merged)
+#   write_mode : "standard" | "soft_delete" | "history_tracking"
+#   purpose    : short description shown in dry-run output
+# ───────────────────────────────────────────────────────────────────────────────
+
+def _build_registry() -> list[dict]:
+    reg: list[dict] = []
+
+    # ── helper to add all three mode variants for a table ──────────────────────
+    def _add(src: str, cat: str, ns: str, base_tbl: str, pk: str, s3pfx: str,
+             base_schema: StructType, purpose: str = "") -> None:
+        # standard  → <table>_std
+        reg.append(dict(
+            group="prod", source_key=src, catalog=cat, namespace=ns,
+            table=f"{base_tbl}_std", pk_col=pk,
+            s3_prefix=f"{s3pfx}/{ns}/{base_tbl}_std",
+            schema=base_schema,
+            write_mode="standard",
+            purpose=purpose or f"{src} {base_tbl} standard (SCD Type 0)",
+        ))
+        # soft_delete → <table>_sd
+        reg.append(dict(
+            group="prod", source_key=src, catalog=cat, namespace=ns,
+            table=f"{base_tbl}_sd", pk_col=pk,
+            s3_prefix=f"{s3pfx}/{ns}/{base_tbl}_sd",
+            schema=_with_extra(base_schema, _SD_EXTRA),
+            write_mode="soft_delete",
+            purpose=purpose or f"{src} {base_tbl} soft_delete",
+        ))
+        # history_tracking → <table>_hist
+        reg.append(dict(
+            group="prod", source_key=src, catalog=cat, namespace=ns,
+            table=f"{base_tbl}_hist", pk_col=pk,
+            s3_prefix=f"{s3pfx}/{ns}/{base_tbl}_hist",
+            schema=_with_extra(base_schema, _HIST_EXTRA),
+            write_mode="history_tracking",
+            purpose=purpose or f"{src} {base_tbl} history_tracking",
+        ))
+
+    # ── Production tables ───────────────────────────────────────────────────────
+
     # PostgreSQL
-    ("postgres", "postgres", "cache_testing", "customers",       "id",            "iceberg/pg_lakehouse",  _PG_CUSTOMERS),
-    ("postgres", "postgres", "cache_testing", "products",        "id",            "iceberg/pg_lakehouse",  _PG_PRODUCTS),
-    ("postgres", "postgres", "cache_testing", "product_reviews", "id",            "iceberg/pg_lakehouse",  _PG_PRODUCT_REVIEWS),
-    ("postgres", "postgres", "cache_testing", "orders",          "id",            "iceberg/pg_lakehouse",  _PG_ORDERS),
+    _add("postgres","postgres","cache_testing","customers",       "id",  "iceberg/pg_lakehouse",  _PG_CUSTOMERS)
+    _add("postgres","postgres","cache_testing","products",        "id",  "iceberg/pg_lakehouse",  _PG_PRODUCTS)
+    _add("postgres","postgres","cache_testing","product_reviews", "id",  "iceberg/pg_lakehouse",  _PG_PRODUCT_REVIEWS)
+    _add("postgres","postgres","cache_testing","orders",          "id",  "iceberg/pg_lakehouse",  _PG_ORDERS)
+
     # Oracle CACHE_TESTING
-    ("oracle",   "oracle",   "cache_testing", "customers",       "id",            "iceberg/ora_lakehouse", _ORA_CT_CUSTOMERS),
-    ("oracle",   "oracle",   "cache_testing", "products",        "id",            "iceberg/ora_lakehouse", _ORA_CT_PRODUCTS),
-    ("oracle",   "oracle",   "cache_testing", "orders",          "id",            "iceberg/ora_lakehouse", _ORA_CT_ORDERS),
-    ("oracle",   "oracle",   "cache_testing", "order_items",     "id",            "iceberg/ora_lakehouse", _ORA_CT_ORDER_ITEMS),
-    ("oracle",   "oracle",   "cache_testing", "product_reviews", "id",            "iceberg/ora_lakehouse", _ORA_CT_PRODUCT_REVIEWS),
-    ("oracle",   "oracle",   "cache_testing", "inventory_events","id",            "iceberg/ora_lakehouse", _ORA_CT_INVENTORY_EVENTS),
+    _add("oracle","oracle","cache_testing","customers",        "id","iceberg/ora_lakehouse",_ORA_CT_CUSTOMERS)
+    _add("oracle","oracle","cache_testing","products",         "id","iceberg/ora_lakehouse",_ORA_CT_PRODUCTS)
+    _add("oracle","oracle","cache_testing","orders",           "id","iceberg/ora_lakehouse",_ORA_CT_ORDERS)
+    _add("oracle","oracle","cache_testing","order_items",      "id","iceberg/ora_lakehouse",_ORA_CT_ORDER_ITEMS)
+    _add("oracle","oracle","cache_testing","product_reviews",  "id","iceberg/ora_lakehouse",_ORA_CT_PRODUCT_REVIEWS)
+    _add("oracle","oracle","cache_testing","inventory_events", "id","iceberg/ora_lakehouse",_ORA_CT_INVENTORY_EVENTS)
+
     # Oracle TPCDS
-    ("oracle",   "oracle",   "tpcds",         "income_band",            "ib_income_band_sk",   "iceberg/ora_lakehouse", _ORA_TPCDS_INCOME_BAND),
-    ("oracle",   "oracle",   "tpcds",         "ship_mode",              "sm_ship_mode_sk",     "iceberg/ora_lakehouse", _ORA_TPCDS_SHIP_MODE),
-    ("oracle",   "oracle",   "tpcds",         "warehouse",              "w_warehouse_sk",      "iceberg/ora_lakehouse", _ORA_TPCDS_WAREHOUSE),
-    ("oracle",   "oracle",   "tpcds",         "reason",                 "r_reason_sk",         "iceberg/ora_lakehouse", _ORA_TPCDS_REASON),
-    ("oracle",   "oracle",   "tpcds",         "call_center",            "cc_call_center_sk",   "iceberg/ora_lakehouse", _ORA_TPCDS_CALL_CENTER),
-    ("oracle",   "oracle",   "tpcds",         "web_site",               "web_site_sk",         "iceberg/ora_lakehouse", _ORA_TPCDS_WEB_SITE),
-    ("oracle",   "oracle",   "tpcds",         "web_page",               "wp_web_page_sk",      "iceberg/ora_lakehouse", _ORA_TPCDS_WEB_PAGE),
-    ("oracle",   "oracle",   "tpcds",         "household_demographics",  "hd_demo_sk",          "iceberg/ora_lakehouse", _ORA_TPCDS_HOUSEHOLD_DEMOGRAPHICS),
-    ("oracle",   "oracle",   "tpcds",         "catalog_page",           "cp_catalog_page_sk",  "iceberg/ora_lakehouse", _ORA_TPCDS_CATALOG_PAGE),
-    ("oracle",   "oracle",   "tpcds",         "promotion",              "p_promo_sk",          "iceberg/ora_lakehouse", _ORA_TPCDS_PROMOTION),
+    _add("oracle","oracle","tpcds","income_band",           "ib_income_band_sk", "iceberg/ora_lakehouse",_ORA_TPCDS_INCOME_BAND)
+    _add("oracle","oracle","tpcds","ship_mode",             "sm_ship_mode_sk",   "iceberg/ora_lakehouse",_ORA_TPCDS_SHIP_MODE)
+    _add("oracle","oracle","tpcds","warehouse",             "w_warehouse_sk",    "iceberg/ora_lakehouse",_ORA_TPCDS_WAREHOUSE)
+    _add("oracle","oracle","tpcds","reason",                "r_reason_sk",       "iceberg/ora_lakehouse",_ORA_TPCDS_REASON)
+    _add("oracle","oracle","tpcds","call_center",           "cc_call_center_sk", "iceberg/ora_lakehouse",_ORA_TPCDS_CALL_CENTER)
+    _add("oracle","oracle","tpcds","web_site",              "web_site_sk",       "iceberg/ora_lakehouse",_ORA_TPCDS_WEB_SITE)
+    _add("oracle","oracle","tpcds","web_page",              "wp_web_page_sk",    "iceberg/ora_lakehouse",_ORA_TPCDS_WEB_PAGE)
+    _add("oracle","oracle","tpcds","household_demographics","hd_demo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_HOUSEHOLD_DEMOGRAPHICS)
+    _add("oracle","oracle","tpcds","catalog_page",          "cp_catalog_page_sk","iceberg/ora_lakehouse",_ORA_TPCDS_CATALOG_PAGE)
+    _add("oracle","oracle","tpcds","promotion",             "p_promo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_PROMOTION)
+
     # MongoDB
-    ("mongodb",  "mongodb",  "cache_testing", "customers",       "_id",           "iceberg/mgo_lakehouse", _MGO_CUSTOMERS),
-    ("mongodb",  "mongodb",  "cache_testing", "products",        "_id",           "iceberg/mgo_lakehouse", _MGO_PRODUCTS),
-]
+    _add("mongodb","mongodb","cache_testing","customers","_id","iceberg/mgo_lakehouse",_MGO_CUSTOMERS)
+    _add("mongodb","mongodb","cache_testing","products", "_id","iceberg/mgo_lakehouse",_MGO_PRODUCTS)
+
+    # ── Dedicated test tables (one namespace per write mode) ────────────────────
+    # These target the same PostgreSQL, Oracle, MongoDB sources but land in
+    # test_standard / test_soft_delete / test_history namespaces so they never
+    # mix with production data and can be safely truncated between test runs.
+
+    for src, cat, base_tbl, pk, s3pfx, base_schema in [
+        ("postgres","postgres","customers",       "id", "iceberg/pg_test",  _PG_CUSTOMERS),
+        ("postgres","postgres","products",        "id", "iceberg/pg_test",  _PG_PRODUCTS),
+        ("postgres","postgres","orders",          "id", "iceberg/pg_test",  _PG_ORDERS),
+        ("oracle",  "oracle",  "customers",       "id", "iceberg/ora_test", _ORA_CT_CUSTOMERS),
+        ("oracle",  "oracle",  "orders",          "id", "iceberg/ora_test", _ORA_CT_ORDERS),
+        ("mongodb", "mongodb", "customers",       "_id","iceberg/mgo_test", _MGO_CUSTOMERS),
+    ]:
+        # standard test
+        reg.append(dict(
+            group="test", source_key=src, catalog=cat, namespace="test_standard",
+            table=base_tbl, pk_col=pk,
+            s3_prefix=f"{s3pfx}/test_standard/{base_tbl}",
+            schema=base_schema,
+            write_mode="standard",
+            purpose=f"[TEST] standard mode — {src}.{base_tbl}",
+        ))
+        # soft_delete test
+        reg.append(dict(
+            group="test", source_key=src, catalog=cat, namespace="test_soft_delete",
+            table=base_tbl, pk_col=pk,
+            s3_prefix=f"{s3pfx}/test_soft_delete/{base_tbl}",
+            schema=_with_extra(base_schema, _SD_EXTRA),
+            write_mode="soft_delete",
+            purpose=f"[TEST] soft_delete mode — {src}.{base_tbl}",
+        ))
+        # history_tracking test
+        reg.append(dict(
+            group="test", source_key=src, catalog=cat, namespace="test_history",
+            table=f"{base_tbl}_hist", pk_col=pk,
+            s3_prefix=f"{s3pfx}/test_history/{base_tbl}_hist",
+            schema=_with_extra(base_schema, _HIST_EXTRA),
+            write_mode="history_tracking",
+            purpose=f"[TEST] history_tracking mode — {src}.{base_tbl}",
+        ))
+
+    # ── StarTransform test tables  (postgres.test_transforms.*) ────────────────
+    # Each table captures the output of ONE StarTransform function so results can
+    # be inspected independently without interference between tests.
+    # All fed from postgres.cache_testing.{customers,products,orders}.
+
+    # customers_dedup — deduplicate(pk="id", order_col="kafka_ts")
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_dedup", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_dedup",
+        schema=_PG_CUSTOMERS,
+        write_mode="standard",
+        purpose="[TRANSFORM] deduplicate() — last-write-wins per customer id",
+    ))
+
+    # customers_masked — mask_columns(["email","phone"])
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_masked", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_masked",
+        schema=_PG_CUSTOMERS,
+        write_mode="standard",
+        purpose="[TRANSFORM] mask_columns() — email + phone SHA-256 hashed",
+    ))
+
+    # customers_proc_time — add_processing_time(col_name="proc_time")
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_proc_time", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_proc_time",
+        schema=_with_extra(_PG_CUSTOMERS, [_S("proc_time", TimestampType(), True)]),
+        write_mode="standard",
+        purpose="[TRANSFORM] add_processing_time() — proc_time TIMESTAMP injected",
+    ))
+
+    # customers_op_label — add_op_label()
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_op_label", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_op_label",
+        schema=_with_extra(_PG_CUSTOMERS, [_S("op_label", StringType(), True)]),
+        write_mode="standard",
+        purpose="[TRANSFORM] add_op_label() — INSERT/UPDATE/DELETE string column",
+    ))
+
+    # customers_source_tag — add_source_tag(source_system="postgres")
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_source_tag", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_source_tag",
+        schema=_with_extra(_PG_CUSTOMERS, [_S("source_system", StringType(), True)]),
+        write_mode="standard",
+        purpose="[TRANSFORM] add_source_tag() — source_system STRING literal",
+    ))
+
+    # customers_filter_ins — filter_op(ops=["c","u"])  inserts + updates only
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_filter_ins", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_filter_ins",
+        schema=_PG_CUSTOMERS,
+        write_mode="standard",
+        purpose="[TRANSFORM] filter_op(['c','u']) — only inserts/updates land here",
+    ))
+
+    # customers_filter_del — filter_op(ops=["d"])  deletes only
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_filter_del", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_filter_del",
+        schema=_PG_CUSTOMERS,
+        write_mode="standard",
+        purpose="[TRANSFORM] filter_op(['d']) — only delete events land here",
+    ))
+
+    # orders_enriched — enrich_from_broadcast(products_dim, join_col="product_id")
+    # Uses orders table base, enriched with product category + name
+    _ORDERS_ENRICHED = _with_extra(_PG_ORDERS, [
+        _S("product_id",       LongType(),   True),   # join key
+        _S("product_name",     StringType(), True),   # from products broadcast
+        _S("product_category", StringType(), True),   # from products broadcast
+    ])
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="orders_enriched", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/orders_enriched",
+        schema=_ORDERS_ENRICHED,
+        write_mode="standard",
+        purpose="[TRANSFORM] enrich_from_broadcast() — orders joined with products dim",
+    ))
+
+    # customers_before_after — pivot_before_after() on history_tracking stream
+    # Shows both before_ and after_ columns side-by-side for UPDATE/DELETE events
+    _BEFORE_AFTER = _with_extra(_HIST_EXTRA[0:1], [  # just _change_type as anchor
+        _S("_change_ts",      TimestampType(), True),
+        _S("before_id",       LongType(),      True),
+        _S("before_name",     StringType(),    True),
+        _S("before_email",    StringType(),    True),
+        _S("before_status",   StringType(),    True),
+        _S("after_id",        LongType(),      True),
+        _S("after_name",      StringType(),    True),
+        _S("after_email",     StringType(),    True),
+        _S("after_status",    StringType(),    True),
+    ])
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_before_after", pk_col="after_id",
+        s3_prefix="iceberg/pg_transforms/customers_before_after",
+        schema=_BEFORE_AFTER,
+        write_mode="history_tracking",
+        purpose="[TRANSFORM] pivot_before_after() — before_* + after_* side by side",
+    ))
+
+    # customers_nullcoal — null_coalesce({"status": "UNKNOWN", "country": "N/A"})
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="customers_nullcoal", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/customers_nullcoal",
+        schema=_PG_CUSTOMERS,
+        write_mode="standard",
+        purpose="[TRANSFORM] null_coalesce() — NULL country/phone replaced with defaults",
+    ))
+
+    # event_counts — aggregate_counts(pk_col="id", op_col="_op", out_col="event_count")
+    _EVENT_COUNTS = StructType([
+        _S("id",          LongType(),   False),
+        _S("_op",         StringType(), True),
+        _S("event_count", LongType(),   True),
+    ])
+    reg.append(dict(
+        group="transforms", source_key="postgres", catalog="postgres",
+        namespace="test_transforms", table="event_counts", pk_col="id",
+        s3_prefix="iceberg/pg_transforms/event_counts",
+        schema=_EVENT_COUNTS,
+        write_mode="standard",
+        purpose="[TRANSFORM] aggregate_counts() — events per (customer_id, op)",
+    ))
+
+    return reg
 
 
-# ── Schema builders per write mode ────────────────────────────────────────────
-
-_SOFT_DELETE_EXTRA = [
-    StructField("is_deleted", BooleanType(),  True),
-    StructField("deleted_at", TimestampType(), True),
-]
-
-_HISTORY_EXTRA = [
-    StructField("_change_type", StringType(),    True),
-    StructField("_change_ts",   TimestampType(), True),
-    # before_* / after_* columns evolve at runtime via mergeSchema — not declared here
-]
-
-
-def _schema_for_mode(base_schema: StructType, write_mode: str) -> StructType:
-    """Return the full schema for the given write mode (base + mode extras)."""
-    extra: list[StructField] = []
-    if write_mode == "soft_delete":
-        extra = _SOFT_DELETE_EXTRA
-    elif write_mode == "history_tracking":
-        extra = _HISTORY_EXTRA
-    # standard: no extras beyond snap columns (added by create_table)
-    existing_names = {f.name for f in base_schema.fields}
-    return StructType(
-        base_schema.fields + [f for f in extra if f.name not in existing_names]
-    )
-
-
-def _table_name_for_mode(table: str, write_mode: str) -> str:
-    """history_tracking tables get a _hist suffix."""
-    return f"{table}_hist" if write_mode == "history_tracking" else table
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
     os.environ["SPARK_USER"] = SPARK_USER
 
     logger.info(
-        "=== Create Iceberg Tables | user=%s | dry_run=%s | source=%s | mode=%s ===",
-        SPARK_USER, DRY_RUN,
-        SOURCE_FILTER or "all",
-        WRITE_MODE_FILTER or "all",
+        "=== Create Iceberg Tables | user=%s | dry_run=%s | source=%s | group=%s ===",
+        SPARK_USER, DRY_RUN, SOURCE_FILTER or "all", TABLE_GROUP,
     )
 
     bao   = BaoSparkInit()
     conf  = bao.spark_conf(app_name="create-iceberg-tables")
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
-
     builder = IcebergTableBuilder(spark, running_user=SPARK_USER)
 
-    write_modes = (
-        [WRITE_MODE_FILTER] if WRITE_MODE_FILTER
-        else ["standard", "soft_delete", "history_tracking"]
-    )
+    registry = _build_registry()
 
-    # Ensure all namespaces exist
+    # Apply filters
+    if SOURCE_FILTER:
+        registry = [r for r in registry if r["source_key"] == SOURCE_FILTER]
+    if TABLE_GROUP != "all":
+        registry = [r for r in registry if r["group"] == TABLE_GROUP]
+
+    # Ensure namespaces
     seen_ns: set[tuple] = set()
-    for (src, catalog, namespace, table, pk, s3pfx, schema) in _TABLE_REGISTRY:
-        if SOURCE_FILTER and src != SOURCE_FILTER:
-            continue
-        ns_key = (catalog, namespace)
-        if ns_key not in seen_ns:
+    for r in registry:
+        key = (r["catalog"], r["namespace"])
+        if key not in seen_ns:
             if not DRY_RUN:
-                builder.ensure_namespace(catalog, namespace)
+                builder.ensure_namespace(r["catalog"], r["namespace"])
             else:
-                logger.info("[DRY_RUN] Would ensure namespace `%s`.`%s`", catalog, namespace)
-            seen_ns.add(ns_key)
+                logger.info("[DRY_RUN] namespace `%s`.`%s`", r["catalog"], r["namespace"])
+            seen_ns.add(key)
 
-    created = 0
-    skipped = 0
-    errors  = 0
+    created = skipped = errors = 0
 
-    for write_mode in write_modes:
-        logger.info("─── Write mode: %s ───", write_mode)
+    for r in registry:
+        cat, ns, tbl = r["catalog"], r["namespace"], r["table"]
+        pk_col       = r["pk_col"]
+        schema       = r["schema"]
+        location     = f"s3://{S3_BUCKET}/{r['s3_prefix']}"
+        fqn          = f"`{cat}`.`{ns}`.`{tbl}`"
 
-        for (src, catalog, namespace, base_table, pk_col, s3_prefix, base_schema) in _TABLE_REGISTRY:
-            if SOURCE_FILTER and src != SOURCE_FILTER:
-                continue
+        if builder.table_exists(cat, ns, tbl):
+            logger.info("  [EXISTS]  %-60s  %s", fqn, r["purpose"])
+            skipped += 1
+            continue
 
-            table    = _table_name_for_mode(base_table, write_mode)
-            schema   = _schema_for_mode(base_schema, write_mode)
-            location = f"s3://{S3_BUCKET}/{s3_prefix}/{namespace}/{table}"
-            fqn      = f"`{catalog}`.`{namespace}`.`{table}`"
+        partition_spec = [
+            IcebergTableBuilder.hours("snap_timestamp"),
+            IcebergTableBuilder.bucket(pk_col, 16),
+        ]
 
-            if builder.table_exists(catalog, namespace, table):
-                logger.info("  [EXISTS]  %s", fqn)
-                skipped += 1
-                continue
+        if DRY_RUN:
+            aug = StructType(schema.fields + [
+                _S("snap_id",        LongType(),      True),
+                _S("snap_timestamp", TimestampType(), True),
+            ])
+            col_ddl = "\n".join(f"    {f.name} {f.dataType.simpleString()}" for f in aug.fields)
+            logger.info(
+                "[DRY_RUN] CREATE TABLE %s (\n%s\n)"
+                "\n  PARTITIONED BY (hours(snap_timestamp), bucket(16, %s))"
+                "\n  LOCATION '%s'  -- %s",
+                fqn, col_ddl, pk_col, location, r["purpose"],
+            )
+            created += 1
+            continue
 
-            partition_spec = [
-                IcebergTableBuilder.hours("snap_timestamp"),
-                IcebergTableBuilder.bucket(pk_col, 16),
-            ]
+        try:
+            builder.create_table(
+                catalog          = cat,
+                namespace        = ns,
+                table            = tbl,
+                schema           = schema,
+                partition_spec   = partition_spec,
+                location         = location,
+                extra_properties = {
+                    "pipeline.write-mode": r["write_mode"],
+                    "pipeline.source":     r["source_key"],
+                    "pipeline.group":      r["group"],
+                    "pipeline.pk-col":     pk_col,
+                    "pipeline.purpose":    r["purpose"],
+                },
+            )
+            logger.info("  [CREATED] %-60s  %s", fqn, r["purpose"])
+            created += 1
+        except Exception as exc:
+            logger.error("  [ERROR]   %-60s  %s", fqn, exc)
+            errors += 1
 
-            if DRY_RUN:
-                # Print the DDL that would be executed
-                aug_schema = StructType(
-                    schema.fields + [
-                        StructField("snap_id",        LongType(),      True),
-                        StructField("snap_timestamp", TimestampType(), True),
-                    ]
-                )
-                col_ddl = "\n".join(
-                    f"    {f.name} {f.dataType.simpleString()}"
-                    for f in aug_schema.fields
-                )
-                logger.info(
-                    "[DRY_RUN] Would CREATE TABLE %s (\n%s\n)"
-                    "\n  PARTITIONED BY (hours(snap_timestamp), bucket(16, %s))"
-                    "\n  LOCATION '%s'",
-                    fqn, col_ddl, pk_col, location,
-                )
-                created += 1
-                continue
-
-            try:
-                builder.create_table(
-                    catalog           = catalog,
-                    namespace         = namespace,
-                    table             = table,
-                    schema            = schema,
-                    partition_spec    = partition_spec,
-                    location          = location,
-                    extra_properties  = {
-                        "pipeline.write-mode": write_mode,
-                        "pipeline.source":     src,
-                        "pipeline.pk-col":     pk_col,
-                    },
-                )
-                logger.info("  [CREATED] %s", fqn)
-                created += 1
-            except Exception as exc:
-                logger.error("  [ERROR]   %s — %s", fqn, exc)
-                errors += 1
-
+    # ── Summary ────────────────────────────────────────────────────────────────
     logger.info("")
-    logger.info("═══════════════════════════════════════")
-    logger.info("  Tables created : %d", created)
+    logger.info("═" * 70)
+    logger.info("  Group filter   : %s", TABLE_GROUP)
+    logger.info("  Source filter  : %s", SOURCE_FILTER or "all")
+    logger.info("  Total entries  : %d", len(registry))
+    logger.info("  Created        : %d", created)
     logger.info("  Already exist  : %d (skipped)", skipped)
     logger.info("  Errors         : %d", errors)
-    logger.info("═══════════════════════════════════════")
+    logger.info("═" * 70)
+    logger.info("")
+    logger.info("  Table groups in this run:")
+    for grp in sorted({r["group"] for r in registry}):
+        ns_list = sorted({f"`{r['catalog']}`.`{r['namespace']}`" for r in registry if r["group"] == grp})
+        logger.info("    %-12s → namespaces: %s", grp, ", ".join(ns_list))
 
     spark.stop()
-
     if errors:
         sys.exit(1)
 
