@@ -271,35 +271,92 @@ _DEBEZIUM_ENVELOPE_SCHEMA = StructType([
 
 # ── Schema Registry Avro helper ───────────────────────────────────────────────
 
+# ── Executor-level Schema Registry cache ─────────────────────────────────────
+# These dicts live in the executor Python process and survive across UDF calls
+# within the same executor.  They are NOT shared across executors (each executor
+# process has its own copy), but they eliminate the per-row HTTP round-trip to
+# the Schema Registry and the per-row Avro schema parse.
+#
+# _SR_CLIENT_CACHE  : { sr_url -> SchemaRegistryClient }  — one client per SR URL
+# _SR_SCHEMA_CACHE  : { schema_id -> avro.schema.Schema } — parsed schema objects
+# _SR_READER_CACHE  : { schema_id -> avro.io.DatumReader } — pre-built readers
+#
+# Cache is populated lazily on first access per schema_id.  A CDC pipeline with
+# 22 topics will typically see 22–44 distinct schema IDs (key + value per topic);
+# the cache converges within the first micro-batch and stays warm for the
+# lifetime of the executor.
+_SR_CLIENT_CACHE: dict = {}
+_SR_SCHEMA_CACHE: dict = {}
+_SR_READER_CACHE: dict = {}
+
+
 def _build_avro_deserialize_udf(_sr_url: str) -> Any:
     """
     Build a Python UDF that deserialises a Confluent Avro-encoded byte array
     (5-byte magic header: 0x00 + 4-byte schema ID + avro payload) to a JSON string.
     Falls back to UTF-8 decode if the magic byte is absent (plain JSON mode).
+
+    Efficiency design
+    -----------------
+    • SchemaRegistryClient is created ONCE per executor process and reused across
+      all UDF invocations (stored in _SR_CLIENT_CACHE keyed by SR URL).
+    • Parsed avro.schema.Schema objects are cached by schema_id (_SR_SCHEMA_CACHE).
+    • avro.io.DatumReader objects are cached by schema_id (_SR_READER_CACHE).
+    • A BytesIO + BinaryDecoder is the only object created per row — unavoidable
+      because the payload bytes differ per message.
+    • Module-level imports (io, struct, avro.*) are resolved once at UDF build
+      time, not inside the closure body.
+
+    Cache lifetime: executor process lifetime (survives across micro-batches on
+    the same executor; reset only on executor restart or pod restart).
     """
-    import io
+    import io as _io
     import struct as _struct
+
+    # Resolve avro modules once at UDF build time (not per row)
+    try:
+        import avro.io as _aio
+        import avro.schema as _aschema
+        _avro_available = True
+    except ImportError:
+        _avro_available = False
 
     def avro_to_json(topic: str, raw_bytes: bytes) -> str | None:
         if raw_bytes is None:
             return None
         try:
             if len(raw_bytes) < 5 or raw_bytes[0] != 0:
-                # Not Confluent wire format — treat as plain UTF-8 JSON
+                # Not Confluent wire format — plain UTF-8 JSON
                 return raw_bytes.decode("utf-8", errors="replace")
-            from confluent_kafka.schema_registry import SchemaRegistryClient
-            _sr = SchemaRegistryClient({"url": _sr_url})
+
+            if not _avro_available:
+                # avro library not present — decode as UTF-8 best-effort
+                return raw_bytes[5:].decode("utf-8", errors="replace")
+
             schema_id = _struct.unpack(">I", raw_bytes[1:5])[0]
-            registered = _sr.get_schema(schema_id)
-            import avro.io as _aio
-            import avro.schema as _aschema
-            schema_def = _aschema.parse(registered.schema_str)
-            decoder = _aio.BinaryDecoder(io.BytesIO(raw_bytes[5:]))
-            reader  = _aio.DatumReader(schema_def)
+
+            # ── Executor-level SR client (created once per executor) ──────────
+            if _sr_url not in _SR_CLIENT_CACHE:
+                from confluent_kafka.schema_registry import SchemaRegistryClient
+                _SR_CLIENT_CACHE[_sr_url] = SchemaRegistryClient({"url": _sr_url})
+            sr = _SR_CLIENT_CACHE[_sr_url]
+
+            # ── Executor-level DatumReader (created once per schema_id) ───────
+            if schema_id not in _SR_READER_CACHE:
+                registered  = sr.get_schema(schema_id)          # one HTTP GET per new schema
+                schema_def  = _aschema.parse(registered.schema_str)
+                _SR_SCHEMA_CACHE[schema_id] = schema_def
+                _SR_READER_CACHE[schema_id] = _aio.DatumReader(schema_def)
+
+            reader  = _SR_READER_CACHE[schema_id]
+            decoder = _aio.BinaryDecoder(_io.BytesIO(raw_bytes[5:]))  # per-row (payload differs)
             record  = reader.read(decoder)
             return json.dumps(record)
+
         except Exception as exc:
-            logger.warning("avro_to_json failed: %s", exc)
+            logger.warning("avro_to_json failed (schema_id=%s): %s",
+                           _struct.unpack(">I", raw_bytes[1:5])[0] if len(raw_bytes) >= 5 else "?",
+                           exc)
             return None
 
     return udf(avro_to_json, StringType())
