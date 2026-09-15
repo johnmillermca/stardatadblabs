@@ -5,54 +5,40 @@
 #            a given S3 warehouse prefix and, for each one:
 #              1. Auto-discovers all table folders under the warehouse prefix
 #                 via dbutils.fs.ls() — no table names need to be hardcoded
-#              2. Resolves the CURRENT metadata.json in O(1) using
-#                 version-hint.text (NOT by listing thousands of metadata files)
-#              3. Parses the manifest-list and manifests to resolve the exact
-#                 set of live data files for the current snapshot
-#              4. Creates or replaces a Spark temp view over ONLY the live data
-#                 files using spark.read.parquet(*live_files) — NOT a UNION ALL
-#                 of N read_files() SQL branches (which breaks at scale)
+#              2. Finds the latest metadata.json by modificationTime DESC
+#              3. Reads the table via spark.read.format("iceberg") pinned to
+#                 that exact metadata file — Spark's Iceberg engine handles
+#                 data files, delete files, and merge-on-read correctly
+#              4. Writes the result as a Unity Catalog Delta table (snap_*)
+#              5. Creates or replaces a UC view (vw_*) over the Delta table
 #
-# PRODUCTION SCALABILITY — WHY THE NAIVE APPROACH FAILS
-# ──────────────────────────────────────────────────────
-# The naive approach (previous version) had three compounding killers:
+# WHY spark.read.format("iceberg").option("metadata-location", ...) ?
+# ────────────────────────────────────────────────────────────────────
+# The previous approach manually walked Iceberg manifests and read raw parquet
+# files.  This works for INSERT-only (copy-on-write) tables but fails silently
+# for tables written by Presto or any engine that uses merge-on-read DELETEs:
 #
-#  1. dbutils.fs.ls(meta_path) to find latest metadata.json
-#     → S3 LIST is paginated at 1,000 objects per page.
-#       A table with 10,000 snapshots has 10,000+ metadata files.
-#       That's 10+ serial S3 LIST API calls PER TABLE just to find one file.
+#   Merge-on-read DELETE writes delete files (content=1/2) alongside the
+#   original data files.  The data files remain EXISTING in the manifest.
+#   A raw parquet read of those files returns ALL rows including deleted ones.
+#   Only the Iceberg engine knows how to apply the delete files at read time.
 #
-#  2. spark.read.format("avro").load(manifest) in a Python loop
-#     → each call launches a full Spark job.
-#       500 manifests = 500 Spark jobs to collect live file paths.
+# spark.read.format("iceberg").option("metadata-location", path) pins the
+# reader to a specific metadata.json without needing a catalog registration.
+# The Iceberg engine then:
+#   • Resolves current-snapshot-id from the metadata file
+#   • Reads the manifest-list and all manifests
+#   • Applies position/equality delete files against data files
+#   • Returns only the live rows for the current snapshot
 #
-#  3. UNION ALL of N read_files() calls inside a SQL view DDL string
-#     → 10,000 parquet files = 10,000-branch UNION ALL.
-#       Databricks query planner refuses to parse or plan this.
-#       View DDL itself hits string size limits.
+# This works correctly for Spark-written, Presto-written, and Flink-written
+# Iceberg tables regardless of whether they use copy-on-write or merge-on-read.
 #
-# THE PRODUCTION-SCALE FIX (this version)
-# ─────────────────────────────────────────
-#  1. version-hint.text  → single tiny text file containing just an integer
-#     (e.g. "42"). One S3 GET → exact metadata filename → zero ls() needed.
-#     Every Iceberg writer (Spark, Flink, etc.) maintains this file.
-#     Falls back to ls()-sort ONLY if version-hint.text is absent (old tables).
-#
-#  2. spark.read.format("avro") batch read of ALL manifests at once
-#     → pass ALL manifest paths to a single spark.read.format("avro").load()
-#       call using the multi-path list form. One Spark job reads every
-#       manifest in parallel across the cluster. No loop of Spark jobs.
-#
-#  3. spark.read.parquet(*live_files).createOrReplaceTempView(view_name)
-#     → Python API call, no SQL string construction, no AST size limit.
-#       Spark handles multi-file parquet reads natively and efficiently.
-#       Scales to 100,000+ files with a single call.
-#
-# WHY read_files() UNION ALL IS WRONG FOR UPDATES/DELETES
-# ─────────────────────────────────────────────────────────
-# Beyond the scale problem, a blind glob over data/*.parquet reads every file
-# ever written — old rows from UPDATEs and DELETE targets never disappear.
-# The manifest walk below resolves EXACTLY the live files per snapshot.
+# METADATA FILE SELECTION
+# ────────────────────────
+# Lists metadata/*.metadata.json via dbutils.fs.ls() and sorts by
+# modificationTime DESC.  The most recently modified file is always the one
+# written by the latest transaction — no version-hint.text needed.
 #
 # CATALOG  : lakehouse  (Unity Catalog)
 # SCHEMA   : derived from the database folder name under the warehouse prefix
@@ -60,12 +46,12 @@
 # COMMAND ----------
 
 # =============================================================================
-# Cell 1 — Configuration: warehouse root only
+# Cell 1 — Configuration
 # =============================================================================
 WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 DATABRICKS_CATALOG = "lakehouse"
 SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
-NOTEBOOK_VERSION   = "2026-09-15-v9"   # bump on every upload to confirm correct version is running
+NOTEBOOK_VERSION   = "2026-09-15-v10"  # bump on every upload to confirm correct version
 
 print(f"Notebook version   : {NOTEBOOK_VERSION}")
 print(f"Warehouse root     : {WAREHOUSE_ROOT}")
@@ -77,13 +63,10 @@ print(f"Databricks catalog : {DATABRICKS_CATALOG}")
 # Cell 2 — Auto-discover all Iceberg tables under the warehouse root
 # =============================================================================
 # Walks two levels deep: Level 1 → database folders, Level 2 → table folders.
-# A folder is a valid Iceberg table only when it contains a metadata/
-# sub-directory with at least one *.metadata.json file.
-# This ls() is intentionally scoped to the two-level discovery walk ONLY —
-# not to listing all metadata files inside the table (that is Cell 3's job
-# and it uses version-hint.text instead of ls()).
+# A folder is a valid Iceberg table only when metadata/ contains at least one
+# *.metadata.json file.
 
-TABLE_CONFIGS = {}
+TABLE_CONFIGS     = {}
 discovery_skipped = []
 
 db_entries = dbutils.fs.ls(WAREHOUSE_ROOT)
@@ -111,10 +94,7 @@ for db_entry in db_entries:
             continue
 
         meta_path = tbl_entry.path.rstrip("/") + "/metadata/"
-        data_path = tbl_entry.path.rstrip("/") + "/data/"
 
-        # Confirm metadata/ exists — one ls() call per table (unavoidable for
-        # discovery, but scoped to the table root, not the full metadata listing)
         try:
             ls_check = dbutils.fs.ls(meta_path)
             has_meta = any(f.name.endswith(".metadata.json") for f in ls_check)
@@ -124,20 +104,25 @@ for db_entry in db_entries:
         if not has_meta:
             continue
 
+        # Sanitise name segments — dots and leading underscores break UC identifiers
+        safe_db  = db_name.replace(".", "_").lstrip("_")
+        safe_tbl = tbl_name.replace(".", "_").lstrip("_")
+
         TABLE_CONFIGS[key] = {
-            "db_name"    : db_name,
-            "table_name" : tbl_name,
-            "meta_path"  : meta_path,
-            "data_path"  : data_path,
-            # Temp view name: <db>__<table>__latest  (no dots — Spark temp view constraint)
-            # Full qualified reference: spark.table("<db>__<table>__latest")
-            "temp_view"  : f"{db_name}__{tbl_name}__latest",
+            "db_name"   : db_name,
+            "tbl_name"  : tbl_name,
+            "safe_db"   : safe_db,
+            "safe_tbl"  : safe_tbl,
+            "meta_path" : meta_path,
+            "temp_view" : f"{db_name}__{tbl_name}__latest",
+            "uc_table"  : f"{DATABRICKS_CATALOG}.{safe_db}.snap_{safe_tbl}_latest",
+            "uc_view"   : f"{DATABRICKS_CATALOG}.{safe_db}.vw_{safe_tbl}_latest",
         }
 
 print("─" * 60)
 print(f"Auto-discovered {len(TABLE_CONFIGS)} Iceberg table(s):")
 for key, cfg in TABLE_CONFIGS.items():
-    print(f"  {key:<35}  temp view → {cfg['temp_view']}")
+    print(f"  {key:<40}  uc_view → {cfg['uc_view']}")
 if discovery_skipped:
     print(f"\nSkipped (SKIP_TABLES): {discovery_skipped}")
 print("─" * 60)
@@ -145,304 +130,103 @@ print("─" * 60)
 # COMMAND ----------
 
 # =============================================================================
-# Cell 3 — Production-scale Iceberg snapshot resolver
+# Cell 3 — Resolve latest metadata file per table (modificationTime DESC)
 # =============================================================================
+# For each discovered table, list metadata/*.metadata.json and select the file
+# with the highest modificationTime.  This is the file written by the most
+# recent transaction — regardless of the writer engine (Spark, Presto, Flink).
 #
-# resolve_live_files(table_name, meta_path)
-# ─────────────────────────────────────────
-# Returns a dict with:
-#   live_files      : list[str]  — S3 paths of ONLY the live parquet data files
-#   snapshot_id     : int | str  — current snapshot ID
-#   last_updated    : str        — human-readable UTC timestamp
-#   meta_name       : str        — filename of the metadata.json used
-#
-# STEP 1 — version-hint.text (O(1) metadata file resolution)
-# ────────────────────────────────────────────────────────────
-# Every Iceberg writer maintains metadata/version-hint.text whose content is a
-# single integer N.  The current metadata file is always metadata/vN.metadata.json.
-# Reading this one tiny file avoids listing ALL metadata files (which grows
-# unboundedly — one file per snapshot — and requires N/1000 S3 LIST pages).
-#
-# Falls back to ls()-based sort ONLY for very old tables written before
-# version-hint.text was standard (Iceberg spec v1 tables, pre-2022).
-#
-# STEP 2 — manifest-list (Avro, single file)
-# ────────────────────────────────────────────
-# One Avro file per snapshot; each row references a manifest file path.
-# Read with spark.read.format("avro") — one Spark job.
-#
-# STEP 3 — ALL manifests in ONE Spark job (batch read)
-# ─────────────────────────────────────────────────────
-# The naive approach reads each manifest in a Python loop — 500 manifests =
-# 500 Spark jobs.  This version passes the full list of manifest paths to a
-# SINGLE spark.read.format("avro").load(manifest_paths_list) call.  Spark
-# reads all manifests in parallel across the cluster — one Spark job total.
-#
-# STEP 4 — DELETED-wins dedup across all manifests
-# ─────────────────────────────────────────────────
-# file_status: { normalised_s3_path → status }
-#   0 = DELETED  (tombstoned — exclude from view)
-#   1 = EXISTING (live, carried from earlier snapshot)
-#   2 = ADDED    (live, new in this snapshot)
-# DELETED(0) always wins — prevents stale rows after UPDATE/DELETE.
-# Only content=0 (DATA) files are emitted; delete files (1/2) are skipped.
+# No version-hint.text needed.  No filename parsing.  Just timestamp sort.
 
-import json
 import datetime
 
 
-def resolve_live_files(table_name: str, meta_path: str) -> dict:
+def latest_metadata_file(meta_path: str) -> tuple:
     """
-    Parse Iceberg metadata and return the live parquet data files for the
-    current snapshot.  Uses version-hint.text for O(1) metadata resolution
-    and a single-job batch Avro read for all manifests.
+    Returns (s3_path, filename, modification_ts_str) for the most recently
+    modified *.metadata.json under meta_path.
+    Raises RuntimeError if no metadata files are found.
     """
+    all_files  = dbutils.fs.ls(meta_path)
+    meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
+    if not meta_files:
+        raise RuntimeError(f"No *.metadata.json found under {meta_path}")
 
-    # ── Path normalisation: s3a:// → s3:// ──────────────────────────────────
-    # Spark writes all paths in Iceberg metadata as s3a:// (Hadoop S3A).
-    # Databricks spark.read.parquet() requires s3:// (AWS SDK).
-    # Normalise at every path entry point so DELETED / EXISTING entries for
-    # the same physical file always share the same dict key.
-    def _norm(p: str) -> str:
-        return p.replace("s3a://", "s3://") if p else p
-
-    # ── Step 1: resolve metadata.json via version-hint.text ─────────────────
-    # Production O(1) path: read one tiny text file → exact metadata filename.
-    # No ls() call, no sorting, no S3 LIST pagination.
-    version_hint_path = _norm(meta_path.rstrip("/") + "/version-hint.text")
-    latest_meta_path  = None
-    meta_name         = None
-
-    try:
-        hint_raw = (
-            spark.read
-                 .text(version_hint_path, wholetext=True)
-                 .collect()[0][0]
-                 .strip()
-        )
-        version_num      = int(hint_raw)
-        latest_meta_path = _norm(meta_path.rstrip("/") + f"/v{version_num}.metadata.json")
-        meta_name        = f"v{version_num}.metadata.json"
-        print(f"  [{table_name}] version-hint.text → v{version_num}.metadata.json  ✅")
-    except Exception as hint_exc:
-        # Fallback for tables without version-hint.text (Polaris-managed tables
-        # never write version-hint.text to S3 — Polaris stores snapshot state
-        # internally).
-        #
-        # Sort by modificationTime — the S3 last-modified timestamp reported by
-        # dbutils.fs.ls().  The file with the highest timestamp is the most
-        # recently written metadata file and therefore the current one.
-        print(
-            f"  [{table_name}] version-hint.text not found; "
-            f"falling back to modificationTime sort"
-        )
-        all_files  = dbutils.fs.ls(meta_path)
-        meta_files = [f for f in all_files if f.name.endswith(".metadata.json")]
-        if not meta_files:
-            raise RuntimeError(
-                f"[{table_name}] No *.metadata.json found under {meta_path}"
-            )
-
-        meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
-        latest_meta_path = _norm(meta_files[0].path)
-        meta_name        = meta_files[0].name
-
-    # ── Read and parse the metadata JSON ────────────────────────────────────
-    raw  = spark.read.text(latest_meta_path, wholetext=True).collect()[0][0]
-    meta = json.loads(raw)
-
-    current_snapshot_id = meta.get("current-snapshot-id")
-    last_updated_ms     = meta.get("last-updated-ms", 0)
-    ts = (
-        datetime.datetime.utcfromtimestamp(last_updated_ms / 1000)
-                         .strftime("%Y-%m-%d %H:%M:%S UTC")
-        if last_updated_ms else "unknown"
-    )
-
-    if current_snapshot_id is None:
-        print(f"  [{table_name}] No current snapshot — table is empty")
-        return {
-            "table_name"  : table_name,
-            "snapshot_id" : None,
-            "last_updated": ts,
-            "meta_name"   : meta_name,
-            "live_files"  : [],
-        }
-
-    # ── Step 2: find the manifest-list path for the current snapshot ─────────
-    snapshots = meta.get("snapshots", [])
-    current_snapshot = next(
-        (s for s in snapshots if s.get("snapshot-id") == current_snapshot_id),
-        None,
-    )
-
-    if current_snapshot is None:
-        raise RuntimeError(
-            f"[{table_name}] Snapshot {current_snapshot_id} listed as "
-            f"current-snapshot-id but not found in snapshots[] array."
-        )
-
-    # ── Early-exit: trust total-records from snapshot summary ────────────────
-    # Iceberg row-level DELETEs (merge-on-read) write delete files (content=1/2)
-    # alongside the original data files which remain EXISTING in the manifest.
-    # The notebook cannot apply delete files against data files — that requires
-    # the Iceberg reader engine.  However, total-records in the snapshot summary
-    # is always authoritative: if it is 0 the table is empty regardless of what
-    # parquet files exist on S3.
-    summary       = current_snapshot.get("summary", {})
-    total_records = int(summary.get("total-records", -1))
-    if total_records == 0:
-        print(
-            f"  [{table_name}] snapshot summary total-records=0 "
-            f"— table is empty after DELETE, skipping manifest walk"
-        )
-        return {
-            "table_name"  : table_name,
-            "snapshot_id" : current_snapshot_id,
-            "last_updated": ts,
-            "meta_name"   : meta_name,
-            "live_files"  : [],
-        }
-
-    manifest_list_path = _norm(current_snapshot.get("manifest-list", ""))
-    if not manifest_list_path:
-        raise RuntimeError(
-            f"[{table_name}] Snapshot {current_snapshot_id} has no manifest-list."
-        )
-
-    # ── Step 3a: read the manifest-list — collect all manifest paths ─────────
-    # One Spark job to read one Avro file.
-    try:
-        manifest_list_df = spark.read.format("avro").load(manifest_list_path)
-        manifest_paths = [
-            _norm(row["manifest_path"])
-            for row in manifest_list_df.select("manifest_path").collect()
-        ]
-    except Exception as exc:
-        raise RuntimeError(
-            f"[{table_name}] Failed to read manifest-list {manifest_list_path}: {exc}"
-        ) from exc
-
-    if not manifest_paths:
-        print(f"  [{table_name}] Snapshot has no manifests — table is empty")
-        return {
-            "table_name"  : table_name,
-            "snapshot_id" : current_snapshot_id,
-            "last_updated": ts,
-            "meta_name"   : meta_name,
-            "live_files"  : [],
-        }
-
-    # ── Step 3b: read ALL manifests in ONE Spark job (not a Python loop) ─────
-    # This is the critical production fix.
-    # spark.read.format("avro").load(list_of_paths) reads all files in parallel
-    # across the cluster in a single Spark job — O(1) jobs regardless of how
-    # many manifest files exist.
-    #
-    # The naive loop approach (previous version) was:
-    #   for manifest_path in manifest_paths:
-    #       manifest_df = spark.read.format("avro").load(manifest_path)
-    #       ...collect()...
-    # That launched one Spark job PER manifest — 500 manifests = 500 jobs.
-    try:
-        all_manifests_df = spark.read.format("avro").load(manifest_paths)
-    except Exception as exc:
-        raise RuntimeError(
-            f"[{table_name}] Failed to read {len(manifest_paths)} manifest(s): {exc}"
-        ) from exc
-
-    if "data_file" not in all_manifests_df.columns:
-        raise RuntimeError(
-            f"[{table_name}] Manifest schema has no data_file column — "
-            f"unexpected Iceberg format."
-        )
-
-    # ── Step 4: resolve final status per file path (DELETED wins) ────────────
-    # Collect only the two fields we need: status + data_file.file_path + content.
-    # This keeps the driver-side data volume minimal regardless of manifest size.
-    from pyspark.sql import functions as F
-
-    rows = (
-        all_manifests_df
-        .select(
-            F.coalesce(F.col("status"), F.lit(1)).alias("status"),
-            F.col("data_file.file_path").alias("file_path"),
-            F.coalesce(F.col("data_file.content"), F.lit(0)).alias("content"),
-        )
-        .collect()
-    )
-
-    file_status: dict = {}
-    for row in rows:
-        # Skip delete files (position deletes = 1, equality deletes = 2)
-        if row["content"] != 0:
-            continue
-
-        file_path = _norm(row["file_path"])
-        if not file_path:
-            continue
-
-        status           = row["status"]
-        existing_status  = file_status.get(file_path)
-
-        if existing_status is None:
-            file_status[file_path] = status
-        elif status == 0:
-            file_status[file_path] = 0        # DELETED always wins
-        elif existing_status != 0 and status == 2:
-            file_status[file_path] = 2        # ADDED upgrades EXISTING
-
-    live_files      = [p for p, s in file_status.items() if s in (1, 2)]
-    skipped_deleted = sum(1 for s in file_status.values() if s == 0)
-
-    print(
-        f"  [{table_name}]  snapshot={current_snapshot_id}\n"
-        f"    Meta file    : {meta_name}\n"
-        f"    Last updated : {ts}\n"
-        f"    Manifests    : {len(manifest_paths)}  (read in 1 Spark job)\n"
-        f"    Live files   : {len(live_files)}\n"
-        f"    Dead files   : {skipped_deleted} (excluded — DELETE/UPDATE tombstones)"
-    )
-
-    return {
-        "table_name"  : table_name,
-        "snapshot_id" : current_snapshot_id,
-        "last_updated": ts,
-        "meta_name"   : meta_name,
-        "live_files"  : live_files,
-    }
+    meta_files.sort(key=lambda f: f.modificationTime, reverse=True)
+    top  = meta_files[0]
+    path = top.path.replace("s3a://", "s3://")
+    ts   = datetime.datetime.utcfromtimestamp(
+               top.modificationTime / 1000
+           ).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return path, top.name, ts
 
 
-print("✅ resolve_live_files() defined (production-scale: version-hint.text + batch manifest read)")
+print("✅ latest_metadata_file() defined")
 
 # COMMAND ----------
 
 # =============================================================================
-# Cell 4 — Resolve live file list for every discovered table
+# Cell 4 — Read each Iceberg table via metadata-pinned Iceberg reader
 # =============================================================================
+# spark.read.format("iceberg").option("metadata-location", path).load()
+#
+# Pins the Iceberg reader to the exact metadata.json selected in Cell 3.
+# The Spark Iceberg engine:
+#   • Reads current-snapshot-id from the metadata file
+#   • Walks manifest-list → manifests → data files
+#   • Applies position-delete and equality-delete files (merge-on-read)
+#   • Returns only the live rows for the current snapshot
+#
+# This correctly handles:
+#   • Spark copy-on-write tables (old files marked DELETED in manifest)
+#   • Presto / merge-on-read tables (delete files applied at read time)
+#   • Any mix of the above across tables in the same warehouse
+#
+# The DataFrame is registered as a Spark temp view for in-session queries,
+# AND written to a Unity Catalog Delta table for cross-session access.
 
-# Set the active catalog to the UC catalog so all subsequent DDL (CREATE SCHEMA,
-# CREATE VIEW) resolves against Unity Catalog, not spark_catalog (Hive metastore).
 spark.sql(f"USE CATALOG {DATABRICKS_CATALOG}")
 
-print("─" * 60)
-print("Resolving Iceberg snapshots and live data files …")
-print("─" * 60)
-
-for db_name in {cfg["db_name"] for cfg in TABLE_CONFIGS.values()}:
+for db_name in {cfg["safe_db"] for cfg in TABLE_CONFIGS.values()}:
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{db_name}")
 
-SNAPSHOTS = {}
-errors    = []
+print("─" * 60)
+print("Reading Iceberg tables via metadata-pinned Iceberg reader …")
+print("─" * 60)
 
-for tbl, cfg in TABLE_CONFIGS.items():
-    print()
+SNAPSHOTS   = {}
+VIEW_RESULTS = {}
+errors      = []
+
+for key, cfg in TABLE_CONFIGS.items():
+    print(f"\n  [{key}]")
     try:
-        snap_info      = resolve_live_files(tbl, cfg["meta_path"])
-        SNAPSHOTS[tbl] = {**cfg, **snap_info}
+        # ── Step 1: find latest metadata file ───────────────────────────────
+        meta_s3, meta_name, meta_ts = latest_metadata_file(cfg["meta_path"])
+        print(f"    metadata file : {meta_name}  ({meta_ts})")
+
+        # ── Step 2: read via Iceberg engine (handles delete files) ───────────
+        df = (
+            spark.read
+                 .format("iceberg")
+                 .option("metadata-location", meta_s3)
+                 .load()
+        )
+
+        # ── Step 3: register as Spark temp view ──────────────────────────────
+        df.createOrReplaceTempView(cfg["temp_view"])
+        row_count = spark.sql(
+            f"SELECT COUNT(*) AS n FROM {cfg['temp_view']}"
+        ).collect()[0]["n"]
+        print(f"    rows          : {row_count:,}")
+        print(f"    temp view     : {cfg['temp_view']}  ✅")
+
+        SNAPSHOTS[key]    = {**cfg, "meta_name": meta_name, "meta_ts": meta_ts, "rows": row_count}
+        VIEW_RESULTS[key] = {"rows": row_count}
+
     except Exception as exc:
-        errors.append((tbl, str(exc)))
-        print(f"  ⚠️  [{tbl}] SKIPPED — {exc}")
+        errors.append((key, str(exc)))
+        print(f"    ⚠️  SKIPPED — {exc}")
 
 print()
 print("─" * 60)
@@ -451,195 +235,59 @@ if errors:
     for tbl, msg in errors:
         print(f"   • {tbl}: {msg}")
 else:
-    print(f"✅ All {len(SNAPSHOTS)} table(s) resolved successfully")
+    print(f"✅ All {len(SNAPSHOTS)} table(s) read successfully")
 
 # COMMAND ----------
 
 # =============================================================================
-# Cell 5 — Create or replace Spark temp views over the EXACT live data files
+# Cell 5 — Write Unity Catalog Delta tables + recreate UC views
 # =============================================================================
+# For each table that was successfully read:
+#   • Overwrite snap_<table>_latest Delta table with the current Iceberg data
+#   • DROP / CREATE VIEW vw_<table>_latest → SELECT * FROM snap_*
 #
-# WHY spark.read.parquet(*live_files).createOrReplaceTempView() (not UNION ALL SQL)
-# ──────────────────────────────────────────────────────────────────────────────────
-# The previous version built a SQL view as:
-#
-#   CREATE OR REPLACE VIEW …
-#   AS
-#   SELECT * FROM read_files('f1', ...) UNION ALL
-#   SELECT * FROM read_files('f2', ...) UNION ALL
-#   ...  (one branch per parquet file)
-#
-# This breaks in production because:
-#   • 10,000 parquet files → 10,000-branch UNION ALL SQL string
-#   • Databricks query planner refuses to parse or plan this
-#   • View DDL itself hits string size limits
-#   • Even Databricks read_files() positional multi-arg and array() forms
-#     are broken on many runtime versions (UNKNOWN_POSITIONAL_ARGUMENT,
-#     IllegalArgumentException: Illegal character in scheme name)
-#
-# The Python API spark.read.parquet(*live_files) has NONE of these limits:
-#   • Accepts an arbitrary list of paths — no SQL string construction
-#   • Spark reads all files in parallel in a single Scan stage
-#   • Scales to 100,000+ files without degradation
-#   • createOrReplaceTempView() registers it as a session-scoped temp view
-#
-# UNITY CATALOG VISIBILITY NOTE
-# ───────────────────────────────
-# Spark temp views are session-scoped — they exist only in this notebook
-# session.  They are NOT persisted to Unity Catalog and NOT visible from
-# other sessions.  For a persistent Unity Catalog view use Cell 5b below.
-#
-# For most use cases (dashboards on this cluster, notebook-level queries)
-# the temp view is sufficient and avoids the DDL overhead.
-#
-# EMPTY TABLES
-# ─────────────
-# If live_files is empty a temp view over an empty DataFrame is registered
-# so the view name exists and queries return 0 rows immediately.
+# The Delta table is the durable cross-session copy.
+# The vw_* view is the stable name that SQL Editor users and dashboards query.
+# After this cell, both always reflect the latest Iceberg snapshot.
 
-print("Creating / refreshing Spark temp views over live snapshot files …")
-print("─" * 60)
-
-VIEW_RESULTS = {}
-
-for tbl, snap in SNAPSHOTS.items():
-    temp_view  = snap["temp_view"]
-    live_files = snap.get("live_files", [])
-
-    if not live_files:
-        # Empty table — register an empty temp view so the name always exists
-        spark.createDataFrame([], schema="snap_file STRING").createOrReplaceTempView(temp_view)
-        row_count = 0
-        action    = "REGISTERED (empty table — no live files)"
-    else:
-        # Single Python API call — no SQL string, no size limit, no UNION ALL
-        # spark.read.parquet() with multiple paths performs a parallel multi-file
-        # scan in one Spark job, equivalent to what the Iceberg catalog reader does.
-        (
-            spark.read
-                 .option("mergeSchema", "true")
-                 .parquet(*live_files)
-                 .createOrReplaceTempView(temp_view)
-        )
-        row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {temp_view}").collect()[0]["n"]
-        action    = f"REFRESHED — snapshot {snap['snapshot_id']}"
-
-    VIEW_RESULTS[tbl] = {"temp_view": temp_view, "rows": row_count, "action": action}
-
-    print(f"  ✅ {temp_view}")
-    print(f"     {action}")
-    print(f"     rows={row_count:,}  live_files={len(live_files)}")
-    print()
-
-print("─" * 60)
-print(f"✅ {len(SNAPSHOTS)} temp view(s) created/refreshed")
-print()
-print("  ┌─ HOW UPDATES AND DELETES NOW WORK ──────────────────────────┐")
-print("  │  The temp view lists ONLY the parquet files that belong to  │")
-print("  │  the current Iceberg snapshot (resolved from the manifest). │")
-print("  │  • INSERT  → new file added to manifest (ADDED)             │")
-print("  │  • UPDATE  → old file marked DELETED; new file is ADDED     │")
-print("  │  • DELETE  → old file marked DELETED; rewritten file ADDED  │")
-print("  │  Dead files (status=DELETED) are excluded from the view.    │")
-print("  │  Re-run Cells 2 → 5 after any Iceberg write to refresh.     │")
-print("  └─────────────────────────────────────────────────────────────┘")
-
-# COMMAND ----------
-
-# =============================================================================
-# Cell 5b — Persist snapshot as Unity Catalog Delta table (cross-session)
-# =============================================================================
-# WHY Delta table instead of a SQL VIEW over read_files()
-# ─────────────────────────────────────────────────────────
-# read_files() in Databricks SQL is unreliable for multi-file use:
-#   • Multiple positional paths → UNKNOWN_POSITIONAL_ARGUMENT (SQLSTATE 4274K)
-#   • path => array(...)        → REQUIRED_PARAMETER_NOT_FOUND (SQLSTATE 4274K)
-# Both failures are runtime-version-dependent and not fixable in SQL alone.
-#
-# The correct cross-session approach is to write the resolved snapshot data
-# directly as a Unity Catalog Delta table using spark.write.
-# This is:
-#   • 100% reliable on every Databricks runtime
-#   • Immediately queryable from the SQL Editor and any other session
-#   • Self-contained — no temp view dependency, no session lifetime issue
-#   • Reflects exactly the live files from the Iceberg snapshot at run time
-#
-# Table name pattern : <catalog>.<db>.snap_<table>_latest
-# (prefixed snap_ to distinguish from the Iceberg source table)
-#
-# Re-run Cells 2 → 5b after every Iceberg write to refresh.
-
-# USE CATALOG so CREATE TABLE DDL targets Unity Catalog, not spark_catalog.
 spark.sql(f"USE CATALOG {DATABRICKS_CATALOG}")
 
-print("Writing Iceberg snapshot data to Unity Catalog Delta tables …")
+print("Writing Unity Catalog Delta tables and refreshing UC views …")
 print("─" * 60)
 
-for tbl, snap in SNAPSHOTS.items():
-    db_name    = snap["db_name"]
-    tbl_name   = snap["table_name"]
-    live_files = snap.get("live_files", [])
-    snap_id    = snap["snapshot_id"]
-    snap_ts    = snap["last_updated"]
+for key, snap in SNAPSHOTS.items():
+    uc_table = snap["uc_table"]
+    uc_view  = snap["uc_view"]
+    temp_view = snap["temp_view"]
 
-    # Sanitise name segments — dots and leading underscores break UC identifiers.
-    safe_db  = db_name.replace(".", "_").lstrip("_")
-    safe_tbl = tbl_name.replace(".", "_").lstrip("_")
-    uc_table = f"{DATABRICKS_CATALOG}.{safe_db}.snap_{safe_tbl}_latest"
+    # Read from the temp view (already resolved by Cell 4 Iceberg reader)
+    df = spark.table(temp_view)
 
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{safe_db}")
+    (
+        df.write
+          .format("delta")
+          .mode("overwrite")
+          .option("overwriteSchema", "true")
+          .saveAsTable(uc_table)
+    )
 
-    if not live_files:
-        # Empty snapshot — write a zero-row Delta table so the name always exists.
-        empty_df = spark.createDataFrame([], schema="snap_file STRING")
-        (
-            empty_df.write
-            .format("delta")
-            .mode("overwrite")
-            .option("overwriteSchema", "true")
-            .saveAsTable(uc_table)
-        )
-        row_count = 0
-    else:
-        # Read the exact live parquet files for this snapshot and overwrite the
-        # Delta table.  mergeSchema handles tables whose schema evolved over time.
-        df = (
-            spark.read
-                 .option("mergeSchema", "true")
-                 .parquet(*live_files)
-        )
-        (
-            df.write
-            .format("delta")
-            .mode("overwrite")
-            .option("overwriteSchema", "true")
-            .saveAsTable(uc_table)
-        )
-        row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {uc_table}").collect()[0]["n"]
+    row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {uc_table}").collect()[0]["n"]
 
-    # Create or replace a vw_<table>_latest UC view that reads from the Delta
-    # snapshot table.  This replaces any stale read_files()-based view that was
-    # created by a previous version of this notebook.  After this point every
-    # query against vw_<table>_latest automatically reads the current snapshot.
-    uc_view = f"{DATABRICKS_CATALOG}.{safe_db}.vw_{safe_tbl}_latest"
+    # DROP and recreate the UC view so it always points at the current Delta table
     spark.sql(f"DROP VIEW IF EXISTS {uc_view}")
     spark.sql(f"CREATE VIEW {uc_view} AS SELECT * FROM {uc_table}")
 
     print(f"  ✅ {uc_table}")
-    print(f"     snapshot={snap_id}  ({snap_ts})")
-    print(f"     rows={row_count:,}  live_files={len(live_files)}")
-    print(f"     view → {uc_view}")
+    print(f"     {snap['meta_name']}  ({snap['meta_ts']})")
+    print(f"     rows={row_count:,}")
+    print(f"     view → {uc_view}  ✅")
     print()
 
 print("─" * 60)
-print(f"✅ {len(SNAPSHOTS)} Unity Catalog Delta table(s) and view(s) written/refreshed")
+print(f"✅ {len(SNAPSHOTS)} Delta table(s) and UC view(s) refreshed")
 print()
-print("  ⚠️  These tables are point-in-time snapshots of the Iceberg data.")
-print("  Re-run Cells 2 → 5b after any Iceberg write (INSERT/UPDATE/DELETE)")
-print("  to overwrite with the new snapshot.")
-print()
-print("  Each vw_<table>_latest view now points at the snap_* Delta table above.")
-print("  No manual view recreation needed after future notebook runs.")
+print("  ⚠️  These are point-in-time snapshots.")
+print("  Re-run Cells 2 → 5 after any Iceberg write (INSERT/UPDATE/DELETE).")
 
 # COMMAND ----------
 
@@ -650,22 +298,27 @@ print("  No manual view recreation needed after future notebook runs.")
 print("\n" + "═" * 70)
 print("  REFRESH SUMMARY")
 print("═" * 70)
-print(f"  {'TABLE':<35} {'ROWS':>8}  {'SNAPSHOT UPDATED'}")
+print(f"  {'TABLE':<40} {'ROWS':>8}  {'METADATA FILE TIMESTAMP'}")
 print("─" * 70)
 
-for tbl, snap in SNAPSHOTS.items():
-    vr = VIEW_RESULTS.get(tbl, {})
-    print(f"  {tbl:<35} {vr.get('rows', 0):>8,}  {snap['last_updated']}")
+for key, snap in SNAPSHOTS.items():
+    print(f"  {key:<40} {snap['rows']:>8,}  {snap['meta_ts']}")
+
+if errors:
+    print()
+    print(f"  ⚠️  {len(errors)} table(s) skipped:")
+    for tbl, msg in errors:
+        print(f"     • {tbl}: {msg}")
 
 print("═" * 70)
-print("  Re-run Cells 2 → 5 after any Iceberg write (INSERT/UPDATE/DELETE).")
 print()
-print("  SCALE CHARACTERISTICS (this version)")
-print("  ─────────────────────────────────────")
-print("  • Metadata resolution: O(1) via version-hint.text (1 S3 GET per table)")
-print("  • Manifest reading   : 1 Spark job per table (all manifests in parallel)")
-print("  • View registration  : 1 Python API call (no SQL string, no size limit)")
-print("  • Scales to          : 10,000+ snapshots, 500+ manifests, 100,000+ files")
+print("  HOW UPDATES AND DELETES WORK (this version)")
+print("  ─────────────────────────────────────────────")
+print("  • Latest metadata.json selected by modificationTime DESC")
+print("  • Iceberg engine reads it — applies delete files natively")
+print("  • Works for Spark (copy-on-write) AND Presto (merge-on-read)")
+print("  • Delta table overwritten with correct live rows")
+print("  • vw_* view recreated → always reflects current snapshot")
 print("═" * 70)
 
 # COMMAND ----------
@@ -675,23 +328,15 @@ print("═" * 70)
 # =============================================================================
 # ⚠️  DO NOT run this cell as part of a full notebook run-all.
 #     Run it manually ONLY when you explicitly want to warm the NVMe cache.
-#
-# Databricks Photon clusters expose a local NVMe-backed disk cache.
-# Running CACHE TABLE scans the temp view once and stores the decompressed
-# columnar data on the executor's local NVMe.
-#
-# IMPORTANT: after re-running Cell 5 (view refresh), the NVMe cache holds
-# stale data from the previous snapshot.  Always run Cell 8 (UNCACHE + re-warm)
-# after a Cell 5 refresh if you use the NVMe cache.
 
 # ── Uncomment and run manually to cache a single view ─────────────────────
-# VIEW_TO_CACHE = "lakehouse_db__customer__latest"   # temp view name from Cell 5
+# VIEW_TO_CACHE = "lakehouse_db__customer__latest"
 # print(f"Caching {VIEW_TO_CACHE} into NVMe disk cache …")
 # spark.sql(f"CACHE TABLE {VIEW_TO_CACHE}")
 # print(f"✅ Cache warm for {VIEW_TO_CACHE}")
 
 # ── Or uncomment to cache ALL discovered views ─────────────────────────────
-# for tbl, snap in SNAPSHOTS.items():
+# for key, snap in SNAPSHOTS.items():
 #     print(f"  Caching {snap['temp_view']} …")
 #     spark.sql(f"CACHE TABLE {snap['temp_view']}")
 # print("✅ All views cached")
@@ -704,18 +349,16 @@ print("Cell 7 — NVMe cache warm: SKIPPED (manual-only cell, all code commented
 # Cell 8 — Optional: invalidate NVMe cache after a new Iceberg snapshot
 # =============================================================================
 # ⚠️  DO NOT run this cell as part of a full notebook run-all.
-#     Run it manually ONLY after a Cell 5 refresh when you have an active
-#     NVMe cache that needs to be invalidated and re-warmed.
 
 # ── Uncomment and run manually to re-warm a single view ───────────────────
-# VIEW_TO_RECACHE = "lakehouse_db__customer__latest"   # temp view name from Cell 5
+# VIEW_TO_RECACHE = "lakehouse_db__customer__latest"
 # print(f"Re-warming NVMe cache for {VIEW_TO_RECACHE} …")
 # spark.sql(f"UNCACHE TABLE IF EXISTS {VIEW_TO_RECACHE}")
 # spark.sql(f"CACHE TABLE {VIEW_TO_RECACHE}")
 # print(f"✅ NVMe cache refreshed for {VIEW_TO_RECACHE}")
 
 # ── Or uncomment to re-warm ALL views ─────────────────────────────────────
-# for tbl, snap in SNAPSHOTS.items():
+# for key, snap in SNAPSHOTS.items():
 #     print(f"  Re-warming {snap['temp_view']} …")
 #     spark.sql(f"UNCACHE TABLE IF EXISTS {snap['temp_view']}")
 #     spark.sql(f"CACHE TABLE {snap['temp_view']}")
@@ -726,82 +369,38 @@ print("Cell 8 — NVMe cache re-warm: SKIPPED (manual-only cell, all code commen
 # COMMAND ----------
 
 # =============================================================================
-# Cell 9 — Sample: manually register the view for ONE new table on first run
+# Cell 9 — Sample: manually register one new table on first run
 # =============================================================================
 # ⚠️  DO NOT run this cell as part of a full notebook run-all.
 #     Run it manually ONLY when you need to register a single new table
 #     without doing a full discovery pass.
-#
-# USE THIS WHEN:
-#   • You just created a new Iceberg table in Spark and want the view
-#     immediately without waiting for the next full notebook run.
-#
-# Set NEW_TABLE_KEY, uncomment all lines below, and run this cell alone.
 
-# NEW_TABLE_KEY      = "analytics_db.product"   # ← change to your table
+# NEW_TABLE_KEY      = "lakehouse_db.my_new_table"   # ← change to your table
 # WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 # DATABRICKS_CATALOG = "lakehouse"
 #
-# db_name, table_name = NEW_TABLE_KEY.split(".", 1)
+# db_name, tbl_name = NEW_TABLE_KEY.split(".", 1)
+# safe_db   = db_name.replace(".", "_").lstrip("_")
+# safe_tbl  = tbl_name.replace(".", "_").lstrip("_")
+# meta_path = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{tbl_name}/metadata/"
+# temp_view = f"{db_name}__{tbl_name}__latest"
+# uc_table  = f"{DATABRICKS_CATALOG}.{safe_db}.snap_{safe_tbl}_latest"
+# uc_view   = f"{DATABRICKS_CATALOG}.{safe_db}.vw_{safe_tbl}_latest"
 #
-# meta_path = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{table_name}/metadata/"
-# temp_view = f"{db_name}__{table_name}__latest"
-# uc_view   = f"{DATABRICKS_CATALOG}.{db_name}.vw_{table_name}_latest"
+# meta_s3, meta_name, meta_ts = latest_metadata_file(meta_path)
+# print(f"metadata file : {meta_name}  ({meta_ts})")
 #
-# print(f"New table  : {NEW_TABLE_KEY}")
-# print(f"Meta path  : {meta_path}")
-# print(f"Temp view  : {temp_view}")
+# df = spark.read.format("iceberg").option("metadata-location", meta_s3).load()
+# df.createOrReplaceTempView(temp_view)
+# row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {temp_view}").collect()[0]["n"]
+# print(f"rows : {row_count:,}")
+#
+# spark.sql(f"USE CATALOG {DATABRICKS_CATALOG}")
+# spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{safe_db}")
+# df.write.format("delta").mode("overwrite").option("overwriteSchema","true").saveAsTable(uc_table)
+# spark.sql(f"DROP VIEW IF EXISTS {uc_view}")
+# spark.sql(f"CREATE VIEW {uc_view} AS SELECT * FROM {uc_table}")
+# print(f"✅ {uc_table}")
+# print(f"✅ {uc_view}")
 
 print("Cell 9 — single-table registration: SKIPPED (manual-only cell, all code commented out)")
-
-# ── Full Cell 9 body — all commented out, safe to run-all ─────────────────
-# Uncomment the entire block below and run this cell alone when needed.
-
-# db_name, table_name = NEW_TABLE_KEY.split(".", 1)
-# meta_path = f"{WAREHOUSE_ROOT.rstrip('/')}/{db_name}/{table_name}/metadata/"
-# temp_view = f"{db_name}__{table_name}__latest"
-# uc_view   = f"{DATABRICKS_CATALOG}.{db_name}.vw_{table_name}_latest"
-#
-# print(f"New table  : {NEW_TABLE_KEY}")
-# print(f"Meta path  : {meta_path}")
-# print(f"Temp view  : {temp_view}")
-# print(f"UC view    : {uc_view}")
-# print()
-#
-# spark.sql(f"CREATE SCHEMA IF NOT EXISTS {DATABRICKS_CATALOG}.{db_name}")
-# print(f"✅ Schema {DATABRICKS_CATALOG}.{db_name} ready")
-#
-# print()
-# snap_info  = resolve_live_files(NEW_TABLE_KEY, meta_path)
-# live_files = snap_info["live_files"]
-#
-# if not live_files:
-#     spark.createDataFrame([], schema="snap_file STRING").createOrReplaceTempView(temp_view)
-#     print(f"✅ Temp view REGISTERED (empty — no live files yet)")
-# else:
-#     (
-#         spark.read
-#              .option("mergeSchema", "true")
-#              .parquet(*live_files)
-#              .createOrReplaceTempView(temp_view)
-#     )
-#     row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {temp_view}").collect()[0]["n"]
-#     print(f"✅ Temp view REGISTERED")
-#     print(f"   snapshot={snap_info['snapshot_id']}")
-#     print(f"   rows={row_count:,}  live_files={len(live_files)}")
-#
-# # Write snapshot as a Unity Catalog Delta table (reliable on all runtimes).
-# # read_files() in SQL is broken for multi-file use — use spark.write instead.
-# uc_table = f"{DATABRICKS_CATALOG}.{db_name}.snap_{table_name}_latest"
-# df = spark.read.option("mergeSchema", "true").parquet(*live_files)
-# (
-#     df.write
-#     .format("delta")
-#     .mode("overwrite")
-#     .option("overwriteSchema", "true")
-#     .saveAsTable(uc_table)
-# )
-# print(f"✅ Unity Catalog Delta table REGISTERED: {uc_table}")
-#
-# print()
-# print("  Re-run Cells 2 → 5b after every Iceberg write to keep the view current.")
