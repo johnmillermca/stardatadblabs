@@ -15,9 +15,40 @@
 5. [Section 4 — StarTransform Tests](#5-section-4--startransform-tests)
 6. [Section 5 — snap_id and snap_timestamp Validation](#6-section-5--snap_id-and-snap_timestamp-validation)
 7. [Section 6 — Multi-Source Validation](#7-section-6--multi-source-validation)
-8. [Section 7 — Schema Evolution Test](#8-section-7--schema-evolution-test)
+8. [Section 7 — Schema Evolution (DDL) Tests](#8-section-7--schema-evolution-ddl-tests)
 9. [Section 8 — Peak-Hour Simulation](#9-section-8--peak-hour-simulation)
 10. [Expected Results Summary](#10-expected-results-summary)
+
+---
+
+## Iceberg Test Table Layout
+
+All E2E test and StarTransform tables live in **one shared namespace per catalog**: `e2e_testing`.  
+The write mode and transform function are encoded entirely in the table name suffix — no separate namespaces needed.
+
+| Iceberg Table | Write Mode | Purpose |
+|---|---|---|
+| `postgres.e2e_testing.customers_std` | standard | Section 1 / 5 / 6 / 7 / 8 |
+| `postgres.e2e_testing.customers_sd` | soft_delete | Section 2 |
+| `postgres.e2e_testing.customers_hist` | history_tracking | Section 3 |
+| `oracle.e2e_testing.customers_std` | standard | Section 1 / 6 |
+| `mongodb.e2e_testing.customers_std` | standard | Section 1 / 6 |
+| `postgres.e2e_testing.customers_dedup` | standard | Section 4.1 — deduplicate() |
+| `postgres.e2e_testing.customers_masked` | standard | Section 4.2 — mask_columns() |
+| `postgres.e2e_testing.customers_proc_time` | standard | Section 4.3 — add_processing_time() |
+| `postgres.e2e_testing.customers_op_label` | standard | Section 4.4 — add_op_label() |
+| `postgres.e2e_testing.customers_source_tag` | standard | Section 4.5 — add_source_tag() |
+| `postgres.e2e_testing.customers_filter_ins` | standard | Section 4.6 — filter_op(["c","u"]) |
+| `postgres.e2e_testing.customers_filter_del` | standard | Section 4.6 — filter_op(["d"]) |
+| `postgres.e2e_testing.orders_enriched` | standard | Section 4.7 — enrich_from_broadcast() |
+| `postgres.e2e_testing.customers_before_after` | history_tracking | Section 4.8 — pivot_before_after() |
+| `postgres.e2e_testing.customers_nullcoal` | standard | Section 4.9 — null_coalesce() |
+| `postgres.e2e_testing.event_counts` | standard | Section 4.10 — aggregate_counts() |
+
+**Source table columns** (PostgreSQL / Oracle `cache_testing.customers`):  
+`id`, `name`, `email`, `phone`, `address`, `city`, `country`, `created_at`, `updated_at`
+
+**Test row ID range**: 900001–909999 — high enough to never collide with production data.
 
 ---
 
@@ -92,18 +123,17 @@ kubectl logs -n prod -l app=kafka-to-iceberg-standard --tail=20 | grep -E "Batch
 
 ## 2. Section 1 — Standard Mode Tests (SCD Type 0)
 
-Confirm `kafka-to-iceberg-standard` is the only active deployment (replicas=1) before starting.
+Confirm `kafka-to-iceberg-standard` is the only active deployment (replicas=1) before starting.  
+All Iceberg queries in this section target the `e2e_testing` namespace.
 
 ### Test 1.1 — PostgreSQL
 
 #### Step 1 — Note current row count
 
 ```sql
--- Run in Spark SQL / spark-shell / spark-submit --class ... or pyspark
-SELECT COUNT(*) AS row_count FROM postgres.cache_testing.customers;
+-- Spark SQL
+SELECT COUNT(*) AS row_count FROM postgres.e2e_testing.customers_std;
 ```
-
-Record the result. Example: `row_count = 1050`
 
 #### Step 2 — INSERT a test row
 
@@ -112,8 +142,9 @@ psql -h postgresql.prod.svc.cluster.local -U rbac -d cache_testing
 ```
 
 ```sql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (99999, 'E2E', 'TestUser', 'e2e_test@example.com', '555-0000', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900001, 'E2E TestUser', 'e2e_test@example.com', '555-0000',
+        '1 Test St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
@@ -126,18 +157,18 @@ sleep 5
 #### Step 4 — Verify INSERT in Iceberg
 
 ```sql
-SELECT customer_id, first_name, last_name, email, snap_id, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 99999;
+SELECT id, name, email, snap_id, snap_timestamp
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900001;
 ```
 
-**Expected:** 1 row returned with `snap_id` populated (non-null BIGINT) and `snap_timestamp` within the last 30 seconds.
+**Expected:** 1 row returned; `snap_id` non-null BIGINT; `snap_timestamp` within the last 30 seconds.
 
 #### Step 5 — UPDATE the test row
 
 ```sql
 -- psql
-UPDATE customers SET email = 'e2e_updated@example.com' WHERE customer_id = 99999;
+UPDATE customers SET email = 'e2e_updated@example.com' WHERE id = 900001;
 COMMIT;
 ```
 
@@ -148,19 +179,18 @@ sleep 5
 ```
 
 ```sql
--- Note the snap_id from Step 4 and compare
-SELECT customer_id, email, snap_id, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 99999;
+SELECT id, email, snap_id, snap_timestamp
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900001;
 ```
 
-**Expected:** `email = 'e2e_updated@example.com'`; `snap_id` is different from the value recorded in Step 4; `snap_timestamp` is newer.
+**Expected:** `email = 'e2e_updated@example.com'`; `snap_id` differs from Step 4; `snap_timestamp` is newer.
 
 #### Step 7 — DELETE the test row
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 99999;
+DELETE FROM customers WHERE id = 900001;
 COMMIT;
 ```
 
@@ -172,8 +202,8 @@ sleep 5
 
 ```sql
 SELECT COUNT(*) AS should_be_zero
-FROM postgres.cache_testing.customers
-WHERE customer_id = 99999;
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900001;
 ```
 
 **Expected:** `should_be_zero = 0`
@@ -181,8 +211,7 @@ WHERE customer_id = 99999;
 #### Step 9 — Cleanup confirmation
 
 ```sql
--- Confirm no test residue
-SELECT customer_id FROM postgres.cache_testing.customers WHERE customer_id = 99999;
+SELECT id FROM postgres.e2e_testing.customers_std WHERE id = 900001;
 -- Expected: 0 rows
 ```
 
@@ -193,19 +222,22 @@ SELECT customer_id FROM postgres.cache_testing.customers WHERE customer_id = 999
 #### Step 1 — Note current row count
 
 ```sql
-SELECT COUNT(*) AS row_count FROM oracle.cache_testing.customers;
+SELECT COUNT(*) AS row_count FROM oracle.e2e_testing.customers_std;
 ```
 
 #### Step 2 — INSERT a test row
 
 ```bash
-# Connect to Oracle (from sqlplus or from inside the oracle-xe pod)
-kubectl exec -it -n prod deployment/oracle-xe -- sqlplus c##dbzcdc/<password>@XEPDB1
+kubectl exec -it -n prod oracle-xe-799f8d67dd-vjtq7 -- \
+  sqlplus sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba
 ```
 
 ```sql
-INSERT INTO CACHE_TESTING.CUSTOMERS (CUSTOMER_ID, FIRST_NAME, LAST_NAME, EMAIL, PHONE, CREATED_AT)
-VALUES (99998, 'E2E', 'OracleTest', 'e2e_oracle@example.com', '555-0001', SYSDATE);
+INSERT INTO CACHE_TESTING.CUSTOMERS
+  (ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT)
+VALUES
+  (900002, 'E2E OracleTest', 'e2e_oracle@example.com', '555-0001',
+   '2 Oracle St', 'Sydney', 'AU', SYSDATE, SYSDATE);
 COMMIT;
 ```
 
@@ -218,18 +250,17 @@ sleep 5
 #### Step 4 — Verify INSERT in Iceberg
 
 ```sql
-SELECT customer_id, first_name, email, snap_id, snap_timestamp
-FROM oracle.cache_testing.customers
-WHERE customer_id = 99998;
+SELECT id, name, email, snap_id, snap_timestamp
+FROM oracle.e2e_testing.customers_std
+WHERE id = 900002;
 ```
 
-**Expected:** 1 row returned; `snap_id` non-null; `snap_timestamp` recent.
+**Expected:** 1 row; `snap_id` non-null; `snap_timestamp` recent.
 
 #### Step 5 — UPDATE
 
 ```sql
--- sqlplus / Oracle
-UPDATE CACHE_TESTING.CUSTOMERS SET EMAIL = 'e2e_oracle_updated@example.com' WHERE CUSTOMER_ID = 99998;
+UPDATE CACHE_TESTING.CUSTOMERS SET EMAIL = 'e2e_oracle_updated@example.com' WHERE ID = 900002;
 COMMIT;
 ```
 
@@ -240,9 +271,9 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, email, snap_id, snap_timestamp
-FROM oracle.cache_testing.customers
-WHERE customer_id = 99998;
+SELECT id, email, snap_id, snap_timestamp
+FROM oracle.e2e_testing.customers_std
+WHERE id = 900002;
 ```
 
 **Expected:** `email = 'e2e_oracle_updated@example.com'`; `snap_id` changed; `snap_timestamp` newer.
@@ -250,8 +281,7 @@ WHERE customer_id = 99998;
 #### Step 7 — DELETE
 
 ```sql
--- sqlplus
-DELETE FROM CACHE_TESTING.CUSTOMERS WHERE CUSTOMER_ID = 99998;
+DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900002;
 COMMIT;
 ```
 
@@ -262,7 +292,7 @@ sleep 5
 ```
 
 ```sql
-SELECT COUNT(*) AS should_be_zero FROM oracle.cache_testing.customers WHERE customer_id = 99998;
+SELECT COUNT(*) AS should_be_zero FROM oracle.e2e_testing.customers_std WHERE id = 900002;
 ```
 
 **Expected:** `should_be_zero = 0`
@@ -274,26 +304,29 @@ SELECT COUNT(*) AS should_be_zero FROM oracle.cache_testing.customers WHERE cust
 #### Step 1 — Note current row count
 
 ```sql
-SELECT COUNT(*) AS row_count FROM mongodb.cache_testing.customers;
+SELECT COUNT(*) AS row_count FROM mongodb.e2e_testing.customers_std;
 ```
 
 #### Step 2 — INSERT a test document
 
 ```bash
-mongosh --host mongodb.prod.svc.cluster.local:27017 \
-        --username root --password <password> \
-        --authenticationDatabase admin
+kubectl exec -n prod \
+  $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
+  mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
+  --quiet
 ```
 
 ```javascript
 use cache_testing;
 db.customers.insertOne({
-  _id: ObjectId("000000000000000000099997"),
-  customer_id: 99997,
-  first_name: "E2E",
-  last_name: "MongoTest",
+  _id: ObjectId("000000000000000000900003"),
+  id: 900003,
+  name: "E2E MongoTest",
   email: "e2e_mongo@example.com",
   phone: "555-0002",
+  address: "3 Mongo St",
+  city: "Perth",
+  country: "AU",
   created_at: new Date()
 });
 ```
@@ -307,9 +340,9 @@ sleep 5
 #### Step 4 — Verify INSERT in Iceberg
 
 ```sql
-SELECT customer_id, first_name, email, snap_id, snap_timestamp
-FROM mongodb.cache_testing.customers
-WHERE customer_id = 99997;
+SELECT id, name, email, snap_id, snap_timestamp
+FROM mongodb.e2e_testing.customers_std
+WHERE id = 900003;
 ```
 
 **Expected:** 1 row; `snap_id` and `snap_timestamp` populated.
@@ -319,7 +352,7 @@ WHERE customer_id = 99997;
 ```javascript
 // mongosh
 db.customers.updateOne(
-  { customer_id: 99997 },
+  { id: 900003 },
   { $set: { email: "e2e_mongo_updated@example.com" } }
 );
 ```
@@ -331,9 +364,9 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, email, snap_id, snap_timestamp
-FROM mongodb.cache_testing.customers
-WHERE customer_id = 99997;
+SELECT id, email, snap_id, snap_timestamp
+FROM mongodb.e2e_testing.customers_std
+WHERE id = 900003;
 ```
 
 **Expected:** `email = 'e2e_mongo_updated@example.com'`; `snap_id` changed.
@@ -342,7 +375,7 @@ WHERE customer_id = 99997;
 
 ```javascript
 // mongosh
-db.customers.deleteOne({ customer_id: 99997 });
+db.customers.deleteOne({ id: 900003 });
 ```
 
 #### Step 8 — Verify hard DELETE
@@ -352,7 +385,7 @@ sleep 5
 ```
 
 ```sql
-SELECT COUNT(*) AS should_be_zero FROM mongodb.cache_testing.customers WHERE customer_id = 99997;
+SELECT COUNT(*) AS should_be_zero FROM mongodb.e2e_testing.customers_std WHERE id = 900003;
 ```
 
 **Expected:** `should_be_zero = 0`
@@ -360,6 +393,8 @@ SELECT COUNT(*) AS should_be_zero FROM mongodb.cache_testing.customers WHERE cus
 ---
 
 ## 3. Section 2 — Soft Delete Mode Tests
+
+Target table: **`postgres.e2e_testing.customers_sd`**
 
 ### Setup: Switch to soft_delete mode
 
@@ -383,8 +418,9 @@ kubectl get deployment -n prod | grep kafka-to-iceberg
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (88888, 'E2E', 'SoftTest', 'soft_test@example.com', '555-0010', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900010, 'E2E SoftTest', 'soft_test@example.com', '555-0010',
+        '10 Soft St', 'Melbourne', 'AU', NOW());
 COMMIT;
 ```
 
@@ -395,9 +431,9 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, email, is_deleted, deleted_at, snap_id, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 88888;
+SELECT id, email, is_deleted, deleted_at, snap_id, snap_timestamp
+FROM postgres.e2e_testing.customers_sd
+WHERE id = 900010;
 ```
 
 **Expected:** 1 row; `is_deleted = false`; `deleted_at = NULL`; `snap_id` and `snap_timestamp` populated.
@@ -410,7 +446,7 @@ WHERE customer_id = 88888;
 
 ```sql
 -- psql
-UPDATE customers SET email = 'soft_updated@example.com' WHERE customer_id = 88888;
+UPDATE customers SET email = 'soft_updated@example.com' WHERE id = 900010;
 COMMIT;
 ```
 
@@ -421,9 +457,9 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, email, is_deleted, deleted_at
-FROM postgres.cache_testing.customers
-WHERE customer_id = 88888;
+SELECT id, email, is_deleted, deleted_at
+FROM postgres.e2e_testing.customers_sd
+WHERE id = 900010;
 ```
 
 **Expected:** `email = 'soft_updated@example.com'`; `is_deleted = false`; `deleted_at = NULL`.
@@ -436,7 +472,7 @@ WHERE customer_id = 88888;
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 88888;
+DELETE FROM customers WHERE id = 900010;
 COMMIT;
 ```
 
@@ -447,9 +483,9 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, email, is_deleted, deleted_at
-FROM postgres.cache_testing.customers
-WHERE customer_id = 88888;
+SELECT id, email, is_deleted, deleted_at
+FROM postgres.e2e_testing.customers_sd
+WHERE id = 900010;
 ```
 
 **Expected:** Row **still present**; `is_deleted = true`; `deleted_at` is a non-null TIMESTAMP within the last 30 seconds.
@@ -457,14 +493,14 @@ WHERE customer_id = 88888;
 #### Step 3 — Query all soft-deleted rows
 
 ```sql
-SELECT customer_id, email, deleted_at
-FROM postgres.cache_testing.customers
+SELECT id, email, deleted_at
+FROM postgres.e2e_testing.customers_sd
 WHERE is_deleted = true
 ORDER BY deleted_at DESC
 LIMIT 20;
 ```
 
-**Expected:** `customer_id = 88888` is in the result set.
+**Expected:** `id = 900010` is in the result set.
 
 ---
 
@@ -479,6 +515,8 @@ kubectl rollout status deployment/kafka-to-iceberg-standard -n prod
 ---
 
 ## 4. Section 3 — History Tracking Mode Tests
+
+Target table: **`postgres.e2e_testing.customers_hist`**
 
 ### Setup: Switch to history_tracking mode
 
@@ -496,8 +534,9 @@ kubectl rollout status deployment/kafka-to-iceberg-history-tracking -n prod
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (77777, 'E2E', 'HistTest', 'hist_test@example.com', '555-0020', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900020, 'E2E HistTest', 'hist_test@example.com', '555-0020',
+        '20 Hist St', 'Brisbane', 'AU', NOW());
 COMMIT;
 ```
 
@@ -508,16 +547,16 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, _change_type, _change_ts,
-       before_customer_id, before_email,
-       after_customer_id, after_email,
+SELECT id, _change_type, _change_ts,
+       before_id, before_email,
+       after_id, after_email,
        snap_id, snap_timestamp
-FROM postgres.cache_testing.customers_hist
-WHERE after_customer_id = 77777
+FROM postgres.e2e_testing.customers_hist
+WHERE after_id = 900020
 ORDER BY _change_ts;
 ```
 
-**Expected:** 1 row; `_change_type = 'INSERT'`; all `before_*` columns are NULL; `after_customer_id = 77777`; `after_email = 'hist_test@example.com'`.
+**Expected:** 1 row; `_change_type = 'INSERT'`; all `before_*` columns are NULL; `after_id = 900020`; `after_email = 'hist_test@example.com'`.
 
 ---
 
@@ -527,7 +566,7 @@ ORDER BY _change_ts;
 
 ```sql
 -- psql
-UPDATE customers SET email = 'hist_updated@example.com' WHERE customer_id = 77777;
+UPDATE customers SET email = 'hist_updated@example.com' WHERE id = 900020;
 COMMIT;
 ```
 
@@ -538,11 +577,11 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, _change_type, _change_ts,
+SELECT id, _change_type, _change_ts,
        before_email, after_email
-FROM postgres.cache_testing.customers_hist
-WHERE after_customer_id = 77777
-   OR before_customer_id = 77777
+FROM postgres.e2e_testing.customers_hist
+WHERE after_id = 900020
+   OR before_id = 900020
 ORDER BY _change_ts;
 ```
 
@@ -558,7 +597,7 @@ ORDER BY _change_ts;
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 77777;
+DELETE FROM customers WHERE id = 900020;
 COMMIT;
 ```
 
@@ -569,11 +608,11 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, _change_type, _change_ts,
+SELECT id, _change_type, _change_ts,
        before_email, after_email
-FROM postgres.cache_testing.customers_hist
-WHERE after_customer_id = 77777
-   OR before_customer_id = 77777
+FROM postgres.e2e_testing.customers_hist
+WHERE after_id = 900020
+   OR before_id = 900020
 ORDER BY _change_ts;
 ```
 
@@ -585,9 +624,9 @@ ORDER BY _change_ts;
 
 ```sql
 SELECT _change_type, _change_ts, before_email, after_email, snap_id
-FROM postgres.cache_testing.customers_hist
-WHERE after_customer_id = 77777
-   OR before_customer_id = 77777
+FROM postgres.e2e_testing.customers_hist
+WHERE after_id = 900020
+   OR before_id = 900020
 ORDER BY _change_ts ASC;
 ```
 
@@ -607,30 +646,30 @@ kubectl rollout status deployment/kafka-to-iceberg-standard -n prod
 
 ## 5. Section 4 — StarTransform Tests
 
-All tests below use `kafka-to-iceberg-standard` in replicas=1. Adjust `TRANSFORM_PIPELINE` or the relevant environment variable, then perform a rolling restart to apply.
+Each test uses its own dedicated Iceberg table inside `postgres.e2e_testing`.  
+All tests use `kafka-to-iceberg-standard` (replicas=1). Change `TRANSFORM_PIPELINE`, restart, and query the dedicated table.
 
 ### How to apply TRANSFORM_PIPELINE changes
 
 ```bash
-# Edit the deployment's TRANSFORM_PIPELINE env var
 kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TRANSFORM_PIPELINE=deduplicate,add_processing_time,mask_pii,add_op_label,add_source_tag
-
-# Rolling restart to pick up the new value
+  TRANSFORM_PIPELINE=<function_name>
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
 
 ---
 
-### Test 4.1 — `deduplicate`
+### Test 4.1 — `deduplicate` → `postgres.e2e_testing.customers_dedup`
 
-**Purpose:** Verify that rapid-fire updates to the same row within a single micro-batch result in only the latest state landing in Iceberg.
+**Purpose:** Rapid-fire updates to the same row within one micro-batch result in only the latest state landing in Iceberg.
 
 #### Enable
 
 ```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod TRANSFORM_PIPELINE=deduplicate
+kubectl set env deployment/kafka-to-iceberg-standard -n prod \
+  TRANSFORM_PIPELINE=deduplicate \
+  TARGET_TABLE=postgres.e2e_testing.customers_dedup
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
@@ -638,14 +677,14 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 #### Fire 3 rapid updates
 
 ```sql
--- psql — execute quickly so all 3 land in the same 2-second micro-batch
-UPDATE customers SET email = 'dedup_v1@example.com' WHERE customer_id = 1;
-UPDATE customers SET email = 'dedup_v2@example.com' WHERE customer_id = 1;
-UPDATE customers SET email = 'dedup_v3@example.com' WHERE customer_id = 1;
+-- psql — run all three before the 2-second micro-batch closes
+UPDATE customers SET email = 'dedup_v1@example.com' WHERE id = 900030;
+UPDATE customers SET email = 'dedup_v2@example.com' WHERE id = 900030;
+UPDATE customers SET email = 'dedup_v3@example.com' WHERE id = 900030;
 COMMIT;
 ```
 
-> If customer_id=1 does not exist, INSERT it first then run the 3 updates.
+> If id=900030 does not exist, INSERT it first then run the 3 updates.
 
 #### Verify in Iceberg
 
@@ -654,25 +693,33 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, email, snap_id, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 1;
+SELECT id, email, snap_id, snap_timestamp
+FROM postgres.e2e_testing.customers_dedup
+WHERE id = 900030;
 ```
 
-**Expected:** Exactly 1 row; `email = 'dedup_v3@example.com'` (the last write wins). If `dedup_v2` appears instead, the three updates may have landed in different batches — retry with faster successive commits.
+**Expected:** Exactly 1 row; `email = 'dedup_v3@example.com'` (last write wins).
+
+#### Cleanup
+
+```sql
+-- psql
+DELETE FROM customers WHERE id = 900030; COMMIT;
+```
 
 ---
 
-### Test 4.2 — `mask_pii` (SHA-256 hash)
+### Test 4.2 — `mask_columns` → `postgres.e2e_testing.customers_masked`
 
-**Purpose:** Verify that PII columns (`email`, `phone`) are stored as SHA-256 hex digests in Iceberg.
+**Purpose:** `email` and `phone` columns are stored as SHA-256 hex digests — plaintext never reaches Iceberg.
 
 #### Enable
 
 ```bash
 kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TRANSFORM_PIPELINE=deduplicate,mask_pii \
-  PII_COLUMNS=email,phone
+  TRANSFORM_PIPELINE=deduplicate,mask_columns \
+  PII_COLUMNS=email,phone \
+  TARGET_TABLE=postgres.e2e_testing.customers_masked
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
@@ -681,8 +728,9 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (66666, 'PII', 'MaskTest', 'pii_clear@example.com', '555-0030', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900031, 'PII MaskTest', 'pii_clear@example.com', '555-0030',
+        '31 PII St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
@@ -696,32 +744,32 @@ echo -n 'pii_clear@example.com' | sha256sum
 ```
 
 ```sql
-SELECT customer_id, email, phone
-FROM postgres.cache_testing.customers
-WHERE customer_id = 66666;
+SELECT id, email, phone
+FROM postgres.e2e_testing.customers_masked
+WHERE id = 900031;
 ```
 
-**Expected:** `email` column contains the SHA-256 hex string `3b37ebfda7f90dc9ce8d59e45d7f5ea5cddfae2f8f27e98d9671218f92c2a6ad` (not the plaintext). The `phone` column contains the SHA-256 hash of `555-0030`.
+**Expected:** `email = '3b37ebfda7f90dc9ce8d59e45d7f5ea5cddfae2f8f27e98d9671218f92c2a6ad'` (SHA-256, not plaintext). `phone` column contains the SHA-256 hash of `555-0030`.
 
 #### Cleanup
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 66666;
-COMMIT;
+DELETE FROM customers WHERE id = 900031; COMMIT;
 ```
 
 ---
 
-### Test 4.3 — `add_processing_time`
+### Test 4.3 — `add_processing_time` → `postgres.e2e_testing.customers_proc_time`
 
-**Purpose:** Verify that the `proc_time` column is injected into every Iceberg row.
+**Purpose:** A `proc_time` TIMESTAMP column is injected by the transform — distinct from `snap_timestamp`.
 
 #### Enable
 
 ```bash
 kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TRANSFORM_PIPELINE=deduplicate,add_processing_time
+  TRANSFORM_PIPELINE=deduplicate,add_processing_time \
+  TARGET_TABLE=postgres.e2e_testing.customers_proc_time
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
@@ -730,8 +778,9 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (55555, 'ProcTime', 'Test', 'proctime@example.com', '555-0040', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900032, 'ProcTime Test', 'proctime@example.com', '555-0040',
+        '32 Proc St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
@@ -740,30 +789,31 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, proc_time, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 55555;
+SELECT id, proc_time, snap_timestamp
+FROM postgres.e2e_testing.customers_proc_time
+WHERE id = 900032;
 ```
 
-**Expected:** `proc_time` is a non-null TIMESTAMP within 30 seconds of now. Note: `proc_time` is the StarTransform injection time (slightly earlier than `snap_timestamp` which is set at the Iceberg write step).
+**Expected:** `proc_time` is a non-null TIMESTAMP within 30 seconds of now. `proc_time` is set by the StarTransform step; `snap_timestamp` is set slightly later at Iceberg write time — both should be close but `proc_time` ≤ `snap_timestamp`.
 
 #### Cleanup
 
 ```sql
-DELETE FROM customers WHERE customer_id = 55555; COMMIT;
+DELETE FROM customers WHERE id = 900032; COMMIT;
 ```
 
 ---
 
-### Test 4.4 — `add_op_label`
+### Test 4.4 — `add_op_label` → `postgres.e2e_testing.customers_op_label`
 
-**Purpose:** Verify that the `op_label` column contains human-readable strings.
+**Purpose:** An `op_label` STRING column (`'INSERT'`/`'UPDATE'`/`'DELETE'`) is injected per event.
 
 #### Enable
 
 ```bash
 kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TRANSFORM_PIPELINE=deduplicate,add_op_label
+  TRANSFORM_PIPELINE=deduplicate,add_op_label \
+  TARGET_TABLE=postgres.e2e_testing.customers_op_label
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
@@ -772,8 +822,9 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (44444, 'OpLabel', 'Test', 'oplabel@example.com', '555-0050', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900033, 'OpLabel Test', 'oplabel@example.com', '555-0050',
+        '33 Label St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
@@ -782,14 +833,14 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, op_label FROM postgres.cache_testing.customers WHERE customer_id = 44444;
+SELECT id, op_label FROM postgres.e2e_testing.customers_op_label WHERE id = 900033;
 ```
 
 **Expected:** `op_label = 'INSERT'`
 
 ```sql
 -- psql
-UPDATE customers SET email = 'oplabel_updated@example.com' WHERE customer_id = 44444;
+UPDATE customers SET email = 'oplabel_updated@example.com' WHERE id = 900033;
 COMMIT;
 ```
 
@@ -798,7 +849,7 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, op_label FROM postgres.cache_testing.customers WHERE customer_id = 44444;
+SELECT id, op_label FROM postgres.e2e_testing.customers_op_label WHERE id = 900033;
 ```
 
 **Expected:** `op_label = 'UPDATE'`
@@ -806,21 +857,22 @@ SELECT customer_id, op_label FROM postgres.cache_testing.customers WHERE custome
 #### Cleanup
 
 ```sql
-DELETE FROM customers WHERE customer_id = 44444; COMMIT;
+DELETE FROM customers WHERE id = 900033; COMMIT;
 ```
 
 ---
 
-### Test 4.5 — `add_source_tag`
+### Test 4.5 — `add_source_tag` → `postgres.e2e_testing.customers_source_tag`
 
-**Purpose:** Verify that the `source_system` column is injected.
+**Purpose:** A `source_system` STRING column is injected with the value of the `SOURCE` env var.
 
 #### Enable
 
 ```bash
 kubectl set env deployment/kafka-to-iceberg-standard -n prod \
   TRANSFORM_PIPELINE=deduplicate,add_source_tag \
-  SOURCE=postgres
+  SOURCE=postgres \
+  TARGET_TABLE=postgres.e2e_testing.customers_source_tag
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
@@ -829,8 +881,9 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (33333, 'SourceTag', 'Test', 'sourcetag@example.com', '555-0060', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900034, 'SourceTag Test', 'sourcetag@example.com', '555-0060',
+        '34 Tag St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
@@ -839,7 +892,7 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, source_system FROM postgres.cache_testing.customers WHERE customer_id = 33333;
+SELECT id, source_system FROM postgres.e2e_testing.customers_source_tag WHERE id = 900034;
 ```
 
 **Expected:** `source_system = 'postgres'`
@@ -847,55 +900,22 @@ SELECT customer_id, source_system FROM postgres.cache_testing.customers WHERE cu
 #### Cleanup
 
 ```sql
-DELETE FROM customers WHERE customer_id = 33333; COMMIT;
+DELETE FROM customers WHERE id = 900034; COMMIT;
 ```
 
 ---
 
-### Test 4.6 — `enrich_from_broadcast`
+### Test 4.6 — `filter_op` (inserts/updates only) → `postgres.e2e_testing.customers_filter_ins`
 
-**Purpose:** Verify that a dimension broadcast join enriches stream rows at write time.
-
-#### Enable
-
-Broadcast enrichment is configured in code (not via env var alone). To test, temporarily patch the pipeline script or use an integration test. The following illustrates the expected outcome assuming the products table is used as the broadcast dimension:
-
-```python
-# Snippet — how it's called in the streaming job
-products_dim = spark.table("postgres.cache_testing.products")
-enriched_df = ST.enrich_from_broadcast(
-    df,
-    dim_df=products_dim,
-    join_col="product_id",
-    select_cols=["product_name", "category"],
-    how="left"
-)
-```
-
-#### Verify
-
-After an INSERT to `orders` that contains a `product_id` that exists in `products`:
-
-```sql
-SELECT order_id, product_id, product_name, category
-FROM postgres.cache_testing.orders
-WHERE order_id = <test_order_id>;
-```
-
-**Expected:** `product_name` and `category` are populated from the broadcast join, not from the orders source table.
-
----
-
-### Test 4.7 — `filter_op` (exclude DELETEs)
-
-**Purpose:** Verify that when `filter_op(ops=["c","u"])` is active, DELETE events are dropped and do not reach Iceberg.
+**Purpose:** DELETE events are dropped; only `c` (create) and `u` (update) reach Iceberg.
 
 #### Enable
 
 ```bash
 kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TRANSFORM_PIPELINE=filter_op
-# filter_op defaults to ops=["c","u"] — deletes are dropped
+  TRANSFORM_PIPELINE=filter_op \
+  FILTER_OPS=c,u \
+  TARGET_TABLE=postgres.e2e_testing.customers_filter_ins
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
@@ -904,8 +924,9 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (22222, 'FilterOp', 'Test', 'filterop@example.com', '555-0070', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900035, 'FilterIns Test', 'filterins@example.com', '555-0070',
+        '35 Filter St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
@@ -914,14 +935,14 @@ sleep 5
 ```
 
 ```sql
--- Verify INSERT reached Iceberg
-SELECT customer_id FROM postgres.cache_testing.customers WHERE customer_id = 22222;
+-- INSERT should have landed
+SELECT id FROM postgres.e2e_testing.customers_filter_ins WHERE id = 900035;
 -- Expected: 1 row
 ```
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 22222;
+DELETE FROM customers WHERE id = 900035;
 COMMIT;
 ```
 
@@ -930,25 +951,246 @@ sleep 5
 ```
 
 ```sql
--- DELETE should NOT have reached Iceberg because filter_op dropped it
-SELECT customer_id FROM postgres.cache_testing.customers WHERE customer_id = 22222;
--- Expected: STILL 1 row (the delete was filtered out)
+-- DELETE was filtered — row still present in Iceberg
+SELECT id FROM postgres.e2e_testing.customers_filter_ins WHERE id = 900035;
+-- Expected: STILL 1 row
 ```
 
-**Expected:** Row remains in Iceberg after the source DELETE because `filter_op` excluded the `d` op.
+**Expected:** Row remains in `customers_filter_ins` after the source DELETE because `filter_op` excluded the `d` op.
 
-#### Cleanup — restore delete capability
+#### Cleanup (manual Iceberg delete)
+
+```sql
+-- Spark SQL — remove the test row directly from Iceberg
+DELETE FROM postgres.e2e_testing.customers_filter_ins WHERE id = 900035;
+```
+
+---
+
+### Test 4.7 — `filter_op` (deletes only) → `postgres.e2e_testing.customers_filter_del`
+
+**Purpose:** Only DELETE events reach Iceberg; inserts/updates are dropped.
+
+#### Enable
 
 ```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod TRANSFORM_PIPELINE=deduplicate
+kubectl set env deployment/kafka-to-iceberg-standard -n prod \
+  TRANSFORM_PIPELINE=filter_op \
+  FILTER_OPS=d \
+  TARGET_TABLE=postgres.e2e_testing.customers_filter_del
 kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
 
-Then clean up the test row manually via Iceberg (requires Spark SQL):
+#### Insert (should be dropped), then delete (should land)
 
 ```sql
-DELETE FROM postgres.cache_testing.customers WHERE customer_id = 22222;
+-- psql
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900036, 'FilterDel Test', 'filterdel@example.com', '555-0071',
+        '36 Filter St', 'Sydney', 'AU', NOW());
+COMMIT;
+```
+
+```bash
+sleep 5
+```
+
+```sql
+-- INSERT was filtered — should NOT appear in customers_filter_del
+SELECT id FROM postgres.e2e_testing.customers_filter_del WHERE id = 900036;
+-- Expected: 0 rows
+```
+
+```sql
+-- psql
+DELETE FROM customers WHERE id = 900036;
+COMMIT;
+```
+
+```bash
+sleep 5
+```
+
+```sql
+-- DELETE should appear in customers_filter_del
+SELECT id FROM postgres.e2e_testing.customers_filter_del WHERE id = 900036;
+-- Expected: 1 row (the delete event marker)
+```
+
+#### Cleanup
+
+```sql
+-- Spark SQL
+DELETE FROM postgres.e2e_testing.customers_filter_del WHERE id = 900036;
+```
+
+---
+
+### Test 4.8 — `enrich_from_broadcast` → `postgres.e2e_testing.orders_enriched`
+
+**Purpose:** Orders stream is enriched at write time with `product_name` and `product_category` from a broadcast products dimension.
+
+#### Enable
+
+Broadcast enrichment is configured in the streaming job code (not purely via env var). Patch the `TARGET_TABLE` to direct output to `orders_enriched`:
+
+```bash
+kubectl set env deployment/kafka-to-iceberg-standard -n prod \
+  TRANSFORM_PIPELINE=deduplicate,enrich_from_broadcast \
+  BROADCAST_DIM_TABLE=postgres.cache_testing.products_std \
+  BROADCAST_JOIN_COL=product_id \
+  TARGET_TABLE=postgres.e2e_testing.orders_enriched
+kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
+kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
+```
+
+#### Insert an order with a known product_id
+
+```sql
+-- psql — insert an order that references an existing product
+INSERT INTO orders (id, customer_id, status, total_amount, created_at)
+VALUES (900040, 900001, 'pending', 99.99, NOW());
+COMMIT;
+```
+
+```bash
+sleep 5
+```
+
+#### Verify enrichment in Iceberg
+
+```sql
+SELECT id, customer_id, status, product_name, product_category, snap_timestamp
+FROM postgres.e2e_testing.orders_enriched
+WHERE id = 900040;
+```
+
+**Expected:** `product_name` and `product_category` are populated from the broadcast join, not from the orders source table.
+
+#### Cleanup
+
+```sql
+-- psql
+DELETE FROM orders WHERE id = 900040; COMMIT;
+```
+
+---
+
+### Test 4.9 — `pivot_before_after` → `postgres.e2e_testing.customers_before_after`
+
+**Purpose:** Both `before_*` and `after_*` columns appear side-by-side for each change event.
+
+#### Enable (requires history_tracking mode)
+
+```bash
+kubectl scale deployment kafka-to-iceberg-standard          -n prod --replicas=0
+kubectl scale deployment kafka-to-iceberg-history-tracking  -n prod --replicas=1
+kubectl set env deployment/kafka-to-iceberg-history-tracking -n prod \
+  TRANSFORM_PIPELINE=pivot_before_after \
+  TARGET_TABLE=postgres.e2e_testing.customers_before_after
+kubectl rollout restart deployment/kafka-to-iceberg-history-tracking -n prod && \
+kubectl rollout status  deployment/kafka-to-iceberg-history-tracking -n prod
+```
+
+#### INSERT and UPDATE to generate before/after rows
+
+```sql
+-- psql
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900041, 'BeforeAfter Test', 'ba_test@example.com', '555-0080',
+        '41 BA St', 'Sydney', 'AU', NOW());
+COMMIT;
+```
+
+```bash
+sleep 5
+```
+
+```sql
+-- psql
+UPDATE customers SET email = 'ba_updated@example.com' WHERE id = 900041;
+COMMIT;
+```
+
+```bash
+sleep 5
+```
+
+#### Verify before/after columns
+
+```sql
+SELECT _change_type, _change_ts,
+       before_id, before_email,
+       after_id,  after_email
+FROM postgres.e2e_testing.customers_before_after
+WHERE after_id = 900041 OR before_id = 900041
+ORDER BY _change_ts;
+```
+
+**Expected:**
+- Row 1 (INSERT): `before_id = NULL`, `before_email = NULL`, `after_id = 900041`, `after_email = 'ba_test@example.com'`
+- Row 2 (UPDATE): `before_email = 'ba_test@example.com'`, `after_email = 'ba_updated@example.com'`
+
+#### Cleanup
+
+```sql
+-- psql
+DELETE FROM customers WHERE id = 900041; COMMIT;
+```
+
+```bash
+# Restore standard mode
+kubectl scale deployment kafka-to-iceberg-history-tracking -n prod --replicas=0
+kubectl scale deployment kafka-to-iceberg-standard         -n prod --replicas=1
+kubectl rollout status deployment/kafka-to-iceberg-standard -n prod
+```
+
+---
+
+### Test 4.10 — `null_coalesce` → `postgres.e2e_testing.customers_nullcoal`
+
+**Purpose:** NULL values in `country` and `phone` are replaced with configured defaults before landing in Iceberg.
+
+#### Enable
+
+```bash
+kubectl set env deployment/kafka-to-iceberg-standard -n prod \
+  TRANSFORM_PIPELINE=deduplicate,null_coalesce \
+  NULL_COALESCE_MAP='{"country":"N/A","phone":"UNKNOWN"}' \
+  TARGET_TABLE=postgres.e2e_testing.customers_nullcoal
+kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
+kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
+```
+
+#### Insert a row with NULL country and phone
+
+```sql
+-- psql
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900042, 'NullCoal Test', 'nullcoal@example.com', NULL,
+        '42 Coal St', 'Sydney', NULL, NOW());
+COMMIT;
+```
+
+```bash
+sleep 5
+```
+
+#### Verify defaults applied in Iceberg
+
+```sql
+SELECT id, name, phone, country
+FROM postgres.e2e_testing.customers_nullcoal
+WHERE id = 900042;
+```
+
+**Expected:** `phone = 'UNKNOWN'`; `country = 'N/A'` — NULL replaced by configured defaults; source row still has NULL in PostgreSQL.
+
+#### Cleanup
+
+```sql
+DELETE FROM customers WHERE id = 900042; COMMIT;
 ```
 
 ---
@@ -959,21 +1201,20 @@ DELETE FROM postgres.cache_testing.customers WHERE customer_id = 22222;
 
 ```sql
 SELECT partition, file_count, total_size
-FROM postgres.cache_testing.customers.partitions
+FROM postgres.e2e_testing.customers_std.partitions
 ORDER BY partition DESC
 LIMIT 10;
 ```
 
-**Expected:** Partitions are named by `snap_timestamp_hour` (e.g. `snap_timestamp_hour=2025-06-15-10`) and bucket number. At least one partition exists per hour the pipeline has been active.
+**Expected:** Partitions are named by `snap_timestamp_hour` (e.g. `snap_timestamp_hour=2025-06-15-10`) and bucket number. At least one partition per hour the pipeline has been active.
 
 ---
 
 ### Test 5.2 — Verify snap_id uniqueness within a batch
 
 ```sql
--- snap_id should be unique within any single snap_timestamp bucket (= micro-batch)
 SELECT snap_timestamp, COUNT(*) AS total_rows, COUNT(DISTINCT snap_id) AS unique_snap_ids
-FROM postgres.cache_testing.customers
+FROM postgres.e2e_testing.customers_std
 GROUP BY snap_timestamp
 HAVING COUNT(*) != COUNT(DISTINCT snap_id);
 ```
@@ -984,8 +1225,6 @@ HAVING COUNT(*) != COUNT(DISTINCT snap_id);
 
 ### Test 5.3 — Verify snap_timestamp is write time, not source event time
 
-Insert a row and record the source event time vs. what lands in Iceberg:
-
 ```sql
 -- psql — note the current time
 SELECT NOW();
@@ -993,11 +1232,11 @@ SELECT NOW();
 ```
 
 ```sql
--- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (11110, 'SnapTs', 'Test', 'snapts@example.com', '555-0080', '2020-01-01 00:00:00');
+-- psql — use a deliberately old created_at to contrast with snap_timestamp
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900050, 'SnapTs Test', 'snapts@example.com', '555-0080',
+        '50 Snap St', 'Sydney', 'AU', '2020-01-01 00:00:00');
 COMMIT;
--- Note: created_at is deliberately in 2020 to distinguish from snap_timestamp
 ```
 
 ```bash
@@ -1005,18 +1244,18 @@ sleep 5
 ```
 
 ```sql
-SELECT customer_id, created_at, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 11110;
+SELECT id, created_at, snap_timestamp
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900050;
 ```
 
-**Expected:** `created_at = 2020-01-01 00:00:00`; `snap_timestamp` is near the current time (2025), confirming it is the write-wall-clock, not the source column value.
+**Expected:** `created_at = 2020-01-01 00:00:00`; `snap_timestamp` ≈ current time (2025), confirming it is the write wall-clock, not the source column value.
 
 #### Cleanup
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 11110; COMMIT;
+DELETE FROM customers WHERE id = 900050; COMMIT;
 ```
 
 ---
@@ -1026,12 +1265,12 @@ DELETE FROM customers WHERE customer_id = 11110; COMMIT;
 ```sql
 -- This query should scan ONLY the most recent hour's partition
 EXPLAIN
-SELECT customer_id, email
-FROM postgres.cache_testing.customers
+SELECT id, email
+FROM postgres.e2e_testing.customers_std
 WHERE snap_timestamp >= (CURRENT_TIMESTAMP - INTERVAL 1 HOUR);
 ```
 
-**Expected:** The execution plan shows `PartitionFilter` or `Dynamic partition pruning` referencing `snap_timestamp_hour`. File scan statistics should show far fewer files than a full table scan.
+**Expected:** The execution plan shows `PartitionFilter` or `Dynamic partition pruning` referencing `snap_timestamp_hour`. File scan statistics show far fewer files than a full table scan.
 
 ---
 
@@ -1039,23 +1278,27 @@ WHERE snap_timestamp >= (CURRENT_TIMESTAMP - INTERVAL 1 HOUR);
 
 **Purpose:** Verify all three source connectors propagate changes to their respective Iceberg catalogs within 10 seconds.
 
-### Step 1 — Simultaneous inserts into all three sources
+All three targets are in `e2e_testing` but different catalogs.
 
-Open three terminal windows (or run sequentially in rapid succession):
+### Step 1 — Simultaneous inserts into all three sources
 
 **Terminal 1 — PostgreSQL:**
 ```sql
 -- psql
-INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-VALUES (9001, 'MultiSrc', 'PG', 'multi_pg@example.com', '555-9001', NOW());
+INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900060, 'MultiSrc PG', 'multi_pg@example.com', '555-9001',
+        '60 Multi St', 'Sydney', 'AU', NOW());
 COMMIT;
 ```
 
 **Terminal 2 — Oracle:**
 ```sql
 -- sqlplus
-INSERT INTO CACHE_TESTING.CUSTOMERS (CUSTOMER_ID, FIRST_NAME, LAST_NAME, EMAIL, PHONE, CREATED_AT)
-VALUES (9002, 'MultiSrc', 'ORA', 'multi_ora@example.com', '555-9002', SYSDATE);
+INSERT INTO CACHE_TESTING.CUSTOMERS
+  (ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT)
+VALUES
+  (900061, 'MultiSrc ORA', 'multi_ora@example.com', '555-9002',
+   '61 Multi St', 'Sydney', 'AU', SYSDATE, SYSDATE);
 COMMIT;
 ```
 
@@ -1064,11 +1307,13 @@ COMMIT;
 // mongosh
 use cache_testing;
 db.customers.insertOne({
-  customer_id: 9003,
-  first_name: "MultiSrc",
-  last_name: "MDB",
+  id: 900062,
+  name: "MultiSrc MDB",
   email: "multi_mdb@example.com",
   phone: "555-9003",
+  address: "62 Multi St",
+  city: "Perth",
+  country: "AU",
   created_at: new Date()
 });
 ```
@@ -1082,24 +1327,21 @@ sleep 10
 ### Step 3 — Verify all three in Iceberg
 
 ```sql
--- Check PostgreSQL catalog
-SELECT 'postgres' AS source, customer_id, email, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE customer_id = 9001
+SELECT 'postgres' AS source, id, email, snap_timestamp
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900060
 
 UNION ALL
 
--- Check Oracle catalog
-SELECT 'oracle' AS source, customer_id, email, snap_timestamp
-FROM oracle.cache_testing.customers
-WHERE customer_id = 9002
+SELECT 'oracle' AS source, id, email, snap_timestamp
+FROM oracle.e2e_testing.customers_std
+WHERE id = 900061
 
 UNION ALL
 
--- Check MongoDB catalog
-SELECT 'mongodb' AS source, customer_id, email, snap_timestamp
-FROM mongodb.cache_testing.customers
-WHERE customer_id = 9003;
+SELECT 'mongodb' AS source, id, email, snap_timestamp
+FROM mongodb.e2e_testing.customers_std
+WHERE id = 900062;
 ```
 
 **Expected:** 3 rows, one from each source, all with `snap_timestamp` within 10 seconds of the inserts.
@@ -1108,57 +1350,54 @@ WHERE customer_id = 9003;
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id = 9001; COMMIT;
+DELETE FROM customers WHERE id = 900060; COMMIT;
 ```
 ```sql
 -- sqlplus
-DELETE FROM CACHE_TESTING.CUSTOMERS WHERE CUSTOMER_ID = 9002; COMMIT;
+DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900061; COMMIT;
 ```
 ```javascript
 // mongosh
-db.customers.deleteOne({ customer_id: 9003 });
+db.customers.deleteOne({ id: 900062 });
 ```
 
 ---
 
 ## 8. Section 7 — Schema Evolution (DDL) Tests
 
-**Purpose:** Verify that DDL changes (ADD COLUMN, DROP COLUMN, ALTER COLUMN type, RENAME COLUMN)
-propagate through Debezium and are handled correctly by Iceberg via `mergeSchema=true`.
+**Purpose:** Verify that DDL changes propagate through Debezium and are handled correctly by Iceberg via `mergeSchema=true`.
 
 > **How DDL flows through the pipeline:**
 > 1. DDL executes on source DB
-> 2. Debezium captures the DDL event and publishes a schema-change message to `schema-changes.<source>`
-> 3. The Avro schema for the topic is updated in Schema Registry (new schema ID issued)
-> 4. On the next DML event after the DDL, the Debezium message carries the new schema ID
-> 5. The executor-level SR cache fetches the new schema on first encounter (one HTTP GET)
-> 6. Spark's `mergeSchema=true` on the Iceberg write adds the new column automatically
-> 7. Pre-DDL rows have `NULL` for the new column
+> 2. Debezium captures the DDL event → publishes to `schema-changes.<source>`
+> 3. Avro schema for the topic updated in Schema Registry (new schema ID issued)
+> 4. On next DML, Debezium message carries the new schema ID
+> 5. Executor-level SR cache fetches new schema once (one HTTP GET per new schema ID)
+> 6. Spark `mergeSchema=true` on Iceberg write adds the new column automatically
+> 7. Pre-DDL rows return NULL for the new column
+
+All Iceberg verification queries in this section target **`postgres.e2e_testing.customers_std`**.
 
 ---
 
 ### Test 7a — PostgreSQL: ADD COLUMN
 
-**Scenario:** Add a `loyalty_tier` column to `customers`. Verify it propagates to Iceberg.
+**Scenario:** Add a `loyalty_tier` column. Verify it propagates to `postgres.e2e_testing.customers_std`.
 
 #### Step 1 — Baseline
 
 ```bash
-# Record current PostgreSQL schema
 psql -h postgresql.prod.svc.cluster.local -U rbac -d cache_testing -c "
-SELECT column_name, data_type, character_maximum_length
-FROM information_schema.columns
+SELECT column_name, data_type FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'customers'
 ORDER BY ordinal_position;"
 ```
 
 ```sql
--- Record current Iceberg schema (run in Spark SQL / notebook)
-DESCRIBE postgres.cache_testing.customers;
+DESCRIBE postgres.e2e_testing.customers_std;
 ```
 
 ```bash
-# Check current Schema Registry subjects for this table
 curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects \
   | jq '[.[] | select(startswith("postgres.cache_testing.customers"))]'
 ```
@@ -1168,37 +1407,26 @@ curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects \
 ```sql
 -- psql
 ALTER TABLE public.customers ADD COLUMN loyalty_tier VARCHAR(20) DEFAULT NULL;
-COMMENT ON COLUMN public.customers.loyalty_tier IS 'Customer loyalty programme tier';
 ```
 
 #### Step 3 — Insert a row using the new column
 
 ```sql
 -- psql
-INSERT INTO public.customers (name, email, phone, address, city, country, created_at, loyalty_tier)
-VALUES ('SchemaEvo Test', 'evo@example.com', '555-0001', '1 Test St', 'Sydney', 'AU', NOW(), 'GOLD');
--- Note the id returned; use it in the verification below
+INSERT INTO public.customers (id, name, email, phone, address, city, country, created_at, loyalty_tier)
+VALUES (900070, 'SchemaEvo Test', 'evo@example.com', '555-0001',
+        '70 Evo St', 'Sydney', 'AU', NOW(), 'GOLD');
 ```
 
 #### Step 4 — Verify in Schema Registry
 
 ```bash
-# Wait for Debezium to publish the new schema (usually within 2–3 seconds of first DML)
 sleep 5
-
-# List versions for this topic — should show a new version number
 curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions
-# Expected: [1, 2]  ← version 2 is the evolved schema with loyalty_tier
+# Expected: [1, 2]  ← version 2 has loyalty_tier
 
-# Inspect the new schema — confirm loyalty_tier is present
 curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions/latest \
   | jq '.schema | fromjson | .fields[] | select(.name == "loyalty_tier")'
-# Expected:
-# {
-#   "name": "loyalty_tier",
-#   "type": ["null","string"],
-#   "default": null
-# }
 ```
 
 #### Step 5 — Verify in Iceberg
@@ -1208,52 +1436,48 @@ sleep 10
 ```
 
 ```sql
--- Iceberg schema should now include loyalty_tier (run in Spark SQL)
-DESCRIBE postgres.cache_testing.customers;
--- Expected: loyalty_tier  string  (or varchar(20))
+DESCRIBE postgres.e2e_testing.customers_std;
+-- Expected: loyalty_tier  string
 
--- The inserted row should have loyalty_tier = 'GOLD'
 SELECT id, name, loyalty_tier, snap_timestamp
-FROM postgres.cache_testing.customers
-WHERE email = 'evo@example.com';
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900070;
 -- Expected: loyalty_tier = 'GOLD'
 
--- Pre-DDL rows have NULL for the new column
 SELECT id, loyalty_tier
-FROM postgres.cache_testing.customers
-WHERE email != 'evo@example.com'
+FROM postgres.e2e_testing.customers_std
+WHERE id != 900070
 LIMIT 5;
--- Expected: loyalty_tier = NULL for all rows
+-- Expected: loyalty_tier = NULL for all pre-DDL rows
 ```
 
 #### Step 6 — Cleanup
 
 ```sql
 -- psql
-DELETE FROM public.customers WHERE email = 'evo@example.com';
+DELETE FROM public.customers WHERE id = 900070;
 ```
 
 ---
 
 ### Test 7b — PostgreSQL: DROP COLUMN
 
-> **Warning:** Iceberg does NOT physically drop the column when Debezium detects a DROP. The column
-> remains in the Iceberg schema and returns `NULL` for all future rows. This is expected and safe.
-> Physical removal from Iceberg requires an explicit `ALTER TABLE ... DROP COLUMN` in Spark SQL.
+> **Note:** Iceberg does NOT physically drop the column. It stays in the schema and returns NULL for future rows. Physical removal requires `ALTER TABLE ... DROP COLUMN` in Spark SQL.
 
-#### Step 1 — Drop the column added in 7a (or use a dispensable column)
+#### Step 1 — Drop the column added in 7a
 
 ```sql
--- psql — drop the loyalty_tier column we just added
+-- psql
 ALTER TABLE public.customers DROP COLUMN loyalty_tier;
 ```
 
 #### Step 2 — Insert a row after the DROP
 
 ```sql
--- psql — insert without loyalty_tier (it no longer exists in PostgreSQL)
-INSERT INTO public.customers (name, email, phone, address, city, country, created_at)
-VALUES ('PostDrop Test', 'postdrop@example.com', '555-0002', '2 Drop St', 'Melbourne', 'AU', NOW());
+-- psql
+INSERT INTO public.customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900071, 'PostDrop Test', 'postdrop@example.com', '555-0002',
+        '71 Drop St', 'Melbourne', 'AU', NOW());
 ```
 
 #### Step 3 — Verify behaviour in Iceberg
@@ -1263,44 +1487,36 @@ sleep 10
 ```
 
 ```sql
--- Iceberg: loyalty_tier column still present but NULL for the new row
 SELECT id, name, loyalty_tier
-FROM postgres.cache_testing.customers
-WHERE email = 'postdrop@example.com';
--- Expected: loyalty_tier = NULL  (column still in Iceberg schema, value absent)
-
--- Confirm Schema Registry issued a new version (dropped field)
--- The new version will no longer contain loyalty_tier in the Avro schema
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900071;
+-- Expected: loyalty_tier = NULL (column kept in Iceberg schema, value absent)
 ```
 
 ```bash
 curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions \
   | jq 'length'
-# Expected: 3  (version 1=original, 2=added loyalty_tier, 3=dropped loyalty_tier)
+# Expected: 3  (original, +loyalty_tier, -loyalty_tier)
 ```
 
 #### Step 4 — (Optional) Remove the column from Iceberg too
 
 ```sql
--- Spark SQL — only run if you want to physically remove the column from Iceberg
-ALTER TABLE postgres.cache_testing.customers DROP COLUMN loyalty_tier;
+ALTER TABLE postgres.e2e_testing.customers_std DROP COLUMN loyalty_tier;
 ```
 
 #### Step 5 — Cleanup
 
 ```sql
 -- psql
-DELETE FROM public.customers WHERE email = 'postdrop@example.com';
+DELETE FROM public.customers WHERE id = 900071;
 ```
 
 ---
 
 ### Test 7c — PostgreSQL: ALTER COLUMN (widen VARCHAR)
 
-> **Scenario:** Widen a VARCHAR column. Debezium emits the new Avro schema. Iceberg type widens
-> automatically (string → string is compatible; narrowing would fail).
-
-#### Step 1 — Widen the `address` column from VARCHAR(255) to TEXT
+#### Step 1 — Widen `address` from VARCHAR(255) to TEXT
 
 ```sql
 -- psql
@@ -1311,14 +1527,10 @@ ALTER TABLE public.customers ALTER COLUMN address TYPE TEXT;
 
 ```sql
 -- psql
-INSERT INTO public.customers (name, email, phone, address, city, country, created_at)
-VALUES (
-  'LongAddr Test',
-  'longaddr@example.com',
-  '555-0003',
-  'This is a very long address that would exceed a typical VARCHAR(255) limit but fits in TEXT type perfectly fine for testing schema evolution',
-  'Brisbane', 'AU', NOW()
-);
+INSERT INTO public.customers (id, name, email, phone, address, city, country, created_at)
+VALUES (900072, 'LongAddr Test', 'longaddr@example.com', '555-0003',
+        'This is a very long address that exceeds VARCHAR(255) but fits TEXT perfectly fine for testing schema evolution purposes in Iceberg',
+        'Brisbane', 'AU', NOW());
 ```
 
 #### Step 3 — Verify
@@ -1328,34 +1540,24 @@ sleep 10
 ```
 
 ```sql
--- Iceberg: address type should be string (unchanged — both map to string)
-DESCRIBE postgres.cache_testing.customers;
+DESCRIBE postgres.e2e_testing.customers_std;
+-- Expected: address still string (VARCHAR and TEXT both map to string)
 
--- Row with long address should be readable
-SELECT id, LEFT(address, 50) AS addr_preview
-FROM postgres.cache_testing.customers
-WHERE email = 'longaddr@example.com';
-```
-
-```bash
-# Schema Registry: new version for customers-value with address type = "string" (same effective type)
-curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions/latest \
-  | jq '.schema | fromjson | .fields[] | select(.name == "address")'
+SELECT id, LEFT(address, 60) AS addr_preview
+FROM postgres.e2e_testing.customers_std
+WHERE id = 900072;
 ```
 
 #### Step 4 — Cleanup
 
 ```sql
 -- psql
-DELETE FROM public.customers WHERE email = 'longaddr@example.com';
+DELETE FROM public.customers WHERE id = 900072;
 ```
 
 ---
 
 ### Test 7d — Oracle: ADD COLUMN via LogMiner
-
-> **Note:** Oracle DDL is captured by Debezium via LogMiner. The DDL event appears in
-> `schema-changes.oracle`. The Oracle connector must be running and in streaming (not snapshot) phase.
 
 #### Step 1 — Add a column to CACHE_TESTING.CUSTOMERS in Oracle
 
@@ -1364,10 +1566,8 @@ kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
 sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
 ALTER TABLE CACHE_TESTING.CUSTOMERS ADD (loyalty_points NUMBER(10) DEFAULT 0);
 COMMIT;
-SELECT column_name, data_type, data_length
-FROM dba_tab_columns
-WHERE owner = 'CACHE_TESTING' AND table_name = 'CUSTOMERS'
-ORDER BY column_id;
+SELECT column_name, data_type FROM dba_tab_columns
+WHERE owner = 'CACHE_TESTING' AND table_name = 'CUSTOMERS' ORDER BY column_id;
 EXIT;
 EOF
 "
@@ -1379,10 +1579,10 @@ EOF
 kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
 sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
 INSERT INTO CACHE_TESTING.CUSTOMERS
-  (id, name, email, phone, address, city, country, created_at, updated_at, loyalty_points)
+  (ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT, LOYALTY_POINTS)
 VALUES
-  (9999001, 'OraSchemaEvo', 'oraevo@example.com', '555-9001',
-   '1 Oracle St', 'Sydney', 'AU', SYSDATE, SYSDATE, 500);
+  (900073, 'OraSchemaEvo', 'oraevo@example.com', '555-9001',
+   '73 Oracle St', 'Sydney', 'AU', SYSDATE, SYSDATE, 500);
 COMMIT;
 EXIT;
 EOF
@@ -1392,21 +1592,16 @@ EOF
 #### Step 3 — Verify the DDL event reached Kafka
 
 ```bash
-# Check schema-changes.oracle topic for the ALTER TABLE event
-# (consume last message from the schema-change topic)
 kubectl exec -n prod \
   $(kubectl get pod -n prod -l app=debezium-connect -o jsonpath='{.items[0].metadata.name}') -- \
   bash -c "
 kafka-console-consumer.sh \
   --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
-  --topic schema-changes.oracle \
-  --from-beginning \
-  --max-messages 50 \
+  --topic schema-changes.oracle --from-beginning --max-messages 50 \
   --consumer-property security.protocol=SASL_PLAINTEXT \
   --consumer-property sasl.mechanism=SCRAM-SHA-512 \
   --consumer-property 'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"debezium-user\" password=\"i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H\";' \
   2>/dev/null | grep -i 'loyalty_points' | head -5"
-# Expected: JSON containing 'loyalty_points' in the DDL event
 ```
 
 #### Step 4 — Verify in Iceberg
@@ -1416,13 +1611,12 @@ sleep 15   # Oracle LogMiner has slightly higher latency than PostgreSQL WAL
 ```
 
 ```sql
--- Spark SQL
-DESCRIBE oracle.cache_testing.customers;
--- Expected: loyalty_points  bigint  (Oracle NUMBER maps to bigint/decimal)
+DESCRIBE oracle.e2e_testing.customers_std;
+-- Expected: loyalty_points  bigint
 
 SELECT id, name, loyalty_points, snap_timestamp
-FROM oracle.cache_testing.customers
-WHERE id = 9999001;
+FROM oracle.e2e_testing.customers_std
+WHERE id = 900073;
 -- Expected: loyalty_points = 500
 ```
 
@@ -1431,10 +1625,8 @@ WHERE id = 9999001;
 ```bash
 kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
 sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
-DELETE FROM CACHE_TESTING.CUSTOMERS WHERE id = 9999001;
+DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900073;
 COMMIT;
--- Leave the column in place for subsequent tests; drop only if needed:
--- ALTER TABLE CACHE_TESTING.CUSTOMERS DROP COLUMN loyalty_points;
 EXIT;
 EOF
 "
@@ -1444,11 +1636,7 @@ EOF
 
 ### Test 7e — MongoDB: New Field (implicit schema evolution)
 
-> **MongoDB is schemaless** — there is no DDL. When a document gains a new field,
-> Debezium emits the full document with the new field in the `after` JSON string.
-> Iceberg picks it up via `mergeSchema=true` on the next write.
-
-#### Step 1 — Insert a document with an extra field
+#### Step 1 — Insert a document with extra fields
 
 ```bash
 kubectl exec -n prod \
@@ -1456,16 +1644,16 @@ kubectl exec -n prod \
   mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
   --quiet --eval '
 db.customers.insertOne({
+  id:           900074,
   name:         "MongoSchemaEvo",
   email:        "mongoevo@example.com",
   phone:        "555-0004",
-  address:      "1 Mongo St",
+  address:      "74 Mongo St",
   city:         "Perth",
   country:      "AU",
-  loyalty_tier: "PLATINUM",      // ← new field not previously seen
-  referral_code: "REF2025XYZ",   // ← another new field
-  created_at:   new Date(),
-  updated_at:   new Date()
+  loyalty_tier: "PLATINUM",
+  referral_code: "REF2025XYZ",
+  created_at:   new Date()
 });
 '
 ```
@@ -1477,21 +1665,13 @@ sleep 10
 ```
 
 ```sql
--- Spark SQL: both new fields should appear via mergeSchema
-DESCRIBE mongodb.cache_testing.customers;
+DESCRIBE mongodb.e2e_testing.customers_std;
 -- Expected: loyalty_tier and referral_code columns now present
 
-SELECT _id, name, loyalty_tier, referral_code, snap_timestamp
-FROM mongodb.cache_testing.customers
-WHERE email = 'mongoevo@example.com';
+SELECT id, name, loyalty_tier, referral_code, snap_timestamp
+FROM mongodb.e2e_testing.customers_std
+WHERE id = 900074;
 -- Expected: loyalty_tier = 'PLATINUM', referral_code = 'REF2025XYZ'
-
--- Pre-evolution rows have NULL for the new fields
-SELECT _id, loyalty_tier, referral_code
-FROM mongodb.cache_testing.customers
-WHERE email != 'mongoevo@example.com'
-LIMIT 3;
--- Expected: NULL for both columns in older rows
 ```
 
 #### Step 3 — Cleanup
@@ -1500,20 +1680,16 @@ LIMIT 3;
 kubectl exec -n prod \
   $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
   mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
-  --quiet --eval 'db.customers.deleteOne({ email: "mongoevo@example.com" });'
+  --quiet --eval 'db.customers.deleteOne({ id: 900074 });'
 ```
 
 ---
 
 ### Test 7f — Schema Registry Version History Verification
 
-After running tests 7a–7e, verify the complete schema version history in the Schema Registry:
-
 ```bash
-# List all subjects (topics that have registered schemas)
 curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects | jq 'sort'
 
-# For each customers topic — list all schema versions
 for SUBJECT in \
   "postgres.cache_testing.customers-value" \
   "oracle.cache_testing.customers-value" \
@@ -1521,26 +1697,18 @@ for SUBJECT in \
   echo "=== $SUBJECT ==="
   VERSIONS=$(curl -s "http://schema-registry.prod.svc.cluster.local:8081/subjects/${SUBJECT}/versions")
   echo "Versions: $VERSIONS"
-  # Show field names in the latest version
   curl -s "http://schema-registry.prod.svc.cluster.local:8081/subjects/${SUBJECT}/versions/latest" \
     | jq '.schema | fromjson | .fields[].name'
   echo ""
 done
 ```
 
-**Expected output for postgres.cache_testing.customers-value:**
-```
-Versions: [1,2,3,4]   ← one per schema change made in tests 7a–7c
-Field names in latest version include all original fields (loyalty_tier absent if dropped in 7b)
-```
-
-**Confirm the executor-level SR cache was effective — check Spark logs:**
+**Confirm executor-level SR cache working:**
 ```bash
 kubectl logs -n prod \
   $(kubectl get pod -n prod -l pipeline.write-mode=standard -o jsonpath='{.items[0].metadata.name}') \
   | grep "avro_to_json\|schema_id\|SR_CLIENT" | tail -20
-# Expected: schema_id fetch logged only once per NEW schema ID,
-# NOT once per message (absence of repeated fetch logs = cache is working)
+# Expected: schema_id fetch logged only once per NEW schema ID, not per message
 ```
 
 ---
@@ -1549,18 +1717,18 @@ kubectl logs -n prod \
 
 | Test | Source | DDL Operation | Debezium behaviour | Iceberg outcome |
 |---|---|---|---|---|
-| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | New Avro schema version registered in SR | Column added via `mergeSchema`; old rows = NULL |
-| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | New Avro schema without the field | Column kept in Iceberg; future rows = NULL |
-| **7c** | PostgreSQL | `ALTER COLUMN address TYPE TEXT` | New Avro schema; type string → string | No Iceberg type change (both = string) |
-| **7d** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | DDL in `schema-changes.oracle`; new Avro schema | Column added via `mergeSchema`; old rows = NULL |
-| **7e** | MongoDB | New field in document (no DDL) | Full document in `after` with new field | Column added via `mergeSchema`; old docs = NULL |
-| **7f** | All | Schema Registry audit | — | All versions visible; SR cache verified |
+| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | New Avro schema version in SR | Column added via `mergeSchema`; old rows = NULL |
+| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | New Avro schema without field | Column kept in Iceberg; future rows = NULL |
+| **7c** | PostgreSQL | `ALTER COLUMN address TYPE TEXT` | New Avro schema; string → string | No Iceberg type change |
+| **7d** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | DDL in `schema-changes.oracle` | Column added; old rows = NULL |
+| **7e** | MongoDB | New field in document (no DDL) | Full document with new field in `after` | Column added via `mergeSchema` |
+| **7f** | All | SR audit | — | All versions visible; SR cache verified |
 
 ---
 
 ## 9. Section 8 — Peak-Hour Simulation
 
-**Purpose:** Verify that the pipeline can be tuned for higher throughput by adjusting parallelism settings.
+**Purpose:** Verify the pipeline handles burst load with the parallelism tuning knobs.
 
 ### Step 1 — Check current ConfigMap settings
 
@@ -1568,9 +1736,7 @@ kubectl logs -n prod \
 kubectl get configmap kafka-to-iceberg-config -n prod -o yaml
 ```
 
-Note the current values of `MERGE_PARALLELISM` and `COALESCE_BEFORE_MERGE`.
-
-### Step 2 — Apply peak-hour settings via kubectl patch
+### Step 2 — Apply peak-hour settings
 
 ```bash
 kubectl patch configmap kafka-to-iceberg-config -n prod --type merge -p '{
@@ -1579,10 +1745,6 @@ kubectl patch configmap kafka-to-iceberg-config -n prod --type merge -p '{
     "COALESCE_BEFORE_MERGE": "8"
   }
 }'
-```
-
-Verify the patch:
-```bash
 kubectl get configmap kafka-to-iceberg-config -n prod \
   -o jsonpath='{.data.MERGE_PARALLELISM} / {.data.COALESCE_BEFORE_MERGE}{"\n"}'
 # Expected: 16 / 8
@@ -1595,36 +1757,33 @@ kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
 kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ```
 
-### Step 4 — Verify new settings are active in logs
+### Step 4 — Verify settings are active in logs
 
 ```bash
 kubectl logs -n prod -l app=kafka-to-iceberg-standard --tail=50 \
   | grep -E "MERGE_PARALLELISM|COALESCE_BEFORE_MERGE"
 ```
 
-**Expected:** Log lines confirming `MERGE_PARALLELISM=16` and `COALESCE_BEFORE_MERGE=8`.
-
-### Step 5 — Generate a burst of inserts to observe throughput
+### Step 5 — Generate a burst of inserts
 
 ```sql
--- psql — insert 1000 rows rapidly
+-- psql — 1000 rows
 DO $$
 BEGIN
-  FOR i IN 200000..201000 LOOP
-    INSERT INTO customers (customer_id, first_name, last_name, email, phone, created_at)
-    VALUES (i, 'BurstTest', 'Row' || i, 'burst_' || i || '@example.com', '555-' || i, NOW());
+  FOR i IN 901000..901999 LOOP
+    INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
+    VALUES (i, 'BurstTest', 'burst_' || i || '@example.com', '555-' || i,
+            i || ' Burst St', 'Sydney', 'AU', NOW());
   END LOOP;
 END $$;
 COMMIT;
 ```
 
-### Step 6 — Monitor batch duration in Spark logs
+### Step 6 — Monitor batch duration
 
 ```bash
 kubectl logs -n prod -l app=kafka-to-iceberg-standard -f | grep -E "Batch [0-9]+ took"
 ```
-
-**Expected:** Batch duration should be similar to or lower than normal-load batches despite higher row counts. Compare with baseline batch duration from Step 4 log output.
 
 ### Step 7 — Restore normal settings
 
@@ -1643,7 +1802,7 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 
 ```sql
 -- psql
-DELETE FROM customers WHERE customer_id BETWEEN 200000 AND 201000;
+DELETE FROM customers WHERE id BETWEEN 901000 AND 901999;
 COMMIT;
 ```
 
@@ -1652,7 +1811,8 @@ sleep 10
 ```
 
 ```sql
-SELECT COUNT(*) FROM postgres.cache_testing.customers WHERE customer_id BETWEEN 200000 AND 201000;
+SELECT COUNT(*) FROM postgres.e2e_testing.customers_std
+WHERE id BETWEEN 901000 AND 901999;
 -- Expected: 0
 ```
 
@@ -1662,31 +1822,35 @@ SELECT COUNT(*) FROM postgres.cache_testing.customers WHERE customer_id BETWEEN 
 
 | Test | Action | Expected Iceberg Result |
 |---|---|---|
-| **1.1 PG INSERT** | INSERT customer_id=99999 | Row appears; `snap_id` ≠ NULL; `snap_timestamp` recent |
-| **1.1 PG UPDATE** | UPDATE customer_id=99999 email | `email` updated; `snap_id` changed; `snap_timestamp` newer |
-| **1.1 PG DELETE** | DELETE customer_id=99999 | Row gone; `COUNT = 0` |
-| **1.2 ORA INSERT** | INSERT customer_id=99998 | Row appears in `oracle.cache_testing.customers` |
-| **1.2 ORA UPDATE** | UPDATE customer_id=99998 email | `email` updated in Iceberg |
-| **1.2 ORA DELETE** | DELETE customer_id=99998 | Row hard-deleted from Iceberg |
-| **1.3 MDB INSERT** | insertOne customer_id=99997 | Row appears in `mongodb.cache_testing.customers` |
-| **1.3 MDB UPDATE** | updateOne customer_id=99997 email | `email` updated in Iceberg |
-| **1.3 MDB DELETE** | deleteOne customer_id=99997 | Row hard-deleted from Iceberg |
-| **2.1 Soft INSERT** | INSERT customer_id=88888 | `is_deleted=false`; `deleted_at=NULL` |
-| **2.2 Soft UPDATE** | UPDATE customer_id=88888 | `email` updated; `is_deleted` still false |
-| **2.3 Soft DELETE** | DELETE customer_id=88888 | Row present; `is_deleted=true`; `deleted_at` non-null |
-| **3.1 Hist INSERT** | INSERT customer_id=77777 | `_hist` row: `_change_type='INSERT'`; `before_*=NULL` |
-| **3.2 Hist UPDATE** | UPDATE customer_id=77777 | Second `_hist` row: `_change_type='UPDATE'`; `before_email` populated |
-| **3.3 Hist DELETE** | DELETE customer_id=77777 | Third `_hist` row: `_change_type='DELETE'`; `after_*=NULL` |
-| **4.1 deduplicate** | 3 rapid UPDATEs same row | Only last value in Iceberg |
-| **4.2 mask_pii** | INSERT with email/phone | SHA-256 hex stored; no plaintext |
-| **4.3 proc_time** | INSERT any row | `proc_time` TIMESTAMP column non-null |
-| **4.4 op_label** | INSERT / UPDATE | `op_label = 'INSERT'` / `'UPDATE'` |
-| **4.5 source_tag** | INSERT any row | `source_system = 'postgres'` |
-| **4.7 filter_op** | DELETE while `filter_op(["c","u"])` | Row remains in Iceberg (delete suppressed) |
-| **5.1 Partitions** | Query `.partitions` metadata | Hourly + bucket partitions visible |
-| **5.2 snap_id unique** | Uniqueness check per batch | 0 duplicates |
-| **5.3 snap_timestamp** | `created_at=2020` insert | `snap_timestamp` ≈ now (not 2020) |
-| **5.4 Partition pruning** | EXPLAIN with `snap_timestamp` filter | Partition pruning visible in plan |
-| **6 Multi-source** | Simultaneous inserts across 3 DBs | All 3 rows in Iceberg within 10 s |
-| **7 Schema evo** | ALTER TABLE ADD COLUMN | New column appears in Iceberg; old rows NULL |
-| **8 Peak-hour** | MERGE_PARALLELISM=16 burst | Batch completes; no errors; setting confirmed in logs |
+| **1.1 PG INSERT** | INSERT id=900001 | Row in `postgres.e2e_testing.customers_std`; `snap_id` ≠ NULL |
+| **1.1 PG UPDATE** | UPDATE id=900001 email | `email` updated; `snap_id` changed; `snap_timestamp` newer |
+| **1.1 PG DELETE** | DELETE id=900001 | Row gone; `COUNT = 0` |
+| **1.2 ORA INSERT** | INSERT id=900002 | Row in `oracle.e2e_testing.customers_std` |
+| **1.2 ORA UPDATE** | UPDATE id=900002 email | `email` updated |
+| **1.2 ORA DELETE** | DELETE id=900002 | Row hard-deleted |
+| **1.3 MDB INSERT** | insertOne id=900003 | Row in `mongodb.e2e_testing.customers_std` |
+| **1.3 MDB UPDATE** | updateOne id=900003 | `email` updated |
+| **1.3 MDB DELETE** | deleteOne id=900003 | Row hard-deleted |
+| **2.1 Soft INSERT** | INSERT id=900010 | `customers_sd`: `is_deleted=false`; `deleted_at=NULL` |
+| **2.2 Soft UPDATE** | UPDATE id=900010 | `email` updated; `is_deleted` still false |
+| **2.3 Soft DELETE** | DELETE id=900010 | Row present; `is_deleted=true`; `deleted_at` non-null |
+| **3.1 Hist INSERT** | INSERT id=900020 | `customers_hist`: `_change_type='INSERT'`; `before_*=NULL` |
+| **3.2 Hist UPDATE** | UPDATE id=900020 | 2nd hist row: `_change_type='UPDATE'`; `before_email` populated |
+| **3.3 Hist DELETE** | DELETE id=900020 | 3rd hist row: `_change_type='DELETE'`; `after_*=NULL` |
+| **4.1 deduplicate** | 3 rapid UPDATEs id=900030 | `customers_dedup`: only last value; 1 row |
+| **4.2 mask_columns** | INSERT id=900031 PII | `customers_masked`: SHA-256 hex in email/phone; no plaintext |
+| **4.3 proc_time** | INSERT id=900032 | `customers_proc_time`: `proc_time` non-null TIMESTAMP |
+| **4.4 op_label** | INSERT/UPDATE id=900033 | `customers_op_label`: `op_label='INSERT'` / `'UPDATE'` |
+| **4.5 source_tag** | INSERT id=900034 | `customers_source_tag`: `source_system='postgres'` |
+| **4.6 filter_ins** | DELETE id=900035 while filter_op(["c","u"]) | `customers_filter_ins`: row stays (delete suppressed) |
+| **4.7 filter_del** | INSERT id=900036 while filter_op(["d"]) | `customers_filter_del`: 0 rows for INSERT; 1 row for DELETE |
+| **4.8 enrich** | INSERT order id=900040 | `orders_enriched`: `product_name`/`product_category` populated |
+| **4.9 before_after** | INSERT+UPDATE id=900041 | `customers_before_after`: `before_*` and `after_*` side-by-side |
+| **4.10 nullcoal** | INSERT id=900042 NULL phone/country | `customers_nullcoal`: `phone='UNKNOWN'`; `country='N/A'` |
+| **5.1 Partitions** | Query `.partitions` metadata | Hourly + bucket partitions visible in `customers_std` |
+| **5.2 snap_id unique** | Uniqueness check | 0 duplicate snap_ids within any batch |
+| **5.3 snap_timestamp** | Insert with `created_at=2020` | `snap_timestamp` ≈ now (not 2020) |
+| **5.4 Partition pruning** | EXPLAIN with `snap_timestamp` filter | Partition pruning in plan |
+| **6 Multi-source** | Simultaneous inserts PG/ORA/MDB | 3 rows across `postgres/oracle/mongodb.e2e_testing.customers_std` within 10 s |
+| **7 Schema evo** | ALTER TABLE ADD COLUMN | New column in `customers_std`; old rows NULL |
+| **8 Peak-hour** | MERGE_PARALLELISM=16 burst 1000 rows | Batch completes; no errors; setting confirmed in logs |

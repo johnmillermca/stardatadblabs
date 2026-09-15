@@ -19,39 +19,49 @@ Each source has its own copy of every table, so the same Kafka topic can fan-out
 into three independent Iceberg tables simultaneously when all three write-mode
 deployments are active.
 
-Test tables  (namespace: test_standard / test_soft_delete / test_history / test_transforms)
--------------------------------------------------------------------------------------------
-Dedicated long-lived test tables that are NEVER mixed with production data.
-These are used exclusively by runbook-30 E2E tests and StarTransform unit tests.
-They can be truncated/reset between test runs without affecting production.
+Test & StarTransform tables  (namespace: e2e_testing — single namespace per catalog)
+--------------------------------------------------------------------------------------
+All E2E test tables and StarTransform function test tables share ONE namespace
+so they are easy to browse and reset without touching production data.
+Write mode and transform function are encoded in the table name suffix.
 
-  <catalog>.test_standard.<table>             — standard mode test target
-  <catalog>.test_soft_delete.<table>          — soft_delete mode test target
-  <catalog>.test_history.<table>_hist         — history_tracking test target
+  Write-mode test tables (fed from same source tables):
+    <catalog>.e2e_testing.customers_std         — standard mode (SCD Type 0)
+    <catalog>.e2e_testing.customers_sd          — soft_delete mode
+    <catalog>.e2e_testing.customers_hist        — history_tracking mode
+    <catalog>.e2e_testing.orders_std            — standard mode
+    <catalog>.e2e_testing.orders_sd             — soft_delete mode
+    <catalog>.e2e_testing.orders_hist           — history_tracking mode
 
-StarTransform test tables  (namespace: test_transforms)
---------------------------------------------------------
-One dedicated Iceberg table per StarTransform function, fed from
-postgres.cache_testing.customers and postgres.cache_testing.products.
-
-  postgres.test_transforms.customers_dedup       — deduplicate() test
-  postgres.test_transforms.customers_masked       — mask_columns() (PII hashed) test
-  postgres.test_transforms.customers_proc_time    — add_processing_time() test
-  postgres.test_transforms.customers_op_label     — add_op_label() test
-  postgres.test_transforms.customers_source_tag   — add_source_tag() test
-  postgres.test_transforms.customers_filter_ins   — filter_op(["c","u"]) test
-  postgres.test_transforms.customers_filter_del   — filter_op(["d"]) test (deletes only)
-  postgres.test_transforms.orders_enriched        — enrich_from_broadcast() join products
-  postgres.test_transforms.customers_before_after — pivot_before_after() (history columns)
-  postgres.test_transforms.customers_nullcoal     — null_coalesce() test
-  postgres.test_transforms.event_counts           — aggregate_counts() test
+  StarTransform test tables (PostgreSQL only, fed from customers/products/orders):
+    postgres.e2e_testing.customers_dedup        — deduplicate() test
+    postgres.e2e_testing.customers_masked       — mask_columns() (PII hashed) test
+    postgres.e2e_testing.customers_proc_time    — add_processing_time() test
+    postgres.e2e_testing.customers_op_label     — add_op_label() test
+    postgres.e2e_testing.customers_source_tag   — add_source_tag() test
+    postgres.e2e_testing.customers_filter_ins   — filter_op(["c","u"]) inserts/updates only
+    postgres.e2e_testing.customers_filter_del   — filter_op(["d"]) deletes only
+    postgres.e2e_testing.orders_enriched        — enrich_from_broadcast() join products
+    postgres.e2e_testing.customers_before_after — pivot_before_after() before/after cols
+    postgres.e2e_testing.customers_nullcoal     — null_coalesce() test
+    postgres.e2e_testing.event_counts           — aggregate_counts() test
 
 Naming convention
 -----------------
-  _std   = standard write mode
-  _sd    = soft_delete write mode
-  _hist  = history_tracking write mode (always append)
-  no suffix in test_* namespaces (mode is implied by namespace)
+  _std              = standard write mode
+  _sd               = soft_delete write mode
+  _hist             = history_tracking write mode (always append)
+  _dedup            = deduplicate() transform
+  _masked           = mask_columns() transform
+  _proc_time        = add_processing_time() transform
+  _op_label         = add_op_label() transform
+  _source_tag       = add_source_tag() transform
+  _filter_ins       = filter_op(["c","u"]) transform
+  _filter_del       = filter_op(["d"]) transform
+  _enriched         = enrich_from_broadcast() transform
+  _before_after     = pivot_before_after() transform
+  _nullcoal         = null_coalesce() transform
+  event_counts      = aggregate_counts() transform
 
 Partitioning (all tables)
 --------------------------
@@ -74,7 +84,7 @@ Usage
   # Only production tables for one source:
   SPARK_USER=dave TABLE_GROUP=prod SOURCE=postgres python3 06_create_iceberg_tables.py
 
-  # Only test tables:
+  # Only test/transform tables:
   SPARK_USER=dave TABLE_GROUP=test python3 06_create_iceberg_tables.py
 
   # Only StarTransform test tables:
@@ -109,6 +119,9 @@ SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
 # TABLE_GROUP: all | prod | test | transforms
 TABLE_GROUP   = os.environ.get("TABLE_GROUP", "all").lower()
 S3_BUCKET     = "xdatatoiceberg1"
+
+# Single namespace for all E2E test and StarTransform tables
+E2E_NS = "e2e_testing"
 
 _S = StructField  # brevity alias
 
@@ -374,9 +387,9 @@ def _with_extra(base: StructType, extras: list[StructField]) -> StructType:
 def _build_registry() -> list[dict]:
     reg: list[dict] = []
 
-    # ── helper to add all three mode variants for a table ──────────────────────
-    def _add(src: str, cat: str, ns: str, base_tbl: str, pk: str, s3pfx: str,
-             base_schema: StructType, purpose: str = "") -> None:
+    # ── helper to add all three mode variants for a production table ───────────
+    def _add_prod(src: str, cat: str, ns: str, base_tbl: str, pk: str, s3pfx: str,
+                  base_schema: StructType, purpose: str = "") -> None:
         # standard  → <table>_std
         reg.append(dict(
             group="prod", source_key=src, catalog=cat, namespace=ns,
@@ -408,86 +421,85 @@ def _build_registry() -> list[dict]:
     # ── Production tables ───────────────────────────────────────────────────────
 
     # PostgreSQL
-    _add("postgres","postgres","cache_testing","customers",       "id",  "iceberg/pg_lakehouse",  _PG_CUSTOMERS)
-    _add("postgres","postgres","cache_testing","products",        "id",  "iceberg/pg_lakehouse",  _PG_PRODUCTS)
-    _add("postgres","postgres","cache_testing","product_reviews", "id",  "iceberg/pg_lakehouse",  _PG_PRODUCT_REVIEWS)
-    _add("postgres","postgres","cache_testing","orders",          "id",  "iceberg/pg_lakehouse",  _PG_ORDERS)
+    _add_prod("postgres","postgres","cache_testing","customers",       "id",  "iceberg/pg_lakehouse",  _PG_CUSTOMERS)
+    _add_prod("postgres","postgres","cache_testing","products",        "id",  "iceberg/pg_lakehouse",  _PG_PRODUCTS)
+    _add_prod("postgres","postgres","cache_testing","product_reviews", "id",  "iceberg/pg_lakehouse",  _PG_PRODUCT_REVIEWS)
+    _add_prod("postgres","postgres","cache_testing","orders",          "id",  "iceberg/pg_lakehouse",  _PG_ORDERS)
 
     # Oracle CACHE_TESTING
-    _add("oracle","oracle","cache_testing","customers",        "id","iceberg/ora_lakehouse",_ORA_CT_CUSTOMERS)
-    _add("oracle","oracle","cache_testing","products",         "id","iceberg/ora_lakehouse",_ORA_CT_PRODUCTS)
-    _add("oracle","oracle","cache_testing","orders",           "id","iceberg/ora_lakehouse",_ORA_CT_ORDERS)
-    _add("oracle","oracle","cache_testing","order_items",      "id","iceberg/ora_lakehouse",_ORA_CT_ORDER_ITEMS)
-    _add("oracle","oracle","cache_testing","product_reviews",  "id","iceberg/ora_lakehouse",_ORA_CT_PRODUCT_REVIEWS)
-    _add("oracle","oracle","cache_testing","inventory_events", "id","iceberg/ora_lakehouse",_ORA_CT_INVENTORY_EVENTS)
+    _add_prod("oracle","oracle","cache_testing","customers",        "id","iceberg/ora_lakehouse",_ORA_CT_CUSTOMERS)
+    _add_prod("oracle","oracle","cache_testing","products",         "id","iceberg/ora_lakehouse",_ORA_CT_PRODUCTS)
+    _add_prod("oracle","oracle","cache_testing","orders",           "id","iceberg/ora_lakehouse",_ORA_CT_ORDERS)
+    _add_prod("oracle","oracle","cache_testing","order_items",      "id","iceberg/ora_lakehouse",_ORA_CT_ORDER_ITEMS)
+    _add_prod("oracle","oracle","cache_testing","product_reviews",  "id","iceberg/ora_lakehouse",_ORA_CT_PRODUCT_REVIEWS)
+    _add_prod("oracle","oracle","cache_testing","inventory_events", "id","iceberg/ora_lakehouse",_ORA_CT_INVENTORY_EVENTS)
 
     # Oracle TPCDS
-    _add("oracle","oracle","tpcds","income_band",           "ib_income_band_sk", "iceberg/ora_lakehouse",_ORA_TPCDS_INCOME_BAND)
-    _add("oracle","oracle","tpcds","ship_mode",             "sm_ship_mode_sk",   "iceberg/ora_lakehouse",_ORA_TPCDS_SHIP_MODE)
-    _add("oracle","oracle","tpcds","warehouse",             "w_warehouse_sk",    "iceberg/ora_lakehouse",_ORA_TPCDS_WAREHOUSE)
-    _add("oracle","oracle","tpcds","reason",                "r_reason_sk",       "iceberg/ora_lakehouse",_ORA_TPCDS_REASON)
-    _add("oracle","oracle","tpcds","call_center",           "cc_call_center_sk", "iceberg/ora_lakehouse",_ORA_TPCDS_CALL_CENTER)
-    _add("oracle","oracle","tpcds","web_site",              "web_site_sk",       "iceberg/ora_lakehouse",_ORA_TPCDS_WEB_SITE)
-    _add("oracle","oracle","tpcds","web_page",              "wp_web_page_sk",    "iceberg/ora_lakehouse",_ORA_TPCDS_WEB_PAGE)
-    _add("oracle","oracle","tpcds","household_demographics","hd_demo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_HOUSEHOLD_DEMOGRAPHICS)
-    _add("oracle","oracle","tpcds","catalog_page",          "cp_catalog_page_sk","iceberg/ora_lakehouse",_ORA_TPCDS_CATALOG_PAGE)
-    _add("oracle","oracle","tpcds","promotion",             "p_promo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_PROMOTION)
+    _add_prod("oracle","oracle","tpcds","income_band",           "ib_income_band_sk", "iceberg/ora_lakehouse",_ORA_TPCDS_INCOME_BAND)
+    _add_prod("oracle","oracle","tpcds","ship_mode",             "sm_ship_mode_sk",   "iceberg/ora_lakehouse",_ORA_TPCDS_SHIP_MODE)
+    _add_prod("oracle","oracle","tpcds","warehouse",             "w_warehouse_sk",    "iceberg/ora_lakehouse",_ORA_TPCDS_WAREHOUSE)
+    _add_prod("oracle","oracle","tpcds","reason",                "r_reason_sk",       "iceberg/ora_lakehouse",_ORA_TPCDS_REASON)
+    _add_prod("oracle","oracle","tpcds","call_center",           "cc_call_center_sk", "iceberg/ora_lakehouse",_ORA_TPCDS_CALL_CENTER)
+    _add_prod("oracle","oracle","tpcds","web_site",              "web_site_sk",       "iceberg/ora_lakehouse",_ORA_TPCDS_WEB_SITE)
+    _add_prod("oracle","oracle","tpcds","web_page",              "wp_web_page_sk",    "iceberg/ora_lakehouse",_ORA_TPCDS_WEB_PAGE)
+    _add_prod("oracle","oracle","tpcds","household_demographics","hd_demo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_HOUSEHOLD_DEMOGRAPHICS)
+    _add_prod("oracle","oracle","tpcds","catalog_page",          "cp_catalog_page_sk","iceberg/ora_lakehouse",_ORA_TPCDS_CATALOG_PAGE)
+    _add_prod("oracle","oracle","tpcds","promotion",             "p_promo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_PROMOTION)
 
     # MongoDB
-    _add("mongodb","mongodb","cache_testing","customers","_id","iceberg/mgo_lakehouse",_MGO_CUSTOMERS)
-    _add("mongodb","mongodb","cache_testing","products", "_id","iceberg/mgo_lakehouse",_MGO_PRODUCTS)
+    _add_prod("mongodb","mongodb","cache_testing","customers","_id","iceberg/mgo_lakehouse",_MGO_CUSTOMERS)
+    _add_prod("mongodb","mongodb","cache_testing","products", "_id","iceberg/mgo_lakehouse",_MGO_PRODUCTS)
 
-    # ── Dedicated test tables (one namespace per write mode) ────────────────────
-    # These target the same PostgreSQL, Oracle, MongoDB sources but land in
-    # test_standard / test_soft_delete / test_history namespaces so they never
-    # mix with production data and can be safely truncated between test runs.
+    # ── E2E test tables — all in a single namespace: e2e_testing ───────────────
+    # Write-mode variants for each source table, all in <catalog>.e2e_testing.
+    # Table suffix encodes the write mode:  _std | _sd | _hist
+    # Safe to truncate / reset between test runs without touching production.
 
     for src, cat, base_tbl, pk, s3pfx, base_schema in [
-        ("postgres","postgres","customers",       "id", "iceberg/pg_test",  _PG_CUSTOMERS),
-        ("postgres","postgres","products",        "id", "iceberg/pg_test",  _PG_PRODUCTS),
-        ("postgres","postgres","orders",          "id", "iceberg/pg_test",  _PG_ORDERS),
-        ("oracle",  "oracle",  "customers",       "id", "iceberg/ora_test", _ORA_CT_CUSTOMERS),
-        ("oracle",  "oracle",  "orders",          "id", "iceberg/ora_test", _ORA_CT_ORDERS),
-        ("mongodb", "mongodb", "customers",       "_id","iceberg/mgo_test", _MGO_CUSTOMERS),
+        ("postgres","postgres","customers",       "id", "iceberg/pg_e2e",  _PG_CUSTOMERS),
+        ("postgres","postgres","products",        "id", "iceberg/pg_e2e",  _PG_PRODUCTS),
+        ("postgres","postgres","orders",          "id", "iceberg/pg_e2e",  _PG_ORDERS),
+        ("oracle",  "oracle",  "customers",       "id", "iceberg/ora_e2e", _ORA_CT_CUSTOMERS),
+        ("oracle",  "oracle",  "orders",          "id", "iceberg/ora_e2e", _ORA_CT_ORDERS),
+        ("mongodb", "mongodb", "customers",       "_id","iceberg/mgo_e2e", _MGO_CUSTOMERS),
     ]:
-        # standard test
+        # standard
         reg.append(dict(
-            group="test", source_key=src, catalog=cat, namespace="test_standard",
-            table=base_tbl, pk_col=pk,
-            s3_prefix=f"{s3pfx}/test_standard/{base_tbl}",
+            group="test", source_key=src, catalog=cat, namespace=E2E_NS,
+            table=f"{base_tbl}_std", pk_col=pk,
+            s3_prefix=f"{s3pfx}/{E2E_NS}/{base_tbl}_std",
             schema=base_schema,
             write_mode="standard",
-            purpose=f"[TEST] standard mode — {src}.{base_tbl}",
+            purpose=f"[E2E] standard mode — {src}.{base_tbl}",
         ))
-        # soft_delete test
+        # soft_delete
         reg.append(dict(
-            group="test", source_key=src, catalog=cat, namespace="test_soft_delete",
-            table=base_tbl, pk_col=pk,
-            s3_prefix=f"{s3pfx}/test_soft_delete/{base_tbl}",
+            group="test", source_key=src, catalog=cat, namespace=E2E_NS,
+            table=f"{base_tbl}_sd", pk_col=pk,
+            s3_prefix=f"{s3pfx}/{E2E_NS}/{base_tbl}_sd",
             schema=_with_extra(base_schema, _SD_EXTRA),
             write_mode="soft_delete",
-            purpose=f"[TEST] soft_delete mode — {src}.{base_tbl}",
+            purpose=f"[E2E] soft_delete mode — {src}.{base_tbl}",
         ))
-        # history_tracking test
+        # history_tracking
         reg.append(dict(
-            group="test", source_key=src, catalog=cat, namespace="test_history",
+            group="test", source_key=src, catalog=cat, namespace=E2E_NS,
             table=f"{base_tbl}_hist", pk_col=pk,
-            s3_prefix=f"{s3pfx}/test_history/{base_tbl}_hist",
+            s3_prefix=f"{s3pfx}/{E2E_NS}/{base_tbl}_hist",
             schema=_with_extra(base_schema, _HIST_EXTRA),
             write_mode="history_tracking",
-            purpose=f"[TEST] history_tracking mode — {src}.{base_tbl}",
+            purpose=f"[E2E] history_tracking mode — {src}.{base_tbl}",
         ))
 
-    # ── StarTransform test tables  (postgres.test_transforms.*) ────────────────
-    # Each table captures the output of ONE StarTransform function so results can
-    # be inspected independently without interference between tests.
-    # All fed from postgres.cache_testing.{customers,products,orders}.
+    # ── StarTransform test tables — also in postgres.e2e_testing ───────────────
+    # One table per StarTransform function.  All fed from postgres source tables.
+    # Suffix encodes the transform being tested (see naming convention at top).
 
     # customers_dedup — deduplicate(pk="id", order_col="kafka_ts")
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_dedup", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_dedup",
+        namespace=E2E_NS, table="customers_dedup", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_dedup",
         schema=_PG_CUSTOMERS,
         write_mode="standard",
         purpose="[TRANSFORM] deduplicate() — last-write-wins per customer id",
@@ -496,8 +508,8 @@ def _build_registry() -> list[dict]:
     # customers_masked — mask_columns(["email","phone"])
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_masked", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_masked",
+        namespace=E2E_NS, table="customers_masked", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_masked",
         schema=_PG_CUSTOMERS,
         write_mode="standard",
         purpose="[TRANSFORM] mask_columns() — email + phone SHA-256 hashed",
@@ -506,8 +518,8 @@ def _build_registry() -> list[dict]:
     # customers_proc_time — add_processing_time(col_name="proc_time")
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_proc_time", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_proc_time",
+        namespace=E2E_NS, table="customers_proc_time", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_proc_time",
         schema=_with_extra(_PG_CUSTOMERS, [_S("proc_time", TimestampType(), True)]),
         write_mode="standard",
         purpose="[TRANSFORM] add_processing_time() — proc_time TIMESTAMP injected",
@@ -516,8 +528,8 @@ def _build_registry() -> list[dict]:
     # customers_op_label — add_op_label()
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_op_label", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_op_label",
+        namespace=E2E_NS, table="customers_op_label", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_op_label",
         schema=_with_extra(_PG_CUSTOMERS, [_S("op_label", StringType(), True)]),
         write_mode="standard",
         purpose="[TRANSFORM] add_op_label() — INSERT/UPDATE/DELETE string column",
@@ -526,8 +538,8 @@ def _build_registry() -> list[dict]:
     # customers_source_tag — add_source_tag(source_system="postgres")
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_source_tag", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_source_tag",
+        namespace=E2E_NS, table="customers_source_tag", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_source_tag",
         schema=_with_extra(_PG_CUSTOMERS, [_S("source_system", StringType(), True)]),
         write_mode="standard",
         purpose="[TRANSFORM] add_source_tag() — source_system STRING literal",
@@ -536,8 +548,8 @@ def _build_registry() -> list[dict]:
     # customers_filter_ins — filter_op(ops=["c","u"])  inserts + updates only
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_filter_ins", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_filter_ins",
+        namespace=E2E_NS, table="customers_filter_ins", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_filter_ins",
         schema=_PG_CUSTOMERS,
         write_mode="standard",
         purpose="[TRANSFORM] filter_op(['c','u']) — only inserts/updates land here",
@@ -546,15 +558,14 @@ def _build_registry() -> list[dict]:
     # customers_filter_del — filter_op(ops=["d"])  deletes only
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_filter_del", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_filter_del",
+        namespace=E2E_NS, table="customers_filter_del", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_filter_del",
         schema=_PG_CUSTOMERS,
         write_mode="standard",
         purpose="[TRANSFORM] filter_op(['d']) — only delete events land here",
     ))
 
     # orders_enriched — enrich_from_broadcast(products_dim, join_col="product_id")
-    # Uses orders table base, enriched with product category + name
     _ORDERS_ENRICHED = _with_extra(_PG_ORDERS, [
         _S("product_id",       LongType(),   True),   # join key
         _S("product_name",     StringType(), True),   # from products broadcast
@@ -562,40 +573,40 @@ def _build_registry() -> list[dict]:
     ])
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="orders_enriched", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/orders_enriched",
+        namespace=E2E_NS, table="orders_enriched", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/orders_enriched",
         schema=_ORDERS_ENRICHED,
         write_mode="standard",
         purpose="[TRANSFORM] enrich_from_broadcast() — orders joined with products dim",
     ))
 
     # customers_before_after — pivot_before_after() on history_tracking stream
-    # Shows both before_ and after_ columns side-by-side for UPDATE/DELETE events
-    _BEFORE_AFTER = _with_extra(_HIST_EXTRA[0:1], [  # just _change_type as anchor
-        _S("_change_ts",      TimestampType(), True),
-        _S("before_id",       LongType(),      True),
-        _S("before_name",     StringType(),    True),
-        _S("before_email",    StringType(),    True),
-        _S("before_status",   StringType(),    True),
-        _S("after_id",        LongType(),      True),
-        _S("after_name",      StringType(),    True),
-        _S("after_email",     StringType(),    True),
-        _S("after_status",    StringType(),    True),
+    _BEFORE_AFTER = StructType([
+        _S("_change_type",  StringType(),    True),
+        _S("_change_ts",    TimestampType(), True),
+        _S("before_id",     LongType(),      True),
+        _S("before_name",   StringType(),    True),
+        _S("before_email",  StringType(),    True),
+        _S("before_status", StringType(),    True),
+        _S("after_id",      LongType(),      True),
+        _S("after_name",    StringType(),    True),
+        _S("after_email",   StringType(),    True),
+        _S("after_status",  StringType(),    True),
     ])
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_before_after", pk_col="after_id",
-        s3_prefix="iceberg/pg_transforms/customers_before_after",
+        namespace=E2E_NS, table="customers_before_after", pk_col="after_id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_before_after",
         schema=_BEFORE_AFTER,
         write_mode="history_tracking",
         purpose="[TRANSFORM] pivot_before_after() — before_* + after_* side by side",
     ))
 
-    # customers_nullcoal — null_coalesce({"status": "UNKNOWN", "country": "N/A"})
+    # customers_nullcoal — null_coalesce({"country": "N/A", "phone": "UNKNOWN"})
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="customers_nullcoal", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/customers_nullcoal",
+        namespace=E2E_NS, table="customers_nullcoal", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_nullcoal",
         schema=_PG_CUSTOMERS,
         write_mode="standard",
         purpose="[TRANSFORM] null_coalesce() — NULL country/phone replaced with defaults",
@@ -609,8 +620,8 @@ def _build_registry() -> list[dict]:
     ])
     reg.append(dict(
         group="transforms", source_key="postgres", catalog="postgres",
-        namespace="test_transforms", table="event_counts", pk_col="id",
-        s3_prefix="iceberg/pg_transforms/event_counts",
+        namespace=E2E_NS, table="event_counts", pk_col="id",
+        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/event_counts",
         schema=_EVENT_COUNTS,
         write_mode="standard",
         purpose="[TRANSFORM] aggregate_counts() — events per (customer_id, op)",
