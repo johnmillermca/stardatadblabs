@@ -1006,10 +1006,12 @@ Select warehouse: **Serverless Starter Warehouse**.
 
 ### 9-0 — Start a fresh Spark session (run this first, every time)
 
-> ⚠️ If you ran `spark.stop()` at the end of Section 2, or restarted the JupyterHub
-> kernel, the SparkContext is dead. You will see:
-> `IllegalStateException: Cannot call methods on a stopped SparkContext`
-> Run this cell to build a fresh session before any DML step.
+> ⚠️ **Gluten/Velox is disabled for this session.**
+> UPDATE and DELETE go through Iceberg's row-level rewrite plan. Gluten/Velox
+> intercepts SQL execution for columnar acceleration but does not support
+> Iceberg row-level write plans — with Gluten enabled, UPDATE and DELETE either
+> throw an error or silently do nothing. This session disables Gluten so that
+> Iceberg's own copy-on-write engine handles UPDATE/DELETE correctly.
 
 ```python
 import os, urllib.request, json
@@ -1017,7 +1019,7 @@ from pyspark.sql import SparkSession
 
 # ── Step 1: load credentials from OpenBao ────────────────────────────────────
 OPENBAO_ADDR  = "http://openbao.prod.svc.cluster.local:8200"
-OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxxxxxxxxxxx"   # ← paste fresh token
+OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxxxxxxxxxxx"   # ← paste fresh root token here
 
 def bao(path, field):
     req = urllib.request.Request(
@@ -1030,8 +1032,10 @@ def bao(path, field):
 S3_KEY         = bao("secret/data/platform/s3",      "access_key")
 S3_SECRET      = bao("secret/data/platform/s3",      "secret_key")
 S3_ENDPOINT    = bao("secret/data/platform/s3",      "endpoint")
+S3_REGION      = bao("secret/data/platform/s3",      "region")
 POLARIS_ID     = bao("secret/data/platform/polaris", "spark_svc_id")
 POLARIS_SECRET = bao("secret/data/platform/polaris", "spark_svc_secret")
+print("Credentials loaded")
 
 # ── Step 2: stop any stale / dead SparkContext ────────────────────────────────
 _s = SparkSession.getActiveSession()
@@ -1042,54 +1046,75 @@ if _s:
     except Exception:
         pass
 
-# ── Step 3: build a fresh session ────────────────────────────────────────────
+# ── Step 3: build a fresh session — Gluten DISABLED for DML ──────────────────
+# Gluten/Velox does not support Iceberg copy-on-write UPDATE/DELETE plans.
+# It must be absent from spark.plugins for UPDATE and DELETE to work.
 DRIVER_IP   = os.environ["SPARK_LOCAL_IP"]
 POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
 
-spark = SparkSession.builder \
-    .master("spark://spark-master-internal.prod.svc.cluster.local:17077") \
-    .appName("jupyter-dml-test") \
-    .config("spark.driver.host",        DRIVER_IP) \
-    .config("spark.driver.bindAddress", DRIVER_IP) \
-    .config("spark.executor.memory",    "2g") \
-    .config("spark.driver.memory",      "2g") \
-    .config("spark.pyspark.python",        "python3.11") \
-    .config("spark.pyspark.driver.python", "python3.11") \
+spark = (
+    SparkSession.builder
+    .master("spark://spark-master-internal.prod.svc.cluster.local:17077")
+    .appName("jupyter-dml-test")
+    .config("spark.driver.host",        DRIVER_IP)
+    .config("spark.driver.bindAddress", DRIVER_IP)
+    .config("spark.executor.memory",    "2g")
+    .config("spark.driver.memory",      "2g")
+    .config("spark.pyspark.python",        "python3.11")
+    .config("spark.pyspark.driver.python", "python3.11")
+    # ── Serialiser ───────────────────────────────────────────────────────────
+    .config("spark.serializer",                "org.apache.spark.serializer.KryoSerializer")
+    .config("spark.kryo.registrationRequired", "false")
+    # ── Iceberg extensions (required for UPDATE / DELETE / MERGE syntax) ─────
     .config("spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+    # ── databricks catalog → Polaris REST ────────────────────────────────────
     .config("spark.sql.catalog.databricks",
-            "org.apache.iceberg.spark.SparkCatalog") \
-    .config("spark.sql.catalog.databricks.type",             "rest") \
-    .config("spark.sql.catalog.databricks.uri",              POLARIS_URI) \
+            "org.apache.iceberg.spark.SparkCatalog")
+    .config("spark.sql.catalog.databricks.type",             "rest")
+    .config("spark.sql.catalog.databricks.uri",              POLARIS_URI)
     .config("spark.sql.catalog.databricks.oauth2-server-uri",
-            f"{POLARIS_URI}/v1/oauth/tokens") \
+            f"{POLARIS_URI}/v1/oauth/tokens")
     .config("spark.sql.catalog.databricks.credential",
-            f"{POLARIS_ID}:{POLARIS_SECRET}") \
-    .config("spark.sql.catalog.databricks.scope",            "PRINCIPAL_ROLE:ALL") \
-    .config("spark.sql.catalog.databricks.warehouse",        "star_lakehouse") \
-    .config("spark.sql.catalog.databricks.rest.auth.type",   "oauth2") \
-    .config("spark.sql.catalog.databricks.s3.access-key-id",     S3_KEY) \
-    .config("spark.sql.catalog.databricks.s3.secret-access-key", S3_SECRET) \
-    .config("spark.sql.catalog.databricks.s3.endpoint",          S3_ENDPOINT) \
-    .config("spark.sql.catalog.databricks.s3.path-style-access", "true") \
-    .config("spark.sql.catalog.databricks.client.region",        "us-east-2") \
+            f"{POLARIS_ID}:{POLARIS_SECRET}")
+    .config("spark.sql.catalog.databricks.scope",            "PRINCIPAL_ROLE:ALL")
+    .config("spark.sql.catalog.databricks.warehouse",        "star_lakehouse")
+    .config("spark.sql.catalog.databricks.rest.auth.type",   "oauth2")
+    .config("spark.sql.catalog.databricks.s3.access-key-id",     S3_KEY)
+    .config("spark.sql.catalog.databricks.s3.secret-access-key", S3_SECRET)
+    .config("spark.sql.catalog.databricks.s3.endpoint",          S3_ENDPOINT)
+    .config("spark.sql.catalog.databricks.s3.path-style-access", "true")
+    .config("spark.sql.catalog.databricks.client.region",        S3_REGION)
+    # ── S3A filesystem (Hadoop) ───────────────────────────────────────────────
     .config("spark.hadoop.fs.s3a.impl",
-            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-    .config("spark.hadoop.fs.s3a.access.key",        S3_KEY) \
-    .config("spark.hadoop.fs.s3a.secret.key",        S3_SECRET) \
-    .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT) \
-    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-    .config("spark.plugins",                         "org.apache.gluten.GlutenPlugin") \
-    .config("spark.gluten.sql.columnar.backend.lib", "velox") \
-    .config("spark.memory.offHeap.enabled",          "true") \
-    .config("spark.memory.offHeap.size",             "2g") \
+            "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.hadoop.fs.s3a.access.key",             S3_KEY)
+    .config("spark.hadoop.fs.s3a.secret.key",             S3_SECRET)
+    .config("spark.hadoop.fs.s3a.endpoint",               S3_ENDPOINT)
+    .config("spark.hadoop.fs.s3a.endpoint.region",        S3_REGION)
+    .config("spark.hadoop.fs.s3a.path.style.access",      "true")
+    .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "true")
+    .config("spark.hadoop.fs.s3.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.hadoop.fs.s3.access.key",         S3_KEY)
+    .config("spark.hadoop.fs.s3.secret.key",         S3_SECRET)
+    .config("spark.hadoop.fs.s3.endpoint",           S3_ENDPOINT)
+    .config("spark.hadoop.fs.s3.path.style.access",  "true")
+    # ── NO spark.plugins — Gluten disabled so UPDATE/DELETE work ─────────────
     .getOrCreate()
+)
 
 spark.sparkContext.setLogLevel("WARN")
-print("✅ Spark", spark.version, "ready —", DRIVER_IP)
+print(f"Spark {spark.version} ready — {DRIVER_IP}")
+print("Gluten: DISABLED (required for Iceberg UPDATE/DELETE)")
 ```
 
-✅ Expected: `✅ Spark 3.5.x ready — 10.244.x.x`
+Expected output:
+```
+Credentials loaded
+Spark 3.5.x ready — 10.244.x.x
+Gluten: DISABLED (required for Iceberg UPDATE/DELETE)
+```
 
 > When done with all DML tests run `spark.stop()` to release cluster cores.
 
