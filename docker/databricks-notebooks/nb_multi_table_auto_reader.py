@@ -65,7 +65,7 @@
 WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 DATABRICKS_CATALOG = "lakehouse"
 SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
-NOTEBOOK_VERSION   = "2026-09-15-v7"   # bump on every upload to confirm correct version is running
+NOTEBOOK_VERSION   = "2026-09-15-v8"   # bump on every upload to confirm correct version is running
 
 print(f"Notebook version   : {NOTEBOOK_VERSION}")
 print(f"Warehouse root     : {WAREHOUSE_ROOT}")
@@ -595,17 +595,29 @@ for tbl, snap in SNAPSHOTS.items():
         )
         row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {uc_table}").collect()[0]["n"]
 
+    # Create or replace a vw_<table>_latest UC view that reads from the Delta
+    # snapshot table.  This replaces any stale read_files()-based view that was
+    # created by a previous version of this notebook.  After this point every
+    # query against vw_<table>_latest automatically reads the current snapshot.
+    uc_view = f"{DATABRICKS_CATALOG}.{safe_db}.vw_{safe_tbl}_latest"
+    spark.sql(f"DROP VIEW IF EXISTS {uc_view}")
+    spark.sql(f"CREATE VIEW {uc_view} AS SELECT * FROM {uc_table}")
+
     print(f"  ✅ {uc_table}")
     print(f"     snapshot={snap_id}  ({snap_ts})")
     print(f"     rows={row_count:,}  live_files={len(live_files)}")
+    print(f"     view → {uc_view}")
     print()
 
 print("─" * 60)
-print(f"✅ {len(SNAPSHOTS)} Unity Catalog Delta table(s) written/refreshed")
+print(f"✅ {len(SNAPSHOTS)} Unity Catalog Delta table(s) and view(s) written/refreshed")
 print()
 print("  ⚠️  These tables are point-in-time snapshots of the Iceberg data.")
 print("  Re-run Cells 2 → 5b after any Iceberg write (INSERT/UPDATE/DELETE)")
 print("  to overwrite with the new snapshot.")
+print()
+print("  Each vw_<table>_latest view now points at the snap_* Delta table above.")
+print("  No manual view recreation needed after future notebook runs.")
 
 # COMMAND ----------
 
