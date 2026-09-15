@@ -65,7 +65,7 @@
 WAREHOUSE_ROOT     = "s3://stardata-databricks/iceberg/warehouse/"
 DATABRICKS_CATALOG = "lakehouse"
 SKIP_TABLES        = set()   # e.g. {"lakehouse_db.staging", "lakehouse_db._temp"}
-NOTEBOOK_VERSION   = "2026-09-15-v8"   # bump on every upload to confirm correct version is running
+NOTEBOOK_VERSION   = "2026-09-15-v9"   # bump on every upload to confirm correct version is running
 
 print(f"Notebook version   : {NOTEBOOK_VERSION}")
 print(f"Warehouse root     : {WAREHOUSE_ROOT}")
@@ -281,6 +281,28 @@ def resolve_live_files(table_name: str, meta_path: str) -> dict:
             f"[{table_name}] Snapshot {current_snapshot_id} listed as "
             f"current-snapshot-id but not found in snapshots[] array."
         )
+
+    # ── Early-exit: trust total-records from snapshot summary ────────────────
+    # Iceberg row-level DELETEs (merge-on-read) write delete files (content=1/2)
+    # alongside the original data files which remain EXISTING in the manifest.
+    # The notebook cannot apply delete files against data files — that requires
+    # the Iceberg reader engine.  However, total-records in the snapshot summary
+    # is always authoritative: if it is 0 the table is empty regardless of what
+    # parquet files exist on S3.
+    summary       = current_snapshot.get("summary", {})
+    total_records = int(summary.get("total-records", -1))
+    if total_records == 0:
+        print(
+            f"  [{table_name}] snapshot summary total-records=0 "
+            f"— table is empty after DELETE, skipping manifest walk"
+        )
+        return {
+            "table_name"  : table_name,
+            "snapshot_id" : current_snapshot_id,
+            "last_updated": ts,
+            "meta_name"   : meta_name,
+            "live_files"  : [],
+        }
 
     manifest_list_path = _norm(current_snapshot.get("manifest-list", ""))
     if not manifest_list_path:
