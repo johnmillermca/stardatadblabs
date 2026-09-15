@@ -472,9 +472,13 @@ for tbl, snap in SNAPSHOTS.items():
         action    = "CREATED (empty table — no live files)"
 
     else:
-        # Build a comma-separated, single-quoted file list for read_files().
+        # read_files() in Databricks does NOT accept multiple positional string
+        # arguments — passing 'file1', 'file2', ... as separate args raises:
+        #   UNKNOWN_POSITIONAL_ARGUMENT at position 1
+        # The correct way to pass multiple paths is as a SQL array literal:
+        #   read_files(array('path1', 'path2', ...), format => 'parquet', ...)
         # Paths are already normalised to s3:// by resolve_live_files() (_norm).
-        file_list_sql = ", ".join(f"'{f}'" for f in live_files)
+        file_array_sql = "array(" + ", ".join(f"'{f}'" for f in live_files) + ")"
 
         spark.sql(f"""
             CREATE OR REPLACE VIEW {view}
@@ -485,7 +489,7 @@ for tbl, snap in SNAPSHOTS.items():
                 _metadata.file_path AS snap_file,
                 _metadata.file_size AS snap_file_size
             FROM read_files(
-                {file_list_sql},
+                {file_array_sql},
                 format      => 'parquet',
                 mergeSchema => true
             )
@@ -659,8 +663,9 @@ if not live_files:
     """)
     print(f"✅ View CREATED (empty — no live files yet)")
 else:
-    # Paths already normalised to s3:// by resolve_live_files()
-    file_list_sql = ", ".join(f"'{f}'" for f in live_files)
+    # Paths already normalised to s3:// by resolve_live_files().
+    # Use array(...) — read_files() does not accept multiple positional string args.
+    file_array_sql = "array(" + ", ".join(f"'{f}'" for f in live_files) + ")"
 
     spark.sql(f"""
         CREATE OR REPLACE VIEW {view}
@@ -671,7 +676,7 @@ else:
             _metadata.file_path AS snap_file,
             _metadata.file_size AS snap_file_size
         FROM read_files(
-            {file_list_sql},
+            {file_array_sql},
             format      => 'parquet',
             mergeSchema => true
         )
