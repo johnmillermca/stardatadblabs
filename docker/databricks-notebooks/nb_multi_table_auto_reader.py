@@ -563,15 +563,16 @@ for tbl, snap in SNAPSHOTS.items():
             AS SELECT CAST(NULL AS STRING) AS _empty WHERE FALSE
         """)
     else:
-        # Build the file list as a comma-separated string of quoted S3 paths.
-        # read_files() is Databricks-native and accepts multiple literal paths.
-        # This embeds the exact live file set for this snapshot — no temp view
-        # dependency, no stale-session risk.
-        file_list_sql = ", ".join(f"'{p}'" for p in live_files)
+        # Build the file list as a SQL array literal: array('s3://...', 's3://...', ...)
+        # read_files() requires path => <array> — multiple positional string args are
+        # NOT supported and raise UNKNOWN_POSITIONAL_ARGUMENT (SQLSTATE 4274K).
+        # Using array() wraps all paths in a single named argument — no size limit,
+        # works for any number of files, no temp view dependency, cross-session safe.
+        file_array_sql = "array(" + ", ".join(f"'{p}'" for p in live_files) + ")"
         spark.sql(f"""
             CREATE OR REPLACE VIEW {uc_view}
             COMMENT 'Iceberg snapshot view for {tbl} — snapshot {snap_id} ({snap_ts}) — {len(live_files)} live files'
-            AS SELECT * FROM read_files({file_list_sql}, format => 'parquet', mergeSchema => true)
+            AS SELECT * FROM read_files(path => {file_array_sql}, format => 'parquet', mergeSchema => true)
         """)
 
     print(f"  ✅ {uc_view}")
@@ -734,12 +735,12 @@ print("Cell 9 — single-table registration: SKIPPED (manual-only cell, all code
 #     print(f"   snapshot={snap_info['snapshot_id']}")
 #     print(f"   rows={row_count:,}  live_files={len(live_files)}")
 #
-# # Promote to Unity Catalog view — uses read_files() directly (no temp view dependency)
-# file_list_sql = ", ".join(f"'{p}'" for p in live_files)
+# # Promote to Unity Catalog view — uses read_files(path => array(...)) directly
+# file_array_sql = "array(" + ", ".join(f"'{p}'" for p in live_files) + ")"
 # spark.sql(f"""
 #     CREATE OR REPLACE VIEW {uc_view}
 #     COMMENT 'Iceberg snapshot view for {NEW_TABLE_KEY} — snapshot {snap_info["snapshot_id"]}'
-#     AS SELECT * FROM read_files({file_list_sql}, format => 'parquet', mergeSchema => true)
+#     AS SELECT * FROM read_files(path => {file_array_sql}, format => 'parquet', mergeSchema => true)
 # """)
 # print(f"✅ Unity Catalog view REGISTERED: {uc_view}")
 #
