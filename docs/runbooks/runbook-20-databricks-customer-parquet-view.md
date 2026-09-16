@@ -1575,3 +1575,214 @@ UNCACHE TABLE IF EXISTS lakehouse.lakehouse_db.vw_customer_latest;
 print(spark.catalog.tableExists("lakehouse.lakehouse_db.vw_customer_latest"))
 # ✅ True — then inspect query profiles to confirm cache hits
 ```
+
+---
+
+## 11. Serverless-safe auto-refresh — `nb_multi_table_auto_reader` + `nb_customer_test_refresh`
+
+> **Context:** The original auto-reader used `dbutils.fs.ls()` and `spark.read.format("avro")` to access S3. Both fail on Databricks Serverless compute with two hard errors. This section documents the root causes, the fixes, and the scheduled job that keeps all tables current.
+
+---
+
+### 11.1 Two serverless blockers and their fixes
+
+| # | Error | Root cause | Fix |
+|---|---|---|---|
+| 1 | `UNAUTHORIZED_ACCESS … AnonymousAWSCredentials … 403 Forbidden` | `dbutils.fs.ls("s3://...")` calls Hadoop S3A. On Serverless compute Hadoop S3A is not initialised with any credentials — it falls back to anonymous access and S3 returns 403. | Replace every `dbutils.fs.ls()` with `boto3` list calls (`list_objects_v2`). Boto3 reads credentials from `os.environ`, which is always available. |
+| 2 | `CONFIG_NOT_AVAILABLE … fs.s3a.access.key … SQLSTATE: 42K0I` | `spark.conf.set("fs.s3a.access.key", …)` is on the SparkConnect blocklist for Serverless. The key is rejected before it reaches Hadoop. | Never let Spark read S3 at all. Download every Parquet file via `boto3.get_object()` → read with `pyarrow.parquet.read_table(BytesIO(…))` → convert to Pandas → `spark.createDataFrame()`. Spark only writes Delta; all S3 I/O stays in Python. |
+
+---
+
+### 11.2 `customer_test` — position-delete table (not skip-worthy)
+
+The auto-reader previously detected `content=1` (delete manifests) in `customer_test`'s manifest-list and skipped the table with a "merge-on-read" warning. That was wrong. The table was written by **Spark Copy-on-Write** with `operation=overwrite`, which produces **position-delete files** alongside the data files to mark superseded rows. The table is CoW, not MoR, and can be read correctly by applying the position-delete index.
+
+**How `customer_test` is structured (snapshot `00017`):**
+
+| Manifest type | Count | Content |
+|---|---|---|
+| Data manifests | 5 | 5 Parquet data files, 5 rows each = 25 raw rows |
+| Delete manifest | 1 | 4 position-delete Parquet files, 5 positions each = 20 deletes |
+
+Position-delete file schema: `(file_path STRING, pos LONG)` — each row names a data file and the zero-based row index within it to suppress.
+
+**Algorithm to get the correct 5 rows:**
+```
+1. Read manifest-list (Avro via boto3/fastavro)
+2. Collect all content=0 (data) manifests → live data file paths
+3. Collect all content=1 (delete) manifests → position-delete files
+4. Build index: norm(file_path) → set{pos, pos, …}
+5. For each data file:
+     df = boto3 download → PyArrow read → Pandas
+     dead_rows = pos_deletes.get(norm(file_path), set())
+     df = df.drop(index=dead_rows).reset_index(drop=True)
+6. pd.concat(all frames) → 5 rows ✅
+```
+
+---
+
+### 11.3 `nb_customer_test_refresh` — dedicated single-cell refresh
+
+**File:** [`docker/databricks-notebooks/nb_customer_test_refresh.py`](../../docker/databricks-notebooks/nb_customer_test_refresh.py)
+
+**One cell only — no restart required.** Packages are installed inline via `subprocess.check_call([sys.executable, "-m", "pip", "install", …])` so `import fastavro` succeeds in the same cell immediately after.
+
+**What it creates:**
+
+| Object | Location |
+|---|---|
+| Delta table | `workspace.lakehouse_db.snap_customer_test_latest` |
+| SQL view | `workspace.lakehouse_db.vw_customer_test_latest` |
+
+**How to run:**
+
+1. Open the notebook:
+   ```
+   https://dbc-6851a86f-f5f1.cloud.databricks.com/#workspace/Shared/stardata/nb_customer_test_refresh
+   ```
+2. Click **Run Cell 1** (the only cell).
+3. Wait ~30 seconds.
+
+**Expected output:**
+```
+────────────────────────────────────────────────────────────
+  Table  : lakehouse_db.customer_test
+  Bucket : s3://stardata-databricks/iceberg/warehouse/lakehouse_db/customer_test
+────────────────────────────────────────────────────────────
+  [1/6] Metadata    : 00017-b89d07af-9dc1-4743-a320-7ff29cb90884.metadata.json
+        Modified    : 2026-09-16 18:07:57 UTC
+  [2/6] Snapshot ID : 2584353479486533243  op=overwrite  total-records=25
+  [3/6] Manifests   : 5 data  +  1 delete
+  [4/6] Delete index: 20 position(s) across 4 file(s)
+  [5/6] Raw rows    : 25  →  after position-delete: 5
+  [6/6] Written     : workspace.lakehouse_db.snap_customer_test_latest  (5 rows)
+────────────────────────────────────────────────────────────
+  ✅  DONE
+  Delta table : workspace.lakehouse_db.snap_customer_test_latest
+  SQL view    : workspace.lakehouse_db.vw_customer_test_latest
+  Rows        : 5
+────────────────────────────────────────────────────────────
+  Query: SELECT * FROM workspace.lakehouse_db.vw_customer_test_latest
+────────────────────────────────────────────────────────────
+```
+
+**Verify in SQL editor:**
+```sql
+SELECT c_custkey, c_name, c_mktsegment
+FROM workspace.lakehouse_db.vw_customer_test_latest
+ORDER BY c_custkey;
+```
+
+Expected result:
+
+| c_custkey | c_name | c_mktsegment |
+|---|---|---|
+| 111 | Global Solutions Ltd | TECHNOLOGY |
+| 112 | Euro-Logistics NV | HOUSEHOLD |
+| 113 | Aki-Motors Corp | AUTOMOBILE |
+| 114 | Desert Sands Trading | BUILDING |
+| 115 | Southern Ag Systems | MACHINERY |
+
+**Re-upload after any code change:**
+```bash
+bash scripts/databricks/run_nb_pyiceberg_catalog.sh
+```
+
+---
+
+### 11.4 `nb_multi_table_auto_reader` — all-table serverless-safe refresh
+
+**File:** [`docker/databricks-notebooks/nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py)  
+**Version:** `2026-09-16-v14`
+
+Discovers and refreshes **all** Iceberg tables under `s3://stardata-databricks/iceberg/warehouse/` in one pass. Writes a Delta table and SQL view for each.
+
+**Cell map (v14):**
+
+| Cell | What it does |
+|---|---|
+| **Cell 1** | `%pip install boto3 fastavro pyarrow` + `restartPython()` |
+| **Cell 2** | Config + AWS credentials into `os.environ` |
+| **Cell 3** | `boto3.list_objects_v2` discovery — replaces all `dbutils.fs.ls()` calls |
+| **Cell 4** | `resolve_live_files()` defined — reads metadata/manifests via boto3+fastavro, builds position-delete index |
+| **Cell 5** | Resolves snapshots for all discovered tables |
+| **Cell 6** | Downloads Parquet via boto3 → PyArrow → Pandas → `spark.createDataFrame()` → Delta table + UC view |
+| **Cell 7** | Summary report |
+
+**UC objects created (all under `workspace` catalog):**
+
+| S3 table | Delta table | SQL view |
+|---|---|---|
+| `lakehouse_db/customer` | `workspace.lakehouse_db.snap_customer_latest` | `workspace.lakehouse_db.vw_customer_latest` |
+| `lakehouse_db/customers` | `workspace.lakehouse_db.snap_customers_latest` | `workspace.lakehouse_db.vw_customers_latest` |
+| `lakehouse_db/product` | `workspace.lakehouse_db.snap_product_latest` | `workspace.lakehouse_db.vw_product_latest` |
+| `lakehouse_db/_pipeline_watermarks` | `workspace.lakehouse_db.snap_pipeline_watermarks_latest` | `workspace.lakehouse_db.vw_pipeline_watermarks_latest` |
+
+**Note:** `customer_test` is handled by `nb_customer_test_refresh` (position-delete logic), not by this notebook.
+
+**Confirmed row counts (last successful run):**
+
+| Table | Rows |
+|---|---:|
+| `vw_customer_latest` | 1,404 |
+| `vw_customers_latest` | 10,005 |
+| `vw_product_latest` | 1,735 |
+| `vw_pipeline_watermarks_latest` | 2 |
+
+---
+
+### 11.5 Scheduled job — `stardata-iceberg-auto-refresh`
+
+The auto-reader runs automatically every **15 minutes** via a Databricks Job on Serverless compute.
+
+| Property | Value |
+|---|---|
+| Job name | `stardata-iceberg-auto-refresh` |
+| Job ID | `142367685690178` |
+| Schedule | `0 0/15 * * * ?` (every 15 min, UTC) |
+| Compute | Serverless (no cluster spin-up) |
+| Notebook | `/Shared/stardata/nb_multi_table_auto_reader` |
+
+**View job in Databricks:**
+```
+https://dbc-6851a86f-f5f1.cloud.databricks.com/#job/142367685690178
+```
+
+**Trigger a manual run + re-upload notebook:**
+```bash
+# Upload latest notebook + reset job + trigger immediate run
+DB_HOST=dbc-6851a86f-f5f1.cloud.databricks.com \
+DB_TOKEN=<DATABRICKS_PAT> \
+  bash scripts/databricks/create_databricks_job.sh --run-now
+```
+
+**Script location:** [`scripts/databricks/create_databricks_job.sh`](../../scripts/databricks/create_databricks_job.sh)
+
+---
+
+### 11.6 CATALOG note — `workspace` vs `lakehouse`
+
+All objects currently live under **`workspace`** (the built-in Unity Catalog catalog). The `lakehouse` catalog cannot be created until the Unity Catalog metastore storage root is configured.
+
+**To migrate to `lakehouse` when ready:**
+1. Go to `accounts.cloud.databricks.com → Data → Metastores → Edit → set storage root URL`
+2. Run: `spark.sql("CREATE CATALOG IF NOT EXISTS lakehouse")`
+3. In [`nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py) Cell 2, change: `DATABRICKS_CATALOG = "lakehouse"`
+4. In [`nb_customer_test_refresh.py`](../../docker/databricks-notebooks/nb_customer_test_refresh.py), change: `UC_CATALOG = "lakehouse"`
+5. Re-upload both notebooks and reset the job:
+   ```bash
+   bash scripts/databricks/create_databricks_job.sh --run-now
+   ```
+
+---
+
+### 11.7 OpenBao secret paths
+
+| Path | Keys |
+|---|---|
+| `secret/data/platform/databricks` | `host`, `token`, `http_path`, `catalog`, `schema`, `s3_bucket` |
+| `secret/data/platform/s3` | `access_key`, `secret_key`, `region`, `endpoint`, `bucket` |
+
+Databricks host: `dbc-6851a86f-f5f1.cloud.databricks.com`  
+SQL Warehouse ID: `8c792c047b42a3c2` (Serverless Starter Warehouse)
+
