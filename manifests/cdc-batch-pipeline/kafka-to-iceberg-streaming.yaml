@@ -29,11 +29,10 @@
 # Auto-restart
 # ─────────────
 # Kubernetes restartPolicy (built into Deployment): Always.
-# The Deployment restart policy means a failing pod is restarted automatically.
-# Additionally, the Python script itself implements an exponential-backoff
-# internal retry loop (MAX_RESTART_ATTEMPTS=10, RESTART_BACKOFF_BASE_S=5,
-# RESTART_BACKOFF_MAX_S=120) before exiting — giving K8s a chance to see a
-# terminated pod and restart it.
+# The Python script runs an infinite internal retry loop (MAX_RESTART_ATTEMPTS=0).
+# A liveness probe on HEALTH_PORT (8080) detects when all Spark streaming queries
+# are dead and the process is stuck in a backoff spiral — Kubernetes kills and
+# restarts the pod after failureThreshold * periodSeconds (default: 3 × 30s = 90s).
 #
 # Namespaces: prod
 # =============================================================================
@@ -53,7 +52,8 @@ data:
   SPARK_USER:              "dave"
   TRIGGER_INTERVAL:        "2 seconds"
   MAX_OFFSETS_PER_TRIGGER: "50000"
-  MAX_RESTART_ATTEMPTS:    "10"
+  MAX_RESTART_ATTEMPTS:    "0"
+  HEALTH_PORT:             "8080"
   RESTART_BACKOFF_BASE_S:  "5"
   RESTART_BACKOFF_MAX_S:   "120"
   DRY_RUN:                 "0"
@@ -116,7 +116,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-12
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-13
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -124,6 +124,18 @@ spec:
             - |
               cd /opt/spark/work-dir && \
               exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
           env:
             - name: USER
               value: dave
@@ -196,6 +208,11 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: TARGET_NAMESPACE
+            - name: HEALTH_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: HEALTH_PORT
           resources:
             requests:
               memory: "4Gi"
@@ -252,7 +269,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-12
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-13
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -260,6 +277,18 @@ spec:
             - |
               cd /opt/spark/work-dir && \
               exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
           env:
             - name: USER
               value: dave
@@ -332,6 +361,11 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: TARGET_NAMESPACE
+            - name: HEALTH_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: HEALTH_PORT
           resources:
             requests:
               memory: "4Gi"
@@ -388,7 +422,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-12
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-13
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -396,6 +430,18 @@ spec:
             - |
               cd /opt/spark/work-dir && \
               exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
           env:
             - name: USER
               value: dave
@@ -468,6 +514,11 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: TARGET_NAMESPACE
+            - name: HEALTH_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: HEALTH_PORT
           resources:
             requests:
               memory: "4Gi"

@@ -74,9 +74,13 @@ Checkpoints
 Auto-restart
 ------------
 • Kubernetes restartPolicy: Always (pod-level).
-• Internal exponential-backoff retry loop (MAX_RESTART_ATTEMPTS / RESTART_BACKOFF_BASE_S).
+• Internal exponential-backoff retry loop (MAX_RESTART_ATTEMPTS=0 → infinite;
+  set to a positive integer to cap retries for debugging).
 • Per-batch restart: after each committed micro-batch the streaming query is
   stopped and immediately restarted from checkpoint — fresh Spark context per batch.
+• HTTP health server on HEALTH_PORT (default 8080): GET / returns 200 OK when
+  all streaming queries are active, 503 when they are all dead (used by the
+  Kubernetes livenessProbe).
 
 Credentials
 -----------
@@ -95,6 +99,7 @@ Usage
 
 from __future__ import annotations
 
+import http.server
 import json
 import logging
 import os
@@ -153,9 +158,14 @@ _SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
 _TARGET_NAMESPACE = os.environ.get("TARGET_NAMESPACE", "").strip()
 
 # Auto-restart loop config
-MAX_RESTART_ATTEMPTS   = int(os.environ.get("MAX_RESTART_ATTEMPTS", "10"))
+# 0 = infinite retries (default — Kubernetes is the only termination gate).
+# Set to a positive integer to cap retries during debugging.
+MAX_RESTART_ATTEMPTS   = int(os.environ.get("MAX_RESTART_ATTEMPTS", "0"))
 RESTART_BACKOFF_BASE_S = float(os.environ.get("RESTART_BACKOFF_BASE_S", "5"))
 RESTART_BACKOFF_MAX_S  = float(os.environ.get("RESTART_BACKOFF_MAX_S", "120"))
+
+# HTTP health server port — serves liveness probe endpoint GET /
+HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8080"))
 
 KAFKA_BOOTSTRAP = "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
 SR_URL          = "http://schema-registry.prod.svc.cluster.local:8081"
@@ -1198,21 +1208,65 @@ def _run_once(bao: BaoSparkInit) -> None:
             pass
 
 
+# ── HTTP health server ─────────────────────────────────────────────────────────
+# _HEALTH_STATE is set by main() — True when at least one streaming query is
+# active (or the process is still starting up), False only when _run_once()
+# exits without active queries and we are between retry backoffs.
+# The Kubernetes livenessProbe hits GET / on HEALTH_PORT:
+#   200 OK  → process is alive and queries are running (or starting)
+#   503     → all queries are dead and the backoff retry is sleeping
+_HEALTH_STATE: dict = {"healthy": True}
+
+
+class _HealthHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal HTTP handler — returns 200 or 503 based on _HEALTH_STATE."""
+
+    def do_GET(self) -> None:  # noqa: N802
+        if _HEALTH_STATE["healthy"]:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK\n")
+        else:
+            self.send_response(503)
+            self.end_headers()
+            self.wfile.write(b"UNHEALTHY\n")
+
+    def log_message(self, fmt: str, *args: object) -> None:  # noqa: N802
+        # Suppress default request logging — it floods the pod log.
+        pass
+
+
+def _start_health_server() -> None:
+    """Start the HTTP health server in a daemon thread."""
+    server = http.server.HTTPServer(("0.0.0.0", HEALTH_PORT), _HealthHandler)
+    t = threading.Thread(target=server.serve_forever, name="health-server", daemon=True)
+    t.start()
+    logger.info("Health server listening on port %d", HEALTH_PORT)
+
+
 def main() -> None:
     os.environ["SPARK_USER"] = SPARK_USER
 
     logger.info(
         "=== Kafka→Iceberg | user=%s | mode=%s | sources=%s | "
-        "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d ===",
+        "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d "
+        "| max_restart_attempts=%s ===",
         SPARK_USER, WRITE_MODE,
         [s.source_key for s in _ALL_SOURCES],
         _TRANSFORM_STEPS or "none",
         DRY_RUN, TRIGGER_INTERVAL, MAX_OFFSETS_PER_TRIGGER,
+        MAX_RESTART_ATTEMPTS if MAX_RESTART_ATTEMPTS > 0 else "∞",
     )
+
+    _start_health_server()
 
     bao = BaoSparkInit()
     attempt = 0
-    while attempt < MAX_RESTART_ATTEMPTS:
+    # MAX_RESTART_ATTEMPTS == 0  → infinite retry loop (never gives up).
+    # MAX_RESTART_ATTEMPTS  > 0  → cap at that many attempts then sys.exit(1)
+    #                              so Kubernetes restartPolicy=Always triggers.
+    while True:
+        _HEALTH_STATE["healthy"] = True
         try:
             _run_once(bao)
             break
@@ -1221,20 +1275,30 @@ def main() -> None:
             sys.exit(0)
         except Exception as exc:
             attempt += 1
-            if attempt >= MAX_RESTART_ATTEMPTS:
+            if MAX_RESTART_ATTEMPTS > 0 and attempt >= MAX_RESTART_ATTEMPTS:
                 logger.error(
                     "Streaming job failed after %d attempt(s). Giving up: %s",
                     attempt, exc,
                 )
+                _HEALTH_STATE["healthy"] = False
                 sys.exit(1)
             backoff = min(
-                RESTART_BACKOFF_BASE_S * (2 ** (attempt - 1)),
+                RESTART_BACKOFF_BASE_S * (2 ** min(attempt - 1, 10)),
                 RESTART_BACKOFF_MAX_S,
             )
-            logger.warning(
-                "Streaming job failed (attempt %d/%d): %s — retrying in %.0f s …",
-                attempt, MAX_RESTART_ATTEMPTS, exc, backoff,
+            cap_info = (
+                f"{attempt}/{MAX_RESTART_ATTEMPTS}"
+                if MAX_RESTART_ATTEMPTS > 0
+                else f"{attempt}/∞"
             )
+            logger.warning(
+                "Streaming job failed (attempt %s): %s — retrying in %.0f s …",
+                cap_info, exc, backoff,
+            )
+            # Mark unhealthy during backoff sleep so liveness probe fires if
+            # the pod is stuck in a backoff spiral longer than failureThreshold
+            # * periodSeconds (configured in the Kubernetes deployment).
+            _HEALTH_STATE["healthy"] = False
             time.sleep(backoff)
 
 
