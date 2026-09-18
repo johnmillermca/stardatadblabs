@@ -469,66 +469,56 @@ def _apply_standard(
     SCD Type 0 — MERGE INTO Iceberg by PK.
 
     INSERT/UPDATE/snapshot (op c/u/r):
-      MERGE MATCHED     → UPDATE all columns including snap_id + snap_timestamp
-      MERGE NOT MATCHED → INSERT all columns
+      MERGE MATCHED     → UPDATE all CDC columns (snap_id/snap_timestamp untouched)
+      MERGE NOT MATCHED → INSERT CDC columns (snap_id/snap_timestamp left NULL)
 
     DELETE (op d):
       MERGE MATCHED → DELETE row from Iceberg (hard delete)
+
+    snap_id and snap_timestamp are NOT included in the MERGE source — they are
+    managed by spark_iceberg_utils.write_append() for append paths.  Injecting
+    them here via monotonically_increasing_id() causes
+    INVALID_NON_DETERMINISTIC_EXPRESSIONS in the Iceberg MERGE planner.
     """
     spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
-    # Gluten/Velox native execution does not support the non-deterministic expressions
-    # (monotonically_increasing_id) that Iceberg MERGE injects internally for copy-on-write
-    # row tracking.  Disable Gluten just for the duration of the MERGE operations and
-    # restore it afterwards so other stages still benefit from vectorised execution.
-    _gluten_was_enabled = spark.conf.get("spark.plugins", "") != ""
-    if _gluten_was_enabled:
-        spark.conf.set("spark.plugins", "")
 
-    try:
-        inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
-        deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
+    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
+    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
-        if not inserts.isEmpty():
-            final_df = (
-                inserts
-                .coalesce(COALESCE_BEFORE_MERGE)
-                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
-                .withColumn("snap_timestamp", current_timestamp())
-            )
-            tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
-            final_df.createOrReplaceGlobalTempView(tmp_view)
-            set_clause = ", ".join(
-                f"t.`{f.name}` = s.`{f.name}`"
-                for f in final_df.schema.fields
-            )
-            spark.sql(f"""
-                MERGE INTO {fqn_backtick} AS t
-                USING global_temp.{tmp_view} AS s
-                ON t.`{pk_col}` = s.`{pk_col}`
-                WHEN MATCHED THEN UPDATE SET {set_clause}
-                WHEN NOT MATCHED THEN INSERT *
-            """)
-            logger.info(
-                "[%s/%s][standard] batch=%d upsert rows=%d",
-                source_key, table_name, batch_id, final_df.count(),
-            )
+    if not inserts.isEmpty():
+        final_df = inserts.coalesce(COALESCE_BEFORE_MERGE)
+        tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
+        final_df.createOrReplaceTempView(tmp_view)
+        set_clause = ", ".join(
+            f"t.`{f.name}` = s.`{f.name}`"
+            for f in final_df.schema.fields
+        )
+        spark.sql(f"""
+            MERGE INTO {fqn_backtick} AS t
+            USING {tmp_view} AS s
+            ON t.`{pk_col}` = s.`{pk_col}`
+            WHEN MATCHED THEN UPDATE SET {set_clause}
+            WHEN NOT MATCHED THEN INSERT ({', '.join(f'`{f.name}`' for f in final_df.schema.fields)})
+            VALUES ({', '.join(f's.`{f.name}`' for f in final_df.schema.fields)})
+        """)
+        logger.info(
+            "[%s/%s][standard] batch=%d upsert rows=%d",
+            source_key, table_name, batch_id, final_df.count(),
+        )
 
-        if not deletes.isEmpty():
-            del_view = f"__cdc_delete_{source_key}_{table_name}_{batch_id}"
-            deletes.select(pk_col).coalesce(1).createOrReplaceGlobalTempView(del_view)
-            spark.sql(f"""
-                MERGE INTO {fqn_backtick} AS t
-                USING global_temp.{del_view} AS s
-                ON t.`{pk_col}` = s.`{pk_col}`
-                WHEN MATCHED THEN DELETE
-            """)
-            logger.info(
-                "[%s/%s][standard] batch=%d hard-delete rows=%d",
-                source_key, table_name, batch_id, deletes.count(),
-            )
-    finally:
-        if _gluten_was_enabled:
-            spark.conf.set("spark.plugins", "org.apache.gluten.GlutenPlugin")
+    if not deletes.isEmpty():
+        del_view = f"__cdc_delete_{source_key}_{table_name}_{batch_id}"
+        deletes.select(pk_col).coalesce(1).createOrReplaceTempView(del_view)
+        spark.sql(f"""
+            MERGE INTO {fqn_backtick} AS t
+            USING {del_view} AS s
+            ON t.`{pk_col}` = s.`{pk_col}`
+            WHEN MATCHED THEN DELETE
+        """)
+        logger.info(
+            "[%s/%s][standard] batch=%d hard-delete rows=%d",
+            source_key, table_name, batch_id, deletes.count(),
+        )
 
 
 def _apply_soft_delete(
@@ -544,77 +534,67 @@ def _apply_soft_delete(
     SCD soft-delete — MERGE upsert for INSERT/UPDATE; flag-only for DELETE.
 
     INSERT/UPDATE/snapshot (op c/u/r):
-      MERGE MATCHED     → UPDATE all columns; is_deleted=false, deleted_at=NULL
-      MERGE NOT MATCHED → INSERT with is_deleted=false, deleted_at=NULL
+      MERGE MATCHED     → UPDATE CDC columns + is_deleted=false, deleted_at=NULL
+      MERGE NOT MATCHED → INSERT CDC columns + is_deleted=false, deleted_at=NULL
 
     DELETE (op d):
       MERGE MATCHED → UPDATE SET is_deleted=true, deleted_at=<now>
       Row is never physically removed from Iceberg.
+
+    snap_id/snap_timestamp are NOT included — managed by spark_iceberg_utils.
     """
     spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
-    _gluten_was_enabled = spark.conf.get("spark.plugins", "") != ""
-    if _gluten_was_enabled:
-        spark.conf.set("spark.plugins", "")
 
-    try:
-        inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
-        deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
+    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
+    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
-        if not inserts.isEmpty():
-            final_df = (
-                inserts
-                .coalesce(COALESCE_BEFORE_MERGE)
-                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
-                .withColumn("snap_timestamp", current_timestamp())
-                .withColumn("is_deleted",     lit(False).cast(BooleanType()))
-                .withColumn("deleted_at",     lit(None).cast(TimestampType()))
-            )
-            tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
-            final_df.createOrReplaceGlobalTempView(tmp_view)
-            set_clause = ", ".join(
-                f"t.`{f.name}` = s.`{f.name}`"
-                for f in final_df.schema.fields
-            )
-            spark.sql(f"""
-                MERGE INTO {fqn_backtick} AS t
-                USING global_temp.{tmp_view} AS s
-                ON t.`{pk_col}` = s.`{pk_col}`
-                WHEN MATCHED THEN UPDATE SET {set_clause}
-                WHEN NOT MATCHED THEN INSERT *
-            """)
-            logger.info(
-                "[%s/%s][soft_delete] batch=%d upsert rows=%d",
-                source_key, table_name, batch_id, final_df.count(),
-            )
+    if not inserts.isEmpty():
+        final_df = (
+            inserts
+            .coalesce(COALESCE_BEFORE_MERGE)
+            .withColumn("is_deleted", lit(False).cast(BooleanType()))
+            .withColumn("deleted_at", lit(None).cast(TimestampType()))
+        )
+        tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
+        final_df.createOrReplaceTempView(tmp_view)
+        set_clause = ", ".join(
+            f"t.`{f.name}` = s.`{f.name}`"
+            for f in final_df.schema.fields
+        )
+        spark.sql(f"""
+            MERGE INTO {fqn_backtick} AS t
+            USING {tmp_view} AS s
+            ON t.`{pk_col}` = s.`{pk_col}`
+            WHEN MATCHED THEN UPDATE SET {set_clause}
+            WHEN NOT MATCHED THEN INSERT ({', '.join(f'`{f.name}`' for f in final_df.schema.fields)})
+            VALUES ({', '.join(f's.`{f.name}`' for f in final_df.schema.fields)})
+        """)
+        logger.info(
+            "[%s/%s][soft_delete] batch=%d upsert rows=%d",
+            source_key, table_name, batch_id, final_df.count(),
+        )
 
-        if not deletes.isEmpty():
-            del_view = f"__cdc_softdel_{source_key}_{table_name}_{batch_id}"
-            soft_del_df = (
-                deletes.select(pk_col)
-                .coalesce(1)
-                .withColumn("is_deleted",     lit(True).cast(BooleanType()))
-                .withColumn("deleted_at",     current_timestamp())
-                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
-                .withColumn("snap_timestamp", current_timestamp())
-            )
-            soft_del_df.createOrReplaceGlobalTempView(del_view)
-            spark.sql(f"""
-                MERGE INTO {fqn_backtick} AS t
-                USING global_temp.{del_view} AS s
-                ON t.`{pk_col}` = s.`{pk_col}`
-                WHEN MATCHED THEN UPDATE SET
-                    t.is_deleted     = s.is_deleted,
-                    t.deleted_at     = s.deleted_at,
-                    t.snap_id        = s.snap_id,
-                    t.snap_timestamp = s.snap_timestamp
-            """)
-            logger.info(
-                "[%s/%s][soft_delete] batch=%d soft-delete rows=%d",
-                source_key, table_name, batch_id, deletes.count(),
-            )
-    finally:
-        if _gluten_was_enabled:
-            spark.conf.set("spark.plugins", "org.apache.gluten.GlutenPlugin")
+    if not deletes.isEmpty():
+        del_view = f"__cdc_softdel_{source_key}_{table_name}_{batch_id}"
+        soft_del_df = (
+            deletes.select(pk_col)
+            .coalesce(1)
+            .withColumn("is_deleted", lit(True).cast(BooleanType()))
+            .withColumn("deleted_at", current_timestamp())
+        )
+        soft_del_df.createOrReplaceTempView(del_view)
+        spark.sql(f"""
+            MERGE INTO {fqn_backtick} AS t
+            USING {del_view} AS s
+            ON t.`{pk_col}` = s.`{pk_col}`
+            WHEN MATCHED THEN UPDATE SET
+                t.is_deleted = s.is_deleted,
+                t.deleted_at = s.deleted_at
+        """)
+        logger.info(
+            "[%s/%s][soft_delete] batch=%d soft-delete rows=%d",
+            source_key, table_name, batch_id, deletes.count(),
+        )
 
 
 def _apply_history_tracking(
@@ -824,17 +804,17 @@ def _write_micro_batch(
                     break
 
             # ── Build write-mode-specific extra schema fields ─────────────────
-            extra_fields: list[StructField] = [
-                StructField("snap_id",        LongType(),      True),
-                StructField("snap_timestamp", TimestampType(), True),
-            ]
+            # snap_id / snap_timestamp are intentionally omitted here — they are
+            # injected by IcebergTableBuilder.create_table() via _inject_snap_cols()
+            # automatically.  Including them in extra_fields would duplicate them.
+            extra_fields: list[StructField] = []
             if write_mode == _WRITE_MODE_SOFT_DELETE:
-                extra_fields += [
+                extra_fields = [
                     StructField("is_deleted", BooleanType(),  True),
                     StructField("deleted_at", TimestampType(), True),
                 ]
             elif write_mode == _WRITE_MODE_HISTORY_TRACKING:
-                extra_fields += [
+                extra_fields = [
                     StructField("_change_type", StringType(),    True),
                     StructField("_change_ts",   TimestampType(), True),
                 ]
