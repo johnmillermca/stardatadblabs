@@ -486,7 +486,7 @@ def _apply_standard(
             .coalesce(COALESCE_BEFORE_MERGE)
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
             .withColumn("snap_timestamp", current_timestamp())
-        )
+        ).cache()
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceGlobalTempView(tmp_view)
         set_clause = ", ".join(
@@ -553,7 +553,7 @@ def _apply_soft_delete(
             .withColumn("snap_timestamp", current_timestamp())
             .withColumn("is_deleted",     lit(False).cast(BooleanType()))
             .withColumn("deleted_at",     lit(None).cast(TimestampType()))
-        )
+        ).cache()
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceGlobalTempView(tmp_view)
         set_clause = ", ".join(
