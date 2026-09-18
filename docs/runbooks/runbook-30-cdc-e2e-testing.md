@@ -202,7 +202,7 @@ mongosh not found — MongoDB tests require exec into mongo pod
 **If `sqlplus` is missing:** Oracle DML in Sections 1–3 must be run inside the Oracle pod:
 ```bash
 ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -it $ORACLE_POD -n prod -- sqlplus cache_testing/cache_testing@//localhost:1521/FREEPDB1
+kubectl exec -it $ORACLE_POD -n prod -- sqlplus CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1
 ```
 
 **If `mongosh` is missing:** MongoDB DML in Sections 1–3 must be run inside the MongoDB pod:
@@ -425,12 +425,14 @@ SELECT COUNT(*) AS row_count FROM oracle.e2e_testing.customers;
 #### Step 2 — INSERT a test row
 
 ```bash
-kubectl exec -it -n prod oracle-xe-799f8d67dd-vjtq7 -- \
-  sqlplus sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba
+ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -it -n prod $ORACLE_POD -- \
+  sqlplus CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1
 ```
 
 ```sql
-INSERT INTO CACHE_TESTING.CUSTOMERS
+-- Connected as CACHE_TESTING — no schema prefix needed
+INSERT INTO CUSTOMERS
   (ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT)
 VALUES
   (900002, 'E2E OracleTest', 'e2e_oracle@example.com', '555-0001',
@@ -457,7 +459,7 @@ WHERE id = 900002;
 #### Step 5 — UPDATE
 
 ```sql
-UPDATE CACHE_TESTING.CUSTOMERS SET EMAIL = 'e2e_oracle_updated@example.com' WHERE ID = 900002;
+UPDATE CUSTOMERS SET EMAIL = 'e2e_oracle_updated@example.com' WHERE ID = 900002;
 COMMIT;
 ```
 
@@ -3335,12 +3337,13 @@ DELETE FROM public.customers WHERE id = 900072;
 #### Step 1 — Add a column to CACHE_TESTING.CUSTOMERS in Oracle
 
 ```bash
-kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
-sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
-ALTER TABLE CACHE_TESTING.CUSTOMERS ADD (loyalty_points NUMBER(10) DEFAULT 0);
+ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n prod $ORACLE_POD -- bash -c "
+sqlplus -s CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1 <<'EOF'
+ALTER TABLE CUSTOMERS ADD (loyalty_points NUMBER(10) DEFAULT 0);
 COMMIT;
-SELECT column_name, data_type FROM dba_tab_columns
-WHERE owner = 'CACHE_TESTING' AND table_name = 'CUSTOMERS' ORDER BY column_id;
+SELECT column_name, data_type FROM user_tab_columns
+WHERE table_name = 'CUSTOMERS' ORDER BY column_id;
 EXIT;
 EOF
 "
@@ -3349,9 +3352,10 @@ EOF
 #### Step 2 — Insert a row with the new column
 
 ```bash
-kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
-sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
-INSERT INTO CACHE_TESTING.CUSTOMERS
+ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n prod $ORACLE_POD -- bash -c "
+sqlplus -s CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1 <<'EOF'
+INSERT INTO CUSTOMERS
   (ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT, LOYALTY_POINTS)
 VALUES
   (900073, 'OraSchemaEvo', 'oraevo@example.com', '555-9001',
@@ -3396,9 +3400,10 @@ WHERE id = 900073;
 #### Step 5 — Cleanup
 
 ```bash
-kubectl exec -n prod oracle-xe-799f8d67dd-vjtq7 -- bash -c "
-sqlplus -s sys/'cP1En0sclH6N4uSyyqvlgfu8'@XEPDB1 as sysdba <<'EOF'
-DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900073;
+ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n prod $ORACLE_POD -- bash -c "
+sqlplus -s CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1 <<'EOF'
+DELETE FROM CUSTOMERS WHERE ID = 900073;
 COMMIT;
 EXIT;
 EOF
