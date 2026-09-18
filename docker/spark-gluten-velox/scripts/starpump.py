@@ -1883,6 +1883,7 @@ def _copy_table(
     lock:         threading.Lock,
     pg_creds:     dict,
     merge_pk_col: str | None = None,
+    incremental:  bool = False,
 ) -> None:
     """
     Copy one table from the source database → Iceberg (called inside a thread).
@@ -1898,6 +1899,14 @@ def _copy_table(
           the Debezium bootstrap script without a Spark session)
     3. Stamp 'pipeline.sf_extraction_ts' as an Iceberg table property so
        the watermark appears in any DESCRIBE EXTENDED output.
+
+    incremental
+    -----------
+    True when called from worker_incremental.  The WHERE clause applied to the
+    source query already scopes the result to only the delta rows, so the batch
+    loop must start at offset=0 (not at already_written).  Passing
+    already_written as the OFFSET on a filtered result set would skip all new
+    rows — that is the bug this flag fixes.
 
     merge_pk_col
     ------------
@@ -2024,8 +2033,18 @@ def _copy_table(
 
             # ── Batched sequential copy ────────────────────────────────────
             iceberg_cols  = [f.name for f in iceberg_schema.fields]
-            offset        = already_written
-            rows_total    = already_written
+            # In incremental mode the WHERE clause already scopes the source
+            # query to only the delta rows (updated_at > last_ts).  The
+            # filtered result set starts at position 0 regardless of how many
+            # rows already exist in Iceberg — OFFSET must be 0 so that
+            # LIMIT batch_size OFFSET 0 returns the first delta row.
+            # Passing already_written (e.g. 2 000 000) as the OFFSET on a
+            # result set that only contains the 1 new row causes PostgreSQL to
+            # skip it entirely, returning 0 rows — the bug seen in testing.
+            # In full mode the source is unfiltered so pagination resumes from
+            # already_written to skip rows committed in a previous partial run.
+            offset        = 0 if incremental else already_written
+            rows_total    = 0
             where_clause  = _get_where_clause(table)
             if where_clause:
                 logger.info("[%s] QUERY_FILTER active — WHERE %s", table, where_clause)
@@ -2858,6 +2877,7 @@ def main() -> None:
                             tbl, size_gb, results, lock,
                             pg_creds=pg,
                             merge_pk_col=pk_col,
+                            incremental=True,
                         )
 
                         # Restore the original QUERY_FILTERS entry
