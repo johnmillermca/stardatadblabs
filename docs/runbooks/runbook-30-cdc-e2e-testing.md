@@ -181,15 +181,36 @@ Run these checks before executing any test section. All checks must pass.
 ### 1.1 — Required CLI Tools
 
 ```bash
-kubectl version --client --short
-curl   --version | head -1
-jq     --version
-psql   --version
+kubectl version --client
+curl    --version | head -1
+jq      --version
+psql    --version
 sqlplus -v          2>/dev/null || echo "sqlplus not found — Oracle tests require sqlplus"
-mongosh --version
+mongosh --version   2>/dev/null || echo "mongosh not found — MongoDB tests require exec into mongo pod"
 ```
 
-**Expected:** Each command prints a version string. If `sqlplus` is missing, Oracle tests in Section 1 must be run from inside the Oracle pod or a jump host.
+**Expected output (example — versions will differ):**
+```
+Client Version: v1.31.14
+curl 8.x.x ...
+jq-1.7.1          ← on RHEL/EL systems jq prints "jq-X.Y.Z" (no space) — this is correct
+psql (PostgreSQL) 16.x
+sqlplus not found — Oracle tests require sqlplus
+mongosh not found — MongoDB tests require exec into mongo pod
+```
+
+**If `sqlplus` is missing:** Oracle DML in Sections 1–3 must be run inside the Oracle pod:
+```bash
+ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -it $ORACLE_POD -n prod -- sqlplus cache_testing/cache_testing@//localhost:1521/FREEPDB1
+```
+
+**If `mongosh` is missing:** MongoDB DML in Sections 1–3 must be run inside the MongoDB pod:
+```bash
+kubectl exec -it mongodb-0 -n prod -- mongosh mongodb://localhost:27017/cache_testing
+```
+
+> **Note:** `--short` was removed from `kubectl version` in v1.28+. Use `kubectl version --client` instead.
 
 ### 1.2 — All Debezium Connectors RUNNING
 
