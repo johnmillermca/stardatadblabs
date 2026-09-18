@@ -488,18 +488,19 @@ def _apply_standard(
     if not inserts.isEmpty():
         final_df = inserts.coalesce(COALESCE_BEFORE_MERGE)
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
-        final_df.createOrReplaceTempView(tmp_view)
+        final_df.createOrReplaceGlobalTempView(tmp_view)
         set_clause = ", ".join(
             f"t.`{f.name}` = s.`{f.name}`"
             for f in final_df.schema.fields
         )
+        col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
+        val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {tmp_view} AS s
+            USING global_temp.{tmp_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
-            WHEN NOT MATCHED THEN INSERT ({', '.join(f'`{f.name}`' for f in final_df.schema.fields)})
-            VALUES ({', '.join(f's.`{f.name}`' for f in final_df.schema.fields)})
+            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
         """)
         logger.info(
             "[%s/%s][standard] batch=%d upsert rows=%d",
@@ -508,10 +509,10 @@ def _apply_standard(
 
     if not deletes.isEmpty():
         del_view = f"__cdc_delete_{source_key}_{table_name}_{batch_id}"
-        deletes.select(pk_col).coalesce(1).createOrReplaceTempView(del_view)
+        deletes.select(pk_col).coalesce(1).createOrReplaceGlobalTempView(del_view)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {del_view} AS s
+            USING global_temp.{del_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN DELETE
         """)
@@ -556,18 +557,19 @@ def _apply_soft_delete(
             .withColumn("deleted_at", lit(None).cast(TimestampType()))
         )
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
-        final_df.createOrReplaceTempView(tmp_view)
+        final_df.createOrReplaceGlobalTempView(tmp_view)
         set_clause = ", ".join(
             f"t.`{f.name}` = s.`{f.name}`"
             for f in final_df.schema.fields
         )
+        col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
+        val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {tmp_view} AS s
+            USING global_temp.{tmp_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
-            WHEN NOT MATCHED THEN INSERT ({', '.join(f'`{f.name}`' for f in final_df.schema.fields)})
-            VALUES ({', '.join(f's.`{f.name}`' for f in final_df.schema.fields)})
+            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
         """)
         logger.info(
             "[%s/%s][soft_delete] batch=%d upsert rows=%d",
@@ -582,10 +584,10 @@ def _apply_soft_delete(
             .withColumn("is_deleted", lit(True).cast(BooleanType()))
             .withColumn("deleted_at", current_timestamp())
         )
-        soft_del_df.createOrReplaceTempView(del_view)
+        soft_del_df.createOrReplaceGlobalTempView(del_view)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {del_view} AS s
+            USING global_temp.{del_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET
                 t.is_deleted = s.is_deleted,
