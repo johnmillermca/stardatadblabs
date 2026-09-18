@@ -1083,9 +1083,11 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     # Iceberg write performance
     conf.set("spark.sql.iceberg.write.fanout.enabled",                   "true")
     conf.set("spark.sql.iceberg.merge.cardinality-check.enabled",        "false")
-    # Reduce Spark driver → executor serialisation overhead for micro-batches
-    conf.set("spark.serializer",                                         "org.apache.spark.serializer.KryoSerializer")
-    conf.set("spark.kryoserializer.buffer.max",                          "256m")
+    # NOTE: KryoSerializer is intentionally NOT set here.
+    # The Kafka structured streaming DataSourceV2 (DataSourceRDDPartition) uses
+    # Java serialisation internally; enabling Kryo causes a ClassCastException
+    # (List$SerializationProxy → Seq) that crashes every micro-batch task.
+    # Java serialiser is the safe default for Spark Structured Streaming + Kafka.
 
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
