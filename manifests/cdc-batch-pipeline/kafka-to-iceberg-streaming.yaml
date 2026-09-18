@@ -2550,39 +2550,74 @@ data:
     ST = StarTransform
 
 
-# ── Deployment: standard write mode ──────────────────────────────────────────
+
+# =============================================================================
+# Per-source Deployments (3 sources × 3 write modes = 9 Deployments)
+#
+# Each Deployment is pinned to exactly ONE source via SOURCE=<postgres|oracle|mongodb>
+# and ONE write mode via WRITE_MODE=<standard|soft_delete|history_tracking>.
+#
+# This replaces the previous 3 multi-source Deployments where a crashing
+# connector (e.g. MongoDB change-stream error) could starve other sources.
+# Now each pipeline is fully isolated — a MongoDB failure has zero impact on
+# the postgres or oracle pipelines.
+#
+# Default active replicas:
+#   kafka-to-iceberg-postgres-standard  → 1  (production pipeline)
+#   all others                          → 0  (scale up as needed)
+#
+# HEALTH_PORT assignments (all unique to allow co-scheduling on same node):
+#   postgres : standard=8081  soft_delete=8082  history_tracking=8083
+#   oracle   : standard=8084  soft_delete=8085  history_tracking=8086
+#   mongodb  : standard=8087  soft_delete=8088  history_tracking=8089
+#
+# Checkpoint paths are already source+write-mode keyed in the script:
+#   s3://xdatatoiceberg1/checkpoints/streaming/<source>/<write_mode>
+# =============================================================================
+
+# ── Deployment template macro (env block is identical across all 9) ──────────
+# Each Deployment below follows this structure:
+#   metadata.name : kafka-to-iceberg-<source>-<write-mode-dashes>
+#   labels        : pipeline.source + pipeline.write-mode
+#   env SOURCE    : pinned to the source (postgres/oracle/mongodb)
+#   env WRITE_MODE: pinned to the write mode
+#   env HEALTH_PORT: unique per deployment (not from ConfigMap — inline value)
+#   resources     : same as before (4Gi/2cpu req, 8Gi/4cpu limit)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSTGRES PIPELINES
+# ─────────────────────────────────────────────────────────────────────────────
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kafka-to-iceberg-standard
+  name: kafka-to-iceberg-postgres-standard
   namespace: prod
   labels:
     app: kafka-to-iceberg
+    pipeline.source: postgres
     pipeline.write-mode: standard
     pipeline.type: streaming
   annotations:
-    # Document the restart policy semantics inline for operators
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
-    pipeline.write-mode-desc: "SCD Type 0 — MERGE upsert + hard delete"
+    pipeline.write-mode-desc: "PostgreSQL → Kafka → Iceberg | SCD Type 0 — MERGE upsert + hard delete"
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: kafka-to-iceberg
+      pipeline.source: postgres
       pipeline.write-mode: standard
   template:
     metadata:
       labels:
         app: kafka-to-iceberg
+        pipeline.source: postgres
         pipeline.write-mode: standard
     spec:
-      # restartPolicy for pods in a Deployment must be Always.
-      # K8s restarts the pod automatically on any non-zero exit code.
       restartPolicy: Always
       serviceAccountName: spark-cleanup
-      # Allow generous time for the Spark session to flush and checkpoint
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
@@ -2596,7 +2631,7 @@ spec:
               exec python3 05_kafka_to_iceberg_streaming.py
           ports:
             - name: health
-              containerPort: 8080
+              containerPort: 8081
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -2611,8 +2646,12 @@ spec:
               value: dave
             - name: SPARK_USER
               value: dave
+            - name: SOURCE
+              value: postgres
             - name: WRITE_MODE
               value: standard
+            - name: HEALTH_PORT
+              value: "8081"
             - name: TRIGGER_INTERVAL
               valueFrom:
                 configMapKeyRef:
@@ -2678,11 +2717,6 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: TARGET_NAMESPACE
-            - name: HEALTH_PORT
-              valueFrom:
-                configMapKeyRef:
-                  name: kafka-to-iceberg-config
-                  key: HEALTH_PORT
           resources:
             requests:
               memory: "4Gi"
@@ -2707,31 +2741,32 @@ spec:
           configMap:
             name: star-transform-script
 
-# ── Deployment: soft_delete write mode ───────────────────────────────────────
-
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kafka-to-iceberg-soft-delete
+  name: kafka-to-iceberg-postgres-soft-delete
   namespace: prod
   labels:
     app: kafka-to-iceberg
+    pipeline.source: postgres
     pipeline.write-mode: soft-delete
     pipeline.type: streaming
   annotations:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
-    pipeline.write-mode-desc: "MERGE upsert + soft-delete flag (is_deleted, deleted_at)"
+    pipeline.write-mode-desc: "PostgreSQL → Kafka → Iceberg | MERGE upsert + soft-delete flag"
 spec:
-  replicas: 0            # disabled by default — scale to 1 to activate
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
+      pipeline.source: postgres
       pipeline.write-mode: soft-delete
   template:
     metadata:
       labels:
         app: kafka-to-iceberg
+        pipeline.source: postgres
         pipeline.write-mode: soft-delete
     spec:
       restartPolicy: Always
@@ -2749,7 +2784,7 @@ spec:
               exec python3 05_kafka_to_iceberg_streaming.py
           ports:
             - name: health
-              containerPort: 8080
+              containerPort: 8082
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -2764,8 +2799,12 @@ spec:
               value: dave
             - name: SPARK_USER
               value: dave
+            - name: SOURCE
+              value: postgres
             - name: WRITE_MODE
               value: soft_delete
+            - name: HEALTH_PORT
+              value: "8082"
             - name: TRIGGER_INTERVAL
               valueFrom:
                 configMapKeyRef:
@@ -2831,11 +2870,6 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: TARGET_NAMESPACE
-            - name: HEALTH_PORT
-              valueFrom:
-                configMapKeyRef:
-                  name: kafka-to-iceberg-config
-                  key: HEALTH_PORT
           resources:
             requests:
               memory: "4Gi"
@@ -2860,31 +2894,32 @@ spec:
           configMap:
             name: star-transform-script
 
-# ── Deployment: history_tracking write mode ───────────────────────────────────
-
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kafka-to-iceberg-history-tracking
+  name: kafka-to-iceberg-postgres-history-tracking
   namespace: prod
   labels:
     app: kafka-to-iceberg
+    pipeline.source: postgres
     pipeline.write-mode: history-tracking
     pipeline.type: streaming
   annotations:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
-    pipeline.write-mode-desc: "Append-only — every CDC event inserted with _change_type + _change_ts"
+    pipeline.write-mode-desc: "PostgreSQL → Kafka → Iceberg | Append-only full row history"
 spec:
-  replicas: 0            # disabled by default — scale to 1 to activate
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
+      pipeline.source: postgres
       pipeline.write-mode: history-tracking
   template:
     metadata:
       labels:
         app: kafka-to-iceberg
+        pipeline.source: postgres
         pipeline.write-mode: history-tracking
     spec:
       restartPolicy: Always
@@ -2902,7 +2937,7 @@ spec:
               exec python3 05_kafka_to_iceberg_streaming.py
           ports:
             - name: health
-              containerPort: 8080
+              containerPort: 8083
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -2917,8 +2952,12 @@ spec:
               value: dave
             - name: SPARK_USER
               value: dave
+            - name: SOURCE
+              value: postgres
             - name: WRITE_MODE
               value: history_tracking
+            - name: HEALTH_PORT
+              value: "8083"
             - name: TRIGGER_INTERVAL
               valueFrom:
                 configMapKeyRef:
@@ -2984,11 +3023,932 @@ spec:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
                   key: TARGET_NAMESPACE
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ORACLE PIPELINES
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-oracle-standard
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.source: oracle
+    pipeline.write-mode: standard
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "Oracle → Kafka → Iceberg | SCD Type 0 — MERGE upsert + hard delete"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.source: oracle
+      pipeline.write-mode: standard
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.source: oracle
+        pipeline.write-mode: standard
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8084
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: oracle
+            - name: WRITE_MODE
+              value: standard
             - name: HEALTH_PORT
+              value: "8084"
+            - name: TRIGGER_INTERVAL
               valueFrom:
                 configMapKeyRef:
                   name: kafka-to-iceberg-config
-                  key: HEALTH_PORT
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-oracle-soft-delete
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.source: oracle
+    pipeline.write-mode: soft-delete
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "Oracle → Kafka → Iceberg | MERGE upsert + soft-delete flag"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.source: oracle
+      pipeline.write-mode: soft-delete
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.source: oracle
+        pipeline.write-mode: soft-delete
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8085
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: oracle
+            - name: WRITE_MODE
+              value: soft_delete
+            - name: HEALTH_PORT
+              value: "8085"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-oracle-history-tracking
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.source: oracle
+    pipeline.write-mode: history-tracking
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "Oracle → Kafka → Iceberg | Append-only full row history"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.source: oracle
+      pipeline.write-mode: history-tracking
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.source: oracle
+        pipeline.write-mode: history-tracking
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8086
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: oracle
+            - name: WRITE_MODE
+              value: history_tracking
+            - name: HEALTH_PORT
+              value: "8086"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MONGODB PIPELINES
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-mongodb-standard
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.source: mongodb
+    pipeline.write-mode: standard
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "MongoDB → Kafka → Iceberg | SCD Type 0 — MERGE upsert + hard delete"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.source: mongodb
+      pipeline.write-mode: standard
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.source: mongodb
+        pipeline.write-mode: standard
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8087
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: mongodb
+            - name: WRITE_MODE
+              value: standard
+            - name: HEALTH_PORT
+              value: "8087"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-mongodb-soft-delete
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.source: mongodb
+    pipeline.write-mode: soft-delete
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "MongoDB → Kafka → Iceberg | MERGE upsert + soft-delete flag"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.source: mongodb
+      pipeline.write-mode: soft-delete
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.source: mongodb
+        pipeline.write-mode: soft-delete
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8088
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: mongodb
+            - name: WRITE_MODE
+              value: soft_delete
+            - name: HEALTH_PORT
+              value: "8088"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: streaming-script
+              mountPath: /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+              subPath: 05_kafka_to_iceberg_streaming.py
+              readOnly: true
+            - name: star-transform-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+              readOnly: true
+      volumes:
+        - name: streaming-script
+          configMap:
+            name: kafka-to-iceberg-script
+        - name: star-transform-script
+          configMap:
+            name: star-transform-script
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-to-iceberg-mongodb-history-tracking
+  namespace: prod
+  labels:
+    app: kafka-to-iceberg
+    pipeline.source: mongodb
+    pipeline.write-mode: history-tracking
+    pipeline.type: streaming
+  annotations:
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+    pipeline.write-mode-desc: "MongoDB → Kafka → Iceberg | Append-only full row history"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kafka-to-iceberg
+      pipeline.source: mongodb
+      pipeline.write-mode: history-tracking
+  template:
+    metadata:
+      labels:
+        app: kafka-to-iceberg
+        pipeline.source: mongodb
+        pipeline.write-mode: history-tracking
+    spec:
+      restartPolicy: Always
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kafka-to-iceberg
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 05_kafka_to_iceberg_streaming.py
+          ports:
+            - name: health
+              containerPort: 8089
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: mongodb
+            - name: WRITE_MODE
+              value: history_tracking
+            - name: HEALTH_PORT
+              value: "8089"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: DRY_RUN
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: DRY_RUN
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: ADAPTIVE_COALESCE_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADAPTIVE_COALESCE_TARGET
+            - name: TRANSFORM_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRANSFORM_PIPELINE
+            - name: PII_COLUMNS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: PII_COLUMNS
+            - name: TARGET_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TARGET_NAMESPACE
           resources:
             requests:
               memory: "4Gi"
