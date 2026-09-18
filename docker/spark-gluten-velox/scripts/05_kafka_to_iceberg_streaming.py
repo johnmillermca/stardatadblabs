@@ -1069,10 +1069,14 @@ def _start_source_stream(
 
 def _build_spark(bao: BaoSparkInit) -> SparkSession:
     conf = bao.spark_conf(app_name=f"kafka-to-iceberg-{WRITE_MODE}")
-    conf.set(
-        "spark.jars.packages",
-        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1",
-    )
+    # spark-sql-kafka and its kafka-clients dependency are baked into the image
+    # at /opt/spark/jars/ (copied in Dockerfile).  Using spark.jars.packages would
+    # trigger a Maven/Ivy download at session start, which (a) requires outbound
+    # internet from the driver pod, (b) only lands the jar on the driver's local
+    # /root/.ivy2/ — executors on worker nodes never receive it, so every micro-batch
+    # that touches a Kafka DataSource fails with ClassNotFoundException.
+    # spark.jars is not needed here because /opt/spark/jars/ is already on the
+    # default classpath for both driver and all executor JVMs on this cluster.
     # Peak-hour AQE tuning
     conf.set("spark.sql.adaptive.enabled",                               "true")
     conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
@@ -1083,11 +1087,14 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     # Iceberg write performance
     conf.set("spark.sql.iceberg.write.fanout.enabled",                   "true")
     conf.set("spark.sql.iceberg.merge.cardinality-check.enabled",        "false")
-    # NOTE: KryoSerializer is intentionally NOT set here.
-    # The Kafka structured streaming DataSourceV2 (DataSourceRDDPartition) uses
-    # Java serialisation internally; enabling Kryo causes a ClassCastException
-    # (List$SerializationProxy → Seq) that crashes every micro-batch task.
-    # Java serialiser is the safe default for Spark Structured Streaming + Kafka.
+    # spark-defaults.conf in the spark-gluten-velox image sets KryoSerializer
+    # cluster-wide (needed for Gluten/Velox + JDBC batch jobs).  The Kafka
+    # DataSourceV2 (DataSourceRDDPartition) uses Java serialisation internally;
+    # Kryo cannot deserialise its List$SerializationProxy → Seq and crashes every
+    # micro-batch with a ClassCastException.  Override back to JavaSerializer here
+    # so only this streaming session is unaffected; Gluten/JDBC jobs keep Kryo.
+    conf.set("spark.serializer",
+             "org.apache.spark.serializer.JavaSerializer")
 
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")

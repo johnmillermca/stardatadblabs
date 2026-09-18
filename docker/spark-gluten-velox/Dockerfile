@@ -104,6 +104,36 @@ COPY jars/mongo-spark-connector_2.12-10.4.0-all.jar \
      /opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar
 RUN chmod 644 /opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar
 
+# Kafka Structured Streaming connector — required by 05_kafka_to_iceberg_streaming.py.
+# Baked in so both the driver pod and every executor JVM on the worker nodes have it
+# on their default classpath (/opt/spark/jars/).  Using spark.jars.packages at
+# runtime would only download to the driver's local /root/.ivy2/ and executors would
+# fail with ClassNotFoundException on the first Kafka micro-batch.
+#
+# Two JARs are required for standalone-cluster mode:
+#   spark-sql-kafka-0-10_2.12-3.5.1.jar  — the DataSourceV2 read/write provider
+#   kafka-clients-3.4.1.jar              — Kafka client library (transitive dep)
+#
+# Downloaded from Maven Central:
+#   org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+#   org.apache.kafka:kafka-clients:3.4.1
+COPY jars/spark-sql-kafka-0-10_2.12-3.5.1.jar \
+     /opt/spark/jars/spark-sql-kafka-0-10_2.12-3.5.1.jar
+COPY jars/kafka-clients-3.4.1.jar \
+     /opt/spark/jars/kafka-clients-3.4.1.jar
+COPY jars/spark-token-provider-kafka-0-10_2.12-3.5.1.jar \
+     /opt/spark/jars/spark-token-provider-kafka-0-10_2.12-3.5.1.jar
+# commons-pool2 is a runtime dependency of spark-sql-kafka (KafkaDataConsumer uses
+# GenericKeyedObjectPoolConfig).  The base apache/spark image ships commons-pool 1.x
+# only; commons-pool2 2.x is a separate artifact and must be added explicitly.
+COPY jars/commons-pool2-2.11.1.jar \
+     /opt/spark/jars/commons-pool2-2.11.1.jar
+RUN chmod 644 \
+    /opt/spark/jars/spark-sql-kafka-0-10_2.12-3.5.1.jar \
+    /opt/spark/jars/kafka-clients-3.4.1.jar \
+    /opt/spark/jars/spark-token-provider-kafka-0-10_2.12-3.5.1.jar \
+    /opt/spark/jars/commons-pool2-2.11.1.jar
+
 # ── Python packages — split into layers to avoid pip botocore conflict ────────
 # Layer 1: boto3 + s3fs together so pip resolves a compatible botocore/aiobotocore
 RUN pip3 install --no-cache-dir \

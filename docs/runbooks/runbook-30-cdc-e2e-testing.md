@@ -324,6 +324,71 @@ done
 
 ---
 
+## 0. Known Issues & Fixes
+
+### ClassCastException: `List$SerializationProxy → Seq` on every Postgres micro-batch
+
+**Symptom:** Every micro-batch for the `cdc-postgres-standard` query (and the other two
+sources) fails with:
+
+```
+java.lang.ClassCastException: scala.collection.immutable.List$SerializationProxy
+  cannot be cast to scala.collection.Seq
+```
+
+**Root cause (two compounding issues confirmed):**
+
+1. **`KryoSerializer` active via `spark-defaults.conf` in the image** — The
+   `spark-gluten-velox` image bakes `spark.serializer = KryoSerializer` into
+   `/opt/spark/conf/spark-defaults.conf` (needed for Gluten/Velox + JDBC batch jobs).
+   The original `_build_spark()` code attempted to avoid Kryo by simply *not setting*
+   the serializer — but `spark-defaults.conf` is loaded before `SparkConf` in
+   `SparkSession.builder`, so the image-level default always wins.  Kafka's
+   `DataSourceV2` / `DataSourceRDDPartition` uses Java serialisation for its internal
+   partition state; Kryo cannot deserialise `List$SerializationProxy` as a `Seq`,
+   crashing every task.
+
+2. **`spark.jars.packages` triggered a Maven/Ivy download at runtime** — The previous
+   code set `spark.jars.packages = org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1`.
+   On a standalone cluster the downloaded jar only lands in the driver pod's
+   `/root/.ivy2/` — executor JVMs on worker nodes never receive it, causing
+   `ClassNotFoundException` on the Kafka `DataSource` on the first micro-batch if the
+   download path happens to be taken.
+
+**Fix applied (image `spark-gluten-velox:3.5.1-14`):**
+
+- [`_build_spark()`](../../../docker/spark-gluten-velox/scripts/05_kafka_to_iceberg_streaming.py)
+  now explicitly sets `spark.serializer = JavaSerializer` so the streaming session
+  overrides the cluster default without affecting any other Gluten/JDBC job.
+- `spark.jars.packages` removed; the three required JARs
+  (`spark-sql-kafka-0-10_2.12-3.5.1.jar`, `kafka-clients-3.4.1.jar`,
+  `spark-token-provider-kafka-0-10_2.12-3.5.1.jar`) are now baked into the image at
+  `/opt/spark/jars/` and are present on every driver *and* executor classpath
+  without any network access at runtime.
+
+**Deploy steps:**
+
+```bash
+# 1. Rebuild and push the image (from repo root)
+bash docker/spark-gluten-velox/build-and-push.sh   # tags as :3.5.1-14
+
+# 2. Apply the updated ConfigMap (already updated in git)
+kubectl apply -f manifests/cdc-batch-pipeline/kafka-to-iceberg-streaming.yaml
+
+# 3. Rolling restart to pick up the new image
+kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
+kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
+
+# 4. Confirm no ClassCastException in first 5 batches
+kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail=60 \
+  | grep -E "Batch [0-9]+|ClassCast|Exception|ERROR"
+```
+
+**Expected after fix:** `Batch 0`, `Batch 1`, … appear for all three sources with no
+`ClassCastException` lines.
+
+---
+
 ## 2. Section 1 — Standard Mode Tests (SCD Type 0)
 
 Confirm `kafka-to-iceberg-standard` is the only active deployment (replicas=1) and
