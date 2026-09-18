@@ -143,6 +143,15 @@ Environment variables
                       Comma-separated list of <[table.]column><op><value> expressions.
                       Applied as a WHERE clause on the source query for every connector.
   DRY_RUN             1 = create Iceberg DDL but skip data copy
+  FULL_RELOAD         1 = convenience alias for --mode full_reload.
+                      Truncates the target Iceberg table (DELETE FROM)
+                      then reloads every row from the source from scratch.
+                      Schema, partitioning, and S3 location are preserved —
+                      only the data is wiped before the reload begins.
+                      Safe for scheduled full-refresh jobs where you always
+                      want a clean current-image copy rather than accumulated
+                      appended snapshots.
+                      Equivalent to: starpump <source> --mode full_reload
   BATCH_SIZE          Rows per batch                (default: 100000)
   MAX_ROWS            Hard cap on total NEW rows written per table in this run.
                       0 (default) = no cap — copy until source is exhausted.
@@ -293,11 +302,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "incremental", "custom_sql"],
+        choices=["full", "incremental", "custom_sql", "full_reload"],
         default=None,
         help=(
             "Copy mode: full (default), incremental (watermark-based), "
-            "or custom_sql (user-supplied JOIN query)."
+            "custom_sql (user-supplied JOIN query), or full_reload "
+            "(truncate Iceberg table then reload all rows from source)."
         ),
     )
     parser.add_argument(
@@ -373,13 +383,19 @@ READ_MAX_RETRIES    = int(os.environ.get("READ_MAX_RETRIES", "3"))
 MAX_THREADS     = _ARGS.threads if _ARGS.threads is not None else int(os.environ.get("MAX_THREADS", "8"))
 
 # ── Mode configuration ─────────────────────────────────────────────────────────
-# MODE: full (default) | incremental | custom_sql
+# MODE: full (default) | incremental | custom_sql | full_reload
 # CLI --mode takes precedence over MODE env var.
 _raw_mode = (_ARGS.mode or os.environ.get("MODE", "full")).lower()
-if _raw_mode not in ("full", "incremental", "custom_sql"):
-    print(f"ERROR: Unknown MODE {_raw_mode!r}. Choose: full, incremental, custom_sql", file=sys.stderr)
+if _raw_mode not in ("full", "incremental", "custom_sql", "full_reload"):
+    print(f"ERROR: Unknown MODE {_raw_mode!r}. Choose: full, incremental, custom_sql, full_reload", file=sys.stderr)
     sys.exit(1)
 MODE: str = _raw_mode
+
+# FULL_RELOAD: convenience alias — set FULL_RELOAD=1 instead of MODE=full_reload.
+# If both are set, MODE=full_reload takes precedence over a conflicting MODE value.
+if os.environ.get("FULL_RELOAD", "0") == "1" and MODE != "full_reload":
+    MODE = "full_reload"
+    logger.info("FULL_RELOAD=1 detected — overriding MODE to full_reload.")
 
 # CUSTOM_SQL: user-supplied SQL query for custom_sql mode.
 # CLI --custom-sql takes precedence over CUSTOM_SQL env var.
@@ -1950,13 +1966,34 @@ def _copy_table(
             logger.info("[%s] DRY_RUN — skipping data copy.", table)
             status = "dry_run"
         else:
+            # ── full_reload: truncate Iceberg table before copying ─────────
+            # DELETE FROM removes all existing rows while keeping the table
+            # DDL, schema, partitioning, and S3 location intact.
+            # After truncation already_written is forced to 0 so the batch
+            # loop starts from offset 0 and reloads the entire source table.
+            if MODE == "full_reload":
+                try:
+                    before_count = spark.table(fqn).count()
+                    spark.sql(f"DELETE FROM {fqn}")
+                    logger.info(
+                        "[%s] full_reload: truncated %d rows from Iceberg table.",
+                        table, before_count,
+                    )
+                except Exception as _trunc_err:
+                    # Table may not exist yet on first ever run — not an error.
+                    logger.info(
+                        "[%s] full_reload: truncate skipped (table empty or not yet created): %s",
+                        table, _trunc_err,
+                    )
+
             # ── Resume detection (offset-capable sources only) ─────────────
             # Snowflake supports reliable LIMIT/OFFSET pagination so a partial
             # copy can be resumed from the last committed Iceberg row count.
             # Databricks JDBC does not (no guaranteed order without ORDER BY),
             # so it always reads from offset 0 regardless of prior runs.
+            # full_reload always starts at 0 — skip the count entirely.
             already_written = 0
-            if connector.supports_offset_resume:
+            if connector.supports_offset_resume and MODE != "full_reload":
                 try:
                     already_written = spark.table(fqn).count()
                 except Exception:
@@ -2631,6 +2668,11 @@ def main() -> None:
             "=== PK_TABLE_MAP not set — incremental writes will use plain append. "
             "Set PK_TABLE_MAP=\"*:id\" or per-table pairs to enable MERGE upsert. ==="
         )
+    elif MODE == "full_reload":
+        logger.info(
+            "=== MODE=full_reload: every Iceberg table will be TRUNCATED "
+            "then reloaded in full from source. ==="
+        )
 
     # Validate custom_sql mode requirements early
     if MODE == "custom_sql":
@@ -2896,8 +2938,10 @@ def main() -> None:
                 ]
 
             else:
-                # full mode — original logic
-                # ── DDL drift detection (full mode) ───────────────────────────
+                # full / full_reload mode
+                # full_reload: _copy_table handles the per-table DELETE FROM
+                # before starting the batch loop — no extra logic needed here.
+                # ── DDL drift detection (full / full_reload mode) ─────────────
                 # Run before spawning threads so the schema is settled before
                 # any thread opens its table-copy.  Sequential to avoid concurrent
                 # ALTER TABLE races on the same table from parallel threads.
