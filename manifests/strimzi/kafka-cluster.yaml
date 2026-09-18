@@ -233,11 +233,11 @@ spec:
       transaction.state.log.min.isr: "1"
       default.replication.factor: "1"
       min.insync.replicas: "1"
-      # Disable auto-create: the Strimzi topic operator manages all topics
-      # declaratively via KafkaTopic CRs. auto.create.topics.enable=true causes
-      # races where Kafka creates a topic with default settings before the operator
-      # can apply the KafkaTopic spec (wrong retention, partitions, compaction etc).
-      auto.create.topics.enable: "false"
+      # Enable auto-create so Debezium can produce to CDC topics without requiring
+      # every topic to be pre-declared as a KafkaTopic CR.
+      # Debezium creates topics dynamically (postgres.cache_testing.customers etc.)
+      # and cannot function when the broker rejects unknown topics.
+      auto.create.topics.enable: "true"
       # ── Durability: flush to disk before OS page-cache writeback ─────────────
       # Flush every 10 000 messages OR every 1 000ms — whichever comes first.
       # Default (flush only on page-cache eviction) means up to ~5s of data is
