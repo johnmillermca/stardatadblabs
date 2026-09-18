@@ -215,6 +215,15 @@ kubectl exec -it mongodb-0 -n prod -- mongosh mongodb://localhost:27017/cache_te
 > **PostgreSQL access from master:** The cluster-internal hostname `postgresql.prod.svc.cluster.local` is not
 > resolvable from the master node. Use the NodePort instead:
 > `PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing`
+>
+> **`rbac` write permissions:** By default `rbac` is SELECT-only. The following grant was applied once
+> to enable DML for e2e testing (idempotent — safe to re-run if permissions are ever reset):
+> ```bash
+> PGPOD=$(kubectl get pod -n prod -l app=postgresql -o jsonpath='{.items[0].metadata.name}')
+> kubectl exec -n prod $PGPOD -- psql -U postgres -d cache_testing -c \
+>   "GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rbac;
+>    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rbac;"
+> ```
 
 ### 1.2 — All Debezium Connectors RUNNING
 
@@ -473,7 +482,11 @@ kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.
 
 ```sql
 -- (in psql)
-DELETE FROM customers WHERE id = 900001;
+-- customers has FK dependencies — remove child rows first
+DELETE FROM product_reviews WHERE customer_id = 900001;
+DELETE FROM order_items   WHERE order_id IN (SELECT id FROM orders WHERE customer_id = 900001);
+DELETE FROM orders        WHERE customer_id = 900001;
+DELETE FROM customers     WHERE id = 900001;
 ```
 
 #### Step 8 — Wait and verify hard DELETE in Iceberg
