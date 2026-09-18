@@ -1,0 +1,29 @@
+# ArgoCD Application — CDC Batch Pipeline (Kafka → Iceberg streaming consumer)
+# Namespace : prod
+# Manages   : kafka-to-iceberg ConfigMap + three write-mode Deployments
+#             (standard, soft_delete, history_tracking)
+# Source    : manifests/cdc-batch-pipeline/
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cdc-batch-pipeline
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/cdc-batch-pipeline
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
