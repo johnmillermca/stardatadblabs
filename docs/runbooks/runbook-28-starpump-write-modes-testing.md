@@ -1,6 +1,6 @@
 # Runbook 28 — Starpump Write Modes End-to-End Testing
 
-> **Version:** 1.0
+> **Version:** 1.1
 > **Status:** Active
 > **Owner:** Platform Engineering
 > **Related runbook:** [`runbook-27-cdc-batch-pipeline-e2e-testing.md`](runbook-27-cdc-batch-pipeline-e2e-testing.md)
@@ -51,6 +51,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 | 3.1 | Incremental / standard | Watermark read — WHERE clause matches last run timestamp |
 | 3.2 | Incremental / standard | New row inserted in Postgres appears in Iceberg |
 | 3.3 | Incremental / standard | Updated row appears in Iceberg with new values |
+| **3.3a** | **Incremental / MERGE upsert** | **Updated row overwrites existing Iceberg row — no duplicate (PK_TABLE_MAP)** |
 | 3.4 | Incremental / standard | Watermark advances to new `extraction_ts` after success |
 | 3.5 | Incremental / standard | Failed run does NOT advance watermark |
 | 3.6 | Incremental / standard | Zero-row window completes without error |
@@ -301,7 +302,7 @@ kubectl exec -n prod $(kubectl get pods -n prod | grep postgres | grep Running |
   "
 ```
 
-**Step 2 — Run incremental:**
+**Step 2 — Run incremental (plain append — no PK_TABLE_MAP):**
 
 ```bash
 kubectl exec -n prod $MASTER -c spark-master -- \
@@ -334,7 +335,154 @@ spark.stop()
 EOF
 ```
 
-**Expected:** `tier=platinum`
+**Expected:** `tier=platinum`. Note: without `PK_TABLE_MAP` this run used plain append.
+The old `gold` row still exists alongside the new `platinum` row. See test **3.3a** below
+to validate MERGE upsert which fixes that.
+
+---
+
+### 3.3a Updated row overwrites existing Iceberg row — MERGE upsert via `PK_TABLE_MAP`
+
+This test validates the MERGE upsert path introduced in starpump v1.1.
+When `PK_TABLE_MAP` is set, incremental mode issues `MERGE INTO` keyed on the
+primary key so updated source rows overwrite their existing Iceberg counterpart
+instead of being appended alongside the stale copy.
+
+**Step 1 — Drop the Iceberg customers table and re-do the full load as a clean baseline:**
+
+```bash
+# Drop existing Iceberg table so we start clean
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("rb28-t33a-reset")).getOrCreate()
+spark.sql("DROP TABLE IF EXISTS `postgres`.`public`.`customers`")
+print("Dropped customers Iceberg table.")
+spark.stop()
+EOF
+
+# Full load into clean table
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
+  starpump postgres --mode full 2>&1 | grep "DONE\|✓\|✗"
+```
+
+**Expected:** Full load completes, `rows=<N>  status=success`.
+
+**Step 2 — Record the row count and verify the test customer's current tier:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("rb28-t33a-pre")).getOrCreate()
+total = spark.table("`postgres`.`public`.`customers`").count()
+print("Total rows in Iceberg:", total)
+spark.sql("""
+    SELECT id, name, tier, updated_at
+    FROM `postgres`.`public`.`customers`
+    WHERE email = 'rb28@test.local'
+""").show(truncate=False)
+spark.stop()
+EOF
+```
+
+Record **Total rows** — call it `N_before`. Note the current `tier` value.
+
+**Step 3 — Update the row in Postgres:**
+
+```bash
+kubectl exec -n prod $(kubectl get pods -n prod | grep postgres | grep Running | awk 'NR==1{print $1}') \
+  -- psql -U postgres -d cache_testing -c "
+    UPDATE public.customers
+    SET tier='diamond', updated_at=NOW()
+    WHERE email='rb28@test.local'
+    RETURNING id, name, tier, updated_at;
+  "
+```
+
+Record the returned `updated_at` timestamp.
+
+**Step 4 — Run incremental with `PK_TABLE_MAP` to enable MERGE upsert:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
+  PK_TABLE_MAP="customers:id" \
+  starpump postgres --mode incremental --watermark-col updated_at 2>&1 \
+  | grep "MERGE upsert\|DONE\|✓\|✗"
+```
+
+**Expected log lines:**
+```
+[customers] Incremental MERGE upsert enabled — pk_col=id
+[customers] MERGE upsert on pk=id completed.
+[customers] DONE — 1 rows written (total incl. prior runs).
+✓ customers   rows=1   status=success
+```
+
+**Step 5 — Verify: exactly one row for the test customer, with updated values:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("rb28-t33a-post")).getOrCreate()
+
+total_after = spark.table("`postgres`.`public`.`customers`").count()
+print("Total rows in Iceberg after MERGE:", total_after)
+
+spark.sql("""
+    SELECT id, name, tier, updated_at, snap_timestamp
+    FROM `postgres`.`public`.`customers`
+    WHERE email = 'rb28@test.local'
+""").show(truncate=False)
+
+# Count how many rows exist for this email — must be exactly 1 after MERGE upsert
+dupe_count = spark.sql("""
+    SELECT count(*) AS cnt
+    FROM `postgres`.`public`.`customers`
+    WHERE email = 'rb28@test.local'
+""").collect()[0]["cnt"]
+print(f"Row count for rb28@test.local: {dupe_count}  (expected: 1)")
+spark.stop()
+EOF
+```
+
+**Expected:**
+- `Total rows in Iceberg after MERGE` = `N_before` (unchanged — MERGE updated in place, not appended)
+- `tier = diamond` (new value from source)
+- `Row count for rb28@test.local: 1` — no duplicate; old stale row was overwritten
+
+**Step 6 — Verify with the wildcard shorthand `PK_TABLE_MAP="*:id"`:**
+
+```bash
+# Update again to a new tier
+kubectl exec -n prod $(kubectl get pods -n prod | grep postgres | grep Running | awk 'NR==1{print $1}') \
+  -- psql -U postgres -d cache_testing -c \
+  "UPDATE public.customers SET tier='platinum', updated_at=NOW() WHERE email='rb28@test.local';"
+
+# Run incremental using wildcard PK
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
+  PK_TABLE_MAP="*:id" \
+  starpump postgres --mode incremental --watermark-col updated_at 2>&1 \
+  | grep "MERGE upsert\|DONE\|✓\|✗"
+```
+
+**Expected:** Same `MERGE upsert enabled` log, same single-row result with `tier=platinum`.
 
 ---
 
@@ -759,6 +907,7 @@ EOF
 | `BATCH_SIZE` | `50000` | Rows per Iceberg snapshot |
 | `DRY_RUN` | `1` | Create DDL only, skip data copy |
 | `DDL_DRIFT_DETECT` | `1` | Detect and apply schema changes |
+| `PK_TABLE_MAP` | `customers:id,orders:id` | Per-table PK for incremental MERGE upsert |
 
 ### Key starpump CLI flags for this runbook
 
@@ -777,8 +926,15 @@ Run start:
   last_ts  ← READ  pipeline_watermarks.sf_extraction_ts
   new_ts   ← capture_ts() from source server          (in memory only)
   WHERE clause: updated_at > '<last_ts>'
+  pk_col   ← PK_TABLE_MAP lookup for this table        (None if not set)
 
-  [batch loop + write to Iceberg]
+  [batch loop]
+    if pk_col is set:
+      MERGE INTO iceberg_table ON pk_col
+        WHEN MATCHED     → UPDATE all columns  (updated row overwrites stale copy)
+        WHEN NOT MATCHED → INSERT              (new row added normally)
+    else:
+      writeTo().append()                       (old behaviour — may duplicate updated rows)
 
   ✓ SUCCESS:
     pipeline_watermarks.sf_extraction_ts ← new_ts    (written now)
@@ -788,3 +944,12 @@ Run start:
     pipeline_watermarks unchanged         (new_ts discarded)
     next run retries same window          (no rows skipped)
 ```
+
+### When to use `PK_TABLE_MAP`
+
+| Scenario | Setting |
+|---|---|
+| All postgres tables use `id` as PK | `PK_TABLE_MAP="*:id"` |
+| Mixed PKs | `PK_TABLE_MAP="customers:id,orders:id,products:product_id"` |
+| Append-only table (e.g. logs) — no upsert needed | Omit from map or don't set `PK_TABLE_MAP` |
+| Full load — upsert never applies | `PK_TABLE_MAP` is ignored in `--mode full` |

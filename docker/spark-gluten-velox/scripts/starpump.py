@@ -150,6 +150,17 @@ Environment variables
                       regardless of how many rows are already in Iceberg.
   MAX_THREADS         Parallel copy threads         (default: 8)
                       Overridden by --threads N on the CLI.
+  PK_TABLE_MAP        Per-table primary-key columns for MERGE upsert in incremental mode.
+                      Comma-separated list of <table>:<pk_col> pairs.
+                      When a table's PK is known, incremental batches are written via
+                      MERGE INTO keyed on the PK so updated rows overwrite their
+                      existing Iceberg counterpart instead of being appended as
+                      duplicates.  Tables not listed fall back to plain append.
+                      Use the special key "*" for a global default PK column.
+                      Examples:
+                        PK_TABLE_MAP="customers:id,orders:id,products:product_id"
+                        PK_TABLE_MAP="*:id"   (every table uses "id" as PK)
+                      Only active in --mode incremental.  Has no effect in full/custom_sql.
 
 Usage
 -----
@@ -381,6 +392,22 @@ TARGET_TABLE: str | None = _ARGS.target_table or os.environ.get("TARGET_TABLE")
 # WATERMARK_COL: timestamp column used for incremental delta detection.
 # Overridable; defaults are tried in order: updated_at → created_at.
 WATERMARK_COL: str | None = _ARGS.watermark_col or os.environ.get("WATERMARK_COL")
+
+# PK_TABLE_MAP: per-table primary key column names for incremental MERGE upsert.
+# Comma-separated list of <table>:<pk_col> pairs, e.g.:
+#   PK_TABLE_MAP="customers:id,orders:id,products:product_id"
+# When a table's PK is known, incremental mode performs MERGE INTO (upsert) instead
+# of a plain append so updated rows overwrite their existing Iceberg counterpart.
+# Tables not listed fall back to append (same behaviour as before this change).
+# The special key "*" sets a default PK for all tables not listed explicitly:
+#   PK_TABLE_MAP="*:id"   — every table uses "id" as the PK
+_raw_pk_map = os.environ.get("PK_TABLE_MAP", "").strip()
+PK_TABLE_MAP: dict[str, str] = {}
+for _entry in _raw_pk_map.split(","):
+    _entry = _entry.strip()
+    if ":" in _entry:
+        _tbl, _pk = _entry.split(":", 1)
+        PK_TABLE_MAP[_tbl.strip().lower()] = _pk.strip().lower()
 
 # DDL_DRIFT_DETECT: compare source schema vs Iceberg before copy and emit ALTER TABLEs.
 DDL_DRIFT_DETECT: bool = os.environ.get("DDL_DRIFT_DETECT", "1") == "1"
@@ -1845,16 +1872,17 @@ def _auto_partition_spec(schema: StructType) -> list[dict]:
 # ── Single-table copy worker ───────────────────────────────────────────────────
 
 def _copy_table(
-    spark:     SparkSession,
-    builder:   IcebergTableBuilder,
-    connector: "_SourceConnector",
-    conn_opts: dict,
-    s3_bucket: str,
-    table:     str,
-    size_gb:   float,
-    results:   dict,
-    lock:      threading.Lock,
-    pg_creds:  dict,
+    spark:        SparkSession,
+    builder:      IcebergTableBuilder,
+    connector:    "_SourceConnector",
+    conn_opts:    dict,
+    s3_bucket:    str,
+    table:        str,
+    size_gb:      float,
+    results:      dict,
+    lock:         threading.Lock,
+    pg_creds:     dict,
+    merge_pk_col: str | None = None,
 ) -> None:
     """
     Copy one table from the source database → Iceberg (called inside a thread).
@@ -1870,6 +1898,13 @@ def _copy_table(
           the Debezium bootstrap script without a Spark session)
     3. Stamp 'pipeline.sf_extraction_ts' as an Iceberg table property so
        the watermark appears in any DESCRIBE EXTENDED output.
+
+    merge_pk_col
+    ------------
+    When set (incremental mode only), each batch is written via MERGE INTO keyed
+    on this primary-key column instead of a plain append.  Updated source rows
+    overwrite their existing Iceberg counterpart; new rows are inserted normally.
+    When None (full mode, or incremental without a known PK), plain append is used.
 
     Writes final status to the shared *results* dict.
     """
@@ -2072,37 +2107,44 @@ def _copy_table(
                     .withColumn("snap_timestamp",  current_timestamp())
                 )
 
-                # ── Write with snapshot-conflict retry ─────────────────────────
-                # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
-                # Occurs when multiple threads commit to the same table and the
-                # snapshot ID changes between scan-time and commit-time.
-                # Retrying re-reads the current snapshot and re-attempts the commit.
-                write_attempt = 0
-                while True:
-                    try:
-                        final.writeTo(fqn).option("mergeSchema", "true").append()
-                        break
-                    except Exception as write_err:  # noqa: BLE001
-                        write_attempt += 1
-                        err_str = str(write_err)
-                        is_retryable = any(k in err_str for k in (
-                            "IllegalStateException",
-                            "CommitFailedException",
-                            "ValidationException",
-                            "Cannot commit",
-                            "concurrent",
-                            "conflict",
-                        ))
-                        if write_attempt > WRITE_MAX_RETRIES or not is_retryable:
-                            raise
-                        sleep_s = WRITE_RETRY_SLEEP_S * write_attempt
-                        logger.warning(
-                            "[%s] writeTo().append() conflict (attempt %d/%d): %s "
-                            "— retrying in %ds …",
-                            table, write_attempt, WRITE_MAX_RETRIES,
-                            err_str[:120], sleep_s,
-                        )
-                        time.sleep(sleep_s)
+                # ── Write: MERGE upsert (incremental + PK known) or plain append ──
+                # Incremental mode with a known primary-key column: use MERGE INTO
+                # so updated source rows overwrite their existing Iceberg counterpart
+                # instead of being appended as duplicate rows alongside the stale one.
+                # Full mode (or incremental without a PK): plain append as before.
+                if merge_pk_col:
+                    _incremental_merge_batch(spark, final, fqn, table, merge_pk_col, lock)
+                else:
+                    # ── Plain append with snapshot-conflict retry ──────────────
+                    # Fixes: java.lang.IllegalStateException — Iceberg commit conflict.
+                    # Occurs when multiple threads commit to the same table and the
+                    # snapshot ID changes between scan-time and commit-time.
+                    write_attempt = 0
+                    while True:
+                        try:
+                            final.writeTo(fqn).option("mergeSchema", "true").append()
+                            break
+                        except Exception as write_err:  # noqa: BLE001
+                            write_attempt += 1
+                            err_str = str(write_err)
+                            is_retryable = any(k in err_str for k in (
+                                "IllegalStateException",
+                                "CommitFailedException",
+                                "ValidationException",
+                                "Cannot commit",
+                                "concurrent",
+                                "conflict",
+                            ))
+                            if write_attempt > WRITE_MAX_RETRIES or not is_retryable:
+                                raise
+                            sleep_s = WRITE_RETRY_SLEEP_S * write_attempt
+                            logger.warning(
+                                "[%s] writeTo().append() conflict (attempt %d/%d): %s "
+                                "— retrying in %ds …",
+                                table, write_attempt, WRITE_MAX_RETRIES,
+                                err_str[:120], sleep_s,
+                            )
+                            time.sleep(sleep_s)
 
                 batch.unpersist()
 
@@ -2230,6 +2272,98 @@ def _incremental_where_clause(wm_col: str, last_ts: str | None) -> str:
     if not last_ts:
         return ""  # first run — full copy
     return f"{wm_col} > '{last_ts}'"
+
+
+def _resolve_pk_col(table: str) -> str | None:
+    """
+    Return the primary-key column name for *table* from PK_TABLE_MAP.
+
+    Lookup order:
+      1. Exact table name (lower-cased)
+      2. Wildcard key "*" — default PK for all tables not listed explicitly
+      3. None — no PK known; incremental write falls back to plain append
+
+    Example PK_TABLE_MAP values:
+      "customers:id,orders:id,products:product_id"   → per-table overrides
+      "*:id"                                          → all tables use "id"
+      "customers:id,*:row_id"                         → customers→id, rest→row_id
+    """
+    tbl = table.lower()
+    if tbl in PK_TABLE_MAP:
+        return PK_TABLE_MAP[tbl]
+    if "*" in PK_TABLE_MAP:
+        return PK_TABLE_MAP["*"]
+    return None
+
+
+def _incremental_merge_batch(
+    spark:     "SparkSession",
+    final_df:  "DataFrame",
+    fqn:       str,
+    table:     str,
+    pk_col:    str,
+    lock:      "threading.Lock",
+) -> None:
+    """
+    Write one incremental batch to Iceberg using MERGE INTO (upsert) keyed on *pk_col*.
+
+    Behaviour per row in *final_df*:
+      • Row whose pk_col already exists in Iceberg  → UPDATE all columns in place.
+        The existing row's values are fully overwritten with the new source image
+        (including snap_id and snap_timestamp reflecting the current batch write).
+      • Row whose pk_col does NOT exist in Iceberg  → INSERT as a new row.
+
+    This replaces the plain .append() used in incremental mode so that source
+    updates result in exactly one current-image row in Iceberg rather than a
+    duplicate alongside the stale original.
+
+    Thread safety: the MERGE runs under *lock* to serialise concurrent commits from
+    parallel copy threads — same pattern as write_watermark_iceberg().
+
+    Retry logic mirrors the append path: up to WRITE_MAX_RETRIES retries with
+    WRITE_RETRY_SLEEP_S * attempt sleep on retryable Iceberg commit conflicts.
+    """
+    tmp_view = f"__incr_merge_{table}_{id(final_df)}"
+    set_clause = ", ".join(
+        f"t.`{f.name}` = s.`{f.name}`"
+        for f in final_df.schema.fields
+    )
+    merge_sql = f"""
+        MERGE INTO {fqn} AS t
+        USING {tmp_view} AS s
+        ON t.`{pk_col}` = s.`{pk_col}`
+        WHEN MATCHED THEN UPDATE SET {set_clause}
+        WHEN NOT MATCHED THEN INSERT *
+    """
+
+    write_attempt = 0
+    while True:
+        final_df.createOrReplaceTempView(tmp_view)
+        try:
+            with lock:
+                spark.sql(merge_sql)
+            break
+        except Exception as write_err:  # noqa: BLE001
+            write_attempt += 1
+            err_str = str(write_err)
+            is_retryable = any(k in err_str for k in (
+                "IllegalStateException",
+                "CommitFailedException",
+                "ValidationException",
+                "Cannot commit",
+                "concurrent",
+                "conflict",
+            ))
+            if write_attempt > WRITE_MAX_RETRIES or not is_retryable:
+                raise
+            sleep_s = WRITE_RETRY_SLEEP_S * write_attempt
+            logger.warning(
+                "[%s] MERGE conflict (attempt %d/%d): %s — retrying in %ds …",
+                table, write_attempt, WRITE_MAX_RETRIES, err_str[:120], sleep_s,
+            )
+            time.sleep(sleep_s)
+
+    logger.info("[%s] MERGE upsert on pk=%s completed.", table, pk_col)
 
 
 def _detect_ddl_drift(
@@ -2468,6 +2602,16 @@ def main() -> None:
         ", ".join(sorted(EXCLUDE_TABLES)) if EXCLUDE_TABLES else "none",
         MAX_TABLE_SIZE_GB,
     )
+    if MODE == "incremental" and PK_TABLE_MAP:
+        logger.info(
+            "=== PK_TABLE_MAP (incremental MERGE upsert): %s ===",
+            ", ".join(f"{t}:{c}" for t, c in sorted(PK_TABLE_MAP.items())),
+        )
+    elif MODE == "incremental":
+        logger.info(
+            "=== PK_TABLE_MAP not set — incremental writes will use plain append. "
+            "Set PK_TABLE_MAP=\"*:id\" or per-table pairs to enable MERGE upsert. ==="
+        )
 
     # Validate custom_sql mode requirements early
     if MODE == "custom_sql":
@@ -2670,6 +2814,21 @@ def main() -> None:
                                     tbl,
                                 )
 
+                            # Resolve primary-key column for MERGE upsert.
+                            # _resolve_pk_col() looks up PK_TABLE_MAP; returns None if not set.
+                            pk_col = _resolve_pk_col(tbl)
+                            if pk_col:
+                                logger.info(
+                                    "[%s] Incremental MERGE upsert enabled — pk_col=%s",
+                                    tbl, pk_col,
+                                )
+                            else:
+                                logger.info(
+                                    "[%s] No PK_TABLE_MAP entry — using plain append. "
+                                    "Set PK_TABLE_MAP=\"%s:id\" to enable MERGE upsert.",
+                                    tbl, tbl,
+                                )
+
                             # Override QUERY_FILTER for this table with watermark clause.
                             # Combine with any existing table-level QUERY_FILTER predicates.
                             existing_clause = _get_where_clause(tbl)
@@ -2692,11 +2851,13 @@ def main() -> None:
                             )
                             with lock:
                                 _saved = QUERY_FILTERS.get(tbl.lower(), "")
+                            pk_col = None
 
                         _copy_table(
                             spark, builder, connector, conn_opts, s3_bucket,
                             tbl, size_gb, results, lock,
                             pg_creds=pg,
+                            merge_pk_col=pk_col,
                         )
 
                         # Restore the original QUERY_FILTERS entry
