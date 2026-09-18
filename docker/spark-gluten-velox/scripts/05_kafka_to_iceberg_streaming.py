@@ -179,12 +179,13 @@ MAX_OFFSETS_PER_TRIGGER = int(os.environ.get("MAX_OFFSETS_PER_TRIGGER", "50000")
 
 # Peak-hour performance tuning
 # Number of shuffle partitions used during MERGE operations.
-# Lower = fewer tasks = faster for small-medium batches; raise for large peak batches.
-MERGE_PARALLELISM = int(os.environ.get("MERGE_PARALLELISM", "8"))
+# CDC batches are small (1–1000 rows); keep low to avoid task scheduling overhead.
+# Raise to 16–32 only for bulk-load catch-up scenarios.
+MERGE_PARALLELISM = int(os.environ.get("MERGE_PARALLELISM", "4"))
 
-# Coalesce batch DataFrame partitions to this count before MERGE.
-# Avoids writing many small Parquet files under high write amplification.
-COALESCE_BEFORE_MERGE = int(os.environ.get("COALESCE_BEFORE_MERGE", "4"))
+# Coalesce batch DataFrame partitions before MERGE.
+# 1 is optimal for low-row-count CDC batches — avoids shuffle overhead.
+COALESCE_BEFORE_MERGE = int(os.environ.get("COALESCE_BEFORE_MERGE", "1"))
 
 # AQE adaptive coalesce target bytes per post-shuffle partition (64 MB default).
 ADAPTIVE_COALESCE_TARGET = os.environ.get("ADAPTIVE_COALESCE_TARGET", "67108864")
@@ -202,6 +203,13 @@ _PII_COLUMNS = [
     if c.strip()
 ]
 
+
+# ── Per-table schema cache ────────────────────────────────────────────────────
+# Keyed by (source_key, table_name) → StructType.
+# Schema inference via spark.read.json(rdd) costs ~2 s per batch because it
+# launches a full Spark job to sample the JSON.  After the first inference the
+# schema is stable for the lifetime of the pipeline, so cache and reuse it.
+_SCHEMA_CACHE: dict[tuple[str, str], "StructType"] = {}
 
 # ── Validate write mode ───────────────────────────────────────────────────────
 if WRITE_MODE not in _VALID_WRITE_MODES:
@@ -688,7 +696,6 @@ def _write_micro_batch(
     builder:      IcebergTableBuilder,
     source:       _StreamingSource,
     write_mode:   str,
-    restart_flag: threading.Event,
     transform_steps: list[tuple[Any, dict]],
 ) -> Any:
     """
@@ -698,10 +705,8 @@ def _write_micro_batch(
       1. Route rows by topic.
       2. Decode Debezium envelope (before / after / op / ts_ms).
       3. Apply optional StarTransform pipeline steps.
-      4. Auto-create Iceberg table if it does not exist.
+      4. Auto-create Iceberg table if it does not exist (schema cached after first batch).
       5. Apply write-mode handler (standard / soft_delete / history_tracking).
-      6. REFRESH TABLE for all written tables.
-      7. Set restart_flag for per-batch Spark context refresh.
     """
     def _foreach_batch(batch_df: DataFrame, batch_id: int) -> None:
         if batch_df.isEmpty():
@@ -762,17 +767,25 @@ def _write_micro_batch(
             if payload_df.isEmpty():
                 continue
 
-            # ── Infer schema from batch ───────────────────────────────────────
-            try:
-                inferred_schema = spark.read.json(
-                    payload_df.select("payload_json").rdd.map(lambda r: r[0])
-                ).schema
-            except Exception as exc:
-                logger.warning(
-                    "[%s/%s] Schema inference failed: %s — skipping.",
-                    source.source_key, table_name, exc,
-                )
-                continue
+            # ── Infer schema from batch (cached per table) ────────────────────
+            cache_key = (source.source_key, table_name)
+            inferred_schema = _SCHEMA_CACHE.get(cache_key)
+            if inferred_schema is None:
+                try:
+                    inferred_schema = spark.read.json(
+                        payload_df.select("payload_json").rdd.map(lambda r: r[0])
+                    ).schema
+                    _SCHEMA_CACHE[cache_key] = inferred_schema
+                    logger.info(
+                        "[%s/%s] Schema inferred and cached (%d fields).",
+                        source.source_key, table_name, len(inferred_schema.fields),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[%s/%s] Schema inference failed: %s — skipping.",
+                        source.source_key, table_name, exc,
+                    )
+                    continue
 
             # ── Parse payload JSON → typed DataFrame ──────────────────────────
             try:
@@ -942,22 +955,9 @@ def _write_micro_batch(
                     exc_info=True,
                 )
 
-        # ── Refresh written tables ────────────────────────────────────────────
-        for fqn_bt in written_tables:
-            try:
-                spark.sql(f"REFRESH TABLE {fqn_bt}")
-                logger.debug("[%s] REFRESH TABLE %s", source.source_key, fqn_bt)
-            except Exception as ref_exc:
-                logger.warning(
-                    "[%s] REFRESH TABLE %s failed (non-fatal): %s",
-                    source.source_key, fqn_bt, ref_exc,
-                )
-
-        # ── Signal per-batch restart ──────────────────────────────────────────
         if written_tables:
-            restart_flag.set()
             logger.info(
-                "[%s] batch=%d — %d table(s) written; restart_flag set.",
+                "[%s] batch=%d — %d table(s) written.",
                 source.source_key, batch_id, len(written_tables),
             )
 
@@ -972,15 +972,13 @@ def _start_source_stream(
     source:       _StreamingSource,
     bao:          BaoSparkInit,
     write_mode:   str,
-    restart_flag: threading.Event,
 ) -> StreamingQuery:
     """
     Build and start the Structured Streaming query for a single CDC source.
 
     Pipeline:
-      Kafka (Avro/JSON) → avro_to_json UDF → flatten Debezium envelope →
-      optional StarTransform steps → write-mode handler → Iceberg →
-      REFRESH TABLE → restart_flag.set()
+      Kafka (JSON) → flatten Debezium envelope →
+      optional StarTransform steps → write-mode handler → Iceberg.
     """
     kafka_secret = bao.kafka_creds()
     kafka_user   = kafka_secret.get("debezium_user",     "debezium-user")
@@ -1043,7 +1041,7 @@ def _start_source_stream(
         .queryName(f"cdc-{source.source_key}-{write_mode}")
         .foreachBatch(
             _write_micro_batch(
-                spark, builder, source, write_mode, restart_flag, transform_steps
+                spark, builder, source, write_mode, transform_steps
             )
         )
         .trigger(processingTime=TRIGGER_INTERVAL)
@@ -1097,18 +1095,15 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
 # ── Main: streaming loop with auto-restart ────────────────────────────────────
 
 def _start_all_queries(
-    spark:         SparkSession,
-    builder:       IcebergTableBuilder,
-    bao:           BaoSparkInit,
-    restart_flags: dict[str, threading.Event],
+    spark:   SparkSession,
+    builder: IcebergTableBuilder,
+    bao:     BaoSparkInit,
 ) -> list[StreamingQuery]:
-    """Start one streaming query per CDC source, each with its own restart flag."""
+    """Start one continuous streaming query per CDC source."""
     queries: list[StreamingQuery] = []
     for src in _ALL_SOURCES:
         try:
-            q = _start_source_stream(
-                spark, builder, src, bao, WRITE_MODE, restart_flags[src.source_key]
-            )
+            q = _start_source_stream(spark, builder, src, bao, WRITE_MODE)
             queries.append(q)
         except Exception as exc:
             logger.error(
@@ -1119,13 +1114,13 @@ def _start_all_queries(
 
 def _run_once(bao: BaoSparkInit) -> None:
     """
-    Initialise Spark, start all streaming queries, and run the per-batch
-    watch-and-restart loop until interrupted or a fatal error occurs.
+    Initialise Spark, start all streaming queries, and block until a query
+    dies unexpectedly (triggering an outer retry) or the process is interrupted.
 
-    Each CDC source has its own restart_flag so that a completed batch for
-    one source only restarts that source's query — never the others.  The
-    previous shared-flag design stopped all three queries simultaneously,
-    abandoning any in-flight write of the other two sources.
+    Queries run continuously — no per-batch restart.  Spark Structured Streaming
+    commits the offset checkpoint atomically after each successful foreachBatch,
+    so restart-on-failure is safe: the next _run_once call resumes from exactly
+    the last committed offset.
     """
     spark = _build_spark(bao)
 
@@ -1143,8 +1138,6 @@ def _run_once(bao: BaoSparkInit) -> None:
         except Exception as exc:
             logger.warning("[%s] Could not ensure namespace: %s", src.source_key, exc)
 
-    # When TARGET_NAMESPACE is set, pre-create that namespace in every active
-    # catalog so the first micro-batch does not fail on a missing namespace.
     if _TARGET_NAMESPACE:
         logger.info(
             "TARGET_NAMESPACE=%r — ensuring override namespace in all active catalogs.",
@@ -1153,87 +1146,35 @@ def _run_once(bao: BaoSparkInit) -> None:
         for src in _ALL_SOURCES:
             try:
                 builder.ensure_namespace(src.catalog, _TARGET_NAMESPACE)
-                logger.info(
-                    "[%s] Namespace '%s' ready.", src.source_key, _TARGET_NAMESPACE
-                )
+                logger.info("[%s] Namespace '%s' ready.", src.source_key, _TARGET_NAMESPACE)
             except Exception as exc:
                 logger.warning(
                     "[%s] Could not ensure namespace %r: %s",
                     src.source_key, _TARGET_NAMESPACE, exc,
                 )
 
-    # One restart flag per source — each foreachBatch sets only its own flag.
-    # This prevents the race where completing one batch stops all three queries.
-    restart_flags: dict[str, threading.Event] = {
-        src.source_key: threading.Event() for src in _ALL_SOURCES
-    }
-    # Map query name → source_key for the watch loop.
-    query_source_map: dict[str, str] = {
-        f"cdc-{src.source_key}-{WRITE_MODE}": src.source_key for src in _ALL_SOURCES
-    }
-
-    queries = _start_all_queries(spark, builder, bao, restart_flags)
+    queries = _start_all_queries(spark, builder, bao)
     if not queries:
         spark.stop()
         raise RuntimeError("No streaming queries started.")
 
     logger.info(
         "All %d streaming queries active (mode=%s, trigger=%s, "
-        "merge_parallelism=%d, coalesce=%d). Per-source restart enabled.",
+        "merge_parallelism=%d, coalesce=%d).",
         len(queries), WRITE_MODE, TRIGGER_INTERVAL,
         MERGE_PARALLELISM, COALESCE_BEFORE_MERGE,
     )
 
     try:
         while True:
-            time.sleep(0.5)
-
-            # Check for unexpectedly dead queries (not triggered by restart_flag).
+            time.sleep(1)
+            # If any query dies unexpectedly, surface the error so the outer
+            # retry loop in main() can restart the entire Spark session cleanly.
             for q in list(queries):
                 if not q.isActive:
-                    src_key = query_source_map.get(q.name, q.name)
-                    if not restart_flags[src_key].is_set():
-                        raise RuntimeError(
-                            f"Streaming query '{q.name}' terminated unexpectedly."
-                        )
-
-            # Per-source restart: only restart the query whose batch completed.
-            for src in _ALL_SOURCES:
-                flag = restart_flags[src.source_key]
-                if not flag.is_set():
-                    continue
-
-                # Find and stop only this source's query.
-                q_name = f"cdc-{src.source_key}-{WRITE_MODE}"
-                for q in queries:
-                    if q.name == q_name:
-                        logger.info(
-                            "[%s] restart_flag set — stopping query for per-batch restart.",
-                            src.source_key,
-                        )
-                        try:
-                            q.stop()
-                        except Exception as stop_exc:
-                            logger.warning(
-                                "[%s] Error stopping %s: %s",
-                                src.source_key, q.name, stop_exc,
-                            )
-                        break
-
-                flag.clear()
-
-                # Restart only this source's query.
-                try:
-                    new_q = _start_source_stream(
-                        spark, builder, src, bao, WRITE_MODE, flag
-                    )
-                    queries = [q for q in queries if q.name != q_name] + [new_q]
-                    logger.info("[%s] Query restarted from checkpoint.", src.source_key)
-                except Exception as exc:
                     raise RuntimeError(
-                        f"[{src.source_key}] Failed to restart query: {exc}"
-                    ) from exc
-
+                        f"Streaming query '{q.name}' terminated unexpectedly."
+                    )
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")
         for q in queries:
