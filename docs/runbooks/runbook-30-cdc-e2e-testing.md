@@ -333,8 +333,13 @@ Table name in Iceberg = lowercase last segment of the Kafka topic:
 
 The `postgres`, `oracle`, and `mongodb` catalogs are Polaris REST catalogs — they
 require OAuth credentials injected by `BaoSparkInit`. There is no standalone
-`spark-sql` shell. All Iceberg queries must be run as a Python snippet inside the
-`spark-master` pod.
+`spark-sql` shell on the master node. All Iceberg queries must be run by copying
+a Python script into the `spark-master` pod and executing it there.
+
+> **Why not `python3 - << 'PYEOF'`?**
+> `kubectl exec ... python3 -` with a heredoc silently produces no output because
+> the local shell consumes stdin before `kubectl exec` can pass it to the pod.
+> Always use `kubectl cp` to copy the script first, then `kubectl exec` to run it.
 
 **Set up once per terminal session:**
 ```bash
@@ -343,27 +348,34 @@ TOKEN=$(kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-
 echo "MASTER=$MASTER"
 ```
 
-**Query template — copy, edit the SQL, run:**
+**Query template — copy, save to `/tmp/q.py`, then run:**
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
-  python3 - << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+cat > /tmp/q.py << 'EOF'
+import os, sys
+os.environ["USER"] = "dave"
+sys.path.insert(0, "/opt/spark/work-dir")
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
-bao  = BaoSparkInit()
+bao   = BaoSparkInit()
 spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+
+# ── edit the SQL below ──────────────────────────────────────────────────────
 spark.sql("""
   SELECT id, name, email, snap_id, snap_timestamp
   FROM postgres.e2e_testing.customers
   WHERE id = 900001
 """).show(truncate=False)
+# ────────────────────────────────────────────────────────────────────────────
+
 spark.stop()
-PYEOF
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec  -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 ```
 
-> **Tip:** Change only the SQL inside `spark.sql("""...""")` for each verification step.
-> Use `.show(truncate=False)` for full values or `.count()` for row counts.
+> **Tip:** Change only the SQL inside `spark.sql("""...""")` for each step.
+> Use `.show(truncate=False)` for full column values, `.count()` for row counts.
 
 ---
 
@@ -378,23 +390,23 @@ id, name, email, phone, address, tier, created_at, updated_at
 #### Step 1 — Note current row count
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
-  python3 - << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+cat > /tmp/q.py << 'EOF'
+import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
-bao   = BaoSparkInit()
-spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
 print("row_count =", spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers").collect()[0][0])
 spark.stop()
-PYEOF
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 ```
 
 #### Step 2 — INSERT a test row
 
 ```bash
-# PostgreSQL is exposed via NodePort 30532 — connect directly from master
+# PostgreSQL NodePort — connect directly from master
 PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
   psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing
 ```
@@ -413,20 +425,17 @@ sleep 5
 #### Step 4 — Verify INSERT in Iceberg
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
-  python3 - << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+cat > /tmp/q.py << 'EOF'
+import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
-bao   = BaoSparkInit()
-spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-spark.sql("""
-  SELECT id, name, email, snap_id, snap_timestamp
-  FROM postgres.e2e_testing.customers WHERE id = 900001
-""").show(truncate=False)
+bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+spark.sql("SELECT id, name, email, snap_id, snap_timestamp FROM postgres.e2e_testing.customers WHERE id = 900001").show(truncate=False)
 spark.stop()
-PYEOF
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 ```
 
 **Expected:** 1 row; `snap_id` non-null BIGINT; `snap_timestamp` within the last 30 seconds.
@@ -445,20 +454,17 @@ sleep 5
 ```
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
-  python3 - << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+cat > /tmp/q.py << 'EOF'
+import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
-bao   = BaoSparkInit()
-spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-spark.sql("""
-  SELECT id, email, snap_id, snap_timestamp
-  FROM postgres.e2e_testing.customers WHERE id = 900001
-""").show(truncate=False)
+bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+spark.sql("SELECT id, email, snap_id, snap_timestamp FROM postgres.e2e_testing.customers WHERE id = 900001").show(truncate=False)
 spark.stop()
-PYEOF
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 ```
 
 **Expected:** `email = 'e2e_updated@example.com'`; `snap_id` differs from Step 4; `snap_timestamp` is newer.
@@ -477,18 +483,17 @@ sleep 5
 ```
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
-  python3 - << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+cat > /tmp/q.py << 'EOF'
+import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
-bao   = BaoSparkInit()
-spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-cnt = spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers WHERE id = 900001").collect()[0][0]
-print("should_be_zero =", cnt)
+bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+print("should_be_zero =", spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers WHERE id = 900001").collect()[0][0])
 spark.stop()
-PYEOF
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 ```
 
 **Expected:** `should_be_zero = 0`
@@ -496,17 +501,17 @@ PYEOF
 #### Step 9 — Cleanup confirmation
 
 ```bash
-kubectl exec -n prod $MASTER -c spark-master -- \
-  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
-  python3 - << 'PYEOF'
-import os; os.environ["USER"] = "dave"
+cat > /tmp/q.py << 'EOF'
+import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
 from bao_spark_init import BaoSparkInit
 from pyspark.sql import SparkSession
-bao   = BaoSparkInit()
-spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
 spark.sql("SELECT id FROM postgres.e2e_testing.customers WHERE id = 900001").show()
 spark.stop()
-PYEOF
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 # Expected: 0 rows
 ```
 
@@ -516,8 +521,18 @@ PYEOF
 
 #### Step 1 — Note current row count
 
-```sql
-SELECT COUNT(*) AS row_count FROM oracle.e2e_testing.customers;
+```bash
+cat > /tmp/q.py << 'EOF'
+import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+print("row_count =", spark.sql("SELECT COUNT(*) FROM oracle.e2e_testing.customers").collect()[0][0])
+spark.stop()
+EOF
+kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
+kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
+  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
 ```
 
 #### Step 2 — INSERT a test row
