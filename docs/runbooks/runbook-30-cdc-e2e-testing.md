@@ -327,13 +327,68 @@ Table name in Iceberg = lowercase last segment of the Kafka topic:
 - `oracle.cache_testing.CUSTOMERS` → **`oracle.e2e_testing.customers`**
 - `mongodb.cache_testing.customers` → **`mongodb.e2e_testing.customers`**
 
+---
+
+### ⚡ How to run Iceberg (Spark SQL) queries
+
+The `postgres`, `oracle`, and `mongodb` catalogs are Polaris REST catalogs — they
+require OAuth credentials injected by `BaoSparkInit`. There is no standalone
+`spark-sql` shell. All Iceberg queries must be run as a Python snippet inside the
+`spark-master` pod.
+
+**Set up once per terminal session:**
+```bash
+MASTER=$(kubectl get pod -n prod -l app=spark,component=master -o jsonpath='{.items[0].metadata.name}')
+TOKEN=$(kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d)
+echo "MASTER=$MASTER"
+```
+
+**Query template — copy, edit the SQL, run:**
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 - << 'PYEOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao  = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+spark.sql("""
+  SELECT id, name, email, snap_id, snap_timestamp
+  FROM postgres.e2e_testing.customers
+  WHERE id = 900001
+""").show(truncate=False)
+spark.stop()
+PYEOF
+```
+
+> **Tip:** Change only the SQL inside `spark.sql("""...""")` for each verification step.
+> Use `.show(truncate=False)` for full values or `.count()` for row counts.
+
+---
+
 ### Test 1.1 — PostgreSQL
+
+**Actual `customers` table schema (PostgreSQL):**
+```
+id, name, email, phone, address, tier, created_at, updated_at
+```
+> `city` and `country` columns do **not** exist in this cluster — the schema uses `address` (free-text) and `tier` instead.
 
 #### Step 1 — Note current row count
 
-```sql
--- Spark SQL
-SELECT COUNT(*) AS row_count FROM postgres.e2e_testing.customers;
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 - << 'PYEOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+print("row_count =", spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers").collect()[0][0])
+spark.stop()
+PYEOF
 ```
 
 #### Step 2 — INSERT a test row
@@ -345,9 +400,8 @@ PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
 ```
 
 ```sql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900001, 'E2E TestUser', 'e2e_test@example.com', '555-0000',
-        '1 Test St', 'Sydney', 'AU', NOW());
+INSERT INTO customers (id, name, email, phone, address, tier)
+VALUES (900001, 'E2E TestUser', 'e2e_test@example.com', '555-0000', '1 Test St', 'standard');
 ```
 
 #### Step 3 — Wait for pipeline propagation
@@ -358,20 +412,30 @@ sleep 5
 
 #### Step 4 — Verify INSERT in Iceberg
 
-```sql
-SELECT id, name, email, snap_id, snap_timestamp
-FROM postgres.e2e_testing.customers
-WHERE id = 900001;
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 - << 'PYEOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+spark.sql("""
+  SELECT id, name, email, snap_id, snap_timestamp
+  FROM postgres.e2e_testing.customers WHERE id = 900001
+""").show(truncate=False)
+spark.stop()
+PYEOF
 ```
 
-**Expected:** 1 row returned; `snap_id` non-null BIGINT; `snap_timestamp` within the last 30 seconds.
+**Expected:** 1 row; `snap_id` non-null BIGINT; `snap_timestamp` within the last 30 seconds.
 
 #### Step 5 — UPDATE the test row
 
 ```sql
--- psql
+-- (in psql)
 UPDATE customers SET email = 'e2e_updated@example.com' WHERE id = 900001;
-COMMIT;
 ```
 
 #### Step 6 — Wait and verify UPDATE in Iceberg
@@ -380,10 +444,21 @@ COMMIT;
 sleep 5
 ```
 
-```sql
-SELECT id, email, snap_id, snap_timestamp
-FROM postgres.e2e_testing.customers
-WHERE id = 900001;
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 - << 'PYEOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+spark.sql("""
+  SELECT id, email, snap_id, snap_timestamp
+  FROM postgres.e2e_testing.customers WHERE id = 900001
+""").show(truncate=False)
+spark.stop()
+PYEOF
 ```
 
 **Expected:** `email = 'e2e_updated@example.com'`; `snap_id` differs from Step 4; `snap_timestamp` is newer.
@@ -391,9 +466,8 @@ WHERE id = 900001;
 #### Step 7 — DELETE the test row
 
 ```sql
--- psql
+-- (in psql)
 DELETE FROM customers WHERE id = 900001;
-COMMIT;
 ```
 
 #### Step 8 — Wait and verify hard DELETE in Iceberg
@@ -402,19 +476,38 @@ COMMIT;
 sleep 5
 ```
 
-```sql
-SELECT COUNT(*) AS should_be_zero
-FROM postgres.e2e_testing.customers
-WHERE id = 900001;
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 - << 'PYEOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+cnt = spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers WHERE id = 900001").collect()[0][0]
+print("should_be_zero =", cnt)
+spark.stop()
+PYEOF
 ```
 
 **Expected:** `should_be_zero = 0`
 
 #### Step 9 — Cleanup confirmation
 
-```sql
-SELECT id FROM postgres.e2e_testing.customers WHERE id = 900001;
--- Expected: 0 rows
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir \
+  python3 - << 'PYEOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao   = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
+spark.sql("SELECT id FROM postgres.e2e_testing.customers WHERE id = 900001").show()
+spark.stop()
+PYEOF
+# Expected: 0 rows
 ```
 
 ---
