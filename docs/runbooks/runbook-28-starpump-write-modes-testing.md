@@ -1,6 +1,6 @@
 # Runbook 28 — Starpump Write Modes End-to-End Testing
 
-> **Version:** 1.1
+> **Version:** 1.2
 > **Status:** Active
 > **Owner:** Platform Engineering
 > **Related runbook:** [`runbook-27-cdc-batch-pipeline-e2e-testing.md`](runbook-27-cdc-batch-pipeline-e2e-testing.md)
@@ -23,8 +23,17 @@ All tests run from the `spark-master` pod in the `prod` namespace.
 ```bash
 # Set up environment once for the session
 export MASTER=$(kubectl get pods -n prod | grep spark-master | grep Running | awk 'NR==1{print $1}')
-export TOKEN=<your-openbao-token>
+
+# Retrieve the OpenBao root token from the Kubernetes secret (prod namespace):
+export TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d)
 ```
+
+> **Token note:** The root token is stored in the `openbao-unseal-keys` Secret in the
+> `prod` namespace, written there when OpenBao was first initialised.
+> Current value: `s.ykxM4SANXt0c1jJcHhE0ZHPK`
+> Always use the `kubectl` command above to retrieve it — the value rotates if OpenBao
+> is re-initialised.
 
 Confirm the pod and token are valid:
 
