@@ -212,6 +212,10 @@ kubectl exec -it mongodb-0 -n prod -- mongosh mongodb://localhost:27017/cache_te
 
 > **Note:** `--short` was removed from `kubectl version` in v1.28+. Use `kubectl version --client` instead.
 
+> **PostgreSQL access from master:** The cluster-internal hostname `postgresql.prod.svc.cluster.local` is not
+> resolvable from the master node. Use the NodePort instead:
+> `PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing`
+
 ### 1.2 — All Debezium Connectors RUNNING
 
 ```bash
@@ -335,14 +339,15 @@ SELECT COUNT(*) AS row_count FROM postgres.e2e_testing.customers;
 #### Step 2 — INSERT a test row
 
 ```bash
-psql -h postgresql.prod.svc.cluster.local -U rbac -d cache_testing
+# PostgreSQL is exposed via NodePort 30532 — connect directly from master
+PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
+  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing
 ```
 
 ```sql
 INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
 VALUES (900001, 'E2E TestUser', 'e2e_test@example.com', '555-0000',
         '1 Test St', 'Sydney', 'AU', NOW());
-COMMIT;
 ```
 
 #### Step 3 — Wait for pipeline propagation
@@ -3162,7 +3167,8 @@ All Iceberg verification queries in this section target **`postgres.e2e_testing.
 #### Step 1 — Baseline
 
 ```bash
-psql -h postgresql.prod.svc.cluster.local -U rbac -d cache_testing -c "
+PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
+  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing -c "
 SELECT column_name, data_type FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'customers'
 ORDER BY ordinal_position;"
