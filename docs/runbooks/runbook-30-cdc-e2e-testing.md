@@ -275,7 +275,7 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 **Expected:** Log line: `TARGET_NAMESPACE='e2e_testing' — ensuring override namespace in all active catalogs.`
 
 ```bash
-kubectl logs -n prod -l app=kafka-to-iceberg-standard --tail=30 | grep -i "e2e_testing\|TARGET_NAMESPACE"
+kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail=30 | grep -i "e2e_testing\|TARGET_NAMESPACE"
 ```
 
 Verify Iceberg namespaces were pre-created across all three catalogs:
@@ -291,7 +291,7 @@ SHOW NAMESPACES IN mongodb;
 ### 1.5 — Streaming Job Healthy (all three sources active)
 
 ```bash
-kubectl logs -n prod -l app=kafka-to-iceberg-standard --tail=30 | grep -E "Streaming query started|Batch|Error|Exception"
+kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail=30 | grep -E "Streaming query started|Batch|Error|Exception"
 ```
 
 **Expected:**
@@ -3538,7 +3538,7 @@ kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
 ### Step 4 — Verify settings are active in logs
 
 ```bash
-kubectl logs -n prod -l app=kafka-to-iceberg-standard --tail=50 \
+kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail=50 \
   | grep -E "MERGE_PARALLELISM|COALESCE_BEFORE_MERGE"
 ```
 
@@ -3560,7 +3560,7 @@ COMMIT;
 ### Step 6 — Monitor batch duration
 
 ```bash
-kubectl logs -n prod -l app=kafka-to-iceberg-standard -f | grep -E "Batch [0-9]+ took"
+kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard -f | grep -E "Batch [0-9]+ took"
 ```
 
 ### Step 7 — Restore normal settings
