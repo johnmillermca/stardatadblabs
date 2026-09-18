@@ -24,7 +24,7 @@ Three write modes, configurable per-run via the WRITE_MODE environment variable:
 
 Source → topic → Iceberg target mapping
 ----------------------------------------
-  postgres  : postgres.public.*         → postgres.public.<table>
+  postgres  : postgres.cache_testing.*  → postgres.cache_testing.<table>
   oracle    : oracle.tpcds.*            → oracle.tpcds.<table>
               oracle.cache_testing.*    → oracle.cache_testing.<table>
   mongodb   : mongodb.cache_testing.*   → mongodb.cache_testing.<table>
@@ -151,7 +151,7 @@ _SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
 # Optional namespace override — when set, ALL topics from ALL sources are written
 # into this Iceberg namespace instead of the namespace derived from the Kafka topic.
 # Use-case: E2E testing — set TARGET_NAMESPACE=e2e_testing so that
-#   postgres.public.customers         → postgres.e2e_testing.customers
+#   postgres.cache_testing.customers  → postgres.e2e_testing.customers
 #   oracle.cache_testing.CUSTOMERS    → oracle.e2e_testing.customers
 #   mongodb.cache_testing.customers   → mongodb.e2e_testing.customers
 # Leave empty ("") in production so each topic routes to its own namespace.
@@ -240,9 +240,9 @@ class _StreamingSource:
 _ALL_SOURCES: list[_StreamingSource] = [
     _StreamingSource(
         source_key    = "postgres",
-        topic_pattern = "postgres\\.public\\..*",
+        topic_pattern = "postgres\\.cache_testing\\..*",
         catalog       = "postgres",
-        namespace     = "public",
+        namespace     = "cache_testing",
         pk_col        = "id",
         s3_prefix     = "iceberg/pg_lakehouse",
     ),
@@ -403,14 +403,14 @@ def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
     When TARGET_NAMESPACE is set (e.g. "e2e_testing"), that value is returned
     unconditionally for every topic and every source — all three databases
     (postgres, oracle, mongodb) write into the same target namespace:
-        postgres.public.customers         → postgres.e2e_testing.customers
+        postgres.cache_testing.customers  → postgres.e2e_testing.customers
         oracle.cache_testing.CUSTOMERS    → oracle.e2e_testing.customers
         mongodb.cache_testing.customers   → mongodb.e2e_testing.customers
 
     When TARGET_NAMESPACE is empty the namespace is derived from the topic:
-        e.g. "oracle.tpcds.INCOME_BAND"      → "tpcds"
-             "oracle.cache_testing.ORDERS"   → "cache_testing"
-             "postgres.public.orders"        → "public"
+        e.g. "oracle.tpcds.INCOME_BAND"           → "tpcds"
+             "oracle.cache_testing.ORDERS"        → "cache_testing"
+             "postgres.cache_testing.orders"      → "cache_testing"
     """
     if _TARGET_NAMESPACE:
         return _TARGET_NAMESPACE
