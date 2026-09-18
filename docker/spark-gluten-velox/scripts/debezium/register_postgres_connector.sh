@@ -189,8 +189,8 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
 
     "table.include.list":   "${TABLE_INCLUDE}",
 
-    "topic.prefix":         "postgres",
-    "topic.naming.strategy": "io.debezium.schema.SchemaTopicNamingStrategy",
+    "topic.prefix":         "postgres.cache_testing",
+    "topic.naming.strategy": "io.debezium.schema.DefaultTopicNamingStrategy",
 
     "snapshot.mode":        "never",
 
@@ -203,10 +203,10 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "schema.history.internal.producer.sasl.mechanism":     "SCRAM-SHA-512",
     "schema.history.internal.producer.sasl.jaas.config":   "${JAAS_CFG}",
 
-    "key.converter":                       "io.confluent.kafka.serializers.KafkaAvroSerializer",
-    "key.converter.schema.registry.url":   "${SR_URL}",
-    "value.converter":                     "io.confluent.kafka.serializers.KafkaAvroSerializer",
-    "value.converter.schema.registry.url": "${SR_URL}",
+    "key.converter":               "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter":             "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
 
     "decimal.handling.mode": "double",
     "time.precision.mode":   "connect",

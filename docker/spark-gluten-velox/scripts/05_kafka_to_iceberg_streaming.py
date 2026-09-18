@@ -488,14 +488,14 @@ def _apply_standard(
             .withColumn("snap_timestamp", current_timestamp())
         )
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
-        final_df.createOrReplaceTempView(tmp_view)
+        final_df.createOrReplaceGlobalTempView(tmp_view)
         set_clause = ", ".join(
             f"t.`{f.name}` = s.`{f.name}`"
             for f in final_df.schema.fields
         )
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {tmp_view} AS s
+            USING global_temp.{tmp_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
             WHEN NOT MATCHED THEN INSERT *
@@ -507,10 +507,10 @@ def _apply_standard(
 
     if not deletes.isEmpty():
         del_view = f"__cdc_delete_{source_key}_{table_name}_{batch_id}"
-        deletes.select(pk_col).coalesce(1).createOrReplaceTempView(del_view)
+        deletes.select(pk_col).coalesce(1).createOrReplaceGlobalTempView(del_view)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {del_view} AS s
+            USING global_temp.{del_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN DELETE
         """)
@@ -555,14 +555,14 @@ def _apply_soft_delete(
             .withColumn("deleted_at",     lit(None).cast(TimestampType()))
         )
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
-        final_df.createOrReplaceTempView(tmp_view)
+        final_df.createOrReplaceGlobalTempView(tmp_view)
         set_clause = ", ".join(
             f"t.`{f.name}` = s.`{f.name}`"
             for f in final_df.schema.fields
         )
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {tmp_view} AS s
+            USING global_temp.{tmp_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
             WHEN NOT MATCHED THEN INSERT *
@@ -582,10 +582,10 @@ def _apply_soft_delete(
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
             .withColumn("snap_timestamp", current_timestamp())
         )
-        soft_del_df.createOrReplaceTempView(del_view)
+        soft_del_df.createOrReplaceGlobalTempView(del_view)
         spark.sql(f"""
             MERGE INTO {fqn_backtick} AS t
-            USING {del_view} AS s
+            USING global_temp.{del_view} AS s
             ON t.`{pk_col}` = s.`{pk_col}`
             WHEN MATCHED THEN UPDATE SET
                 t.is_deleted     = s.is_deleted,
