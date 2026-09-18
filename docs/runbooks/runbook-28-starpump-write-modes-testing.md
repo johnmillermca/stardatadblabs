@@ -1,6 +1,6 @@
 # Runbook 28 — Starpump Write Modes End-to-End Testing
 
-> **Version:** 1.2
+> **Version:** 1.4
 > **Status:** Active
 > **Owner:** Platform Engineering
 > **Related runbook:** [`runbook-27-cdc-batch-pipeline-e2e-testing.md`](runbook-27-cdc-batch-pipeline-e2e-testing.md)
@@ -64,6 +64,7 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 | 3.4 | Incremental / standard | Watermark advances to new `extraction_ts` after success |
 | 3.5 | Incremental / standard | Failed run does NOT advance watermark |
 | 3.6 | Incremental / standard | Zero-row window completes without error |
+| 3.7 | Incremental / custom watermark | Custom `--watermark-col` used instead of `updated_at` |
 | 4.1 | Filters | `INCLUDE_TABLES` restricts copy to named tables only |
 | 4.2 | Filters | `EXCLUDE_TABLES` drops named tables |
 | 4.3 | Filters | `MAX_TABLE_SIZE_GB` skips tables over threshold |
@@ -73,6 +74,14 @@ kubectl exec -n prod $MASTER -c spark-master -- \
 | 5.2 | Custom SQL | Multi-table JOIN enrichment writes to new Iceberg table |
 | 6.1 | DDL Drift | New source column detected and ALTER TABLE applied |
 | 7.1 | Pipeline DB | `pipeline_run_log` records each run (status, rows, timing) |
+| 8.1 | Oracle — Full | Full load from Oracle TPCDS schema into Iceberg |
+| 8.2 | Oracle — Incremental | New Oracle row appears in Iceberg with custom watermark col |
+| 8.3 | Oracle — MERGE upsert | Updated Oracle row overwrites existing Iceberg row |
+| 9.1 | MongoDB — Full | Full load from MongoDB cache_testing database into Iceberg |
+| 9.2 | MongoDB — Incremental | New MongoDB document appears in Iceberg (append-only) |
+| **10.1** | **Full Reload** | **`full_reload` truncates Iceberg table then reloads all rows from source** |
+| **10.2** | **Full Reload** | **`FULL_RELOAD=1` env alias produces identical result** |
+| **10.3** | **Full Reload** | **Watermark resets to new extraction_ts after reload** |
 
 ---
 
@@ -593,6 +602,112 @@ Exit code 0.
 
 ---
 
+### 3.7 Custom `--watermark-col` — table with a non-standard timestamp column
+
+starpump's `--watermark-col` (or env var `WATERMARK_COL`) lets you name **any timestamp column** in the source table as the watermark, not just `updated_at` or `created_at`. This is essential for sources like Oracle where column names differ (e.g. `updated_at` exists but Oracle tables seeded by `ora_load_*.sql` also have `created_at`), or for any table where the change-tracking column has a custom name such as `last_modified`, `modified_date`, `change_ts`, etc.
+
+**How watermark column resolution works:**
+
+Priority order inside [`_resolve_watermark_col()`](docker/spark-gluten-velox/scripts/starpump.py):
+1. `--watermark-col <col>` CLI flag or `WATERMARK_COL=<col>` env var — **your explicit override always wins**
+2. `updated_at` — used automatically if present in the table schema
+3. `created_at` — fallback for append-only tables
+4. `None` — no suitable column found; table falls back to full copy without a time filter
+
+**Step 1 — Confirm `product_reviews` has only `created_at` (no `updated_at`):**
+
+```bash
+kubectl exec -n prod $(kubectl get pods -n prod | grep postgres | grep Running | awk 'NR==1{print $1}') \
+  -- psql -U postgres -d cache_testing -c \
+  "\d public.product_reviews"
+```
+
+**Expected:** Columns include `created_at` but NOT `updated_at` — making it a good candidate to test the `created_at` fallback and then an explicit override.
+
+**Step 2 — Run incremental without override (auto-detects `created_at`):**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=product_reviews \
+  starpump postgres --mode incremental 2>&1 \
+  | grep "Incremental mode\|watermark-col\|No watermark\|DONE\|✓"
+```
+
+**Expected:**
+```
+[product_reviews] Incremental mode: col=created_at last_ts=<ts> clause='created_at > '<ts>''
+[product_reviews] DONE — 0 rows written (total incl. prior runs).
+```
+`col=created_at` confirms the auto-fallback is working.
+
+**Step 3 — Insert a new review and run incremental with explicit `--watermark-col`:**
+
+```bash
+# Insert a new review
+kubectl exec -n prod $(kubectl get pods -n prod | grep postgres | grep Running | awk 'NR==1{print $1}') \
+  -- psql -U postgres -d cache_testing -c "
+    INSERT INTO public.product_reviews (product_id, customer_id, rating, review_text, created_at)
+    VALUES (1, 1, 5, 'RB28 watermark-col test review', NOW())
+    RETURNING id, rating, created_at;
+  "
+
+# Run incremental with explicit watermark column override
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=product_reviews \
+  starpump postgres --mode incremental --watermark-col created_at 2>&1 \
+  | grep "Incremental mode\|DONE\|✓\|✗"
+```
+
+**Expected:**
+```
+[product_reviews] Incremental mode: col=created_at last_ts=<ts> clause='created_at > '<ts>''
+[product_reviews] DONE — 1 rows written (total incl. prior runs).
+✓ product_reviews   rows=1   status=success
+```
+
+**Step 4 — Verify in Iceberg:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("rb28-t37")).getOrCreate()
+spark.sql("""
+    SELECT id, product_id, rating, review_text, created_at
+    FROM `postgres`.`public`.`product_reviews`
+    WHERE review_text = 'RB28 watermark-col test review'
+""").show(truncate=False)
+spark.stop()
+EOF
+```
+
+**Expected:** The new review row is returned.
+
+**Step 5 — Test with a completely custom column name using `WATERMARK_COL` env var:**
+
+```bash
+# This tests that WATERMARK_COL env var is honoured identically to --watermark-col
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
+  WATERMARK_COL=updated_at \
+  starpump postgres --mode incremental 2>&1 \
+  | grep "Incremental mode\|DONE\|✓\|✗"
+```
+
+**Expected:**
+```
+[customers] Incremental mode: col=updated_at last_ts=<ts> clause='updated_at > '<ts>''
+```
+Identical behaviour to passing `--watermark-col updated_at` on the CLI.
+
+---
+
 ## Section 4 — Filters
 
 ### 4.1 INCLUDE_TABLES
@@ -869,6 +984,139 @@ EOF
 
 ---
 
+## Section 10 — Full Reload Mode
+
+`full_reload` is a destructive-then-reload mode: it **truncates** all rows from the
+Iceberg table (keeping DDL, schema, partitioning, and S3 location intact) and then
+copies the full source table from scratch. Use it when you want a clean current-image
+copy rather than accumulated append snapshots.
+
+Two equivalent invocations:
+```
+--mode full_reload          # CLI flag
+FULL_RELOAD=1               # env var alias
+```
+
+---
+
+### 10.1 `full_reload` truncates Iceberg table then reloads all rows
+
+**Step 1 — Confirm current row count in Iceberg:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("rb28-t101-pre")).getOrCreate()
+n = spark.table("`postgres`.`public`.`customers`").count()
+print("Rows in Iceberg BEFORE full_reload:", n)
+spark.stop()
+EOF
+```
+
+Record the count — call it `N_before`.
+
+**Step 2 — Run full_reload:**
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
+  starpump postgres --mode full_reload 2>&1 \
+  | grep "full_reload\|DONE\|✓\|✗"
+```
+
+**Expected log lines:**
+```
+=== MODE=full_reload: every Iceberg table will be TRUNCATED then reloaded in full from source. ===
+[customers] full_reload: truncated <N_before> rows from Iceberg table.
+[customers] DONE — <N_source> rows written (total incl. prior runs).
+✓ customers   rows=<N_source>   status=success
+```
+
+**Step 3 — Verify row count matches source exactly:**
+
+```bash
+# Count in Iceberg after reload
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env TOKEN=$TOKEN PYTHONPATH=/opt/spark/work-dir python3 - << 'EOF'
+import os; os.environ["USER"] = "dave"
+from bao_spark_init import BaoSparkInit
+from pyspark.sql import SparkSession
+bao = BaoSparkInit()
+spark = SparkSession.builder.config(conf=bao.spark_conf("rb28-t101-post")).getOrCreate()
+n = spark.table("`postgres`.`public`.`customers`").count()
+print("Rows in Iceberg AFTER full_reload:", n)
+spark.stop()
+EOF
+
+# Count in Postgres source
+kubectl exec -n prod $(kubectl get pods -n prod | grep postgres | grep Running | awk 'NR==1{print $1}') \
+  -- psql -U postgres -d cache_testing -c \
+  "SELECT count(*) FROM public.customers;"
+```
+
+**Expected:** Both counts are identical. The Iceberg table has exactly as many rows as
+the Postgres source — no stale rows, no duplicates.
+
+---
+
+### 10.2 `FULL_RELOAD=1` env alias produces identical result
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN \
+  INCLUDE_TABLES=customers \
+  FULL_RELOAD=1 \
+  starpump postgres 2>&1 \
+  | grep "FULL_RELOAD\|full_reload\|DONE\|✓\|✗"
+```
+
+**Expected:**
+```
+FULL_RELOAD=1 detected — overriding MODE to full_reload.
+=== MODE=full_reload: every Iceberg table will be TRUNCATED then reloaded in full from source. ===
+[customers] full_reload: truncated <N> rows from Iceberg table.
+✓ customers   rows=<N_source>   status=success
+```
+
+Result is identical to `--mode full_reload`.
+
+---
+
+### 10.3 Watermark resets to new `extraction_ts` after reload
+
+```bash
+kubectl exec -n prod $MASTER -c spark-master -- \
+  env USER=dave TOKEN=$TOKEN python3 - << 'EOF'
+import sys; sys.path.insert(0, "/opt/spark/work-dir")
+from bao_spark_init import BaoSparkInit
+import psycopg2
+bao = BaoSparkInit()
+pg = bao.pipeline_db_creds()
+with psycopg2.connect(**pg) as conn:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT sf_extraction_ts, rows_copied, pipeline_run_ts
+            FROM pipeline_watermarks
+            WHERE source_db='cache_testing' AND source_schema='public'
+              AND table_name='customers'
+        """)
+        print(cur.fetchone())
+EOF
+```
+
+**Expected:**
+- `sf_extraction_ts` is the timestamp of the reload run (newer than any prior watermark)
+- `rows_copied` equals the full source row count
+- A subsequent `--mode incremental` run will pick up this new watermark as `last_ts`
+  and only copy rows changed after the reload timestamp
+
+---
+
 ## Cleanup
 
 Remove test rows and custom SQL target tables after completing all tests:
@@ -917,12 +1165,13 @@ EOF
 | `DRY_RUN` | `1` | Create DDL only, skip data copy |
 | `DDL_DRIFT_DETECT` | `1` | Detect and apply schema changes |
 | `PK_TABLE_MAP` | `customers:id,orders:id` | Per-table PK for incremental MERGE upsert |
+| `FULL_RELOAD` | `1` | Convenience alias for `--mode full_reload` |
 
 ### Key starpump CLI flags for this runbook
 
 | Flag | Values | Purpose |
 |------|--------|---------|
-| `--mode` | `full`, `incremental`, `custom_sql` | Copy mode |
+| `--mode` | `full`, `incremental`, `custom_sql`, `full_reload` | Copy mode |
 | `--watermark-col` | `updated_at`, `created_at` | Incremental timestamp column |
 | `--custom-sql` | `"SELECT …"` | SQL for custom_sql mode |
 | `--target-table` | `my_target` | Iceberg table for custom_sql output |
@@ -953,6 +1202,36 @@ Run start:
     pipeline_watermarks unchanged         (new_ts discarded)
     next run retries same window          (no rows skipped)
 ```
+
+### full_reload flow
+
+```
+full_reload run:
+  CREATE TABLE IF NOT EXISTS iceberg_table   (DDL preserved)
+  DELETE FROM iceberg_table                  (all rows wiped)
+  offset = 0, rows_total = 0
+
+  [full batch loop — same as full mode]
+    SELECT * FROM source LIMIT batch OFFSET offset
+    writeTo(iceberg).append()
+
+  ✓ SUCCESS:
+    pipeline_watermarks.sf_extraction_ts ← new extraction_ts
+    rows_copied = total source rows
+
+  Next incremental run:
+    last_ts = new extraction_ts from this reload
+    WHERE updated_at > last_ts  (only rows changed after reload)
+```
+
+### When to use each mode
+
+| Mode | When to use |
+|---|---|
+| `full` | Initial load; resume a partial copy |
+| `incremental` | Scheduled delta sync — pick up new/updated rows only |
+| `full_reload` | Scheduled clean refresh — wipe stale Iceberg data and reload entirely |
+| `custom_sql` | JOIN or aggregate query result written to a new Iceberg table |
 
 ### When to use `PK_TABLE_MAP`
 
