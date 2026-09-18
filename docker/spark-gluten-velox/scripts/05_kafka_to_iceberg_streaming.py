@@ -829,24 +829,23 @@ def _write_micro_batch(
             fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{table_name}`"
             fqn_plain    = f"{source.catalog}.{namespace}.{table_name}"
 
-            table_exists = builder.table_exists(source.catalog, namespace, table_name)
+            # For history_tracking the authoritative table is <table>_hist.
+            # Compute the effective_table name BEFORE the existence check so we
+            # check whether the correct target table exists, not the base table
+            # (which may have been created by a prior standard-mode run).
+            effective_table = (
+                f"{table_name}_hist"
+                if write_mode == _WRITE_MODE_HISTORY_TRACKING
+                else table_name
+            )
+
+            table_exists = builder.table_exists(source.catalog, namespace, effective_table)
             if not table_exists:
                 pk_col_exists = any(
                     f.name.lower() == source.pk_col.lower()
                     for f in inferred_schema.fields
                 )
                 pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
-                s3_location = (
-                    f"s3://{S3_BUCKET}/{source.s3_prefix}"
-                    f"/{namespace}/{table_name}"
-                )
-                # For history_tracking tables add "_hist" suffix to distinguish
-                # them from the standard/soft-delete tables for the same source.
-                effective_table = (
-                    f"{table_name}_hist"
-                    if write_mode == _WRITE_MODE_HISTORY_TRACKING
-                    else table_name
-                )
                 effective_fqn_bt = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
                 effective_fqn_pl = f"{source.catalog}.{namespace}.{effective_table}"
                 effective_loc    = (
@@ -882,18 +881,12 @@ def _write_micro_batch(
                         source.source_key, effective_table, create_exc,
                     )
             else:
-                # For history_tracking use the _hist suffixed table name
-                if write_mode == _WRITE_MODE_HISTORY_TRACKING:
-                    effective_table = f"{table_name}_hist"
-                    if not builder.table_exists(source.catalog, namespace, effective_table):
-                        logger.warning(
-                            "[%s/%s] Expected _hist table not found; using base table.",
-                            source.source_key, effective_table,
-                        )
-                    else:
-                        fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
-                        fqn_plain    = f"{source.catalog}.{namespace}.{effective_table}"
-                        table_name   = effective_table
+                # effective_table already has the correct name (_hist or base)
+                # because we computed it before the existence check.
+                # Update fqn references to use the confirmed existing table name.
+                fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
+                fqn_plain    = f"{source.catalog}.{namespace}.{effective_table}"
+                table_name   = effective_table
 
             # ── Apply write mode ──────────────────────────────────────────────
             try:
@@ -1104,15 +1097,18 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
 # ── Main: streaming loop with auto-restart ────────────────────────────────────
 
 def _start_all_queries(
-    spark:        SparkSession,
-    builder:      IcebergTableBuilder,
-    bao:          BaoSparkInit,
-    restart_flag: threading.Event,
+    spark:         SparkSession,
+    builder:       IcebergTableBuilder,
+    bao:           BaoSparkInit,
+    restart_flags: dict[str, threading.Event],
 ) -> list[StreamingQuery]:
+    """Start one streaming query per CDC source, each with its own restart flag."""
     queries: list[StreamingQuery] = []
     for src in _ALL_SOURCES:
         try:
-            q = _start_source_stream(spark, builder, src, bao, WRITE_MODE, restart_flag)
+            q = _start_source_stream(
+                spark, builder, src, bao, WRITE_MODE, restart_flags[src.source_key]
+            )
             queries.append(q)
         except Exception as exc:
             logger.error(
@@ -1125,6 +1121,11 @@ def _run_once(bao: BaoSparkInit) -> None:
     """
     Initialise Spark, start all streaming queries, and run the per-batch
     watch-and-restart loop until interrupted or a fatal error occurs.
+
+    Each CDC source has its own restart_flag so that a completed batch for
+    one source only restarts that source's query — never the others.  The
+    previous shared-flag design stopped all three queries simultaneously,
+    abandoning any in-flight write of the other two sources.
     """
     spark = _build_spark(bao)
 
@@ -1161,15 +1162,24 @@ def _run_once(bao: BaoSparkInit) -> None:
                     src.source_key, _TARGET_NAMESPACE, exc,
                 )
 
-    restart_flag = threading.Event()
-    queries = _start_all_queries(spark, builder, bao, restart_flag)
+    # One restart flag per source — each foreachBatch sets only its own flag.
+    # This prevents the race where completing one batch stops all three queries.
+    restart_flags: dict[str, threading.Event] = {
+        src.source_key: threading.Event() for src in _ALL_SOURCES
+    }
+    # Map query name → source_key for the watch loop.
+    query_source_map: dict[str, str] = {
+        f"cdc-{src.source_key}-{WRITE_MODE}": src.source_key for src in _ALL_SOURCES
+    }
+
+    queries = _start_all_queries(spark, builder, bao, restart_flags)
     if not queries:
         spark.stop()
         raise RuntimeError("No streaming queries started.")
 
     logger.info(
         "All %d streaming queries active (mode=%s, trigger=%s, "
-        "merge_parallelism=%d, coalesce=%d). Per-batch restart enabled.",
+        "merge_parallelism=%d, coalesce=%d). Per-source restart enabled.",
         len(queries), WRITE_MODE, TRIGGER_INTERVAL,
         MERGE_PARALLELISM, COALESCE_BEFORE_MERGE,
     )
@@ -1178,29 +1188,51 @@ def _run_once(bao: BaoSparkInit) -> None:
         while True:
             time.sleep(0.5)
 
-            dead = [q for q in queries if not q.isActive]
-            if dead and not restart_flag.is_set():
-                names = [q.name for q in dead]
-                raise RuntimeError(
-                    f"Streaming query(s) terminated unexpectedly: {names}"
-                )
+            # Check for unexpectedly dead queries (not triggered by restart_flag).
+            for q in list(queries):
+                if not q.isActive:
+                    src_key = query_source_map.get(q.name, q.name)
+                    if not restart_flags[src_key].is_set():
+                        raise RuntimeError(
+                            f"Streaming query '{q.name}' terminated unexpectedly."
+                        )
 
-            if restart_flag.is_set():
-                logger.info(
-                    "restart_flag — stopping %d query(s) for per-batch restart …",
-                    len(queries),
-                )
+            # Per-source restart: only restart the query whose batch completed.
+            for src in _ALL_SOURCES:
+                flag = restart_flags[src.source_key]
+                if not flag.is_set():
+                    continue
+
+                # Find and stop only this source's query.
+                q_name = f"cdc-{src.source_key}-{WRITE_MODE}"
                 for q in queries:
-                    try:
-                        q.stop()
-                    except Exception as stop_exc:
-                        logger.warning("Error stopping %s: %s", q.name, stop_exc)
+                    if q.name == q_name:
+                        logger.info(
+                            "[%s] restart_flag set — stopping query for per-batch restart.",
+                            src.source_key,
+                        )
+                        try:
+                            q.stop()
+                        except Exception as stop_exc:
+                            logger.warning(
+                                "[%s] Error stopping %s: %s",
+                                src.source_key, q.name, stop_exc,
+                            )
+                        break
 
-                restart_flag.clear()
-                queries = _start_all_queries(spark, builder, bao, restart_flag)
-                if not queries:
-                    raise RuntimeError("No streaming queries started after restart.")
-                logger.info("%d query(s) restarted from checkpoint.", len(queries))
+                flag.clear()
+
+                # Restart only this source's query.
+                try:
+                    new_q = _start_source_stream(
+                        spark, builder, src, bao, WRITE_MODE, flag
+                    )
+                    queries = [q for q in queries if q.name != q_name] + [new_q]
+                    logger.info("[%s] Query restarted from checkpoint.", src.source_key)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"[{src.source_key}] Failed to restart query: {exc}"
+                    ) from exc
 
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")

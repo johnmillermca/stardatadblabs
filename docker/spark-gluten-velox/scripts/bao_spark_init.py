@@ -635,6 +635,14 @@ class BaoSparkInit:
             _DATABRICKS_JDBC_JAR,
             _ORACLE_JDBC_JAR,
             _MONGODB_CONNECTOR_JAR,
+            # Kafka Structured Streaming support — must be listed here so Spark
+            # distributes them to executor nodes in cluster mode.  The JARs live
+            # in /opt/spark/jars/ on the driver image; executors on worker nodes
+            # receive them via spark.jars distribution, not from the local FS.
+            "/opt/spark/jars/spark-sql-kafka-0-10_2.12-3.5.1.jar",
+            "/opt/spark/jars/spark-token-provider-kafka-0-10_2.12-3.5.1.jar",
+            "/opt/spark/jars/kafka-clients-3.4.1.jar",
+            "/opt/spark/jars/commons-pool2-2.11.1.jar",
         ]))
 
         if extra_conf:
