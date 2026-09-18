@@ -190,6 +190,14 @@ COALESCE_BEFORE_MERGE = int(os.environ.get("COALESCE_BEFORE_MERGE", "1"))
 # AQE adaptive coalesce target bytes per post-shuffle partition (64 MB default).
 ADAPTIVE_COALESCE_TARGET = os.environ.get("ADAPTIVE_COALESCE_TARGET", "67108864")
 
+# Executor sizing — keep small so the streaming job does not starve other Spark
+# jobs on the cluster.  CDC micro-batches are tiny (1–1000 rows); a single
+# executor with 1 core is plenty.  Raise via env vars for bulk-load catch-up.
+EXECUTOR_INSTANCES = int(os.environ.get("EXECUTOR_INSTANCES", "1"))
+EXECUTOR_CORES     = int(os.environ.get("EXECUTOR_CORES",     "1"))
+EXECUTOR_MEMORY    = os.environ.get("EXECUTOR_MEMORY",        "2g")
+EXECUTOR_OFFHEAP   = os.environ.get("EXECUTOR_OFFHEAP",       "512m")
+
 # ── StarTransform pipeline config ─────────────────────────────────────────────
 # Comma-separated list of built-in transform step names to apply before
 # each write-mode handler.  Example: "deduplicate,add_processing_time"
@@ -1069,6 +1077,12 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     # spark.jars is not needed here because /opt/spark/jars/ is already on the
     # default classpath for both driver and all executor JVMs on this cluster.
     # Peak-hour AQE tuning
+    # Cap executor count/size so the streaming job does not starve other Spark
+    # jobs sharing the same standalone cluster.
+    conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
+    conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
+    conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
+    conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
     conf.set("spark.sql.adaptive.enabled",                               "true")
     conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
     conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize",   "33554432")   # 32 MB
@@ -1232,11 +1246,13 @@ def main() -> None:
     logger.info(
         "=== Kafka→Iceberg | user=%s | mode=%s | sources=%s | "
         "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d "
+        "| executors=%d x %d core(s) x %s heap (%s off-heap) "
         "| max_restart_attempts=%s ===",
         SPARK_USER, WRITE_MODE,
         [s.source_key for s in _ALL_SOURCES],
         _TRANSFORM_STEPS or "none",
         DRY_RUN, TRIGGER_INTERVAL, MAX_OFFSETS_PER_TRIGGER,
+        EXECUTOR_INSTANCES, EXECUTOR_CORES, EXECUTOR_MEMORY, EXECUTOR_OFFHEAP,
         MAX_RESTART_ATTEMPTS if MAX_RESTART_ATTEMPTS > 0 else "∞",
     )
 
