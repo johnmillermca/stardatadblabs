@@ -1076,11 +1076,18 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     # that touches a Kafka DataSource fails with ClassNotFoundException.
     # spark.jars is not needed here because /opt/spark/jars/ is already on the
     # default classpath for both driver and all executor JVMs on this cluster.
-    # Peak-hour AQE tuning
     # Cap executor count/size so the streaming job does not starve other Spark
     # jobs sharing the same standalone cluster.
+    # spark.cores.max is the hard ceiling in Spark standalone mode — without it
+    # the master ignores executor.instances × executor.cores and allocates all
+    # available worker cores to this application.  Setting it to
+    # EXECUTOR_INSTANCES × EXECUTOR_CORES (default 1 × 1 = 1) ensures each
+    # kafka-to-iceberg job never holds more than 1 core, leaving the rest free
+    # for other jobs (e2e-verify, batch pipelines, etc.).
+    conf.set("spark.cores.max",          str(EXECUTOR_INSTANCES * EXECUTOR_CORES))
     conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
     conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
+    # Peak-hour AQE tuning
     conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
     conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
     conf.set("spark.sql.adaptive.enabled",                               "true")
