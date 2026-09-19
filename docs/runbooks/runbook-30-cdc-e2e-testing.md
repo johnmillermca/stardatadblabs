@@ -391,207 +391,379 @@ kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail
 
 ## 2. Section 1 — Standard Mode Tests (SCD Type 0)
 
-Confirm `kafka-to-iceberg-standard` is the only active deployment (replicas=1) and
-`TARGET_NAMESPACE=e2e_testing` is set (Prerequisite 1.4) before starting.
+Confirm `kafka-to-iceberg-postgres-standard` is the only active deployment (replicas=1)
+before starting.  With `TARGET_NAMESPACE=""` (production default) data lands in the
+**source namespace** — `cache_testing` — not `e2e_testing`.
 
-All Iceberg queries in this section target the `e2e_testing` namespace.
-**All three sources — PostgreSQL, Oracle, MongoDB — replicate in real time via Debezium.**
-Table name in Iceberg = lowercase last segment of the Kafka topic:
-- `postgres.cache_testing.customers` → **`postgres.e2e_testing.customers`**
-- `oracle.cache_testing.CUSTOMERS` → **`oracle.e2e_testing.customers`**
-- `mongodb.cache_testing.customers` → **`mongodb.e2e_testing.customers`**
+Table routing with default config:
+- Kafka topic `postgres.cache_testing.customers` → Iceberg **`postgres.cache_testing.customers`**
 
 ---
 
-### ⚡ How to run Iceberg (Spark SQL) queries
+### ⚡ How to run Iceberg queries — JupyterHub
 
-The `postgres`, `oracle`, and `mongodb` catalogs are Polaris REST catalogs — they
-require OAuth credentials injected by `BaoSparkInit`. There is no standalone
-`spark-sql` shell on the master node. All Iceberg queries must be run by copying
-a Python script into the `spark-master` pod and executing it there.
+All Iceberg verification steps in this section use **JupyterHub** with a PySpark kernel.
+The `postgres` catalog is a Polaris REST catalog that requires OAuth credentials — the
+notebook fetches them from OpenBao automatically.
 
-> **Why not `python3 - << 'PYEOF'`?**
-> `kubectl exec ... python3 -` with a heredoc silently produces no output because
-> the local shell consumes stdin before `kubectl exec` can pass it to the pod.
-> Always use `kubectl cp` to copy the script first, then `kubectl exec` to run it.
+> **Rules:**
+> - Run cells **top-to-bottom** on every new session — the kernel loses variables on restart.
+> - Always run the **stop cell last** to release the 1 core this session holds on the cluster.
+> - Never leave the session idle — it blocks the core from the streaming job.
 
-**Set up once per terminal session:**
+#### Open JupyterHub
+
+1. Navigate to **`http://192.168.1.50:30888`**
+2. Log in as `admin` — password:
+   ```bash
+   kubectl get secret jupyterhub-credentials -n analytics \
+     -o jsonpath='{.data.admin-password}' | base64 -d
+   ```
+3. **File → New → Notebook → Python 3 kernel**
+
+---
+
+#### Notebook Cell 1 — Fetch token & credentials
+
+Get a fresh root token from any terminal with `kubectl`:
+
 ```bash
-MASTER=$(kubectl get pod -n prod -l app=spark,component=master -o jsonpath='{.items[0].metadata.name}')
-TOKEN=$(kubectl get secret openbao-unseal-keys -n prod -o jsonpath='{.data.root-token}' | base64 -d)
-echo "MASTER=$MASTER"
+kubectl get secret openbao-unseal-keys -n prod \
+  -o jsonpath='{.data.root-token}' | base64 -d && echo
 ```
 
-**Query template — copy, save to `/tmp/q.py`, then run:**
-```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys
-os.environ["USER"] = "dave"
-sys.path.insert(0, "/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
+Paste the token into the cell, then **Shift+Enter**:
+
+```python
+import urllib.request, json, os
+
+OPENBAO_ADDR  = "http://openbao.prod.svc.cluster.local:8200"
+OPENBAO_TOKEN = "s.xxxxxxxxxxxxxxxxxxxxxxxx"   # ← paste token here
+
+def _bao(path):
+    req = urllib.request.Request(
+        f"{OPENBAO_ADDR}/v1/{path}",
+        headers={"X-Vault-Token": OPENBAO_TOKEN}
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())["data"]["data"]
+
+pol = _bao("secret/data/platform/polaris")
+s3  = _bao("secret/data/platform/s3")
+print("✅ Credentials loaded")
+```
+
+✅ Expected: `✅ Credentials loaded`
+
+---
+
+#### Notebook Cell 2 — Start Spark session
+
+```python
 from pyspark.sql import SparkSession
-bao   = BaoSparkInit()
-spark = SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
 
-# ── edit the SQL below ──────────────────────────────────────────────────────
-spark.sql("""
-  SELECT id, name, email, snap_id, snap_timestamp
-  FROM postgres.e2e_testing.customers
-  WHERE id = 900001
-""").show(truncate=False)
-# ────────────────────────────────────────────────────────────────────────────
+# Stop any stale session first
+_s = SparkSession.getActiveSession()
+if _s:
+    _s.stop()
+    print("Stopped stale session")
 
-spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec  -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
+DRIVER_IP   = os.environ.get("SPARK_LOCAL_IP", __import__("socket").gethostbyname(__import__("socket").gethostname()))
+POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+
+spark = (
+    SparkSession.builder
+    .master("spark://192.168.1.50:30777")
+    .appName("e2e-verify")
+    # ── resource cap — 1 core max so the streaming job is never starved ──
+    .config("spark.cores.max",           "1")
+    .config("spark.executor.instances",  "1")
+    .config("spark.executor.cores",      "1")
+    .config("spark.executor.memory",     "2g")
+    .config("spark.driver.host",         DRIVER_IP)
+    .config("spark.driver.bindAddress",  DRIVER_IP)
+    # ── Iceberg extensions ────────────────────────────────────────────────
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+    # ── postgres catalog (Polaris REST) ───────────────────────────────────
+    .config("spark.sql.catalog.postgres",
+            "org.apache.iceberg.spark.SparkCatalog")
+    .config("spark.sql.catalog.postgres.type",             "rest")
+    .config("spark.sql.catalog.postgres.uri",              POLARIS_URI)
+    .config("spark.sql.catalog.postgres.oauth2-server-uri",
+            f"{POLARIS_URI}/v1/oauth/tokens")
+    .config("spark.sql.catalog.postgres.credential",
+            f"{pol['spark_svc_id']}:{pol['spark_svc_secret']}")
+    .config("spark.sql.catalog.postgres.scope",            "PRINCIPAL_ROLE:ALL")
+    .config("spark.sql.catalog.postgres.warehouse",        "IcebergCatalog")
+    .config("spark.sql.catalog.postgres.rest.auth.type",   "oauth2")
+    .config("spark.sql.catalog.postgres.s3.access-key-id",     s3["access_key"])
+    .config("spark.sql.catalog.postgres.s3.secret-access-key", s3["secret_key"])
+    .config("spark.sql.catalog.postgres.s3.endpoint",          s3["endpoint"])
+    .config("spark.sql.catalog.postgres.s3.path-style-access", "true")
+    .config("spark.sql.catalog.postgres.client.region",        s3.get("region","us-east-1"))
+    # ── S3A hadoop layer ──────────────────────────────────────────────────
+    .config("spark.hadoop.fs.s3a.impl",
+            "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.hadoop.fs.s3a.access.key",        s3["access_key"])
+    .config("spark.hadoop.fs.s3a.secret.key",        s3["secret_key"])
+    .config("spark.hadoop.fs.s3a.endpoint",          s3["endpoint"])
+    .config("spark.hadoop.fs.s3a.path.style.access", "true")
+    .getOrCreate()
+)
+spark.sparkContext.setLogLevel("WARN")
+print("✅ Spark", spark.version, "connected —", DRIVER_IP)
 ```
 
-> **Tip:** Change only the SQL inside `spark.sql("""...""")` for each step.
-> Use `.show(truncate=False)` for full column values, `.count()` for row counts.
+✅ Expected: `✅ Spark 3.5.1 connected — 10.244.x.x`
 
 ---
 
-### Test 1.1 — PostgreSQL
+### Test 1.1 — PostgreSQL Standard Replication (INSERT / UPDATE / DELETE)
 
-**Actual `customers` table schema (PostgreSQL):**
+**`customers` table schema in PostgreSQL:**
 ```
 id, name, email, phone, address, tier, created_at, updated_at
 ```
-> `city` and `country` columns do **not** exist in this cluster — the schema uses `address` (free-text) and `tier` instead.
+> `city` and `country` do **not** exist — this cluster uses `address` (free-text) and `tier`.
 
-#### Step 1 — Note current row count
+**Iceberg target:** `postgres.cache_testing.customers`
+**Test row ID:** `900001` (safe range — no production data uses IDs ≥ 900000)
 
-```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
-from pyspark.sql import SparkSession
-bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-print("row_count =", spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers").collect()[0][0])
-spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
+---
+
+#### Step 1 — Note baseline row count
+
+**Notebook Cell 3:**
+```python
+cnt = spark.sql(
+    "SELECT COUNT(*) FROM postgres.cache_testing.customers"
+).collect()[0][0]
+print(f"baseline_row_count = {cnt}")
+
+exists = spark.sql(
+    "SELECT COUNT(*) FROM postgres.cache_testing.customers WHERE id = 900001"
+).collect()[0][0]
+print(f"id=900001 already_exists = {exists > 0}  ← must be False before proceeding")
 ```
 
-#### Step 2 — INSERT a test row
+✅ Expected:
+```
+baseline_row_count = <N>
+id=900001 already_exists = False  ← must be False before proceeding
+```
+
+> If `already_exists = True`, a previous test run was not cleaned up.
+> Run the DELETE in Step 7 first, wait 10 s, then re-run this cell.
+
+---
+
+#### Step 2 — INSERT a test row into PostgreSQL
+
+Run from any terminal with `kubectl` (or from the master node):
 
 ```bash
-# PostgreSQL NodePort — connect directly from master
 PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
-  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing
+  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing -c \
+  "INSERT INTO customers (id, name, email, phone, address, tier)
+   VALUES (900001, 'E2E TestUser', 'e2e_test@example.com', '555-0000', '1 Test St', 'standard')
+   RETURNING id, name, email, tier;"
 ```
 
-```sql
-INSERT INTO customers (id, name, email, phone, address, tier)
-VALUES (900001, 'E2E TestUser', 'e2e_test@example.com', '555-0000', '1 Test St', 'standard');
+✅ Expected:
 ```
+  id   |     name     |        email         |   tier
+-------+--------------+----------------------+----------
+900001 | E2E TestUser | e2e_test@example.com | standard
+INSERT 0 1
+```
+
+---
 
 #### Step 3 — Wait for pipeline propagation
 
+The streaming job triggers every 2 seconds. Wait 10 seconds to be safe:
+
 ```bash
-sleep 5
+sleep 10
 ```
+
+Then check the streaming job processed it — look for `batch=N upsert rows=1`:
+
+```bash
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=postgres,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=20s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
+```
+
+✅ Expected: `[postgres/customers][standard] batch=N upsert rows=1`
+
+---
 
 #### Step 4 — Verify INSERT in Iceberg
 
+**Notebook Cell 4:**
+```python
+print("=== INSERT verify ===")
+spark.sql("""
+    SELECT id, name, email, tier, snap_id, snap_timestamp
+    FROM   postgres.cache_testing.customers
+    WHERE  id = 900001
+""").show(truncate=False)
+```
+
+✅ Expected:
+```
+=== INSERT verify ===
++------+------------+--------------------+--------+-------+--------------+
+|id    |name        |email               |tier    |snap_id|snap_timestamp|
++------+------------+--------------------+--------+-------+--------------+
+|900001|E2E TestUser|e2e_test@example.com|standard|...    |...           |
++------+------------+--------------------+--------+-------+--------------+
+```
+1 row returned. `snap_id` is a non-null BIGINT. `snap_timestamp` is within the last 30 s.
+
+---
+
+#### Step 5 — UPDATE the test row in PostgreSQL
+
 ```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
-from pyspark.sql import SparkSession
-bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-spark.sql("SELECT id, name, email, snap_id, snap_timestamp FROM postgres.e2e_testing.customers WHERE id = 900001").show(truncate=False)
-spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
+PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
+  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing -c \
+  "UPDATE customers
+   SET email = 'e2e_updated@example.com', tier = 'gold'
+   WHERE id = 900001
+   RETURNING id, email, tier;"
 ```
 
-**Expected:** 1 row; `snap_id` non-null BIGINT; `snap_timestamp` within the last 30 seconds.
-
-#### Step 5 — UPDATE the test row
-
-```sql
--- (in psql)
-UPDATE customers SET email = 'e2e_updated@example.com' WHERE id = 900001;
+✅ Expected:
 ```
+  id   |          email          | tier
+-------+-------------------------+------
+900001 | e2e_updated@example.com | gold
+UPDATE 1
+```
+
+---
 
 #### Step 6 — Wait and verify UPDATE in Iceberg
 
 ```bash
-sleep 5
+sleep 10
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=postgres,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=20s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
 ```
+
+✅ Expected: `[postgres/customers][standard] batch=N upsert rows=1`
+
+**Notebook Cell 5:**
+```python
+print("=== UPDATE verify ===")
+spark.sql("""
+    SELECT id, name, email, tier, snap_id, snap_timestamp
+    FROM   postgres.cache_testing.customers
+    WHERE  id = 900001
+""").show(truncate=False)
+```
+
+✅ Expected:
+```
+=== UPDATE verify ===
++------+------------+-----------------------+----+-------+--------------+
+|id    |name        |email                  |tier|snap_id|snap_timestamp|
++------+------------+-----------------------+----+-------+--------------+
+|900001|E2E TestUser|e2e_updated@example.com|gold|...    |...           |
++------+------------+-----------------------+----+-------+--------------+
+```
+`email` = `e2e_updated@example.com`, `tier` = `gold`.
+`snap_id` differs from Step 4. `snap_timestamp` is newer than Step 4.
+
+---
+
+#### Step 7 — DELETE the test row from PostgreSQL
+
+`customers` has FK constraints — child rows must be removed first:
 
 ```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
-from pyspark.sql import SparkSession
-bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-spark.sql("SELECT id, email, snap_id, snap_timestamp FROM postgres.e2e_testing.customers WHERE id = 900001").show(truncate=False)
-spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
-```
-
-**Expected:** `email = 'e2e_updated@example.com'`; `snap_id` differs from Step 4; `snap_timestamp` is newer.
-
-#### Step 7 — DELETE the test row
-
-```sql
--- (in psql)
--- customers has FK dependencies — remove child rows first
+PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
+  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing << 'SQL'
 DELETE FROM product_reviews WHERE customer_id = 900001;
-DELETE FROM order_items   WHERE order_id IN (SELECT id FROM orders WHERE customer_id = 900001);
-DELETE FROM orders        WHERE customer_id = 900001;
-DELETE FROM customers     WHERE id = 900001;
+DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id = 900001);
+DELETE FROM orders      WHERE customer_id = 900001;
+DELETE FROM customers   WHERE id = 900001 RETURNING id;
+SQL
 ```
+
+✅ Expected:
+```
+DELETE 0
+DELETE 0
+DELETE 0
+  id
+------
+900001
+DELETE 1
+```
+
+---
 
 #### Step 8 — Wait and verify hard DELETE in Iceberg
 
 ```bash
-sleep 5
+sleep 10
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=postgres,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=20s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
 ```
 
-```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
-from pyspark.sql import SparkSession
-bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-print("should_be_zero =", spark.sql("SELECT COUNT(*) FROM postgres.e2e_testing.customers WHERE id = 900001").collect()[0][0])
+✅ Expected: `[postgres/customers][standard] batch=N hard-delete rows=1`
+
+**Notebook Cell 6:**
+```python
+print("=== DELETE verify ===")
+cnt = spark.sql(
+    "SELECT COUNT(*) FROM postgres.cache_testing.customers WHERE id = 900001"
+).collect()[0][0]
+total = spark.sql(
+    "SELECT COUNT(*) FROM postgres.cache_testing.customers"
+).collect()[0][0]
+print(f"id=900001 row_count    = {cnt}    (expected 0)")
+print(f"total_rows_remaining  = {total}  (expected baseline_row_count)")
+```
+
+✅ Expected:
+```
+=== DELETE verify ===
+id=900001 row_count    = 0    (expected 0)
+total_rows_remaining  = <N>  (expected baseline_row_count)
+```
+
+---
+
+#### Step 9 — Stop the Spark session ⚠️
+
+**Always run this cell when finished** — it releases the 1 core back to the cluster.
+
+**Notebook Cell 7:**
+```python
 spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
+print("✅ Session stopped — cluster core released")
 ```
 
-**Expected:** `should_be_zero = 0`
+✅ Expected: `✅ Session stopped — cluster core released`
 
-#### Step 9 — Cleanup confirmation
+---
 
-```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
-from pyspark.sql import SparkSession
-bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-spark.sql("SELECT id FROM postgres.e2e_testing.customers WHERE id = 900001").show()
-spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
-# Expected: 0 rows
-```
+**Test 1.1 pass criteria:**
+
+| Step | Operation | Kafka log | Iceberg result |
+|------|-----------|-----------|----------------|
+| 2–4  | INSERT    | `batch=N upsert rows=1`      | 1 row, correct values |
+| 5–6  | UPDATE    | `batch=N upsert rows=1`      | `email` and `tier` updated |
+| 7–8  | DELETE    | `batch=N hard-delete rows=1` | `row_count = 0` |
 
 ---
 
