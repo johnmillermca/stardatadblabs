@@ -611,15 +611,16 @@ data:
         deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
     
         if not inserts.isEmpty():
-            final_df = (
+            raw_df = (
                 inserts
                 .coalesce(COALESCE_BEFORE_MERGE)
                 .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
                 .withColumn("snap_timestamp", current_timestamp())
             )
-            final_df = final_df.cache()
-            row_count = final_df.count()
-            tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
+            rows      = raw_df.collect()
+            final_df  = spark.createDataFrame(rows, raw_df.schema)
+            row_count = len(rows)
+            tmp_view  = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
             final_df.createOrReplaceGlobalTempView(tmp_view)
             # Exclude snap columns from SET — preserve the values written at INSERT time.
             set_clause = ", ".join(
@@ -629,16 +630,13 @@ data:
             )
             col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
             val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
-            try:
-                spark.sql(f"""
-                    MERGE INTO {fqn_backtick} AS t
-                    USING global_temp.{tmp_view} AS s
-                    ON t.`{pk_col}` = s.`{pk_col}`
-                    WHEN MATCHED THEN UPDATE SET {set_clause}
-                    WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
-                """)
-            finally:
-                final_df.unpersist()
+            spark.sql(f"""
+                MERGE INTO {fqn_backtick} AS t
+                USING global_temp.{tmp_view} AS s
+                ON t.`{pk_col}` = s.`{pk_col}`
+                WHEN MATCHED THEN UPDATE SET {set_clause}
+                WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
+            """)
             logger.info(
                 "[%s/%s][standard] batch=%d upsert rows=%d",
                 source_key, table_name, batch_id, row_count,
@@ -691,7 +689,7 @@ data:
         deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
     
         if not inserts.isEmpty():
-            final_df = (
+            raw_df = (
                 inserts
                 .coalesce(COALESCE_BEFORE_MERGE)
                 .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
@@ -699,9 +697,10 @@ data:
                 .withColumn("is_deleted", lit(False).cast(BooleanType()))
                 .withColumn("deleted_at", lit(None).cast(TimestampType()))
             )
-            final_df = final_df.cache()
-            row_count = final_df.count()
-            tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
+            rows      = raw_df.collect()
+            final_df  = spark.createDataFrame(rows, raw_df.schema)
+            row_count = len(rows)
+            tmp_view  = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
             final_df.createOrReplaceGlobalTempView(tmp_view)
             # Exclude snap columns from SET — preserve the values written at INSERT time.
             set_clause = ", ".join(
@@ -711,16 +710,13 @@ data:
             )
             col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
             val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
-            try:
-                spark.sql(f"""
-                    MERGE INTO {fqn_backtick} AS t
-                    USING global_temp.{tmp_view} AS s
-                    ON t.`{pk_col}` = s.`{pk_col}`
-                    WHEN MATCHED THEN UPDATE SET {set_clause}
-                    WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
-                """)
-            finally:
-                final_df.unpersist()
+            spark.sql(f"""
+                MERGE INTO {fqn_backtick} AS t
+                USING global_temp.{tmp_view} AS s
+                ON t.`{pk_col}` = s.`{pk_col}`
+                WHEN MATCHED THEN UPDATE SET {set_clause}
+                WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
+            """)
             logger.info(
                 "[%s/%s][soft_delete] batch=%d upsert rows=%d",
                 source_key, table_name, batch_id, row_count,

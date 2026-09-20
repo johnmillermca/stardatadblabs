@@ -524,17 +524,29 @@ def _apply_standard(
     deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
-        final_df = (
+        raw_df = (
             inserts
             .coalesce(COALESCE_BEFORE_MERGE)
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
             .withColumn("snap_timestamp", current_timestamp())
         )
-        # Materialise before registering the view so the MERGE planner sees a
-        # static InMemoryRelation with no non-deterministic expressions.
-        final_df = final_df.cache()
-        row_count = final_df.count()   # triggers evaluation; freezes snap values
-        tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
+        # Fully break streaming lineage before registering the global temp view.
+        #
+        # Problem: createOrReplaceGlobalTempView() registers the *logical plan*
+        # of the DataFrame, not its data.  When the source DataFrame still carries
+        # the streaming LogicalRDD in its lineage (even after .cache()+.count()),
+        # Spark's Iceberg MERGE planner (ReplaceData path) traverses that full
+        # plan tree and flags monotonically_increasing_id() / current_timestamp()
+        # as INVALID_NON_DETERMINISTIC_EXPRESSIONS.
+        #
+        # Fix: .collect() pulls the rows to the driver, then spark.createDataFrame()
+        # builds a brand-new static DataFrame backed by a LocalRelation — completely
+        # detached from the streaming LogicalRDD.  The MERGE planner sees only a
+        # plain local table with no live expressions in its lineage.
+        rows      = raw_df.collect()
+        final_df  = spark.createDataFrame(rows, raw_df.schema)
+        row_count = len(rows)
+        tmp_view  = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceGlobalTempView(tmp_view)
         # Exclude snap columns from SET — preserve the values written at INSERT time.
         set_clause = ", ".join(
@@ -544,16 +556,13 @@ def _apply_standard(
         )
         col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
         val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
-        try:
-            spark.sql(f"""
-                MERGE INTO {fqn_backtick} AS t
-                USING global_temp.{tmp_view} AS s
-                ON t.`{pk_col}` = s.`{pk_col}`
-                WHEN MATCHED THEN UPDATE SET {set_clause}
-                WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
-            """)
-        finally:
-            final_df.unpersist()   # release cache immediately after MERGE
+        spark.sql(f"""
+            MERGE INTO {fqn_backtick} AS t
+            USING global_temp.{tmp_view} AS s
+            ON t.`{pk_col}` = s.`{pk_col}`
+            WHEN MATCHED THEN UPDATE SET {set_clause}
+            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
+        """)
         logger.info(
             "[%s/%s][standard] batch=%d upsert rows=%d",
             source_key, table_name, batch_id, row_count,
@@ -607,7 +616,7 @@ def _apply_soft_delete(
     deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
-        final_df = (
+        raw_df = (
             inserts
             .coalesce(COALESCE_BEFORE_MERGE)
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
@@ -615,10 +624,11 @@ def _apply_soft_delete(
             .withColumn("is_deleted", lit(False).cast(BooleanType()))
             .withColumn("deleted_at", lit(None).cast(TimestampType()))
         )
-        # Materialise before registering the view — same reason as _apply_standard.
-        final_df = final_df.cache()
-        row_count = final_df.count()
-        tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
+        # Same streaming-lineage break as _apply_standard — see that docstring.
+        rows      = raw_df.collect()
+        final_df  = spark.createDataFrame(rows, raw_df.schema)
+        row_count = len(rows)
+        tmp_view  = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceGlobalTempView(tmp_view)
         # Exclude snap columns from SET — preserve the values written at INSERT time.
         set_clause = ", ".join(
@@ -628,16 +638,13 @@ def _apply_soft_delete(
         )
         col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
         val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
-        try:
-            spark.sql(f"""
-                MERGE INTO {fqn_backtick} AS t
-                USING global_temp.{tmp_view} AS s
-                ON t.`{pk_col}` = s.`{pk_col}`
-                WHEN MATCHED THEN UPDATE SET {set_clause}
-                WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
-            """)
-        finally:
-            final_df.unpersist()
+        spark.sql(f"""
+            MERGE INTO {fqn_backtick} AS t
+            USING global_temp.{tmp_view} AS s
+            ON t.`{pk_col}` = s.`{pk_col}`
+            WHEN MATCHED THEN UPDATE SET {set_clause}
+            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
+        """)
         logger.info(
             "[%s/%s][soft_delete] batch=%d upsert rows=%d",
             source_key, table_name, batch_id, row_count,
