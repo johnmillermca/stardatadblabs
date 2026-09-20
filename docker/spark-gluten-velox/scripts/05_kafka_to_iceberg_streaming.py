@@ -696,24 +696,28 @@ def _apply_history_tracking(
     batch_id:     int,
     before_schema: Any,
     after_schema:  Any,
-    row_schema:    Any = None,
 ) -> None:
     """
     Append-only history tracking — every CDC event is a new Iceberg row.
 
-    Columns injected on every row:
+    Columns written:
       _change_type   STRING     — INSERT / UPDATE / DELETE
       _change_ts     TIMESTAMP  — pipeline processing time
+      after_<col>    — row state after the change  (NULL for DELETE)
+      before_<col>   — row state before the change (NULL for INSERT)
+                       added via mergeSchema=true on the first UPDATE/DELETE
+                       batch after table creation
       snap_id        BIGINT     — unique row id within batch
       snap_timestamp TIMESTAMP  — write-time wall clock
 
-    For UPDATE and DELETE events the before image (source DB state prior to
-    the change) is preserved alongside the after image:
-      before_<col>   — value before the change  (NULL for INSERT)
-      after_<col>    — value after  the change  (NULL for DELETE)
-
-    This produces a complete audit trail: from any snapshot of the Iceberg
-    table you can reconstruct the full change history for any row.
+    Table-creation strategy
+    -----------------------
+    writeTo().append() requires the table to exist first.  On the very first
+    batch (table absent) we strip any before_* columns — which only appear on
+    UPDATE/DELETE rows that arrive before the table exists — build the DDL
+    from the resulting DataFrame schema, CREATE the table, then write.
+    Subsequent batches that carry before_* columns land via mergeSchema=true
+    which adds the new columns to the existing table automatically.
     """
     # Map op codes to human-readable change types
     typed_df = payload_df.withColumn(
@@ -728,22 +732,8 @@ def _apply_history_tracking(
         current_timestamp(),
     )
 
-    # Expand before / after JSON strings into typed columns.
-    #
-    # Key invariant: every batch must produce the SAME column set for both
-    # before_* and after_* regardless of which op types appear in the batch.
-    # A pure INSERT batch has no before rows → before_schema=None.
-    # A pure DELETE batch has no after rows  → after_schema=None.
-    # If we skip adding the missing image columns those batches will fail
-    # with INCOMPATIBLE_DATA_FOR_TABLE once the table has been created with
-    # both image column sets.
-    #
-    # Strategy: expand whichever schemas we have, then backfill NULL columns
-    # for the image that is absent so the final DataFrame always carries the
-    # full stable column set.
+    # Expand "before" image (present for UPDATE / DELETE rows)
     result_df = typed_df
-
-    # Expand "before" image
     if before_schema is not None and "before" in typed_df.columns:
         parsed_before = from_json(col("before"), before_schema)
         for field in before_schema.fields:
@@ -753,7 +743,7 @@ def _apply_history_tracking(
     if "before" in result_df.columns:
         result_df = result_df.drop("before")
 
-    # Expand "after" image
+    # Expand "after" image (present for INSERT / UPDATE rows)
     if after_schema is not None and "after" in result_df.columns:
         parsed_after = from_json(col("after"), after_schema)
         for field in after_schema.fields:
@@ -763,52 +753,30 @@ def _apply_history_tracking(
     if "after" in result_df.columns:
         result_df = result_df.drop("after")
 
-    # Backfill missing before_* / after_* columns with NULLs using the
-    # source schema (row_schema) so every batch has the same column set.
-    # This prevents schema mismatch on DELETE-only or INSERT-only batches.
-    if row_schema is not None:
-        for field in row_schema.fields:
-            after_col = f"after_{field.name}"
-            before_col = f"before_{field.name}"
-            if after_col not in result_df.columns:
-                result_df = result_df.withColumn(
-                    after_col, lit(None).cast(field.dataType)
-                )
-            if before_col not in result_df.columns:
-                result_df = result_df.withColumn(
-                    before_col, lit(None).cast(field.dataType)
-                )
-
-    # Drop envelope columns that must never appear in the Iceberg table.
-    # ts_ms is the Debezium source-DB commit timestamp (epoch ms) — useful
-    # as a raw value but not a first-class audit column; drop it here so
-    # the schema stays clean.  _op and kafka_ts are pipeline-internal only.
+    # Drop internal envelope columns that must never reach Iceberg.
     _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
     result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
 
-    # Break streaming lineage before any Iceberg write — same rationale as
-    # _apply_standard: non-deterministic expressions (monotonically_increasing_id,
-    # current_timestamp) in the plan cause errors on some Iceberg write paths.
-    result_df_materialized = (
-        result_df
-        .coalesce(COALESCE_BEFORE_MERGE)
-    )
-    rows     = result_df_materialized.collect()
-    base_df  = spark.createDataFrame(rows, result_df_materialized.schema)
+    # Break streaming lineage — same rationale as _apply_standard.
+    rows    = result_df.coalesce(COALESCE_BEFORE_MERGE).collect()
+    base_df = spark.createDataFrame(rows, result_df.schema)
     final_df = (
         base_df
         .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
         .withColumn("snap_timestamp", current_timestamp())
     )
 
-    # writeTo().append() requires the table to already exist — it does NOT
-    # auto-create.  On the very first batch we build the CREATE TABLE DDL
-    # directly from final_df.schema so the Iceberg table is created with
-    # exactly the right columns (after_*, before_*, _change_type, _change_ts,
-    # snap_id, snap_timestamp) before we write.
-    # mergeSchema=true then handles any schema evolution on later batches
-    # (e.g. before_* columns first appearing on an UPDATE/DELETE batch).
-    if not spark.catalog.tableExists(fqn_plain):
+    table_exists = spark.catalog.tableExists(fqn_plain)
+
+    if not table_exists:
+        # On first-create: drop any before_* columns that snuck in before the
+        # table existed (e.g. an UPDATE/DELETE arriving in the very first batch).
+        # They will be added automatically by mergeSchema=true on the next batch.
+        before_cols = [f.name for f in final_df.schema.fields
+                       if f.name.startswith("before_")]
+        if before_cols:
+            final_df = final_df.drop(*before_cols)
+
         _PY_TO_ICEBERG = {
             "LongType":      "BIGINT",
             "IntegerType":   "INT",
@@ -839,6 +807,8 @@ def _apply_history_tracking(
             source_key, table_name,
         )
 
+    # Always re-materialise after any column drops so the write DataFrame is
+    # a clean LocalRelation with no streaming lineage.
     write_rows = final_df.collect()
     write_df   = spark.createDataFrame(write_rows, final_df.schema)
     (
@@ -1117,7 +1087,6 @@ def _write_micro_batch(
                         pk_col_actual, source.source_key, table_name, batch_id,
                         before_schema=before_schema,
                         after_schema=after_schema,
-                        row_schema=inferred_schema,
                     )
 
                 written_tables.append(fqn_backtick)
