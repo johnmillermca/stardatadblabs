@@ -340,7 +340,8 @@ data:
     # Schema inference via spark.read.json(rdd) costs ~2 s per batch because it
     # launches a full Spark job to sample the JSON.  After the first inference the
     # schema is stable for the lifetime of the pipeline, so cache and reuse it.
-    _SCHEMA_CACHE: dict[tuple[str, str], "StructType"] = {}
+    _SCHEMA_CACHE:     dict[tuple[str, str], "StructType"] = {}  # raw inferred (for from_json)
+    _DDL_SCHEMA_CACHE: dict[tuple[str, str], "StructType"] = {}  # type-normalised (for CREATE TABLE DDL)
     
     # ── Validate write mode ───────────────────────────────────────────────────────
     if WRITE_MODE not in _VALID_WRITE_MODES:
@@ -1091,36 +1092,40 @@ data:
                 if source.source_key == "oracle":
                     _TS_SUFFIXES = ("_at", "_AT", "_time", "_TIME", "_ts", "_TS",
                                     "_date", "_DATE")
-                    _orig_fields  = row_df.schema.fields[:]   # snapshot before mutations
+                    # Snapshot raw fields BEFORE any mutations.
+                    # IMPORTANT: _SCHEMA_CACHE stores RAW types (LongType/DoubleType) so
+                    # from_json on subsequent batches always infers numeric types correctly.
+                    # _DDL_SCHEMA_CACHE stores the corrected types for CREATE TABLE DDL only.
+                    _orig_fields = row_df.schema.fields[:]
+                    _ddl_fields  = list(inferred_schema.fields)  # start from raw schema
                     for _f in _orig_fields:
                         if isinstance(_f.dataType, LongType) and any(
                             _f.name.endswith(s) for s in _TS_SUFFIXES
                         ):
-                            # epoch milliseconds → TimestampType
+                            # epoch milliseconds (LongType int) → TimestampType
                             row_df = row_df.withColumn(
                                 _f.name,
                                 (col(_f.name) / lit(1_000)).cast(TimestampType()),
                             )
-                            _SCHEMA_CACHE[cache_key] = StructType([
+                            _ddl_fields = [
                                 StructField(_cf.name, TimestampType(), _cf.nullable)
                                 if _cf.name == _f.name else _cf
-                                for _cf in (_SCHEMA_CACHE.get(cache_key)
-                                            or inferred_schema).fields
-                            ])
+                                for _cf in _ddl_fields
+                            ]
                         elif isinstance(_f.dataType, DoubleType) and not any(
                             _f.name.endswith(s) for s in _TS_SUFFIXES
                         ):
-                            # NUMBER(p,0) emitted as float — restore as LongType
+                            # NUMBER(p,0) arrives as JSON float → restore as LongType
                             row_df = row_df.withColumn(
                                 _f.name,
                                 col(_f.name).cast(LongType()),
                             )
-                            _SCHEMA_CACHE[cache_key] = StructType([
+                            _ddl_fields = [
                                 StructField(_cf.name, LongType(), _cf.nullable)
                                 if _cf.name == _f.name else _cf
-                                for _cf in (_SCHEMA_CACHE.get(cache_key)
-                                            or inferred_schema).fields
-                            ])
+                                for _cf in _ddl_fields
+                            ]
+                    _DDL_SCHEMA_CACHE[cache_key] = StructType(_ddl_fields)
 
                 # ── Apply StarTransform pipeline steps ────────────────────────────
                 if transform_steps:
@@ -1160,7 +1165,13 @@ data:
     
                 # Use the schema from the cache — it may have been updated by the
                 # Oracle type-normalisation block above (timestamp/float fixes).
-                _schema_for_ddl = _SCHEMA_CACHE.get(cache_key) or inferred_schema
+                # For oracle: use the DDL cache (corrected types for TIMESTAMP/BIGINT).
+                # For other sources: fall back to the raw inferred schema.
+                _schema_for_ddl = (
+                    _DDL_SCHEMA_CACHE.get(cache_key)
+                    or _SCHEMA_CACHE.get(cache_key)
+                    or inferred_schema
+                )
                 full_schema = StructType(_schema_for_ddl.fields + extra_fields)
     
                 # ── Auto-create Iceberg table if needed ───────────────────────────
