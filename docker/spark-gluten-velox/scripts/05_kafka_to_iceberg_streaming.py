@@ -792,16 +792,19 @@ def _apply_history_tracking(
     _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
     result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
 
-    # ── 6. Break streaming lineage + inject snap cols ─────────────────────────
-    # collect() + createDataFrame() produces a static LocalRelation with no
-    # streaming plan — required before any Iceberg write (same as _apply_standard).
-    rows    = result_df.coalesce(COALESCE_BEFORE_MERGE).collect()
-    base_df = spark.createDataFrame(rows, result_df.schema)
-    final_df = (
-        base_df
+    # ── 6. Break streaming lineage (identical pattern to _apply_standard) ─────
+    # .collect() pulls rows to driver; spark.createDataFrame() builds a fresh
+    # LocalRelation with zero lineage to the streaming source.
+    # snap_id / snap_timestamp are then added to this static DataFrame so
+    # monotonically_increasing_id() and current_timestamp() are evaluated
+    # against a plain LocalRelation — no INVALID_NON_DETERMINISTIC_EXPRESSIONS.
+    rows      = result_df.coalesce(COALESCE_BEFORE_MERGE).collect()
+    final_df  = (
+        spark.createDataFrame(rows, result_df.schema)
         .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
         .withColumn("snap_timestamp", current_timestamp())
     )
+    row_count = len(rows)
 
     # ── 7. Lazy table creation ────────────────────────────────────────────────
     # writeTo().append() requires the table to already exist.
@@ -829,7 +832,9 @@ def _apply_history_tracking(
         )
 
     # ── 8. Write ──────────────────────────────────────────────────────────────
-    # Re-materialise after snap injection so write_df is a clean LocalRelation.
+    # Collect again after snap col injection so write_df is a clean LocalRelation
+    # with the evaluated snap_id / snap_timestamp values baked in — same
+    # two-collect pattern used by _apply_standard and _apply_soft_delete.
     write_rows = final_df.collect()
     write_df   = spark.createDataFrame(write_rows, final_df.schema)
     (
@@ -840,7 +845,7 @@ def _apply_history_tracking(
     )
     logger.info(
         "[%s/%s][history_tracking] batch=%d appended rows=%d",
-        source_key, table_name, batch_id, len(write_rows),
+        source_key, table_name, batch_id, row_count,
     )
 
 
