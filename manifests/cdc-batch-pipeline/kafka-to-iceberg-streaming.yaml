@@ -390,7 +390,7 @@ data:
             topic_pattern = "oracle\\.(tpcds|cache_testing|TPCDS|CACHE_TESTING)\\..*",
             catalog       = "oracle",
             namespace     = "tpcds",
-            pk_col        = "id",
+            pk_col        = "CUSTOMER_ID",
             s3_prefix     = "iceberg/ora_lakehouse",
         ),
         _StreamingSource(
