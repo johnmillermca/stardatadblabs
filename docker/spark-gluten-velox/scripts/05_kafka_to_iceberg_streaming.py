@@ -492,13 +492,29 @@ def _apply_standard(
     DELETE (op d):
       MERGE MATCHED → DELETE row from Iceberg (hard delete)
 
-    snap_id and snap_timestamp are injected into the source DataFrame via
-    .withColumn() before the global temp view is registered.  This is safe —
-    monotonically_increasing_id() / current_timestamp() are evaluated when Spark
-    materialises the source DataFrame, NOT inside the MERGE SQL planner, so
-    INVALID_NON_DETERMINISTIC_EXPRESSIONS is not triggered.  They are excluded
-    from the MATCHED SET clause so an update never overwrites the original snap
-    values written at insert time.
+    snap_id / snap_timestamp injection strategy
+    -------------------------------------------
+    We call .withColumn() on the source DataFrame, then immediately materialise
+    it with .cache() + .count() BEFORE createOrReplaceGlobalTempView().
+
+    Why materialise?
+      Spark's Iceberg MERGE planner (ReplaceData path) walks the FULL logical
+      plan of the USING source — including the plan of any global temp view it
+      references.  If monotonically_increasing_id() or current_timestamp() are
+      still present as unevaluated expressions anywhere in that plan tree, Spark
+      raises INVALID_NON_DETERMINISTIC_EXPRESSIONS even though those expressions
+      are in the source, not the join condition.
+
+      .cache() + .count() forces Spark to execute the DataFrame and store the
+      result as an InMemoryRelation.  The global temp view then points to that
+      static relation — the MERGE planner sees no live non-deterministic
+      functions and proceeds normally.
+
+      The cached DataFrame is unpersisted immediately after the MERGE to avoid
+      memory pressure between batches.
+
+    snap_id / snap_timestamp are excluded from the MATCHED SET clause so an
+    UPDATE never overwrites the audit values stamped at INSERT time.
     """
     spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
 
@@ -514,6 +530,10 @@ def _apply_standard(
             .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
             .withColumn("snap_timestamp", current_timestamp())
         )
+        # Materialise before registering the view so the MERGE planner sees a
+        # static InMemoryRelation with no non-deterministic expressions.
+        final_df = final_df.cache()
+        row_count = final_df.count()   # triggers evaluation; freezes snap values
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceGlobalTempView(tmp_view)
         # Exclude snap columns from SET — preserve the values written at INSERT time.
@@ -524,16 +544,19 @@ def _apply_standard(
         )
         col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
         val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
-        spark.sql(f"""
-            MERGE INTO {fqn_backtick} AS t
-            USING global_temp.{tmp_view} AS s
-            ON t.`{pk_col}` = s.`{pk_col}`
-            WHEN MATCHED THEN UPDATE SET {set_clause}
-            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
-        """)
+        try:
+            spark.sql(f"""
+                MERGE INTO {fqn_backtick} AS t
+                USING global_temp.{tmp_view} AS s
+                ON t.`{pk_col}` = s.`{pk_col}`
+                WHEN MATCHED THEN UPDATE SET {set_clause}
+                WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
+            """)
+        finally:
+            final_df.unpersist()   # release cache immediately after MERGE
         logger.info(
             "[%s/%s][standard] batch=%d upsert rows=%d",
-            source_key, table_name, batch_id, final_df.count(),
+            source_key, table_name, batch_id, row_count,
         )
 
     if not deletes.isEmpty():
@@ -573,10 +596,8 @@ def _apply_soft_delete(
       MERGE MATCHED → UPDATE SET is_deleted=true, deleted_at=<now>
       Row is never physically removed from Iceberg.
 
-    snap_id and snap_timestamp are injected into the source DataFrame via
-    .withColumn() before the global temp view is registered (same safe pattern
-    as _apply_standard — evaluated at DataFrame materialisation, not in the
-    MERGE SQL planner).  Excluded from the MATCHED SET clause.
+    Same .cache()/.count() materialisation strategy as _apply_standard —
+    see that function's docstring for the full rationale.
     """
     spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
 
@@ -594,6 +615,9 @@ def _apply_soft_delete(
             .withColumn("is_deleted", lit(False).cast(BooleanType()))
             .withColumn("deleted_at", lit(None).cast(TimestampType()))
         )
+        # Materialise before registering the view — same reason as _apply_standard.
+        final_df = final_df.cache()
+        row_count = final_df.count()
         tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
         final_df.createOrReplaceGlobalTempView(tmp_view)
         # Exclude snap columns from SET — preserve the values written at INSERT time.
@@ -604,16 +628,19 @@ def _apply_soft_delete(
         )
         col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
         val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
-        spark.sql(f"""
-            MERGE INTO {fqn_backtick} AS t
-            USING global_temp.{tmp_view} AS s
-            ON t.`{pk_col}` = s.`{pk_col}`
-            WHEN MATCHED THEN UPDATE SET {set_clause}
-            WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
-        """)
+        try:
+            spark.sql(f"""
+                MERGE INTO {fqn_backtick} AS t
+                USING global_temp.{tmp_view} AS s
+                ON t.`{pk_col}` = s.`{pk_col}`
+                WHEN MATCHED THEN UPDATE SET {set_clause}
+                WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list})
+            """)
+        finally:
+            final_df.unpersist()
         logger.info(
             "[%s/%s][soft_delete] batch=%d upsert rows=%d",
-            source_key, table_name, batch_id, final_df.count(),
+            source_key, table_name, batch_id, row_count,
         )
 
     if not deletes.isEmpty():
@@ -1100,8 +1127,8 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     # that touches a Kafka DataSource fails with ClassNotFoundException.
     # spark.jars is not needed here because /opt/spark/jars/ is already on the
     # default classpath for both driver and all executor JVMs on this cluster.
-    # Cap executor count/size so the streaming job does not starve other Spark
-    # jobs sharing the same standalone cluster.
+
+    # ── Core cap (b) ─────────────────────────────────────────────────────────────
     # spark.cores.max is the hard ceiling in Spark standalone mode — without it
     # the master ignores executor.instances × executor.cores and allocates all
     # available worker cores to this application.  Setting it to
@@ -1111,6 +1138,64 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     conf.set("spark.cores.max",          str(EXECUTOR_INSTANCES * EXECUTOR_CORES))
     conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
     conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
+
+    # ── Dynamic allocation (b) + (c) + (d) ───────────────────────────────────────
+    # Problem: the streaming job holds its allocated executor core permanently —
+    # even during idle triggers (no Kafka messages) and between micro-batches —
+    # starving other Spark jobs sharing the cluster.
+    #
+    # Solution: enable dynamic executor allocation with minExecutors=0.
+    #
+    #   spark.dynamicAllocation.enabled = true
+    #     Activates the ExecutorAllocationManager.  Spark requests executors when
+    #     tasks are pending and releases them when idle.
+    #
+    #   spark.dynamicAllocation.minExecutors = 0
+    #     Allow scaling all the way down to zero executors.  When foreachBatch
+    #     returns an empty batch (no Kafka messages) — or when the MERGE finishes
+    #     and the next trigger hasn't arrived yet — the executor sits idle.  After
+    #     executorIdleTimeout seconds Spark deregisters it from the master,
+    #     returning the core to the cluster pool for other jobs.
+    #
+    #   spark.dynamicAllocation.maxExecutors = EXECUTOR_INSTANCES (= 1)
+    #     Hard ceiling on scale-up.  CDC micro-batches are tiny (1–1000 rows);
+    #     one executor is always enough.  This also enforces the same 1-core cap
+    #     as the original spark.cores.max but via the dynamic allocator.
+    #
+    #   spark.dynamicAllocation.executorIdleTimeout = 30s
+    #     Release idle executor after 30 seconds with no tasks.  Short enough
+    #     that a burst of empty triggers (quiet CDC period) frees the core within
+    #     ~30 s; long enough that the executor isn't destroyed and re-requested
+    #     on every single trigger interval (2 s).
+    #
+    #   spark.dynamicAllocation.schedulerBacklogTimeout = 1s
+    #     Request a new executor within 1 s of tasks backing up.  Keeps latency
+    #     low when a real CDC event arrives after an idle period.
+    #
+    #   spark.dynamicAllocation.sustainedSchedulerBacklogTimeout = 1s
+    #     Same for sustained backlog (keeps scale-up responsive).
+    #
+    #   spark.dynamicAllocation.shuffleTracking.enabled = true
+    #     Required for Structured Streaming + dynamic allocation in Spark 3.x.
+    #     Without this flag Spark refuses to deregister executors that may still
+    #     hold shuffle data; this flag enables the shuffle-block tracker so Spark
+    #     can safely release executors even if they served shuffle reads.
+    #
+    # Net effect:
+    #   • A real CDC event arrives       → executor acquired in ~1 s, MERGE runs,
+    #                                      core held only for the duration of the job.
+    #   • No CDC events for > 30 s       → executor released, 0 cores consumed on
+    #                                      the Spark master, other jobs get the core.
+    #   • Empty foreachBatch trigger     → no tasks submitted, idle timeout ticks,
+    #                                      executor released after 30 s of silence.
+    conf.set("spark.dynamicAllocation.enabled",                          "true")
+    conf.set("spark.dynamicAllocation.minExecutors",                     "0")
+    conf.set("spark.dynamicAllocation.maxExecutors",                     str(EXECUTOR_INSTANCES))
+    conf.set("spark.dynamicAllocation.executorIdleTimeout",              "30s")
+    conf.set("spark.dynamicAllocation.schedulerBacklogTimeout",          "1s")
+    conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", "1s")
+    conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
+
     # Peak-hour AQE tuning
     conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
     conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
