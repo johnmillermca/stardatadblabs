@@ -759,52 +759,70 @@ def _apply_history_tracking(
     _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
     result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
 
-    final_df = (
+    # Break streaming lineage before any Iceberg write — same rationale as
+    # _apply_standard: non-deterministic expressions (monotonically_increasing_id,
+    # current_timestamp) in the plan cause errors on some Iceberg write paths.
+    result_df_materialized = (
         result_df
         .coalesce(COALESCE_BEFORE_MERGE)
+    )
+    rows     = result_df_materialized.collect()
+    base_df  = spark.createDataFrame(rows, result_df_materialized.schema)
+    final_df = (
+        base_df
         .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
         .withColumn("snap_timestamp", current_timestamp())
     )
 
     # writeTo().append() requires the table to already exist — it does NOT
-    # auto-create.  Create it lazily on the first batch using the exact
-    # schema of final_df so the table always matches what we write.
-    # mergeSchema=true then handles any subsequent schema evolution
-    # (e.g. new before_* columns appearing on first UPDATE/DELETE batch).
+    # auto-create.  On the very first batch we build the CREATE TABLE DDL
+    # directly from final_df.schema so the Iceberg table is created with
+    # exactly the right columns (after_*, before_*, _change_type, _change_ts,
+    # snap_id, snap_timestamp) before we write.
+    # mergeSchema=true then handles any schema evolution on later batches
+    # (e.g. before_* columns first appearing on an UPDATE/DELETE batch).
     if not spark.catalog.tableExists(fqn_plain):
+        _PY_TO_ICEBERG = {
+            "LongType":      "BIGINT",
+            "IntegerType":   "INT",
+            "StringType":    "STRING",
+            "DoubleType":    "DOUBLE",
+            "FloatType":     "FLOAT",
+            "BooleanType":   "BOOLEAN",
+            "TimestampType": "TIMESTAMP",
+            "DateType":      "DATE",
+        }
+        col_defs = ", ".join(
+            f"`{f.name}` {_PY_TO_ICEBERG.get(type(f.dataType).__name__, 'STRING')}"
+            for f in final_df.schema.fields
+        )
         spark.sql(f"""
-            CREATE TABLE IF NOT EXISTS {fqn_backtick}
+            CREATE TABLE IF NOT EXISTS {fqn_backtick} (
+                {col_defs}
+            )
             USING iceberg
             PARTITIONED BY (hours(snap_timestamp))
-            AS SELECT * FROM (VALUES (1)) t(x) WHERE 1=0
+            TBLPROPERTIES (
+                'pipeline.write-mode' = 'history_tracking',
+                'pipeline.source'     = '{source_key}'
+            )
         """)
-        # The CTAS above creates an empty table; use createDataFrame + writeTo
-        # to establish the real schema from the first batch in one go.
-        rows = final_df.collect()
-        seed_df = spark.createDataFrame(rows, final_df.schema)
-        spark.sql(f"DROP TABLE IF EXISTS {fqn_backtick}")
-        seed_df.writeTo(fqn_plain).tableProperty(
-            "pipeline.write-mode", "history_tracking"
-        ).tableProperty(
-            "pipeline.source", source_key
-        ).partitionedBy(
-            F.col("snap_timestamp")
-        ).createOrReplace()
         logger.info(
-            "[%s/%s][history_tracking] Created Iceberg table and wrote batch=%d rows=%d",
-            source_key, table_name, batch_id, len(rows),
+            "[%s/%s][history_tracking] Created Iceberg table (mode=history_tracking).",
+            source_key, table_name,
         )
-        return
 
+    write_rows = final_df.collect()
+    write_df   = spark.createDataFrame(write_rows, final_df.schema)
     (
-        final_df
+        write_df
         .writeTo(fqn_plain)
         .option("mergeSchema", "true")
         .append()
     )
     logger.info(
         "[%s/%s][history_tracking] batch=%d appended rows=%d",
-        source_key, table_name, batch_id, final_df.count(),
+        source_key, table_name, batch_id, len(write_rows),
     )
 
 
