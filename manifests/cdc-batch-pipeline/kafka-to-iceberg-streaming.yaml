@@ -3327,7 +3327,7 @@ metadata:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
     pipeline.write-mode-desc: "Oracle → Kafka → Iceberg | SCD Type 0 — MERGE upsert + hard delete"
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: kafka-to-iceberg
