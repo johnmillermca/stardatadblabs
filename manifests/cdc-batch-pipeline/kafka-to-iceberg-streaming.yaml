@@ -1102,10 +1102,13 @@ data:
                             is_known_ts = _f.name in existing_ts_cols
                             is_suffix_ts = any(_f.name.endswith(s) for s in _TS_SUFFIXES)
                             if is_known_ts or is_suffix_ts:
-                                # epoch microseconds → TimestampType (divide by 1e6)
+                                # Oracle LogMiner emits TIMESTAMP as epoch nanoseconds (1e9).
+                                # Divide by 1e9 to get seconds, then cast to TimestampType.
+                                # (TimestampType stores epoch microseconds internally but
+                                # the Spark cast from DoubleType seconds handles the conversion.)
                                 row_df = row_df.withColumn(
                                     _f.name,
-                                    (col(_f.name) / lit(1_000_000)).cast(TimestampType()),
+                                    (col(_f.name) / lit(1_000_000_000)).cast(TimestampType()),
                                 )
                                 # Also update the cached schema so table-creation DDL uses TIMESTAMP
                                 _SCHEMA_CACHE[cache_key] = StructType([
