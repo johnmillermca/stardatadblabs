@@ -2616,7 +2616,7 @@ metadata:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
     pipeline.write-mode-desc: "PostgreSQL → Kafka → Iceberg | SCD Type 0 — MERGE upsert + hard delete"
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
@@ -2789,7 +2789,7 @@ metadata:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
     pipeline.write-mode-desc: "PostgreSQL → Kafka → Iceberg | MERGE upsert + soft-delete flag"
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: kafka-to-iceberg
