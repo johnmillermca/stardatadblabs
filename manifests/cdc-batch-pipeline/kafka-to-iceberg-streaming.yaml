@@ -1074,6 +1074,46 @@ data:
                     )
                     continue
     
+                # ── Oracle epoch-micros → TimestampType cast ─────────────────────
+                # Debezium Oracle LogMiner emits TIMESTAMP columns as epoch
+                # microseconds (BIGINT). spark.read.json() infers them as LongType.
+                # If the Iceberg table already exists, cast any BIGINT column that
+                # corresponds to a TIMESTAMP column in the table schema.
+                # On first write (table doesn't exist yet) we also cast columns
+                # whose names end in common timestamp suffixes so the table is
+                # created with TimestampType rather than LongType.
+                if source.source_key == "oracle":
+                    _TS_SUFFIXES = ("_at", "_AT", "_time", "_TIME", "_ts", "_TS", "_date", "_DATE")
+                    existing_ts_cols: set[str] = set()
+                    try:
+                        _fqn_check = (
+                            f"{source.catalog}.{namespace}."
+                            + (f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
+                               else f"{table_name}_hist" if write_mode == _WRITE_MODE_HISTORY_TRACKING
+                               else table_name)
+                        )
+                        for _f in spark.table(_fqn_check).schema.fields:
+                            if isinstance(_f.dataType, TimestampType):
+                                existing_ts_cols.add(_f.name)
+                    except Exception:
+                        pass  # table not yet created — fall back to suffix heuristic
+                    for _f in row_df.schema.fields:
+                        if isinstance(_f.dataType, LongType):
+                            is_known_ts = _f.name in existing_ts_cols
+                            is_suffix_ts = any(_f.name.endswith(s) for s in _TS_SUFFIXES)
+                            if is_known_ts or is_suffix_ts:
+                                # epoch microseconds → TimestampType (divide by 1e6)
+                                row_df = row_df.withColumn(
+                                    _f.name,
+                                    (col(_f.name) / lit(1_000_000)).cast(TimestampType()),
+                                )
+                                # Also update the cached schema so table-creation DDL uses TIMESTAMP
+                                _SCHEMA_CACHE[cache_key] = StructType([
+                                    StructField(_cf.name, TimestampType(), _cf.nullable)
+                                    if _cf.name == _f.name else _cf
+                                    for _cf in (_SCHEMA_CACHE.get(cache_key) or inferred_schema).fields
+                                ])
+
                 # ── Apply StarTransform pipeline steps ────────────────────────────
                 if transform_steps:
                     try:
