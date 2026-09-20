@@ -2963,7 +2963,7 @@ metadata:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
     pipeline.write-mode-desc: "PostgreSQL → Kafka → Iceberg | Append-only full row history"
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: kafka-to-iceberg
