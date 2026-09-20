@@ -937,54 +937,55 @@ def _write_micro_batch(
             else:
                 effective_table = table_name
 
-            table_exists = builder.table_exists(source.catalog, namespace, effective_table)
-            if not table_exists:
-                pk_col_exists = any(
-                    f.name.lower() == source.pk_col.lower()
-                    for f in inferred_schema.fields
-                )
-                pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
-                effective_fqn_bt = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
-                effective_fqn_pl = f"{source.catalog}.{namespace}.{effective_table}"
-                effective_loc    = (
-                    f"s3://{S3_BUCKET}/{source.s3_prefix}"
-                    f"/{namespace}/{effective_table}"
-                )
-                try:
-                    builder.create_table(
-                        catalog        = source.catalog,
-                        namespace      = namespace,
-                        table          = effective_table,
-                        schema         = full_schema,
-                        partition_spec = [
-                            IcebergTableBuilder.hours("snap_timestamp"),
-                            IcebergTableBuilder.bucket(pk_for_bucket, 16),
-                        ],
-                        location       = effective_loc,
-                        extra_properties={
-                            "pipeline.write-mode": write_mode,
-                            "pipeline.source":     source.source_key,
-                        },
+            # history_tracking uses writeTo().option("mergeSchema","true").append()
+            # which auto-creates the table on first write with the exact DataFrame
+            # schema — including before_* / after_* / _change_type / _change_ts /
+            # snap_id / snap_timestamp.  Pre-creating the table here would produce
+            # a schema mismatch (base cols only vs. full envelope cols) so we skip
+            # create_table() for this mode entirely and let Iceberg handle it.
+            effective_fqn_bt = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
+            effective_fqn_pl = f"{source.catalog}.{namespace}.{effective_table}"
+            fqn_backtick = effective_fqn_bt
+            fqn_plain    = effective_fqn_pl
+            table_name   = effective_table
+
+            if write_mode != _WRITE_MODE_HISTORY_TRACKING:
+                table_exists = builder.table_exists(source.catalog, namespace, effective_table)
+                if not table_exists:
+                    pk_col_exists = any(
+                        f.name.lower() == source.pk_col.lower()
+                        for f in inferred_schema.fields
                     )
-                    logger.info(
-                        "[%s/%s] Created Iceberg table (mode=%s).",
-                        source.source_key, effective_table, write_mode,
+                    pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
+                    effective_loc = (
+                        f"s3://{S3_BUCKET}/{source.s3_prefix}"
+                        f"/{namespace}/{effective_table}"
                     )
-                    fqn_backtick = effective_fqn_bt
-                    fqn_plain    = effective_fqn_pl
-                    table_name   = effective_table
-                except Exception as create_exc:
-                    logger.warning(
-                        "[%s/%s] Table creation failed (may already exist): %s",
-                        source.source_key, effective_table, create_exc,
-                    )
-            else:
-                # effective_table already has the correct name (_hist or base)
-                # because we computed it before the existence check.
-                # Update fqn references to use the confirmed existing table name.
-                fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
-                fqn_plain    = f"{source.catalog}.{namespace}.{effective_table}"
-                table_name   = effective_table
+                    try:
+                        builder.create_table(
+                            catalog        = source.catalog,
+                            namespace      = namespace,
+                            table          = effective_table,
+                            schema         = full_schema,
+                            partition_spec = [
+                                IcebergTableBuilder.hours("snap_timestamp"),
+                                IcebergTableBuilder.bucket(pk_for_bucket, 16),
+                            ],
+                            location       = effective_loc,
+                            extra_properties={
+                                "pipeline.write-mode": write_mode,
+                                "pipeline.source":     source.source_key,
+                            },
+                        )
+                        logger.info(
+                            "[%s/%s] Created Iceberg table (mode=%s).",
+                            source.source_key, effective_table, write_mode,
+                        )
+                    except Exception as create_exc:
+                        logger.warning(
+                            "[%s/%s] Table creation failed (may already exist): %s",
+                            source.source_key, effective_table, create_exc,
+                        )
 
             # ── Apply write mode ──────────────────────────────────────────────
             try:

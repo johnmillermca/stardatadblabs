@@ -287,7 +287,8 @@ data:
     
     # Peak-hour performance tuning
     # Number of shuffle partitions used during MERGE operations.
-    # CDC batches are small (1-1000 rows); keep low to avoid task scheduling overhead.
+    # CDC batches are small (1–1000 rows); keep low to avoid task scheduling overhead.
+    # Raise to 16–32 only for bulk-load catch-up scenarios.
     MERGE_PARALLELISM = int(os.environ.get("MERGE_PARALLELISM", "4"))
     
     # Coalesce batch DataFrame partitions before MERGE.
@@ -298,15 +299,23 @@ data:
     ADAPTIVE_COALESCE_TARGET = os.environ.get("ADAPTIVE_COALESCE_TARGET", "67108864")
     
     # Executor sizing — keep small so the streaming job does not starve other Spark
-    # jobs on the cluster.  CDC micro-batches are tiny (1-1000 rows); a single
+    # jobs on the cluster.  CDC micro-batches are tiny (1–1000 rows); a single
     # executor with 1 core is plenty.  Raise via env vars for bulk-load catch-up.
     EXECUTOR_INSTANCES = int(os.environ.get("EXECUTOR_INSTANCES", "1"))
     EXECUTOR_CORES     = int(os.environ.get("EXECUTOR_CORES",     "1"))
     EXECUTOR_MEMORY    = os.environ.get("EXECUTOR_MEMORY",        "2g")
     EXECUTOR_OFFHEAP   = os.environ.get("EXECUTOR_OFFHEAP",       "512m")
     
-    # Dynamic allocation burst ceiling and backlog timeout.
-    MAX_EXECUTORS           = int(os.environ.get("MAX_EXECUTORS",           "3"))
+    # Maximum executors the dynamic allocator may scale up to under sustained load.
+    # Default 3: baseline = 1 executor (1 core); burst = up to 3 executors (3 cores)
+    # after BURST_BACKLOG_TIMEOUT_S seconds of sustained task backlog.
+    # Set to 1 to disable burst (hard cap at 1 core always).
+    MAX_EXECUTORS = int(os.environ.get("MAX_EXECUTORS", "3"))
+    
+    # How long (seconds) the scheduler backlog must be sustained before the dynamic
+    # allocator requests an additional executor (2nd and beyond).
+    # Default 60: a job must be backlogged for 60 s before getting an extra core,
+    # so short CDC micro-batches never consume more than 1 core unnecessarily.
     BURST_BACKLOG_TIMEOUT_S = int(os.environ.get("BURST_BACKLOG_TIMEOUT_S", "60"))
     
     # ── StarTransform pipeline config ─────────────────────────────────────────────
@@ -324,11 +333,11 @@ data:
     
     
     # ── Per-table schema cache ────────────────────────────────────────────────────
-    # Keyed by (source_key, table_name) -> StructType.
-    # Schema inference via spark.read.json(rdd) costs ~2s per batch.
-    # Cache after first inference — schema is stable for the pipeline lifetime.
-    _SCHEMA_CACHE: dict = {}
-    
+    # Keyed by (source_key, table_name) → StructType.
+    # Schema inference via spark.read.json(rdd) costs ~2 s per batch because it
+    # launches a full Spark job to sample the JSON.  After the first inference the
+    # schema is stable for the lifetime of the pipeline, so cache and reuse it.
+    _SCHEMA_CACHE: dict[tuple[str, str], "StructType"] = {}
     
     # ── Validate write mode ───────────────────────────────────────────────────────
     if WRITE_MODE not in _VALID_WRITE_MODES:
@@ -603,12 +612,27 @@ data:
         DELETE (op d):
           MERGE MATCHED → DELETE row from Iceberg (hard delete)
     
-        snap_id / snap_timestamp are injected via .withColumn() then materialised
-        with .cache()/.count() BEFORE createOrReplaceGlobalTempView().  This freezes
-        the non-deterministic expressions into a static InMemoryRelation so the
-        Iceberg MERGE planner (ReplaceData path) does not raise
-        INVALID_NON_DETERMINISTIC_EXPRESSIONS when it walks the source plan tree.
-        The cache is unpersisted immediately after the MERGE.
+        snap_id / snap_timestamp injection strategy
+        -------------------------------------------
+        We call .withColumn() on the source DataFrame, then immediately materialise
+        it with .cache() + .count() BEFORE createOrReplaceGlobalTempView().
+    
+        Why materialise?
+          Spark's Iceberg MERGE planner (ReplaceData path) walks the FULL logical
+          plan of the USING source — including the plan of any global temp view it
+          references.  If monotonically_increasing_id() or current_timestamp() are
+          still present as unevaluated expressions anywhere in that plan tree, Spark
+          raises INVALID_NON_DETERMINISTIC_EXPRESSIONS even though those expressions
+          are in the source, not the join condition.
+    
+          .cache() + .count() forces Spark to execute the DataFrame and store the
+          result as an InMemoryRelation.  The global temp view then points to that
+          static relation — the MERGE planner sees no live non-deterministic
+          functions and proceeds normally.
+    
+          The cached DataFrame is unpersisted immediately after the MERGE to avoid
+          memory pressure between batches.
+    
         snap_id / snap_timestamp are excluded from the MATCHED SET clause so an
         UPDATE never overwrites the audit values stamped at INSERT time.
         """
@@ -626,6 +650,19 @@ data:
                 .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
                 .withColumn("snap_timestamp", current_timestamp())
             )
+            # Fully break streaming lineage before registering the global temp view.
+            #
+            # Problem: createOrReplaceGlobalTempView() registers the *logical plan*
+            # of the DataFrame, not its data.  When the source DataFrame still carries
+            # the streaming LogicalRDD in its lineage (even after .cache()+.count()),
+            # Spark's Iceberg MERGE planner (ReplaceData path) traverses that full
+            # plan tree and flags monotonically_increasing_id() / current_timestamp()
+            # as INVALID_NON_DETERMINISTIC_EXPRESSIONS.
+            #
+            # Fix: .collect() pulls the rows to the driver, then spark.createDataFrame()
+            # builds a brand-new static DataFrame backed by a LocalRelation — completely
+            # detached from the streaming LogicalRDD.  The MERGE planner sees only a
+            # plain local table with no live expressions in its lineage.
             rows      = raw_df.collect()
             final_df  = spark.createDataFrame(rows, raw_df.schema)
             row_count = len(rows)
@@ -688,7 +725,8 @@ data:
           MERGE MATCHED → UPDATE SET is_deleted=true, deleted_at=<now>
           Row is never physically removed from Iceberg.
     
-        Same .cache()/.count() materialisation strategy as _apply_standard.
+        Same .cache()/.count() materialisation strategy as _apply_standard —
+        see that function's docstring for the full rationale.
         """
         spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
     
@@ -706,6 +744,7 @@ data:
                 .withColumn("is_deleted", lit(False).cast(BooleanType()))
                 .withColumn("deleted_at", lit(None).cast(TimestampType()))
             )
+            # Same streaming-lineage break as _apply_standard — see that docstring.
             rows      = raw_df.collect()
             final_df  = spark.createDataFrame(rows, raw_df.schema)
             row_count = len(rows)
@@ -852,7 +891,7 @@ data:
           1. Route rows by topic.
           2. Decode Debezium envelope (before / after / op / ts_ms).
           3. Apply optional StarTransform pipeline steps.
-          4. Auto-create Iceberg table if needed (schema cached after first batch).
+          4. Auto-create Iceberg table if it does not exist (schema cached after first batch).
           5. Apply write-mode handler (standard / soft_delete / history_tracking).
         """
         def _foreach_batch(batch_df: DataFrame, batch_id: int) -> None:
@@ -966,8 +1005,9 @@ data:
                         break
     
                 # ── Build write-mode-specific extra schema fields ─────────────────
-                # snap_id / snap_timestamp are omitted — injected automatically by
-                # IcebergTableBuilder.create_table() via _inject_snap_cols().
+                # snap_id / snap_timestamp are intentionally omitted here — they are
+                # injected by IcebergTableBuilder.create_table() via _inject_snap_cols()
+                # automatically.  Including them in extra_fields would duplicate them.
                 extra_fields: list[StructField] = []
                 if write_mode == _WRITE_MODE_SOFT_DELETE:
                     extra_fields = [
@@ -988,10 +1028,16 @@ data:
                 fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{table_name}`"
                 fqn_plain    = f"{source.catalog}.{namespace}.{table_name}"
     
-                # Each write mode writes into its own dedicated Iceberg table:
-                #   standard         → <table>
-                #   soft_delete      → <table>_sd
-                #   history_tracking → <table>_hist
+                # Each write mode writes into its own dedicated Iceberg table so
+                # standard, soft_delete and history_tracking never share a target:
+                #
+                #   standard         → <table>          (SCD Type 0, hard deletes)
+                #   soft_delete      → <table>_sd        (is_deleted flag, row never removed)
+                #   history_tracking → <table>_hist      (append-only full history)
+                #
+                # Compute the effective_table name BEFORE the existence check so we
+                # always check and write to the correct table, never to the base table
+                # created by a different write mode.
                 if write_mode == _WRITE_MODE_HISTORY_TRACKING:
                     effective_table = f"{table_name}_hist"
                 elif write_mode == _WRITE_MODE_SOFT_DELETE:
@@ -999,54 +1045,55 @@ data:
                 else:
                     effective_table = table_name
     
-                table_exists = builder.table_exists(source.catalog, namespace, effective_table)
-                if not table_exists:
-                    pk_col_exists = any(
-                        f.name.lower() == source.pk_col.lower()
-                        for f in inferred_schema.fields
-                    )
-                    pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
-                    effective_fqn_bt = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
-                    effective_fqn_pl = f"{source.catalog}.{namespace}.{effective_table}"
-                    effective_loc    = (
-                        f"s3://{S3_BUCKET}/{source.s3_prefix}"
-                        f"/{namespace}/{effective_table}"
-                    )
-                    try:
-                        builder.create_table(
-                            catalog        = source.catalog,
-                            namespace      = namespace,
-                            table          = effective_table,
-                            schema         = full_schema,
-                            partition_spec = [
-                                IcebergTableBuilder.hours("snap_timestamp"),
-                                IcebergTableBuilder.bucket(pk_for_bucket, 16),
-                            ],
-                            location       = effective_loc,
-                            extra_properties={
-                                "pipeline.write-mode": write_mode,
-                                "pipeline.source":     source.source_key,
-                            },
+                # history_tracking uses writeTo().option("mergeSchema","true").append()
+                # which auto-creates the table on first write with the exact DataFrame
+                # schema — including before_* / after_* / _change_type / _change_ts /
+                # snap_id / snap_timestamp.  Pre-creating the table here would produce
+                # a schema mismatch (base cols only vs. full envelope cols) so we skip
+                # create_table() for this mode entirely and let Iceberg handle it.
+                effective_fqn_bt = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
+                effective_fqn_pl = f"{source.catalog}.{namespace}.{effective_table}"
+                fqn_backtick = effective_fqn_bt
+                fqn_plain    = effective_fqn_pl
+                table_name   = effective_table
+    
+                if write_mode != _WRITE_MODE_HISTORY_TRACKING:
+                    table_exists = builder.table_exists(source.catalog, namespace, effective_table)
+                    if not table_exists:
+                        pk_col_exists = any(
+                            f.name.lower() == source.pk_col.lower()
+                            for f in inferred_schema.fields
                         )
-                        logger.info(
-                            "[%s/%s] Created Iceberg table (mode=%s).",
-                            source.source_key, effective_table, write_mode,
+                        pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
+                        effective_loc = (
+                            f"s3://{S3_BUCKET}/{source.s3_prefix}"
+                            f"/{namespace}/{effective_table}"
                         )
-                        fqn_backtick = effective_fqn_bt
-                        fqn_plain    = effective_fqn_pl
-                        table_name   = effective_table
-                    except Exception as create_exc:
-                        logger.warning(
-                            "[%s/%s] Table creation failed (may already exist): %s",
-                            source.source_key, effective_table, create_exc,
-                        )
-                else:
-                    # effective_table already has the correct name (_hist or base)
-                    # because we computed it before the existence check.
-                    # Update fqn references to use the confirmed existing table name.
-                    fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{effective_table}`"
-                    fqn_plain    = f"{source.catalog}.{namespace}.{effective_table}"
-                    table_name   = effective_table
+                        try:
+                            builder.create_table(
+                                catalog        = source.catalog,
+                                namespace      = namespace,
+                                table          = effective_table,
+                                schema         = full_schema,
+                                partition_spec = [
+                                    IcebergTableBuilder.hours("snap_timestamp"),
+                                    IcebergTableBuilder.bucket(pk_for_bucket, 16),
+                                ],
+                                location       = effective_loc,
+                                extra_properties={
+                                    "pipeline.write-mode": write_mode,
+                                    "pipeline.source":     source.source_key,
+                                },
+                            )
+                            logger.info(
+                                "[%s/%s] Created Iceberg table (mode=%s).",
+                                source.source_key, effective_table, write_mode,
+                            )
+                        except Exception as create_exc:
+                            logger.warning(
+                                "[%s/%s] Table creation failed (may already exist): %s",
+                                source.source_key, effective_table, create_exc,
+                            )
     
                 # ── Apply write mode ──────────────────────────────────────────────
                 try:
@@ -1215,17 +1262,71 @@ data:
         # that touches a Kafka DataSource fails with ClassNotFoundException.
         # spark.jars is not needed here because /opt/spark/jars/ is already on the
         # default classpath for both driver and all executor JVMs on this cluster.
-        # ── Core cap ─────────────────────────────────────────────────────────────
-        # spark.cores.max is a static registration ceiling — set to MAX_EXECUTORS
-        # (default 3) so the dynamic allocator has headroom to burst.
+    
+        # ── Core cap ─────────────────────────────────────────────────────────────────
+        # spark.cores.max is the static registration ceiling for this application in
+        # Spark standalone mode.  It is fixed at session start and cannot change at
+        # runtime — it is NOT the live core consumption figure.
+        #
+        # We set it to MAX_EXECUTORS × EXECUTOR_CORES (default 3 × 1 = 3) so the
+        # dynamic allocator has room to burst up to 3 cores when sustained load
+        # demands it, while the executor count at idle drops to 0 (see below).
         conf.set("spark.cores.max",          str(MAX_EXECUTORS * EXECUTOR_CORES))
         conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
         conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
     
-        # ── Graduated dynamic allocation ─────────────────────────────────────────
-        # idle=0 executors → normal=1 → burst up to MAX_EXECUTORS after
-        # BURST_BACKLOG_TIMEOUT_S (60s) of sustained backlog.
-        # shuffleTracking.enabled required for Structured Streaming + dynAlloc.
+        # ── Graduated dynamic allocation ─────────────────────────────────────────────
+        #
+        # Goal: 0 cores consumed at idle, exactly 1 core during normal CDC processing,
+        # up to 3 cores if the job is backlogged for > BURST_BACKLOG_TIMEOUT_S (60 s).
+        #
+        # spark.cores.max is a static ceiling (immutable after session start).
+        # The dynamic allocator is what controls the ACTUAL live executor count.
+        #
+        # minExecutors = 0
+        #   Scale all the way to zero.  After executorIdleTimeout (30 s) of no tasks
+        #   the executor process is removed from the worker — 0 CPU used at the OS
+        #   level.  The app stays registered on the master (necessary for the
+        #   streaming query to remain alive) but holds no live resources.
+        #
+        # maxExecutors = MAX_EXECUTORS (default 3)
+        #   Hard ceiling on scale-up.  Normal CDC micro-batches need only 1 executor.
+        #   The allocator will not add a 2nd executor unless the task backlog persists
+        #   beyond sustainedSchedulerBacklogTimeout (see below).
+        #
+        # executorIdleTimeout = 30s
+        #   Kill an executor that has had no tasks for 30 s.  Short enough to free
+        #   the core quickly during quiet periods; long enough not to thrash on the
+        #   2-second trigger interval.
+        #
+        # schedulerBacklogTimeout = 1s
+        #   Request the FIRST executor within 1 s of tasks queuing up.  This keeps
+        #   CDC latency low — when a Kafka message arrives after an idle period, the
+        #   executor is back in ~1 s.
+        #
+        # sustainedSchedulerBacklogTimeout = BURST_BACKLOG_TIMEOUT_S (default 60s)
+        #   Only request a 2nd (and 3rd) executor if the backlog has been sustained
+        #   for 60 consecutive seconds.  This is the "wait 1 minute before bursting"
+        #   rule.  A short spike that clears in < 60 s stays on 1 core.  A heavy
+        #   batch load that persists for > 60 s gets a 2nd core; if still backlogged
+        #   after another 60 s it gets a 3rd, up to maxExecutors.
+        #
+        # shuffleTracking.enabled = true
+        #   Required for Structured Streaming + dynamic allocation in Spark 3.x.
+        #   Allows the allocator to safely remove executors that previously served
+        #   shuffle reads without losing shuffle data.
+        #
+        # Behaviour summary
+        # ──────────────────────────────────────────────────────────────────────────
+        #   State                       Executors   Cores on worker
+        #   ─────────────────────────── ─────────── ───────────────
+        #   Idle (no Kafka events)      0 (after 30s)    0
+        #   Active CDC micro-batch      1                1
+        #   Backlog < 60 s              1                1   (no burst yet)
+        #   Backlog 60–119 s            2                2
+        #   Backlog ≥ 120 s             3 (max)          3
+        #   Backlog clears              scales back to 1, then 0 after 30 s idle
+        # ──────────────────────────────────────────────────────────────────────────
         conf.set("spark.dynamicAllocation.enabled",                          "true")
         conf.set("spark.dynamicAllocation.minExecutors",                     "0")
         conf.set("spark.dynamicAllocation.maxExecutors",                     str(MAX_EXECUTORS))
@@ -1234,9 +1335,9 @@ data:
         conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", f"{BURST_BACKLOG_TIMEOUT_S}s")
         conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
     
+        # Peak-hour AQE tuning
         conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
         conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
-        # Peak-hour AQE tuning
         conf.set("spark.sql.adaptive.enabled",                               "true")
         conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
         conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize",   "33554432")   # 32 MB
@@ -1285,9 +1386,10 @@ data:
         Initialise Spark, start all streaming queries, and block until a query
         dies unexpectedly (triggering an outer retry) or the process is interrupted.
     
-        Queries run continuously — no per-batch restart.  Spark commits the offset
-        checkpoint atomically after each successful foreachBatch, so restart-on-
-        failure resumes from exactly the last committed offset.
+        Queries run continuously — no per-batch restart.  Spark Structured Streaming
+        commits the offset checkpoint atomically after each successful foreachBatch,
+        so restart-on-failure is safe: the next _run_once call resumes from exactly
+        the last committed offset.
         """
         spark = _build_spark(bao)
     
@@ -1335,6 +1437,8 @@ data:
         try:
             while True:
                 time.sleep(1)
+                # If any query dies unexpectedly, surface the error so the outer
+                # retry loop in main() can restart the entire Spark session cleanly.
                 for q in list(queries):
                     if not q.isActive:
                         raise RuntimeError(
@@ -1454,12 +1558,6 @@ data:
     
     if __name__ == "__main__":
         main()
-
-
-# ── ConfigMap: star_transform script (managed by ArgoCD) ─────────────────────
-# Delivers star_transform.py into the pod at /opt/spark/work-dir/star_transform.py
-# so the streaming script can 'from star_transform import StarTransform as ST'.
-
 ---
 apiVersion: v1
 kind: ConfigMap
