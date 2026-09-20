@@ -730,6 +730,9 @@ def _apply_history_tracking(
     # Expand before / after JSON strings into typed columns.
     # "after"  is present for INSERT and UPDATE (the new row state).
     # "before" is present for UPDATE and DELETE (the old row state).
+    # Always drop the raw JSON columns — if schema is None for a given
+    # image (e.g. INSERT batch has no "before" rows) we still must drop
+    # the raw string column so it never leaks into the Iceberg write.
     result_df = typed_df
     if before_schema is not None and "before" in typed_df.columns:
         parsed_before = from_json(col("before"), before_schema)
@@ -737,6 +740,7 @@ def _apply_history_tracking(
             result_df = result_df.withColumn(
                 f"before_{field.name}", parsed_before[field.name]
             )
+    if "before" in result_df.columns:
         result_df = result_df.drop("before")
 
     if after_schema is not None and "after" in result_df.columns:
@@ -745,15 +749,52 @@ def _apply_history_tracking(
             result_df = result_df.withColumn(
                 f"after_{field.name}", parsed_after[field.name]
             )
+    if "after" in result_df.columns:
         result_df = result_df.drop("after")
+
+    # Drop envelope columns that must never appear in the Iceberg table.
+    # ts_ms is the Debezium source-DB commit timestamp (epoch ms) — useful
+    # as a raw value but not a first-class audit column; drop it here so
+    # the schema stays clean.  _op and kafka_ts are pipeline-internal only.
+    _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
+    result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
 
     final_df = (
         result_df
-        .drop("_op", "kafka_ts")
         .coalesce(COALESCE_BEFORE_MERGE)
         .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
         .withColumn("snap_timestamp", current_timestamp())
     )
+
+    # writeTo().append() requires the table to already exist — it does NOT
+    # auto-create.  Create it lazily on the first batch using the exact
+    # schema of final_df so the table always matches what we write.
+    # mergeSchema=true then handles any subsequent schema evolution
+    # (e.g. new before_* columns appearing on first UPDATE/DELETE batch).
+    if not spark.catalog.tableExists(fqn_plain):
+        spark.sql(f"""
+            CREATE TABLE IF NOT EXISTS {fqn_backtick}
+            USING iceberg
+            PARTITIONED BY (hours(snap_timestamp))
+            AS SELECT * FROM (VALUES (1)) t(x) WHERE 1=0
+        """)
+        # The CTAS above creates an empty table; use createDataFrame + writeTo
+        # to establish the real schema from the first batch in one go.
+        rows = final_df.collect()
+        seed_df = spark.createDataFrame(rows, final_df.schema)
+        spark.sql(f"DROP TABLE IF EXISTS {fqn_backtick}")
+        seed_df.writeTo(fqn_plain).tableProperty(
+            "pipeline.write-mode", "history_tracking"
+        ).tableProperty(
+            "pipeline.source", source_key
+        ).partitionedBy(
+            F.col("snap_timestamp")
+        ).createOrReplace()
+        logger.info(
+            "[%s/%s][history_tracking] Created Iceberg table and wrote batch=%d rows=%d",
+            source_key, table_name, batch_id, len(rows),
+        )
+        return
 
     (
         final_df
