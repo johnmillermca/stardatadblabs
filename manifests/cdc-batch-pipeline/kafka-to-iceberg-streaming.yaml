@@ -68,11 +68,16 @@ data:
   ADAPTIVE_COALESCE_TARGET:     "67108864"
   # EXECUTOR_INSTANCES / EXECUTOR_CORES / EXECUTOR_MEMORY / EXECUTOR_OFFHEAP:
   # Keep at 1x1 core for normal CDC streaming — micro-batches are tiny (1-1000 rows).
-  # Raise EXECUTOR_INSTANCES + EXECUTOR_CORES only for bulk-load catch-up scenarios.
   EXECUTOR_INSTANCES:           "1"
   EXECUTOR_CORES:               "1"
   EXECUTOR_MEMORY:              "2g"
   EXECUTOR_OFFHEAP:             "512m"
+  # MAX_EXECUTORS: ceiling for dynamic allocation burst (default 3).
+  # At idle = 0 executors; normal CDC = 1; sustained backlog >60s = up to 3.
+  MAX_EXECUTORS:                "3"
+  # BURST_BACKLOG_TIMEOUT_S: seconds of sustained task backlog before adding a
+  # 2nd (then 3rd) executor. Default 60 — waits 1 minute before bursting.
+  BURST_BACKLOG_TIMEOUT_S:      "60"
   # TRANSFORM_PIPELINE: comma-separated StarTransform steps applied before write-mode handler.
   # Available: deduplicate, add_processing_time, add_op_label, add_source_tag, mask_pii
   # Leave empty ("") to disable all transforms (default).
@@ -299,6 +304,10 @@ data:
     EXECUTOR_CORES     = int(os.environ.get("EXECUTOR_CORES",     "1"))
     EXECUTOR_MEMORY    = os.environ.get("EXECUTOR_MEMORY",        "2g")
     EXECUTOR_OFFHEAP   = os.environ.get("EXECUTOR_OFFHEAP",       "512m")
+    
+    # Dynamic allocation burst ceiling and backlog timeout.
+    MAX_EXECUTORS           = int(os.environ.get("MAX_EXECUTORS",           "3"))
+    BURST_BACKLOG_TIMEOUT_S = int(os.environ.get("BURST_BACKLOG_TIMEOUT_S", "60"))
     
     # ── StarTransform pipeline config ─────────────────────────────────────────────
     # Comma-separated list of built-in transform step names to apply before
@@ -1206,21 +1215,22 @@ data:
         # spark.jars is not needed here because /opt/spark/jars/ is already on the
         # default classpath for both driver and all executor JVMs on this cluster.
         # ── Core cap ─────────────────────────────────────────────────────────────
-        # spark.cores.max is the hard ceiling in Spark standalone mode.
-        conf.set("spark.cores.max",          str(EXECUTOR_INSTANCES * EXECUTOR_CORES))
+        # spark.cores.max is a static registration ceiling — set to MAX_EXECUTORS
+        # (default 3) so the dynamic allocator has headroom to burst.
+        conf.set("spark.cores.max",          str(MAX_EXECUTORS * EXECUTOR_CORES))
         conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
         conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
     
-        # ── Dynamic allocation ────────────────────────────────────────────────────
-        # Releases the executor core back to the cluster when idle (no DMLs) or
-        # when foreachBatch receives an empty batch.  minExecutors=0 allows full
-        # scale-down.  shuffleTracking.enabled is required for Structured Streaming.
+        # ── Graduated dynamic allocation ─────────────────────────────────────────
+        # idle=0 executors → normal=1 → burst up to MAX_EXECUTORS after
+        # BURST_BACKLOG_TIMEOUT_S (60s) of sustained backlog.
+        # shuffleTracking.enabled required for Structured Streaming + dynAlloc.
         conf.set("spark.dynamicAllocation.enabled",                          "true")
         conf.set("spark.dynamicAllocation.minExecutors",                     "0")
-        conf.set("spark.dynamicAllocation.maxExecutors",                     str(EXECUTOR_INSTANCES))
+        conf.set("spark.dynamicAllocation.maxExecutors",                     str(MAX_EXECUTORS))
         conf.set("spark.dynamicAllocation.executorIdleTimeout",              "30s")
         conf.set("spark.dynamicAllocation.schedulerBacklogTimeout",          "1s")
-        conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", "1s")
+        conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", f"{BURST_BACKLOG_TIMEOUT_S}s")
         conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
     
         conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
@@ -1386,13 +1396,14 @@ data:
         logger.info(
             "=== Kafka→Iceberg | user=%s | mode=%s | sources=%s | "
             "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d "
-            "| executors=%d x %d core(s) x %s heap (%s off-heap) "
-            "| max_restart_attempts=%s ===",
+            "| executors=0→1 core (burst up to %d after %ds backlog) "
+            "| mem=%s off-heap=%s | max_restart_attempts=%s ===",
             SPARK_USER, WRITE_MODE,
             [s.source_key for s in _ALL_SOURCES],
             _TRANSFORM_STEPS or "none",
             DRY_RUN, TRIGGER_INTERVAL, MAX_OFFSETS_PER_TRIGGER,
-            EXECUTOR_INSTANCES, EXECUTOR_CORES, EXECUTOR_MEMORY, EXECUTOR_OFFHEAP,
+            MAX_EXECUTORS, BURST_BACKLOG_TIMEOUT_S,
+            EXECUTOR_MEMORY, EXECUTOR_OFFHEAP,
             MAX_RESTART_ATTEMPTS if MAX_RESTART_ATTEMPTS > 0 else "∞",
         )
     

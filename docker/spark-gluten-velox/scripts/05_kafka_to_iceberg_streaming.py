@@ -198,6 +198,18 @@ EXECUTOR_CORES     = int(os.environ.get("EXECUTOR_CORES",     "1"))
 EXECUTOR_MEMORY    = os.environ.get("EXECUTOR_MEMORY",        "2g")
 EXECUTOR_OFFHEAP   = os.environ.get("EXECUTOR_OFFHEAP",       "512m")
 
+# Maximum executors the dynamic allocator may scale up to under sustained load.
+# Default 3: baseline = 1 executor (1 core); burst = up to 3 executors (3 cores)
+# after BURST_BACKLOG_TIMEOUT_S seconds of sustained task backlog.
+# Set to 1 to disable burst (hard cap at 1 core always).
+MAX_EXECUTORS = int(os.environ.get("MAX_EXECUTORS", "3"))
+
+# How long (seconds) the scheduler backlog must be sustained before the dynamic
+# allocator requests an additional executor (2nd and beyond).
+# Default 60: a job must be backlogged for 60 s before getting an extra core,
+# so short CDC micro-batches never consume more than 1 core unnecessarily.
+BURST_BACKLOG_TIMEOUT_S = int(os.environ.get("BURST_BACKLOG_TIMEOUT_S", "60"))
+
 # ── StarTransform pipeline config ─────────────────────────────────────────────
 # Comma-separated list of built-in transform step names to apply before
 # each write-mode handler.  Example: "deduplicate,add_processing_time"
@@ -1135,72 +1147,76 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     # spark.jars is not needed here because /opt/spark/jars/ is already on the
     # default classpath for both driver and all executor JVMs on this cluster.
 
-    # ── Core cap (b) ─────────────────────────────────────────────────────────────
-    # spark.cores.max is the hard ceiling in Spark standalone mode — without it
-    # the master ignores executor.instances × executor.cores and allocates all
-    # available worker cores to this application.  Setting it to
-    # EXECUTOR_INSTANCES × EXECUTOR_CORES (default 1 × 1 = 1) ensures each
-    # kafka-to-iceberg job never holds more than 1 core, leaving the rest free
-    # for other jobs (e2e-verify, batch pipelines, etc.).
-    conf.set("spark.cores.max",          str(EXECUTOR_INSTANCES * EXECUTOR_CORES))
+    # ── Core cap ─────────────────────────────────────────────────────────────────
+    # spark.cores.max is the static registration ceiling for this application in
+    # Spark standalone mode.  It is fixed at session start and cannot change at
+    # runtime — it is NOT the live core consumption figure.
+    #
+    # We set it to MAX_EXECUTORS × EXECUTOR_CORES (default 3 × 1 = 3) so the
+    # dynamic allocator has room to burst up to 3 cores when sustained load
+    # demands it, while the executor count at idle drops to 0 (see below).
+    conf.set("spark.cores.max",          str(MAX_EXECUTORS * EXECUTOR_CORES))
     conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
     conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
 
-    # ── Dynamic allocation (b) + (c) + (d) ───────────────────────────────────────
-    # Problem: the streaming job holds its allocated executor core permanently —
-    # even during idle triggers (no Kafka messages) and between micro-batches —
-    # starving other Spark jobs sharing the cluster.
+    # ── Graduated dynamic allocation ─────────────────────────────────────────────
     #
-    # Solution: enable dynamic executor allocation with minExecutors=0.
+    # Goal: 0 cores consumed at idle, exactly 1 core during normal CDC processing,
+    # up to 3 cores if the job is backlogged for > BURST_BACKLOG_TIMEOUT_S (60 s).
     #
-    #   spark.dynamicAllocation.enabled = true
-    #     Activates the ExecutorAllocationManager.  Spark requests executors when
-    #     tasks are pending and releases them when idle.
+    # spark.cores.max is a static ceiling (immutable after session start).
+    # The dynamic allocator is what controls the ACTUAL live executor count.
     #
-    #   spark.dynamicAllocation.minExecutors = 0
-    #     Allow scaling all the way down to zero executors.  When foreachBatch
-    #     returns an empty batch (no Kafka messages) — or when the MERGE finishes
-    #     and the next trigger hasn't arrived yet — the executor sits idle.  After
-    #     executorIdleTimeout seconds Spark deregisters it from the master,
-    #     returning the core to the cluster pool for other jobs.
+    # minExecutors = 0
+    #   Scale all the way to zero.  After executorIdleTimeout (30 s) of no tasks
+    #   the executor process is removed from the worker — 0 CPU used at the OS
+    #   level.  The app stays registered on the master (necessary for the
+    #   streaming query to remain alive) but holds no live resources.
     #
-    #   spark.dynamicAllocation.maxExecutors = EXECUTOR_INSTANCES (= 1)
-    #     Hard ceiling on scale-up.  CDC micro-batches are tiny (1–1000 rows);
-    #     one executor is always enough.  This also enforces the same 1-core cap
-    #     as the original spark.cores.max but via the dynamic allocator.
+    # maxExecutors = MAX_EXECUTORS (default 3)
+    #   Hard ceiling on scale-up.  Normal CDC micro-batches need only 1 executor.
+    #   The allocator will not add a 2nd executor unless the task backlog persists
+    #   beyond sustainedSchedulerBacklogTimeout (see below).
     #
-    #   spark.dynamicAllocation.executorIdleTimeout = 30s
-    #     Release idle executor after 30 seconds with no tasks.  Short enough
-    #     that a burst of empty triggers (quiet CDC period) frees the core within
-    #     ~30 s; long enough that the executor isn't destroyed and re-requested
-    #     on every single trigger interval (2 s).
+    # executorIdleTimeout = 30s
+    #   Kill an executor that has had no tasks for 30 s.  Short enough to free
+    #   the core quickly during quiet periods; long enough not to thrash on the
+    #   2-second trigger interval.
     #
-    #   spark.dynamicAllocation.schedulerBacklogTimeout = 1s
-    #     Request a new executor within 1 s of tasks backing up.  Keeps latency
-    #     low when a real CDC event arrives after an idle period.
+    # schedulerBacklogTimeout = 1s
+    #   Request the FIRST executor within 1 s of tasks queuing up.  This keeps
+    #   CDC latency low — when a Kafka message arrives after an idle period, the
+    #   executor is back in ~1 s.
     #
-    #   spark.dynamicAllocation.sustainedSchedulerBacklogTimeout = 1s
-    #     Same for sustained backlog (keeps scale-up responsive).
+    # sustainedSchedulerBacklogTimeout = BURST_BACKLOG_TIMEOUT_S (default 60s)
+    #   Only request a 2nd (and 3rd) executor if the backlog has been sustained
+    #   for 60 consecutive seconds.  This is the "wait 1 minute before bursting"
+    #   rule.  A short spike that clears in < 60 s stays on 1 core.  A heavy
+    #   batch load that persists for > 60 s gets a 2nd core; if still backlogged
+    #   after another 60 s it gets a 3rd, up to maxExecutors.
     #
-    #   spark.dynamicAllocation.shuffleTracking.enabled = true
-    #     Required for Structured Streaming + dynamic allocation in Spark 3.x.
-    #     Without this flag Spark refuses to deregister executors that may still
-    #     hold shuffle data; this flag enables the shuffle-block tracker so Spark
-    #     can safely release executors even if they served shuffle reads.
+    # shuffleTracking.enabled = true
+    #   Required for Structured Streaming + dynamic allocation in Spark 3.x.
+    #   Allows the allocator to safely remove executors that previously served
+    #   shuffle reads without losing shuffle data.
     #
-    # Net effect:
-    #   • A real CDC event arrives       → executor acquired in ~1 s, MERGE runs,
-    #                                      core held only for the duration of the job.
-    #   • No CDC events for > 30 s       → executor released, 0 cores consumed on
-    #                                      the Spark master, other jobs get the core.
-    #   • Empty foreachBatch trigger     → no tasks submitted, idle timeout ticks,
-    #                                      executor released after 30 s of silence.
+    # Behaviour summary
+    # ──────────────────────────────────────────────────────────────────────────
+    #   State                       Executors   Cores on worker
+    #   ─────────────────────────── ─────────── ───────────────
+    #   Idle (no Kafka events)      0 (after 30s)    0
+    #   Active CDC micro-batch      1                1
+    #   Backlog < 60 s              1                1   (no burst yet)
+    #   Backlog 60–119 s            2                2
+    #   Backlog ≥ 120 s             3 (max)          3
+    #   Backlog clears              scales back to 1, then 0 after 30 s idle
+    # ──────────────────────────────────────────────────────────────────────────
     conf.set("spark.dynamicAllocation.enabled",                          "true")
     conf.set("spark.dynamicAllocation.minExecutors",                     "0")
-    conf.set("spark.dynamicAllocation.maxExecutors",                     str(EXECUTOR_INSTANCES))
+    conf.set("spark.dynamicAllocation.maxExecutors",                     str(MAX_EXECUTORS))
     conf.set("spark.dynamicAllocation.executorIdleTimeout",              "30s")
     conf.set("spark.dynamicAllocation.schedulerBacklogTimeout",          "1s")
-    conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", "1s")
+    conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", f"{BURST_BACKLOG_TIMEOUT_S}s")
     conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
 
     # Peak-hour AQE tuning
@@ -1369,13 +1385,14 @@ def main() -> None:
     logger.info(
         "=== Kafka→Iceberg | user=%s | mode=%s | sources=%s | "
         "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d "
-        "| executors=%d x %d core(s) x %s heap (%s off-heap) "
-        "| max_restart_attempts=%s ===",
+        "| executors=0→1 core (burst up to %d after %ds backlog) "
+        "| mem=%s off-heap=%s | max_restart_attempts=%s ===",
         SPARK_USER, WRITE_MODE,
         [s.source_key for s in _ALL_SOURCES],
         _TRANSFORM_STEPS or "none",
         DRY_RUN, TRIGGER_INTERVAL, MAX_OFFSETS_PER_TRIGGER,
-        EXECUTOR_INSTANCES, EXECUTOR_CORES, EXECUTOR_MEMORY, EXECUTOR_OFFHEAP,
+        MAX_EXECUTORS, BURST_BACKLOG_TIMEOUT_S,
+        EXECUTOR_MEMORY, EXECUTOR_OFFHEAP,
         MAX_RESTART_ATTEMPTS if MAX_RESTART_ATTEMPTS > 0 else "∞",
     )
 
