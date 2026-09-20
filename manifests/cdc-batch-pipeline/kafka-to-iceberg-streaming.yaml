@@ -165,7 +165,10 @@ data:
     
     Snap columns
     ------------
-    • snap_id        BIGINT    — monotonically_increasing_id() per row (unique within batch)
+    • snap_id        BIGINT    — globally unique per row: (batch_id * 10_000_000) + monotonically_increasing_id()
+                                 batch_id is the Spark Structured Streaming micro-batch counter (monotonically
+                                 increasing per streaming query lifetime), ensuring uniqueness even when a batch
+                                 contains only 1 row (where monotonically_increasing_id alone repeats).
     • snap_timestamp TIMESTAMP — current_timestamp() at write time (same for all rows in batch)
     Both are injected per write-mode handler, not by IcebergTableBuilder.write_append(),
     so MERGE operations (standard/soft_delete) can include them in SET clauses.
@@ -647,7 +650,8 @@ data:
             raw_df = (
                 inserts
                 .coalesce(COALESCE_BEFORE_MERGE)
-                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+                .withColumn("snap_id",        (lit(batch_id).cast(LongType()) * lit(10_000_000).cast(LongType())
+                                               + monotonically_increasing_id().cast(LongType())))
                 .withColumn("snap_timestamp", current_timestamp())
             )
             # Fully break streaming lineage before registering the global temp view.
@@ -739,7 +743,8 @@ data:
             raw_df = (
                 inserts
                 .coalesce(COALESCE_BEFORE_MERGE)
-                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+                .withColumn("snap_id",        (lit(batch_id).cast(LongType()) * lit(10_000_000).cast(LongType())
+                                               + monotonically_increasing_id().cast(LongType())))
                 .withColumn("snap_timestamp", current_timestamp())
                 .withColumn("is_deleted", lit(False).cast(BooleanType()))
                 .withColumn("deleted_at", lit(None).cast(TimestampType()))
@@ -909,7 +914,8 @@ data:
         rows      = result_df.coalesce(COALESCE_BEFORE_MERGE).collect()
         final_df  = (
             spark.createDataFrame(rows, result_df.schema)
-            .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+            .withColumn("snap_id",        (lit(batch_id).cast(LongType()) * lit(10_000_000).cast(LongType())
+                                           + monotonically_increasing_id().cast(LongType())))
             .withColumn("snap_timestamp", current_timestamp())
         )
         row_count = len(rows)
