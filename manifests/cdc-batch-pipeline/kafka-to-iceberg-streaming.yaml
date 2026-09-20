@@ -227,7 +227,7 @@ data:
     )
     from pyspark.sql.streaming import StreamingQuery
     from pyspark.sql.types import (
-        BooleanType, LongType, StringType, StructField, StructType, TimestampType,
+        BooleanType, DoubleType, LongType, StringType, StructField, StructType, TimestampType,
     )
     
     from bao_spark_init import BaoSparkInit
