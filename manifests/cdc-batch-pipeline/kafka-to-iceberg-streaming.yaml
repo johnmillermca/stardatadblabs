@@ -804,30 +804,51 @@ data:
         batch_id:     int,
         before_schema: Any,
         after_schema:  Any,
+        row_schema:    Any = None,
     ) -> None:
         """
         Append-only history tracking — every CDC event is a new Iceberg row.
     
-        Columns written:
-          _change_type   STRING     — INSERT / UPDATE / DELETE
-          _change_ts     TIMESTAMP  — pipeline processing time
-          after_<col>    — row state after the change  (NULL for DELETE)
-          before_<col>   — row state before the change (NULL for INSERT)
-                           added via mergeSchema=true on the first UPDATE/DELETE
-                           batch after table creation
-          snap_id        BIGINT     — unique row id within batch
-          snap_timestamp TIMESTAMP  — write-time wall clock
+        Columns written on every row:
+          _change_type    STRING     — INSERT / UPDATE / DELETE
+          _change_ts      TIMESTAMP  — pipeline processing time
+          after_<col>     typed      — row state after  the change (NULL for DELETE)
+          before_<col>    typed      — row state before the change (NULL for INSERT)
+          snap_id         BIGINT     — unique row id within batch
+          snap_timestamp  TIMESTAMP  — write-time wall clock
+    
+        Schema stability guarantee
+        --------------------------
+        Every batch always produces the full column set regardless of which op
+        types (INSERT / UPDATE / DELETE) are present:
+    
+        • after_* NULLed for DELETE batches  (no "after" image in Debezium envelope)
+        • before_* NULLed for INSERT batches (no "before" image in Debezium envelope)
+    
+        Both image column sets are backfilled from row_schema (the inferred source
+        schema cached on the first batch).  This ensures the DataFrame schema is
+        identical on every call so writeTo().append() never encounters a column
+        mismatch regardless of batch composition.
     
         Table-creation strategy
         -----------------------
-        writeTo().append() requires the table to exist first.  On the very first
-        batch (table absent) we strip any before_* columns — which only appear on
-        UPDATE/DELETE rows that arrive before the table exists — build the DDL
-        from the resulting DataFrame schema, CREATE the table, then write.
-        Subsequent batches that carry before_* columns land via mergeSchema=true
-        which adds the new columns to the existing table automatically.
+        writeTo().append() requires the table to exist.  On the first batch we
+        build a CREATE TABLE DDL directly from the full final_df schema (which
+        already contains both after_* and before_* columns) so the table is
+        created once with the complete stable schema.  No mergeSchema surprises.
         """
-        # Map op codes to human-readable change types
+        _PY_TO_ICEBERG = {
+            "LongType":      "BIGINT",
+            "IntegerType":   "INT",
+            "StringType":    "STRING",
+            "DoubleType":    "DOUBLE",
+            "FloatType":     "FLOAT",
+            "BooleanType":   "BOOLEAN",
+            "TimestampType": "TIMESTAMP",
+            "DateType":      "DATE",
+        }
+    
+        # ── 1. Map op codes to human-readable change types ────────────────────────
         typed_df = payload_df.withColumn(
             "_change_type",
             F.when(col("_op") == "c", lit("INSERT"))
@@ -840,7 +861,7 @@ data:
             current_timestamp(),
         )
     
-        # Expand "before" image (present for UPDATE / DELETE rows)
+        # ── 2. Expand "before" image (UPDATE / DELETE rows only) ─────────────────
         result_df = typed_df
         if before_schema is not None and "before" in typed_df.columns:
             parsed_before = from_json(col("before"), before_schema)
@@ -851,7 +872,7 @@ data:
         if "before" in result_df.columns:
             result_df = result_df.drop("before")
     
-        # Expand "after" image (present for INSERT / UPDATE rows)
+        # ── 3. Expand "after" image (INSERT / UPDATE rows only) ──────────────────
         if after_schema is not None and "after" in result_df.columns:
             parsed_after = from_json(col("after"), after_schema)
             for field in after_schema.fields:
@@ -861,11 +882,27 @@ data:
         if "after" in result_df.columns:
             result_df = result_df.drop("after")
     
-        # Drop internal envelope columns that must never reach Iceberg.
+        # ── 4. Backfill missing image columns with typed NULLs ───────────────────
+        # after_* absent on DELETE batches; before_* absent on INSERT batches.
+        # Both must be present on every batch so the schema never drifts between
+        # calls — writeTo().append() fails if the DataFrame is missing any column
+        # that already exists in the Iceberg table.
+        if row_schema is not None:
+            for field in row_schema.fields:
+                for prefix in ("after_", "before_"):
+                    img_col = f"{prefix}{field.name}"
+                    if img_col not in result_df.columns:
+                        result_df = result_df.withColumn(
+                            img_col, lit(None).cast(field.dataType)
+                        )
+    
+        # ── 5. Drop internal envelope columns ────────────────────────────────────
         _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
         result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
     
-        # Break streaming lineage — same rationale as _apply_standard.
+        # ── 6. Break streaming lineage + inject snap cols ─────────────────────────
+        # collect() + createDataFrame() produces a static LocalRelation with no
+        # streaming plan — required before any Iceberg write (same as _apply_standard).
         rows    = result_df.coalesce(COALESCE_BEFORE_MERGE).collect()
         base_df = spark.createDataFrame(rows, result_df.schema)
         final_df = (
@@ -874,27 +911,11 @@ data:
             .withColumn("snap_timestamp", current_timestamp())
         )
     
-        table_exists = spark.catalog.tableExists(fqn_plain)
-    
-        if not table_exists:
-            # On first-create: drop any before_* columns that snuck in before the
-            # table existed (e.g. an UPDATE/DELETE arriving in the very first batch).
-            # They will be added automatically by mergeSchema=true on the next batch.
-            before_cols = [f.name for f in final_df.schema.fields
-                           if f.name.startswith("before_")]
-            if before_cols:
-                final_df = final_df.drop(*before_cols)
-    
-            _PY_TO_ICEBERG = {
-                "LongType":      "BIGINT",
-                "IntegerType":   "INT",
-                "StringType":    "STRING",
-                "DoubleType":    "DOUBLE",
-                "FloatType":     "FLOAT",
-                "BooleanType":   "BOOLEAN",
-                "TimestampType": "TIMESTAMP",
-                "DateType":      "DATE",
-            }
+        # ── 7. Lazy table creation ────────────────────────────────────────────────
+        # writeTo().append() requires the table to already exist.
+        # Create it once using the full final_df schema — which already contains
+        # both after_* and before_* columns — so no mergeSchema surprises later.
+        if not spark.catalog.tableExists(fqn_plain):
             col_defs = ", ".join(
                 f"`{f.name}` {_PY_TO_ICEBERG.get(type(f.dataType).__name__, 'STRING')}"
                 for f in final_df.schema.fields
@@ -915,8 +936,8 @@ data:
                 source_key, table_name,
             )
     
-        # Always re-materialise after any column drops so the write DataFrame is
-        # a clean LocalRelation with no streaming lineage.
+        # ── 8. Write ──────────────────────────────────────────────────────────────
+        # Re-materialise after snap injection so write_df is a clean LocalRelation.
         write_rows = final_df.collect()
         write_df   = spark.createDataFrame(write_rows, final_df.schema)
         (
@@ -1195,6 +1216,7 @@ data:
                             pk_col_actual, source.source_key, table_name, batch_id,
                             before_schema=before_schema,
                             after_schema=after_schema,
+                            row_schema=inferred_schema,
                         )
     
                     written_tables.append(fqn_backtick)
