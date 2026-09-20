@@ -587,26 +587,42 @@ data:
         SCD Type 0 — MERGE INTO Iceberg by PK.
     
         INSERT/UPDATE/snapshot (op c/u/r):
-          MERGE MATCHED     → UPDATE all CDC columns (snap_id/snap_timestamp untouched)
-          MERGE NOT MATCHED → INSERT CDC columns (snap_id/snap_timestamp left NULL)
+          MERGE MATCHED     → UPDATE all CDC columns (snap_id/snap_timestamp untouched —
+                              excluded from SET so existing audit values are preserved)
+          MERGE NOT MATCHED → INSERT CDC columns + fresh snap_id/snap_timestamp
     
         DELETE (op d):
           MERGE MATCHED → DELETE row from Iceberg (hard delete)
     
-        snap_id/snap_timestamp NOT in source — managed by spark_iceberg_utils.
+        snap_id and snap_timestamp are injected into the source DataFrame via
+        .withColumn() before the global temp view is registered.  This is safe —
+        monotonically_increasing_id() / current_timestamp() are evaluated when Spark
+        materialises the source DataFrame, NOT inside the MERGE SQL planner, so
+        INVALID_NON_DETERMINISTIC_EXPRESSIONS is not triggered.  They are excluded
+        from the MATCHED SET clause so an update never overwrites the original snap
+        values written at insert time.
         """
         spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
+    
+        _SNAP_COLS = {"snap_id", "snap_timestamp"}
     
         inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
         deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
     
         if not inserts.isEmpty():
-            final_df = inserts.coalesce(COALESCE_BEFORE_MERGE)
+            final_df = (
+                inserts
+                .coalesce(COALESCE_BEFORE_MERGE)
+                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+                .withColumn("snap_timestamp", current_timestamp())
+            )
             tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
             final_df.createOrReplaceGlobalTempView(tmp_view)
+            # Exclude snap columns from SET — preserve the values written at INSERT time.
             set_clause = ", ".join(
                 f"t.`{f.name}` = s.`{f.name}`"
                 for f in final_df.schema.fields
+                if f.name not in _SNAP_COLS
             )
             col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
             val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
@@ -651,15 +667,22 @@ data:
     
         INSERT/UPDATE/snapshot (op c/u/r):
           MERGE MATCHED     → UPDATE CDC columns + is_deleted=false, deleted_at=NULL
+                              (snap_id/snap_timestamp excluded from SET — preserved)
           MERGE NOT MATCHED → INSERT CDC columns + is_deleted=false, deleted_at=NULL
+                              + fresh snap_id/snap_timestamp
     
         DELETE (op d):
           MERGE MATCHED → UPDATE SET is_deleted=true, deleted_at=<now>
           Row is never physically removed from Iceberg.
     
-        snap_id/snap_timestamp NOT in source — managed by spark_iceberg_utils.
+        snap_id and snap_timestamp are injected into the source DataFrame via
+        .withColumn() before the global temp view is registered (same safe pattern
+        as _apply_standard — evaluated at DataFrame materialisation, not in the
+        MERGE SQL planner).  Excluded from the MATCHED SET clause.
         """
         spark.conf.set("spark.sql.shuffle.partitions", str(MERGE_PARALLELISM))
+    
+        _SNAP_COLS = {"snap_id", "snap_timestamp"}
     
         inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
         deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
@@ -668,14 +691,18 @@ data:
             final_df = (
                 inserts
                 .coalesce(COALESCE_BEFORE_MERGE)
+                .withColumn("snap_id",        monotonically_increasing_id().cast(LongType()))
+                .withColumn("snap_timestamp", current_timestamp())
                 .withColumn("is_deleted", lit(False).cast(BooleanType()))
                 .withColumn("deleted_at", lit(None).cast(TimestampType()))
             )
             tmp_view = f"__cdc_upsert_{source_key}_{table_name}_{batch_id}"
             final_df.createOrReplaceGlobalTempView(tmp_view)
+            # Exclude snap columns from SET — preserve the values written at INSERT time.
             set_clause = ", ".join(
                 f"t.`{f.name}` = s.`{f.name}`"
                 for f in final_df.schema.fields
+                if f.name not in _SNAP_COLS
             )
             col_list = ", ".join(f"`{f.name}`" for f in final_df.schema.fields)
             val_list  = ", ".join(f"s.`{f.name}`" for f in final_df.schema.fields)
