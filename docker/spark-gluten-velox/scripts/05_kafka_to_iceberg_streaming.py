@@ -920,15 +920,22 @@ def _write_micro_batch(
             fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{table_name}`"
             fqn_plain    = f"{source.catalog}.{namespace}.{table_name}"
 
-            # For history_tracking the authoritative table is <table>_hist.
+            # Each write mode writes into its own dedicated Iceberg table so
+            # standard, soft_delete and history_tracking never share a target:
+            #
+            #   standard         → <table>          (SCD Type 0, hard deletes)
+            #   soft_delete      → <table>_sd        (is_deleted flag, row never removed)
+            #   history_tracking → <table>_hist      (append-only full history)
+            #
             # Compute the effective_table name BEFORE the existence check so we
-            # check whether the correct target table exists, not the base table
-            # (which may have been created by a prior standard-mode run).
-            effective_table = (
-                f"{table_name}_hist"
-                if write_mode == _WRITE_MODE_HISTORY_TRACKING
-                else table_name
-            )
+            # always check and write to the correct table, never to the base table
+            # created by a different write mode.
+            if write_mode == _WRITE_MODE_HISTORY_TRACKING:
+                effective_table = f"{table_name}_hist"
+            elif write_mode == _WRITE_MODE_SOFT_DELETE:
+                effective_table = f"{table_name}_sd"
+            else:
+                effective_table = table_name
 
             table_exists = builder.table_exists(source.catalog, namespace, effective_table)
             if not table_exists:

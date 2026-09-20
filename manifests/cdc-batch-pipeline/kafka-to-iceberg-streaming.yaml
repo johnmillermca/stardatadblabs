@@ -988,15 +988,16 @@ data:
                 fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{table_name}`"
                 fqn_plain    = f"{source.catalog}.{namespace}.{table_name}"
     
-                # For history_tracking the authoritative table is <table>_hist.
-                # Compute the effective_table name BEFORE the existence check so we
-                # check whether the correct target table exists, not the base table
-                # (which may have been created by a prior standard-mode run).
-                effective_table = (
-                    f"{table_name}_hist"
-                    if write_mode == _WRITE_MODE_HISTORY_TRACKING
-                    else table_name
-                )
+                # Each write mode writes into its own dedicated Iceberg table:
+                #   standard         → <table>
+                #   soft_delete      → <table>_sd
+                #   history_tracking → <table>_hist
+                if write_mode == _WRITE_MODE_HISTORY_TRACKING:
+                    effective_table = f"{table_name}_hist"
+                elif write_mode == _WRITE_MODE_SOFT_DELETE:
+                    effective_table = f"{table_name}_sd"
+                else:
+                    effective_table = table_name
     
                 table_exists = builder.table_exists(source.catalog, namespace, effective_table)
                 if not table_exists:
