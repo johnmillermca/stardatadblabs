@@ -26,6 +26,12 @@ This directory contains detailed operational runbooks for every application depl
 | [16](runbook-16-data-governance-masking.md) | **Data Governance & Automatic Column Masking** | Star Knowledge Catalog — data classifications, business glossary, masking algorithms, auto column tagging, Doris masked views, role-aware query routing, performance validation | 30860, 30090 |
 | [17](runbook-17-star-catalog-e2e-testing.md) | **Star Knowledge Catalog: End-to-End Testing** | 52 ordered tests across 16 phases — infrastructure checks, auth, CRUD, auto-classify, masked view apply, role-routing, negative tests, performance, idempotency, and smoke-test one-liner | 30860, 30090, 30850 |
 | [20](runbook-20-databricks-customer-parquet-view.md) | **Databricks customer Table — Iceberg Write & Parquet View** | Spark Gluten (k8s) → Iceberg `databricks.lakehouse_db.customer` on S3 `stardata-databricks` → Databricks Unity Catalog view `lakehouse.lakehouse_db.vw_customer_latest`; 1 000-row seed, latest-snapshot auto-resolve, idle-session CronJob | 30888 (JupyterHub), 30707 (Spark UI) |
+| [27](runbook-27-cdc-batch-pipeline-e2e-testing.md) | **CDC Batch Pipeline E2E Testing** | kafka-to-iceberg batch pipeline end-to-end validation — all three sources | 30888, 30707 |
+| [28](runbook-28-starpump-write-modes-testing.md) | **StarPump Write Modes Testing** | StarPump write mode validation — standard, upsert, append | 30888, 30707 |
+| [29](runbook-29-cdc-debezium-kafka-iceberg-architecture.md) | **CDC Architecture Reference** | Debezium → Kafka → Iceberg pipeline architecture, connector config, schema registry, write modes | 30083, 30810 |
+| [30](runbook-30-cdc-e2e-testing.md) | **CDC Pipeline E2E Test Runbook (all sources)** | Full end-to-end test suite for PostgreSQL / Oracle / MongoDB → Kafka → Iceberg: standard, soft-delete, history-tracking, 25 StarTransform tests, schema evolution, peak-hour simulation | 30888, 30707, 30083 |
+| [31](runbook-31-oracle-kafka-iceberg-e2e-testing.md) | **Oracle → Kafka → Iceberg E2E Tests** | Dedicated Oracle LogMiner CDC test suite — standard (SCD Type 0), soft-delete, history tracking; test IDs 900100–900199 | 30521, 30083, 30888 |
+| [32](runbook-32-mongodb-kafka-iceberg-e2e-testing.md) | **MongoDB → Kafka → Iceberg E2E Tests** | Dedicated MongoDB change-stream CDC test suite — standard, soft-delete, history tracking, implicit schema evolution; test IDs 900200–900299 | 30017, 30083, 30888 |
 
 ---
 

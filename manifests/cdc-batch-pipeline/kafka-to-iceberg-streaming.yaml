@@ -902,6 +902,19 @@ data:
                             img_col, lit(None).cast(field.dataType)
                         )
     
+        # ── 4b. Inject top-level PK column ───────────────────────────────────────
+        # DELETE events have after=null in the Debezium envelope so after_<pk> is
+        # always NULL on DELETE rows.  Coalesce after_<pk> and before_<pk> into a
+        # single top-level identity column (<pk_col>) so every row — INSERT, UPDATE,
+        # and DELETE — carries the entity PK and can be queried without inspecting
+        # both image columns.
+        after_pk  = f"after_{pk_col}"
+        before_pk = f"before_{pk_col}"
+        if after_pk in result_df.columns or before_pk in result_df.columns:
+            _after_expr  = col(after_pk)  if after_pk  in result_df.columns else lit(None)
+            _before_expr = col(before_pk) if before_pk in result_df.columns else lit(None)
+            result_df = result_df.withColumn(pk_col, F.coalesce(_after_expr, _before_expr))
+
         # ── 5. Drop internal envelope columns ────────────────────────────────────
         _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
         result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])

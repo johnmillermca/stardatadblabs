@@ -1,8 +1,12 @@
 # Runbook 30 — CDC Pipeline End-to-End Test Runbook
 
-**Status:** Operational  
-**Namespace:** `prod`  
+**Status:** Operational
+**Namespace:** `prod`
 **Estimated duration:** 45–90 minutes (full suite)
+
+> **Source-specific deep-dive runbooks:**
+> - [Runbook 31 — Oracle → Kafka → Iceberg E2E](runbook-31-oracle-kafka-iceberg-e2e-testing.md) *(standard · soft-delete · history tracking)*
+> - [Runbook 32 — MongoDB → Kafka → Iceberg E2E](runbook-32-mongodb-kafka-iceberg-e2e-testing.md) *(standard · soft-delete · history tracking)*
 
 ---
 
@@ -10,6 +14,7 @@
 
 1. [Prerequisites Check](#1-prerequisites-check)
 2. [Section 1 — Standard Mode Tests (SCD Type 0)](#2-section-1--standard-mode-tests-scd-type-0)
+   - 1.1 PostgreSQL (full depth) · 1.2 Oracle · 1.3 MongoDB
 3. [Section 2 — Soft Delete Mode Tests](#3-section-2--soft-delete-mode-tests)
 4. [Section 3 — History Tracking Mode Tests](#4-section-3--history-tracking-mode-tests)
 5. [Section 4 — StarTransform Tests](#5-section-4--startransform-tests) *(Tests 4.1–4.25, one per function)*
@@ -769,23 +774,49 @@ print("✅ Session stopped — cluster core released")
 
 ### Test 1.2 — Oracle (CACHE_TESTING schema)
 
-#### Step 1 — Note current row count
-
-```bash
-cat > /tmp/q.py << 'EOF'
-import os, sys; os.environ["USER"]="dave"; sys.path.insert(0,"/opt/spark/work-dir")
-from bao_spark_init import BaoSparkInit
-from pyspark.sql import SparkSession
-bao=BaoSparkInit(); spark=SparkSession.builder.config(conf=bao.spark_conf("e2e-verify")).getOrCreate()
-print("row_count =", spark.sql("SELECT COUNT(*) FROM oracle.e2e_testing.customers").collect()[0][0])
-spark.stop()
-EOF
-kubectl cp /tmp/q.py -n prod $MASTER:/tmp/q.py -c spark-master
-kubectl exec -n prod $MASTER -c spark-master -- env TOKEN=$TOKEN python3 /tmp/q.py \
-  2>&1 | grep -vE "WARN|INFO|SLF4J|log4j|Gluten|libvelox|execstack|VM will|OpenJDK"
+**`CUSTOMERS` table schema in Oracle:**
+```
+ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT
 ```
 
-#### Step 2 — INSERT a test row
+**Iceberg target:** `oracle.e2e_testing.customers`
+**Test row ID:** `900002`
+
+> **Propagation note:** LogMiner polls redo logs every ~5 s; allow **15 s** for
+> end-to-end propagation (vs 10 s for Postgres).
+
+---
+
+#### Step 1 — Note baseline row count
+
+Open a **new JupyterHub notebook** (or reuse the existing session if still active) and run
+**Cell 1 & Cell 2** from the [JupyterHub Setup](#how-to-run-iceberg-queries--jupyterhub)
+section above — but substitute `oracle` for `postgres` in the catalog config.
+
+**Notebook Cell 3 (Oracle):**
+```python
+cnt = spark.sql(
+    "SELECT COUNT(*) FROM oracle.e2e_testing.customers"
+).collect()[0][0]
+print(f"baseline_row_count = {cnt}")
+
+exists = spark.sql(
+    "SELECT COUNT(*) FROM oracle.e2e_testing.customers WHERE id = 900002"
+).collect()[0][0]
+print(f"id=900002 already_exists = {exists > 0}  ← must be False before proceeding")
+```
+
+✅ Expected:
+```
+baseline_row_count = <N>
+id=900002 already_exists = False  ← must be False before proceeding
+```
+
+> If `already_exists = True`, run the DELETE in Step 7 first, wait 15 s, then re-run.
+
+---
+
+#### Step 2 — INSERT a test row into Oracle
 
 ```bash
 ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
@@ -803,77 +834,227 @@ VALUES
 COMMIT;
 ```
 
-#### Step 3 — Wait
+✅ Expected: `1 row created.` → `Commit complete.`
+
+---
+
+#### Step 3 — Wait for pipeline propagation
 
 ```bash
-sleep 5
+sleep 15
 ```
+
+Check the streaming job processed it:
+
+```bash
+kubectl logs -n prod \
+  $(kubectl get pod -n prod \
+    -l app=kafka-to-iceberg,pipeline.source=oracle,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
+```
+
+✅ Expected: `[oracle/customers][standard] batch=N upsert rows=1`
+
+---
 
 #### Step 4 — Verify INSERT in Iceberg
 
-```sql
-SELECT id, name, email, snap_id, snap_timestamp
-FROM oracle.e2e_testing.customers
-WHERE id = 900002;
+**Notebook Cell 4 (Oracle):**
+```python
+print("=== INSERT verify ===")
+spark.sql("""
+    SELECT id, name, email, city, country, snap_id, snap_timestamp
+    FROM   oracle.e2e_testing.customers
+    WHERE  id = 900002
+""").show(truncate=False)
 ```
 
-**Expected:** 1 row; `snap_id` non-null; `snap_timestamp` recent.
+✅ Expected:
+```
+=== INSERT verify ===
++------+--------------+----------------------+------+-------+-------+--------------+
+|id    |name          |email                 |city  |country|snap_id|snap_timestamp|
++------+--------------+----------------------+------+-------+-------+--------------+
+|900002|E2E OracleTest|e2e_oracle@example.com|Sydney|AU     |...    |...           |
++------+--------------+----------------------+------+-------+-------+--------------+
+```
+1 row returned. `snap_id` is a non-null BIGINT. `snap_timestamp` is within the last 30 s.
 
-#### Step 5 — UPDATE
+---
+
+#### Step 5 — UPDATE the test row in Oracle
 
 ```sql
-UPDATE CUSTOMERS SET EMAIL = 'e2e_oracle_updated@example.com' WHERE ID = 900002;
+-- sqlplus (CACHE_TESTING session)
+UPDATE CUSTOMERS
+SET    EMAIL = 'e2e_oracle_updated@example.com',
+       CITY  = 'Melbourne',
+       UPDATED_AT = SYSDATE
+WHERE  ID = 900002;
 COMMIT;
 ```
 
-#### Step 6 — Verify UPDATE
+✅ Expected: `1 row updated.` → `Commit complete.`
+
+---
+
+#### Step 6 — Wait and verify UPDATE in Iceberg
 
 ```bash
-sleep 5
+sleep 15
+kubectl logs -n prod \
+  $(kubectl get pod -n prod \
+    -l app=kafka-to-iceberg,pipeline.source=oracle,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
 ```
 
-```sql
-SELECT id, email, snap_id, snap_timestamp
-FROM oracle.e2e_testing.customers
-WHERE id = 900002;
+✅ Expected: `[oracle/customers][standard] batch=N upsert rows=1`
+
+**Notebook Cell 5 (Oracle):**
+```python
+print("=== UPDATE verify ===")
+spark.sql("""
+    SELECT id, name, email, city, snap_id, snap_timestamp
+    FROM   oracle.e2e_testing.customers
+    WHERE  id = 900002
+""").show(truncate=False)
 ```
 
-**Expected:** `email = 'e2e_oracle_updated@example.com'`; `snap_id` changed; `snap_timestamp` newer.
+✅ Expected:
+```
+=== UPDATE verify ===
++------+--------------+--------------------------------+---------+-------+--------------+
+|id    |name          |email                           |city     |snap_id|snap_timestamp|
++------+--------------+--------------------------------+---------+-------+--------------+
+|900002|E2E OracleTest|e2e_oracle_updated@example.com  |Melbourne|...    |...           |
++------+--------------+--------------------------------+---------+-------+--------------+
+```
+`email` = `e2e_oracle_updated@example.com`, `city` = `Melbourne`.
+`snap_id` differs from Step 4. `snap_timestamp` is newer than Step 4.
 
-#### Step 7 — DELETE
+---
+
+#### Step 7 — DELETE the test row from Oracle
+
+Oracle requires FK children removed before deleting a customer:
 
 ```sql
-DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900002;
+-- sqlplus (CACHE_TESTING session)
+DELETE FROM PRODUCT_REVIEWS WHERE CUSTOMER_ID = 900002;
+DELETE FROM ORDER_ITEMS WHERE ORDER_ID IN (SELECT ID FROM ORDERS WHERE CUSTOMER_ID = 900002);
+DELETE FROM ORDERS WHERE CUSTOMER_ID = 900002;
+DELETE FROM CUSTOMERS WHERE ID = 900002;
 COMMIT;
 ```
 
-#### Step 8 — Verify hard DELETE
+✅ Expected: row counts printed per statement; `Commit complete.`
+
+---
+
+#### Step 8 — Wait and verify hard DELETE in Iceberg
 
 ```bash
-sleep 5
+sleep 15
+kubectl logs -n prod \
+  $(kubectl get pod -n prod \
+    -l app=kafka-to-iceberg,pipeline.source=oracle,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
 ```
 
-```sql
-SELECT COUNT(*) AS should_be_zero FROM oracle.e2e_testing.customers WHERE id = 900002;
+✅ Expected: `[oracle/customers][standard] batch=N hard-delete rows=1`
+
+**Notebook Cell 6 (Oracle):**
+```python
+print("=== DELETE verify ===")
+cnt = spark.sql(
+    "SELECT COUNT(*) FROM oracle.e2e_testing.customers WHERE id = 900002"
+).collect()[0][0]
+total = spark.sql(
+    "SELECT COUNT(*) FROM oracle.e2e_testing.customers"
+).collect()[0][0]
+print(f"id=900002 row_count    = {cnt}    (expected 0)")
+print(f"total_rows_remaining  = {total}  (expected baseline_row_count)")
 ```
 
-**Expected:** `should_be_zero = 0`
+✅ Expected:
+```
+=== DELETE verify ===
+id=900002 row_count    = 0    (expected 0)
+total_rows_remaining  = <N>  (expected baseline_row_count)
+```
+
+---
+
+#### Step 9 — Stop the Spark session ⚠️
+
+**Notebook Cell 7 (Oracle):**
+```python
+spark.stop()
+print("✅ Session stopped — cluster core released")
+```
+
+---
+
+**Test 1.2 pass criteria:**
+
+| Step | Operation | Kafka log | Iceberg result |
+|------|-----------|-----------|----------------|
+| 2–4  | INSERT    | `batch=N upsert rows=1`      | 1 row, correct values |
+| 5–6  | UPDATE    | `batch=N upsert rows=1`      | `email` and `city` updated |
+| 7–8  | DELETE    | `batch=N hard-delete rows=1` | `row_count = 0` |
+
+> **Full test reference:** See [Runbook 31](runbook-31-oracle-kafka-iceberg-e2e-testing.md) for
+> the complete Oracle standard/soft-delete/history-tracking suite with test IDs 900100–900199.
 
 ---
 
 ### Test 1.3 — MongoDB
 
-#### Step 1 — Note current row count
-
-```sql
-SELECT COUNT(*) AS row_count FROM mongodb.e2e_testing.customers;
+**`customers` collection schema in MongoDB:**
 ```
+_id (ObjectId), id (Number), name, email, phone, address, city, country, created_at
+```
+
+**Iceberg target:** `mongodb.e2e_testing.customers`
+**Test document `id`:** `900003`
+
+> **Propagation note:** MongoDB change streams are near-realtime; allow **10 s**.
+
+---
+
+#### Step 1 — Note baseline row count
+
+**Notebook Cell 3 (MongoDB):**
+```python
+cnt = spark.sql(
+    "SELECT COUNT(*) FROM mongodb.e2e_testing.customers"
+).collect()[0][0]
+print(f"baseline_row_count = {cnt}")
+
+exists = spark.sql(
+    "SELECT COUNT(*) FROM mongodb.e2e_testing.customers WHERE id = 900003"
+).collect()[0][0]
+print(f"id=900003 already_exists = {exists > 0}  ← must be False before proceeding")
+```
+
+✅ Expected:
+```
+baseline_row_count = <N>
+id=900003 already_exists = False  ← must be False before proceeding
+```
+
+> If `already_exists = True`, run the DELETE in Step 7 first, wait 10 s, then re-run.
+
+---
 
 #### Step 2 — INSERT a test document
 
 ```bash
-kubectl exec -n prod \
-  $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
+MONGO_POD=$(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -it -n prod $MONGO_POD -- \
   mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
   --quiet
 ```
@@ -881,82 +1062,208 @@ kubectl exec -n prod \
 ```javascript
 use cache_testing;
 db.customers.insertOne({
-  _id: ObjectId("000000000000000000900003"),
-  id: 900003,
-  name: "E2E MongoTest",
-  email: "e2e_mongo@example.com",
-  phone: "555-0002",
-  address: "3 Mongo St",
-  city: "Perth",
-  country: "AU",
+  _id:        ObjectId("000000000000000000900003"),
+  id:         900003,
+  name:       "E2E MongoTest",
+  email:      "e2e_mongo@example.com",
+  phone:      "555-0002",
+  address:    "3 Mongo St",
+  city:       "Perth",
+  country:    "AU",
   created_at: new Date()
 });
 ```
 
-#### Step 3 — Wait
+✅ Expected: `{ acknowledged: true, insertedId: ObjectId('000000000000000000900003') }`
+
+---
+
+#### Step 3 — Wait for pipeline propagation
 
 ```bash
-sleep 5
+sleep 10
 ```
+
+Check the streaming job processed it:
+
+```bash
+kubectl logs -n prod \
+  $(kubectl get pod -n prod \
+    -l app=kafka-to-iceberg,pipeline.source=mongodb,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=20s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
+```
+
+✅ Expected: `[mongodb/customers][standard] batch=N upsert rows=1`
+
+---
 
 #### Step 4 — Verify INSERT in Iceberg
 
-```sql
-SELECT id, name, email, snap_id, snap_timestamp
-FROM mongodb.e2e_testing.customers
-WHERE id = 900003;
+**Notebook Cell 4 (MongoDB):**
+```python
+print("=== INSERT verify ===")
+spark.sql("""
+    SELECT id, name, email, city, country, snap_id, snap_timestamp
+    FROM   mongodb.e2e_testing.customers
+    WHERE  id = 900003
+""").show(truncate=False)
 ```
 
-**Expected:** 1 row; `snap_id` and `snap_timestamp` populated.
+✅ Expected:
+```
+=== INSERT verify ===
++------+-------------+----------------------+-----+-------+-------+--------------+
+|id    |name         |email                 |city |country|snap_id|snap_timestamp|
++------+-------------+----------------------+-----+-------+-------+--------------+
+|900003|E2E MongoTest|e2e_mongo@example.com |Perth|AU     |...    |...           |
++------+-------------+----------------------+-----+-------+-------+--------------+
+```
+1 row returned. `snap_id` is a non-null BIGINT. `snap_timestamp` is within the last 30 s.
 
-#### Step 5 — UPDATE
+---
+
+#### Step 5 — UPDATE the test document in MongoDB
 
 ```javascript
-// mongosh
+// mongosh (cache_testing database)
 db.customers.updateOne(
   { id: 900003 },
-  { $set: { email: "e2e_mongo_updated@example.com" } }
+  { $set: {
+      email: "e2e_mongo_updated@example.com",
+      city:  "Melbourne"
+  }}
 );
 ```
 
-#### Step 6 — Verify UPDATE
+✅ Expected: `{ acknowledged: true, matchedCount: 1, modifiedCount: 1 }`
+
+---
+
+#### Step 6 — Wait and verify UPDATE in Iceberg
 
 ```bash
-sleep 5
+sleep 10
+kubectl logs -n prod \
+  $(kubectl get pod -n prod \
+    -l app=kafka-to-iceberg,pipeline.source=mongodb,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=20s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
 ```
 
-```sql
-SELECT id, email, snap_id, snap_timestamp
-FROM mongodb.e2e_testing.customers
-WHERE id = 900003;
+✅ Expected: `[mongodb/customers][standard] batch=N upsert rows=1`
+
+**Notebook Cell 5 (MongoDB):**
+```python
+print("=== UPDATE verify ===")
+spark.sql("""
+    SELECT id, name, email, city, snap_id, snap_timestamp
+    FROM   mongodb.e2e_testing.customers
+    WHERE  id = 900003
+""").show(truncate=False)
 ```
 
-**Expected:** `email = 'e2e_mongo_updated@example.com'`; `snap_id` changed.
+✅ Expected:
+```
+=== UPDATE verify ===
++------+-------------+------------------------------+---------+-------+--------------+
+|id    |name         |email                         |city     |snap_id|snap_timestamp|
++------+-------------+------------------------------+---------+-------+--------------+
+|900003|E2E MongoTest|e2e_mongo_updated@example.com |Melbourne|...    |...           |
++------+-------------+------------------------------+---------+-------+--------------+
+```
+`email` = `e2e_mongo_updated@example.com`, `city` = `Melbourne`.
+`snap_id` differs from Step 4. `snap_timestamp` is newer than Step 4.
 
-#### Step 7 — DELETE
+---
+
+#### Step 7 — DELETE the test document from MongoDB
+
+MongoDB has no FK enforcement — a single `deleteOne` is sufficient:
 
 ```javascript
-// mongosh
+// mongosh (cache_testing database)
 db.customers.deleteOne({ id: 900003 });
 ```
 
-#### Step 8 — Verify hard DELETE
+✅ Expected: `{ acknowledged: true, deletedCount: 1 }`
+
+---
+
+#### Step 8 — Wait and verify hard DELETE in Iceberg
 
 ```bash
-sleep 5
+sleep 10
+kubectl logs -n prod \
+  $(kubectl get pod -n prod \
+    -l app=kafka-to-iceberg,pipeline.source=mongodb,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=20s 2>&1 | grep -E "batch=|upsert|hard-delete|ERROR"
 ```
 
-```sql
-SELECT COUNT(*) AS should_be_zero FROM mongodb.e2e_testing.customers WHERE id = 900003;
+✅ Expected: `[mongodb/customers][standard] batch=N hard-delete rows=1`
+
+**Notebook Cell 6 (MongoDB):**
+```python
+print("=== DELETE verify ===")
+cnt = spark.sql(
+    "SELECT COUNT(*) FROM mongodb.e2e_testing.customers WHERE id = 900003"
+).collect()[0][0]
+total = spark.sql(
+    "SELECT COUNT(*) FROM mongodb.e2e_testing.customers"
+).collect()[0][0]
+print(f"id=900003 row_count    = {cnt}    (expected 0)")
+print(f"total_rows_remaining  = {total}  (expected baseline_row_count)")
 ```
 
-**Expected:** `should_be_zero = 0`
+✅ Expected:
+```
+=== DELETE verify ===
+id=900003 row_count    = 0    (expected 0)
+total_rows_remaining  = <N>  (expected baseline_row_count)
+```
+
+---
+
+#### Step 9 — Stop the Spark session ⚠️
+
+**Notebook Cell 7 (MongoDB):**
+```python
+spark.stop()
+print("✅ Session stopped — cluster core released")
+```
+
+---
+
+**Test 1.3 pass criteria:**
+
+| Step | Operation | Kafka log | Iceberg result |
+|------|-----------|-----------|----------------|
+| 2–4  | INSERT    | `batch=N upsert rows=1`      | 1 row, correct values |
+| 5–6  | UPDATE    | `batch=N upsert rows=1`      | `email` and `city` updated |
+| 7–8  | DELETE    | `batch=N hard-delete rows=1` | `row_count = 0` |
+
+> **Full test reference:** See [Runbook 32](runbook-32-mongodb-kafka-iceberg-e2e-testing.md) for
+> the complete MongoDB standard/soft-delete/history-tracking suite with test IDs 900200–900299.
 
 ---
 
 ## 3. Section 2 — Soft Delete Mode Tests
 
-Target table: **`postgres.e2e_testing.customers_sd`**
+**All three sources** feed into the soft-delete deployment simultaneously.
+Per-source target tables:
+
+| Source | Iceberg table |
+|--------|---------------|
+| PostgreSQL | `postgres.e2e_testing.customers_sd` |
+| Oracle | `oracle.e2e_testing.customers_sd` |
+| MongoDB | `mongodb.e2e_testing.customers_sd` |
+
+The tests below exercise **PostgreSQL** in detail. For the equivalent Oracle and MongoDB
+full-depth procedures see [Runbook 31 Section 2](runbook-31-oracle-kafka-iceberg-e2e-testing.md#4-section-2--soft-delete-mode-tests)
+and [Runbook 32 Section 2](runbook-32-mongodb-kafka-iceberg-e2e-testing.md#4-section-2--soft-delete-mode-tests).
+
+**Primary target table (Postgres):** **`postgres.e2e_testing.customers_sd`**
 
 ### Setup: Switch to soft_delete mode
 
@@ -1086,7 +1393,20 @@ kubectl rollout status deployment/kafka-to-iceberg-standard -n prod
 
 ## 4. Section 3 — History Tracking Mode Tests
 
-Target table: **`postgres.e2e_testing.customers_hist`**
+**All three sources** feed into the history-tracking deployment simultaneously.
+Per-source target tables:
+
+| Source | Iceberg table |
+|--------|---------------|
+| PostgreSQL | `postgres.e2e_testing.customers_hist` |
+| Oracle | `oracle.e2e_testing.customers_hist` |
+| MongoDB | `mongodb.e2e_testing.customers_hist` |
+
+The tests below exercise **PostgreSQL** in detail. For the equivalent Oracle and MongoDB
+full-depth procedures see [Runbook 31 Section 3](runbook-31-oracle-kafka-iceberg-e2e-testing.md#5-section-3--history-tracking-mode-tests)
+and [Runbook 32 Section 3](runbook-32-mongodb-kafka-iceberg-e2e-testing.md#5-section-3--history-tracking-mode-tests).
+
+**Primary target table (Postgres):** **`postgres.e2e_testing.customers_hist`**
 
 ### Setup: Switch to history_tracking mode
 
@@ -4015,3 +4335,313 @@ WHERE id BETWEEN 901000 AND 901999;
 | **6 Multi-source** | Simultaneous inserts PG/ORA/MDB | 3 rows across `postgres/oracle/mongodb.e2e_testing.customers` within 10 s |
 | **7 Schema evo** | ALTER TABLE ADD COLUMN | New column in `postgres.e2e_testing.customers`; old rows NULL |
 | **8 Peak-hour** | MERGE_PARALLELISM=16 burst 1000 rows | Batch completes; no errors; setting confirmed in logs |
+
+
+---
+
+## 11. Session Log
+
+> Append a new entry below each working session. Keep entries in reverse-chronological order
+> (newest first). Entries are immutable — do not edit past entries.
+
+---
+
+### Session — 2025-07-10
+
+#### Completed
+
+| Item | Notes |
+|------|-------|
+| Oracle standard pipeline — all type fixes | `pk_col`, `DoubleType`, epoch-ms timestamps, DDL schema cache all resolved |
+| Oracle standard — 10,001 rows in Iceberg | Timestamps correct; `snap_id` / `snap_timestamp` columns populated |
+| 10,000-row bulk load benchmark | 217 ms Oracle insert · ~30 s E2E · ~345 rows/s |
+| Executor / Spark config gap documented | `MAX_EXECUTORS` and `BURST_BACKLOG_TIMEOUT_S` exist in ConfigMap but are **not wired into the Deployment `env:` stanza** — see §11.1 below |
+| Commit `11304c2` pushed & ArgoCD synced | Scaled oracle-soft-delete, oracle-history-tracking, mongodb-standard, mongodb-soft-delete, mongodb-history-tracking to `replicas=1` |
+
+#### Pending — pick up next session (run in order)
+
+**Step 0 — Confirm the 5 new deployments are healthy**
+
+```bash
+# All five should be 1/1 READY; if 0/0 ArgoCD may have a resource conflict
+kubectl get deployment -n prod -l app=kafka-to-iceberg -o wide
+
+# If any show 0/0, inspect events on the first offender:
+kubectl describe deployment kafka-to-iceberg-oracle-soft-delete -n prod | tail -20
+```
+
+Expected healthy output (one line per deployment):
+```
+kafka-to-iceberg-oracle-soft-delete       1/1   1    1   ...
+kafka-to-iceberg-oracle-history-tracking  1/1   1    1   ...
+kafka-to-iceberg-mongodb-standard         1/1   1    1   ...
+kafka-to-iceberg-mongodb-soft-delete      1/1   1    1   ...
+kafka-to-iceberg-mongodb-history-tracking 1/1   1    1   ...
+```
+
+---
+
+**Step 1 — Oracle soft-delete pipeline** (see [Runbook 31 §4](runbook-31-oracle-kafka-iceberg-e2e-testing.md#4-section-2--soft-delete-mode-tests))
+
+```sql
+-- sqlplus / sqlcl  (XEPDB1, schema CACHE_TESTING)
+INSERT INTO CUSTOMERS (ID,NAME,EMAIL,PHONE,ADDRESS,CITY,COUNTRY,CREATED_AT,UPDATED_AT)
+VALUES (900150,'SD Test','sd@example.com','555-1501','1 SD St','Sydney','AU',SYSDATE,SYSDATE);
+COMMIT;
+```
+
+```bash
+sleep 15
+```
+
+```sql
+-- Spark SQL (oracle catalog)
+SELECT id, is_deleted, deleted_at FROM oracle.e2e_testing.customers_sd WHERE id = 900150;
+-- Expected: 1 row · is_deleted=false · deleted_at=NULL
+```
+
+```sql
+-- sqlplus
+DELETE FROM CUSTOMERS WHERE ID = 900150; COMMIT;
+```
+
+```bash
+sleep 15
+```
+
+```sql
+-- Spark SQL — verify soft delete
+SELECT id, is_deleted, deleted_at FROM oracle.e2e_testing.customers_sd WHERE id = 900150;
+-- Expected: row still present · is_deleted=true · deleted_at IS NOT NULL
+```
+
+---
+
+**Step 2 — Oracle history-tracking pipeline** (see [Runbook 31 §5](runbook-31-oracle-kafka-iceberg-e2e-testing.md#5-section-3--history-tracking-mode-tests))
+
+```sql
+-- sqlplus
+INSERT INTO CUSTOMERS (ID,NAME,EMAIL,PHONE,ADDRESS,CITY,COUNTRY,CREATED_AT,UPDATED_AT)
+VALUES (900151,'HT Test','ht@example.com','555-1511','2 HT St','Melbourne','AU',SYSDATE,SYSDATE);
+COMMIT;
+```
+
+```bash
+sleep 15
+```
+
+```sql
+-- Spark SQL
+SELECT id, _change_type, snap_timestamp FROM oracle.e2e_testing.customers_hist WHERE id = 900151;
+-- Expected: 1 row · _change_type=INSERT
+```
+
+```sql
+-- sqlplus
+UPDATE CUSTOMERS SET EMAIL='ht_upd@example.com' WHERE ID=900151; COMMIT;
+```
+
+```bash
+sleep 15
+```
+
+```sql
+-- Spark SQL
+SELECT id, _change_type, email FROM oracle.e2e_testing.customers_hist WHERE id = 900151 ORDER BY snap_timestamp;
+-- Expected: 2 rows · INSERT + UPDATE
+```
+
+```sql
+-- sqlplus
+DELETE FROM CUSTOMERS WHERE ID=900151; COMMIT;
+```
+
+```bash
+sleep 15
+```
+
+```sql
+-- Spark SQL
+SELECT id, _change_type FROM oracle.e2e_testing.customers_hist WHERE id = 900151 ORDER BY snap_timestamp;
+-- Expected: 3 rows · INSERT · UPDATE · DELETE
+```
+
+---
+
+**Step 3 — MongoDB standard pipeline** (see [Runbook 32 §3](runbook-32-mongodb-kafka-iceberg-e2e-testing.md#3-section-1--standard-mode-tests-scd-type-0))
+
+```javascript
+// mongosh  (cache_testing database)
+db.customers.insertOne({
+  _id: ObjectId("000000000000000000900200"),
+  id: 900200, name: "MDB Std Test", email: "mdb_std@example.com",
+  phone: "555-2001", address: "1 MDB St", city: "Brisbane", country: "AU",
+  created_at: new Date(), updated_at: new Date()
+});
+```
+
+```bash
+sleep 10
+```
+
+```sql
+-- Spark SQL (mongodb catalog)
+SELECT id, name, email FROM mongodb.e2e_testing.customers WHERE id = 900200;
+-- Expected: 1 row · correct values
+```
+
+---
+
+**Step 4 — MongoDB soft-delete pipeline** (see [Runbook 32 §4](runbook-32-mongodb-kafka-iceberg-e2e-testing.md#4-section-2--soft-delete-mode-tests))
+
+```javascript
+// mongosh
+db.customers.insertOne({
+  _id: ObjectId("000000000000000000900210"),
+  id: 900210, name: "MDB SD Test", email: "mdb_sd@example.com",
+  phone: "555-2101", address: "2 MDB St", city: "Perth", country: "AU",
+  created_at: new Date(), updated_at: new Date()
+});
+```
+
+```bash
+sleep 10
+```
+
+```sql
+SELECT id, is_deleted, deleted_at FROM mongodb.e2e_testing.customers_sd WHERE id = 900210;
+-- Expected: row present · is_deleted=false
+```
+
+```javascript
+db.customers.deleteOne({ id: 900210 });
+```
+
+```bash
+sleep 10
+```
+
+```sql
+SELECT id, is_deleted, deleted_at FROM mongodb.e2e_testing.customers_sd WHERE id = 900210;
+-- Expected: row present · is_deleted=true · deleted_at IS NOT NULL
+```
+
+---
+
+**Step 5 — MongoDB history-tracking pipeline** (see [Runbook 32 §5](runbook-32-mongodb-kafka-iceberg-e2e-testing.md#5-section-3--history-tracking-mode-tests))
+
+```javascript
+// mongosh
+db.customers.insertOne({
+  _id: ObjectId("000000000000000000900220"),
+  id: 900220, name: "MDB HT Test", email: "mdb_ht@example.com",
+  phone: "555-2201", address: "3 MDB St", city: "Darwin", country: "AU",
+  created_at: new Date(), updated_at: new Date()
+});
+```
+
+```bash
+sleep 10
+```
+
+```sql
+SELECT id, _change_type FROM mongodb.e2e_testing.customers_hist WHERE id = 900220;
+-- Expected: 1 row · _change_type=INSERT
+```
+
+```javascript
+db.customers.updateOne({ id: 900220 }, { $set: { email: "mdb_ht_upd@example.com" } });
+```
+
+```bash
+sleep 10
+```
+
+```javascript
+db.customers.deleteOne({ id: 900220 });
+```
+
+```bash
+sleep 10
+```
+
+```sql
+SELECT id, _change_type FROM mongodb.e2e_testing.customers_hist WHERE id = 900220 ORDER BY snap_timestamp;
+-- Expected: 3 rows · INSERT · UPDATE · DELETE
+```
+
+---
+
+**Step 6 — Cross-source status report**
+
+```bash
+# Quick summary across all 9 pipelines: 3 sources × 3 modes
+echo "=== Deployment health ==="
+kubectl get deployment -n prod -l app=kafka-to-iceberg \
+  -o custom-columns="NAME:.metadata.name,READY:.status.readyReplicas,DESIRED:.spec.replicas"
+
+echo "=== Iceberg row counts ==="
+# Run in a JupyterHub Spark notebook:
+```
+
+```sql
+-- PostgreSQL source
+SELECT 'pg-standard'    AS pipeline, COUNT(*) AS rows FROM postgres.e2e_testing.customers      WHERE id BETWEEN 900001 AND 900099
+UNION ALL
+SELECT 'pg-soft-delete',              COUNT(*)          FROM postgres.e2e_testing.customers      WHERE is_deleted IS NOT NULL AND id BETWEEN 900001 AND 900099
+UNION ALL
+SELECT 'pg-history',                  COUNT(*)          FROM postgres.e2e_testing.customers_hist WHERE id BETWEEN 900001 AND 900099
+UNION ALL
+-- Oracle source
+SELECT 'ora-standard',                COUNT(*)          FROM oracle.e2e_testing.customers        WHERE id BETWEEN 900100 AND 900199
+UNION ALL
+SELECT 'ora-soft-delete',             COUNT(*)          FROM oracle.e2e_testing.customers_sd     WHERE id BETWEEN 900100 AND 900199
+UNION ALL
+SELECT 'ora-history',                 COUNT(*)          FROM oracle.e2e_testing.customers_hist   WHERE id BETWEEN 900100 AND 900199
+UNION ALL
+-- MongoDB source
+SELECT 'mdb-standard',                COUNT(*)          FROM mongodb.e2e_testing.customers       WHERE id BETWEEN 900200 AND 900299
+UNION ALL
+SELECT 'mdb-soft-delete',             COUNT(*)          FROM mongodb.e2e_testing.customers_sd    WHERE id BETWEEN 900200 AND 900299
+UNION ALL
+SELECT 'mdb-history',                 COUNT(*)          FROM mongodb.e2e_testing.customers_hist  WHERE id BETWEEN 900200 AND 900299;
+```
+
+---
+
+#### §11.1 — Known gap: MAX_EXECUTORS / BURST_BACKLOG_TIMEOUT_S not wired into Deployment
+
+The two tuning knobs exist in the ConfigMap but the Deployment `env:` stanza does not reference
+them, so the Spark job never sees them.
+
+**Affected deployments:** all `kafka-to-iceberg-*` Deployments in `prod`.
+
+**Fix (optional — apply when convenient):**
+
+```yaml
+# In the Deployment spec, add under containers[0].env:
+- name: MAX_EXECUTORS
+  valueFrom:
+    configMapKeyRef:
+      name: kafka-to-iceberg-config
+      key: MAX_EXECUTORS
+- name: BURST_BACKLOG_TIMEOUT_S
+  valueFrom:
+    configMapKeyRef:
+      name: kafka-to-iceberg-config
+      key: BURST_BACKLOG_TIMEOUT_S
+```
+
+After patching, rolling-restart to apply:
+
+```bash
+kubectl rollout restart deployment -n prod -l app=kafka-to-iceberg
+kubectl rollout status  deployment -n prod -l app=kafka-to-iceberg
+```
+
+Verify the values are live:
+
+```bash
+kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail=50 \
+  | grep -E "MAX_EXECUTORS|BURST_BACKLOG"
+```
