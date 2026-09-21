@@ -1093,18 +1093,44 @@ data:
                     )
                     continue
     
-                # ── MongoDB: drop _id struct column ──────────────────────────────
-                # Debezium emits MongoDB's _id as a nested struct {"$oid":"..."}
-                # (StructType with field "$oid": StringType).  It cannot be cast
-                # to a scalar type and is not the Iceberg merge key (customer_id is).
-                # Drop it entirely so it never touches the Iceberg schema.
-                if source.source_key == "mongodb" and "_id" in row_df.columns:
-                    row_df = row_df.drop("_id")
-                    # Also remove _id from the inferred schema cache so subsequent
-                    # batches and CREATE TABLE DDL never include it.
-                    _SCHEMA_CACHE[cache_key] = StructType(
-                        [f for f in inferred_schema.fields if f.name != "_id"]
-                    )
+                # ── MongoDB: BSON extended-JSON type normalisation ────────────────
+                # Debezium serialises MongoDB BSON types as extended JSON structs:
+                #   _id        → StructType({"$oid": StringType})   — drop entirely
+                #   created_at → StructType({"$date": LongType})    — cast to TimestampType
+                #   updated_at → StructType({"$date": LongType})    — cast to TimestampType
+                #   (any col)  → StructType with field name starting "$date"
+                #                                                    — cast to TimestampType
+                #
+                # Columns whose names contain "$" cause PARSE_SYNTAX_ERROR in Spark SQL DDL.
+                # Strategy:
+                #   1. Drop _id (ObjectId struct, not the merge key).
+                #   2. For any StructType column whose first sub-field name starts with "$date",
+                #      extract the epoch-ms value and divide by 1000 → TimestampType.
+                #   3. Rebuild the schema cache without the dropped _id field and with
+                #      corrected TimestampType for date columns.
+                if source.source_key == "mongodb":
+                    from pyspark.sql.types import StructType as _ST, StructField as _SF
+                    _clean_fields: list = []
+                    for _f in inferred_schema.fields:
+                        if _f.name == "_id":
+                            # Drop ObjectId entirely — not needed as merge key
+                            if "_id" in row_df.columns:
+                                row_df = row_df.drop("_id")
+                            continue
+                        if (
+                            hasattr(_f.dataType, "fields")
+                            and _f.dataType.fields
+                            and _f.dataType.fields[0].name.startswith("$date")
+                        ):
+                            # {"$date": <epoch_ms>} → TimestampType (epoch_ms / 1000)
+                            row_df = row_df.withColumn(
+                                _f.name,
+                                (col(f"`{_f.name}`")["`$date`"] / lit(1_000)).cast(TimestampType()),
+                            )
+                            _clean_fields.append(_SF(_f.name, TimestampType(), True))
+                        else:
+                            _clean_fields.append(_f)
+                    _SCHEMA_CACHE[cache_key] = _ST(_clean_fields)
                     inferred_schema = _SCHEMA_CACHE[cache_key]
 
                 # ── Oracle type normalisation ─────────────────────────────────────
