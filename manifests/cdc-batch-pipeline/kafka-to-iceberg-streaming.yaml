@@ -1108,6 +1108,10 @@ data:
                 #      extract the epoch-ms value and divide by 1000 → TimestampType.
                 #   3. Rebuild the schema cache without the dropped _id field and with
                 #      corrected TimestampType for date columns.
+                #   4. Widen any LongType numeric column whose live value is DoubleType
+                #      (happens when schema was cached from an integer-only batch but a
+                #      subsequent batch carries decimal values e.g. credit_limit: 9999.99).
+                #      Cast to DoubleType so decimal precision is preserved.
                 if source.source_key == "mongodb":
                     from pyspark.sql.types import StructType as _ST, StructField as _SF
                     _clean_fields: list = []
@@ -1130,6 +1134,14 @@ data:
                                 (col(f"`{_f.name}`").getField("$date") / lit(1_000)).cast(TimestampType()),
                             )
                             _clean_fields.append(_SF(_f.name, TimestampType(), True))
+                        elif (
+                            isinstance(_f.dataType, LongType)
+                            and _f.name in row_df.columns
+                            and isinstance(row_df.schema[_f.name].dataType, DoubleType)
+                        ):
+                            # Live batch inferred DoubleType but cached schema says LongType —
+                            # widen the cache to DoubleType so decimal values are not truncated.
+                            _clean_fields.append(_SF(_f.name, DoubleType(), True))
                         else:
                             _clean_fields.append(_f)
                     _SCHEMA_CACHE[cache_key] = _ST(_clean_fields)
