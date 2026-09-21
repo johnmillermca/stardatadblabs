@@ -1123,9 +1123,11 @@ data:
                             and _f.dataType.fields[0].name.startswith("$date")
                         ):
                             # {"$date": <epoch_ms>} → TimestampType (epoch_ms / 1000)
+                            # Use getField() — not bracket syntax — to access the "$date" sub-field
+                            # because the $ causes Spark SQL parser errors inside col() expressions.
                             row_df = row_df.withColumn(
                                 _f.name,
-                                (col(f"`{_f.name}`")["`$date`"] / lit(1_000)).cast(TimestampType()),
+                                (col(f"`{_f.name}`").getField("$date") / lit(1_000)).cast(TimestampType()),
                             )
                             _clean_fields.append(_SF(_f.name, TimestampType(), True))
                         else:
