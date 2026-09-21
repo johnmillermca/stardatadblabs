@@ -112,12 +112,32 @@ echo "mongodb-cache-testing-cdc: ${STATE}"
 
 ✅ Expected: `mongodb-cache-testing-cdc: RUNNING | tasks: RUNNING`
 
-If FAILED:
+If FAILED — try a simple restart first:
 ```bash
 curl -s -X POST http://192.168.1.54:30083/connectors/mongodb-cache-testing-cdc/restart
 sleep 10
 curl -s http://192.168.1.54:30083/connectors/mongodb-cache-testing-cdc/status \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['connector']['state'])"
+```
+
+If still FAILED (common after converting from standalone → replica set), re-register with the
+correct replica-set connection string:
+```bash
+curl -s -X PUT http://192.168.1.54:30083/connectors/mongodb-cache-testing-cdc/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
+    "mongodb.connection.string": "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@mongodb.prod.svc.cluster.local:27017/?replicaSet=rs0&authSource=admin",
+    "topic.prefix": "mongodb",
+    "database.include.list": "cache_testing",
+    "collection.include.list": "cache_testing.customers,cache_testing.products",
+    "snapshot.mode": "never",
+    "capture.mode": "change_streams_update_document_key_only_handling_tombstone_events"
+  }'
+sleep 10
+curl -s http://192.168.1.54:30083/connectors/mongodb-cache-testing-cdc/status \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    print(d['connector']['state'], '| tasks:', ','.join(t['state'] for t in d['tasks']))"
 ```
 
 ---

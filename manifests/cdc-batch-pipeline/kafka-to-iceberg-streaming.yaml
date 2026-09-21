@@ -399,7 +399,12 @@ data:
             topic_pattern = "mongodb\\.cache_testing\\..*",
             catalog       = "mongodb",
             namespace     = "cache_testing",
-            pk_col        = "_id",
+            # Application-level integer PK used as the Iceberg MERGE key.
+            # MongoDB's internal ObjectId (_id) is emitted as {"$oid":"..."} JSON
+            # and cannot be used as a scalar merge key.  The cache_testing.customers
+            # and .products collections carry an explicit integer `id` field that is
+            # used for MERGE ON ... = ... matching in standard / soft_delete modes.
+            pk_col        = "id",
             s3_prefix     = "iceberg/mgo_lakehouse",
         ),
     ]

@@ -1,9 +1,20 @@
 # =============================================================================
-# MongoDB 8.0 — prod namespace  (standalone — master node only)
+# MongoDB 8.0 — prod namespace  (replica set rs0 — single-node, change streams enabled)
 # Image  : 192.168.1.50:30500/library/mongo:8.0
 # Access : mongodb.prod.svc.cluster.local:27017  (internal)
 #          NodePort 192.168.1.50:30017            (external)
 # Secret : mongodb-credentials  (key: mongodb-root-password)
+#          mongodb-keyfile       (key: keyfile — 512-byte base64 random blob)
+#
+# Pre-apply: create the keyfile secret if it does not already exist:
+#   openssl rand -base64 756 > /tmp/mongo-keyfile
+#   kubectl create secret generic mongodb-keyfile \
+#     --from-file=keyfile=/tmp/mongo-keyfile -n prod
+#   rm /tmp/mongo-keyfile
+#
+# Replica set bootstrap (one-time, idempotent — safe to re-run):
+# The postStart hook below calls rs.initiate() automatically on every pod start.
+# On an already-initiated replica set the call is a no-op.
 # =============================================================================
 ---
 apiVersion: v1
@@ -46,9 +57,20 @@ spec:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
+      initContainers:
+        - name: fix-keyfile-perms
+          image: 192.168.1.50:30500/library/mongo:8.0
+          command: ["bash", "-c", "cp /secret/keyfile /data/keyfile && chmod 400 /data/keyfile && chown 999:999 /data/keyfile"]
+          volumeMounts:
+            - name: mongodb-keyfile
+              mountPath: /secret/keyfile
+              subPath: keyfile
+            - name: mongodb-keyfile-rw
+              mountPath: /data
       containers:
         - name: mongodb
           image: 192.168.1.50:30500/library/mongo:8.0
+          args: ["--replSet", "rs0", "--bind_ip_all", "--keyFile", "/etc/mongodb/keyfile"]
           ports:
             - containerPort: 27017
           env:
@@ -59,9 +81,35 @@ spec:
                 secretKeyRef:
                   name: mongodb-credentials
                   key: mongodb-root-password
+          lifecycle:
+            postStart:
+              exec:
+                # rs.initiate() is idempotent — safe on every pod restart.
+                # Waits up to 30 s for mongod to accept connections before initiating.
+                # If already initiated, the call returns immediately with no side-effect.
+                command:
+                  - bash
+                  - -c
+                  - |
+                    for i in $(seq 1 30); do
+                      mongosh --quiet \
+                        --eval "db.adminCommand('ping')" \
+                        "mongodb://localhost:27017/admin" \
+                        >/dev/null 2>&1 && break
+                      sleep 1
+                    done
+                    mongosh --quiet \
+                      -u root \
+                      -p "${MONGO_INITDB_ROOT_PASSWORD}" \
+                      --authenticationDatabase admin \
+                      --eval 'try { rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]}) } catch(e) { if (e.codeName !== "AlreadyInitialized") throw e }'
           volumeMounts:
             - name: mongodb-storage
               mountPath: /data/db
+            - name: mongodb-keyfile-rw
+              mountPath: /etc/mongodb/keyfile
+              subPath: keyfile
+              readOnly: false
           resources:
             requests:
               memory: 512Mi
@@ -78,6 +126,12 @@ spec:
         - name: mongodb-storage
           persistentVolumeClaim:
             claimName: mongodb-data
+        - name: mongodb-keyfile
+          secret:
+            secretName: mongodb-keyfile
+            defaultMode: 0400
+        - name: mongodb-keyfile-rw
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
