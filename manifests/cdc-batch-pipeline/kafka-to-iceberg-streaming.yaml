@@ -1093,6 +1093,20 @@ data:
                     )
                     continue
     
+                # ── MongoDB: drop _id struct column ──────────────────────────────
+                # Debezium emits MongoDB's _id as a nested struct {"$oid":"..."}
+                # (StructType with field "$oid": StringType).  It cannot be cast
+                # to a scalar type and is not the Iceberg merge key (customer_id is).
+                # Drop it entirely so it never touches the Iceberg schema.
+                if source.source_key == "mongodb" and "_id" in row_df.columns:
+                    row_df = row_df.drop("_id")
+                    # Also remove _id from the inferred schema cache so subsequent
+                    # batches and CREATE TABLE DDL never include it.
+                    _SCHEMA_CACHE[cache_key] = StructType(
+                        [f for f in inferred_schema.fields if f.name != "_id"]
+                    )
+                    inferred_schema = _SCHEMA_CACHE[cache_key]
+
                 # ── Oracle type normalisation ─────────────────────────────────────
                 # Debezium Oracle LogMiner JSON quirks (confirmed from live traffic):
                 #
