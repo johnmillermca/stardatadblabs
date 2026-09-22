@@ -230,7 +230,8 @@ data:
     )
     from pyspark.sql.streaming import StreamingQuery
     from pyspark.sql.types import (
-        BooleanType, DoubleType, LongType, StringType, StructField, StructType, TimestampType,
+        BooleanType, DoubleType, FloatType, IntegerType,
+        LongType, StringType, StructField, StructType, TimestampType,
     )
     
     from bao_spark_init import BaoSparkInit
@@ -343,8 +344,7 @@ data:
     # Schema inference via spark.read.json(rdd) costs ~2 s per batch because it
     # launches a full Spark job to sample the JSON.  After the first inference the
     # schema is stable for the lifetime of the pipeline, so cache and reuse it.
-    _SCHEMA_CACHE:     dict[tuple[str, str], "StructType"] = {}  # raw inferred (for from_json)
-    _DDL_SCHEMA_CACHE: dict[tuple[str, str], "StructType"] = {}  # type-normalised (for CREATE TABLE DDL)
+    _SCHEMA_CACHE: dict[tuple[str, str], "StructType"] = {}
     
     # ── Validate write mode ───────────────────────────────────────────────────────
     if WRITE_MODE not in _VALID_WRITE_MODES:
@@ -394,7 +394,7 @@ data:
             topic_pattern = "oracle\\.(tpcds|cache_testing|TPCDS|CACHE_TESTING)\\..*",
             catalog       = "oracle",
             namespace     = "tpcds",
-            pk_col        = "CUSTOMER_ID",
+            pk_col        = "id",
             s3_prefix     = "iceberg/ora_lakehouse",
         ),
         _StreamingSource(
@@ -402,13 +402,7 @@ data:
             topic_pattern = "mongodb\\.cache_testing\\..*",
             catalog       = "mongodb",
             namespace     = "cache_testing",
-            # Application-level integer PK used as the Iceberg MERGE key.
-            # MongoDB's internal ObjectId (_id) is emitted as {"$oid":"..."} JSON
-            # and cannot be used as a scalar merge key.  The cache_testing.customers
-            # collection uses "customer_id" as the unique application integer PK
-            # (unique index: customer_id_1) for MERGE ON matching.
-            # products collection uses "product_id".
-            pk_col        = "customer_id",
+            pk_col        = "_id",
             s3_prefix     = "iceberg/mgo_lakehouse",
         ),
     ]
@@ -912,18 +906,16 @@ data:
                         )
     
         # ── 4b. Inject top-level PK column ───────────────────────────────────────
-        # DELETE events have after=null in the Debezium envelope so after_<pk> is
-        # always NULL on DELETE rows.  Coalesce after_<pk> and before_<pk> into a
-        # single top-level identity column (<pk_col>) so every row — INSERT, UPDATE,
-        # and DELETE — carries the entity PK and can be queried without inspecting
-        # both image columns.
+        # DELETE events have after=null so after_<pk> is always NULL on DELETE rows.
+        # Coalesce after_<pk> and before_<pk> into a single top-level identity
+        # column (<pk_col>) so every row carries the entity PK regardless of op.
         after_pk  = f"after_{pk_col}"
         before_pk = f"before_{pk_col}"
         if after_pk in result_df.columns or before_pk in result_df.columns:
             _after_expr  = col(after_pk)  if after_pk  in result_df.columns else lit(None)
             _before_expr = col(before_pk) if before_pk in result_df.columns else lit(None)
             result_df = result_df.withColumn(pk_col, F.coalesce(_after_expr, _before_expr))
-
+    
         # ── 4c. MongoDB history_tracking post-processing ──────────────────────────
         # Debezium MongoDB connector emits BSON extended-JSON types inside the
         # "before" / "after" JSON strings.  After JSON expansion via from_json():
@@ -932,14 +924,10 @@ data:
         #   created_at → STRUCT<$date:BIGINT>  → extract epoch_ms / 1000 → TIMESTAMP
         #   updated_at → STRUCT<$date:BIGINT>  → extract epoch_ms / 1000 → TIMESTAMP
         #   (any _at / _ts / _time col)        → same $date struct handling
-        #
-        # We handle all three cases here so history rows land with proper types.
         if source_key == "mongodb":
-            # Drop ObjectId columns (internal MongoDB _id — not the merge key)
             _oid_cols = [c for c in result_df.columns if c in ("after__id", "before__id")]
             if _oid_cols:
                 result_df = result_df.drop(*_oid_cols)
-            # Normalise BSON $date structs and date strings → TIMESTAMP
             _TS_SUFFIXES_HIST = ("_at", "_ts", "_time", "_date")
             from pyspark.sql.types import StructType as _HistST
             for _c in list(result_df.columns):
@@ -967,7 +955,7 @@ data:
                     result_df = result_df.withColumn(
                         _c, (col(_c) / lit(1_000)).cast(TimestampType()),
                     )
-
+    
         # ── 5. Drop internal envelope columns ────────────────────────────────────
         _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
         result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
@@ -1109,35 +1097,138 @@ data:
                     continue
     
                 # ── Infer schema from batch (cached per table) ────────────────────
-                # Re-inferred every 10 batches to detect DDL evolution automatically.
+                # Schema is re-inferred fresh every 10 batches to detect DDL evolution.
+                # from_json silently drops fields not in the declared schema — so a
+                # stale cache after ALTER TABLE ADD COLUMN would lose the new column.
+                #
+                # Type-stability rule (Fix: last_login_at STRING→BIGINT regression)
+                # ─────────────────────────────────────────────────────────────────
+                # Spark's JSON inference defaults NULL values to StringType.  A batch
+                # where a nullable TIMESTAMP/BIGINT column is NULL on every row will
+                # infer that column as STRING, silently downgrading the cached type.
+                # Rule: NEVER replace an existing cached field's type from re-inference.
+                # Only APPEND fields that are genuinely new (not in the cached schema).
+                # On first inference (cache miss), seed from the live Iceberg schema
+                # (DESCRIBE TABLE) when available — that schema was written from real
+                # data and is authoritative.  Fall back to batch inference only when
+                # the table doesn't exist yet.
+                #
+                # BSON _id exclusion (Fix: MongoDB $oid struct ALTER TABLE failure)
+                # ─────────────────────────────────────────────────────────────────
+                # The Debezium MongoDB connector emits _id as a BSON extended-JSON
+                # struct<$oid:string>.  Iceberg column names cannot contain '$', so
+                # ALTER TABLE ADD COLUMN `_id` struct<$oid:string> always fails with
+                # PARSE_SYNTAX_ERROR.  _id is not a business column — exclude it from
+                # all schema evolution paths (cache, ALTER TABLE, from_json parse).
+                _MGO_BSON_EXCLUDE = {"_id"}   # fields to strip from inferred schema
+    
+                def _is_bson_struct(field) -> bool:
+                    """True for struct types whose sub-field names contain '$'."""
+                    from pyspark.sql.types import StructType as _ST2
+                    return (
+                        isinstance(field.dataType, _ST2)
+                        and any("$" in sf.name for sf in field.dataType.fields)
+                    )
+    
+                def _safe_iceberg_fields(fields):
+                    """
+                    Filter out fields that cannot be represented as Iceberg columns:
+                      • _id (MongoDB BSON ObjectId)
+                      • any struct whose sub-fields contain '$' (BSON extended JSON)
+                    """
+                    return [
+                        f for f in fields
+                        if f.name.lower() not in _MGO_BSON_EXCLUDE
+                        and not _is_bson_struct(f)
+                    ]
+    
                 cache_key = (source.source_key, table_name)
                 inferred_schema = _SCHEMA_CACHE.get(cache_key)
                 _should_reinfer = (inferred_schema is None) or (batch_id % 10 == 0)
                 if _should_reinfer:
                     try:
-                        _fresh_schema = spark.read.json(
+                        _fresh_schema_raw = spark.read.json(
                             payload_df.select("payload_json").rdd.map(lambda r: r[0])
                         ).schema
+                        # Strip BSON/invalid fields before any cache or evolution logic
+                        _fresh_schema = StructType(_safe_iceberg_fields(_fresh_schema_raw.fields))
+    
                         if inferred_schema is None:
-                            inferred_schema = _fresh_schema
-                            _SCHEMA_CACHE[cache_key] = inferred_schema
-                            logger.info(
-                                "[%s/%s] Schema inferred and cached (%d fields).",
-                                source.source_key, table_name, len(inferred_schema.fields),
+                            # ── First batch: prefer Iceberg schema as type authority ──
+                            # Iceberg schema was written from real non-NULL data; batch
+                            # inference may have NULL-only columns inferred as STRING.
+                            _evo_tbl_init = (
+                                f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
+                                else (f"{table_name}_hist" if write_mode == _WRITE_MODE_HISTORY_TRACKING
+                                      else table_name)
                             )
+                            _fqn_init = f"`{source.catalog}`.`{namespace}`.`{_evo_tbl_init}`"
+                            try:
+                                _ice_rows = spark.sql(f"DESCRIBE TABLE {_fqn_init}").collect()
+                                _ice_type_map = {
+                                    row["col_name"].lower(): row["data_type"].lower()
+                                    for row in _ice_rows
+                                    if not row["col_name"].startswith("#")
+                                }
+                                # Map Iceberg type strings back to Spark types
+                                _ICE_TO_SPARK = {
+                                    "bigint": LongType(), "long": LongType(),
+                                    "int": IntegerType(), "integer": IntegerType(),
+                                    "smallint": IntegerType(), "tinyint": IntegerType(),
+                                    "string": StringType(), "varchar": StringType(),
+                                    "boolean": BooleanType(),
+                                    "timestamp": TimestampType(),
+                                    "double": DoubleType(), "float": FloatType(),
+                                }
+                                _patched = []
+                                for _f in _fresh_schema.fields:
+                                    _ice_t = _ice_type_map.get(_f.name.lower())
+                                    if _ice_t and _ice_t in _ICE_TO_SPARK:
+                                        _patched.append(StructField(_f.name, _ICE_TO_SPARK[_ice_t], _f.nullable))
+                                    else:
+                                        _patched.append(_f)
+                                inferred_schema = StructType(_patched)
+                                logger.info(
+                                    "[%s/%s] Schema seeded from Iceberg (%d fields) — "
+                                    "batch inference types overridden by Iceberg authority.",
+                                    source.source_key, table_name, len(inferred_schema.fields),
+                                )
+                            except Exception:
+                                # Table doesn't exist yet — use batch inference as-is
+                                inferred_schema = _fresh_schema
+                                logger.info(
+                                    "[%s/%s] Schema inferred from batch (%d fields) — "
+                                    "table not yet in Iceberg.",
+                                    source.source_key, table_name, len(inferred_schema.fields),
+                                )
+                            _SCHEMA_CACHE[cache_key] = inferred_schema
+    
                         elif len(_fresh_schema.fields) != len(inferred_schema.fields):
+                            # Field count changed — DDL evolution detected.
+                            # Keep ALL cached fields (types are authoritative).
+                            # Only append fields that are genuinely new.
+                            _cached_names = {f.name.lower(): f for f in inferred_schema.fields}
+                            _merged = list(inferred_schema.fields)
+                            _added = []
+                            for _nf in _fresh_schema.fields:
+                                if _nf.name.lower() not in _cached_names:
+                                    _merged.append(_nf)
+                                    _added.append(_nf.name)
                             logger.info(
                                 "[%s/%s] DDL evolution detected in batch %d: "
-                                "cached=%d fields, fresh=%d fields — refreshing cache.",
+                                "cached=%d fields, fresh=%d fields — adding %s to cache.",
                                 source.source_key, table_name, batch_id,
                                 len(inferred_schema.fields), len(_fresh_schema.fields),
+                                _added,
                             )
-                            inferred_schema = _fresh_schema
+                            inferred_schema = StructType(_merged)
                             _SCHEMA_CACHE[cache_key] = inferred_schema
                         else:
                             logger.debug(
-                                "[%s/%s] Periodic schema re-check (batch %d): no change (%d fields).",
-                                source.source_key, table_name, batch_id, len(inferred_schema.fields),
+                                "[%s/%s] Periodic schema re-check (batch %d): "
+                                "no new fields (%d fields).",
+                                source.source_key, table_name, batch_id,
+                                len(inferred_schema.fields),
                             )
                     except Exception as exc:
                         if inferred_schema is None:
@@ -1146,14 +1237,20 @@ data:
                                 source.source_key, table_name, exc,
                             )
                             continue
+                        # Non-fatal on periodic re-check: keep existing cached schema
                         logger.debug(
-                            "[%s/%s] Periodic schema re-check failed (batch %d): %s — keeping cache.",
+                            "[%s/%s] Periodic schema re-check failed (batch %d): "
+                            "%s — keeping cache.",
                             source.source_key, table_name, batch_id, exc,
                         )
     
                 # ── Schema-cache invalidation: ALTER TABLE for new cols in Iceberg ─
-                # After fresh schema re-inference detects new fields, issue
-                # ALTER TABLE ADD COLUMN inline so MERGE never hits UNRESOLVED_COLUMN.
+                # After DDL evolution is detected (fresh schema has new fields that
+                # the Iceberg table lacks), issue ALTER TABLE ADD COLUMN inline before
+                # the MERGE so the MERGE never hits UNRESOLVED_COLUMN.
+                # Only for standard/soft_delete — history_tracking uses mergeSchema=true.
+                # BSON struct fields (e.g. _id struct<$oid:string>) are excluded —
+                # Iceberg column names cannot contain '$'.
                 if write_mode != _WRITE_MODE_HISTORY_TRACKING:
                     _evo_table = (
                         f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
@@ -1178,7 +1275,15 @@ data:
                                     f for f in inferred_schema.fields
                                     if f.name.lower() == _nc
                                 )
+                                # Skip any field whose Iceberg type string would be
+                                # unparseable (e.g. struct<$oid:string>)
                                 _ice_type = _nc_field.dataType.simpleString()
+                                if "$" in _ice_type or _is_bson_struct(_nc_field):
+                                    logger.debug(
+                                        "[%s/%s] Skipping ALTER TABLE for BSON field `%s` %s",
+                                        source.source_key, _evo_table, _nc_field.name, _ice_type,
+                                    )
+                                    continue
                                 _alter_ddl = (
                                     f"ALTER TABLE {_evo_fqn} "
                                     f"ADD COLUMN `{_nc_field.name}` {_ice_type}"
@@ -1187,8 +1292,7 @@ data:
                                     spark.sql(_alter_ddl)
                                     logger.info(
                                         "[%s/%s] ALTER TABLE ADD COLUMN `%s` %s — OK",
-                                        source.source_key, _evo_table,
-                                        _nc_field.name, _ice_type,
+                                        source.source_key, _evo_table, _nc_field.name, _ice_type,
                                     )
                                 except Exception as _alt_exc:
                                     logger.warning(
@@ -1198,6 +1302,7 @@ data:
                                         _nc_field.name, _alt_exc,
                                     )
                     except Exception as _evo_exc:
+                        # DESCRIBE TABLE fails when table doesn't exist yet — safe to ignore
                         logger.debug(
                             "[%s/%s] Schema evolution ALTER check skipped: %s",
                             source.source_key, _evo_table, _evo_exc,
@@ -1216,112 +1321,6 @@ data:
                     )
                     continue
     
-                # ── MongoDB: BSON extended-JSON type normalisation ────────────────
-                # Debezium serialises MongoDB BSON types as extended JSON structs:
-                #   _id        → StructType({"$oid": StringType})   — drop entirely
-                #   created_at → StructType({"$date": LongType})    — cast to TimestampType
-                #   updated_at → StructType({"$date": LongType})    — cast to TimestampType
-                #   (any col)  → StructType with field name starting "$date"
-                #                                                    — cast to TimestampType
-                #
-                # Columns whose names contain "$" cause PARSE_SYNTAX_ERROR in Spark SQL DDL.
-                # Strategy:
-                #   1. Drop _id (ObjectId struct, not the merge key).
-                #   2. For any StructType column whose first sub-field name starts with "$date",
-                #      extract the epoch-ms value and divide by 1000 → TimestampType.
-                #   3. Rebuild the schema cache without the dropped _id field and with
-                #      corrected TimestampType for date columns.
-                #   4. Widen any LongType numeric column whose live value is DoubleType
-                #      (happens when schema was cached from an integer-only batch but a
-                #      subsequent batch carries decimal values e.g. credit_limit: 9999.99).
-                #      Cast to DoubleType so decimal precision is preserved.
-                if source.source_key == "mongodb":
-                    from pyspark.sql.types import StructType as _ST, StructField as _SF
-                    _clean_fields: list = []
-                    for _f in inferred_schema.fields:
-                        if _f.name == "_id":
-                            # Drop ObjectId entirely — not needed as merge key
-                            if "_id" in row_df.columns:
-                                row_df = row_df.drop("_id")
-                            continue
-                        if (
-                            hasattr(_f.dataType, "fields")
-                            and _f.dataType.fields
-                            and _f.dataType.fields[0].name.startswith("$date")
-                        ):
-                            # {"$date": <epoch_ms>} → TimestampType (epoch_ms / 1000)
-                            # Use getField() — not bracket syntax — to access the "$date" sub-field
-                            # because the $ causes Spark SQL parser errors inside col() expressions.
-                            row_df = row_df.withColumn(
-                                _f.name,
-                                (col(f"`{_f.name}`").getField("$date") / lit(1_000)).cast(TimestampType()),
-                            )
-                            _clean_fields.append(_SF(_f.name, TimestampType(), True))
-                        elif (
-                            isinstance(_f.dataType, LongType)
-                            and _f.name in row_df.columns
-                            and isinstance(row_df.schema[_f.name].dataType, DoubleType)
-                        ):
-                            # Live batch inferred DoubleType but cached schema says LongType —
-                            # widen the cache to DoubleType so decimal values are not truncated.
-                            _clean_fields.append(_SF(_f.name, DoubleType(), True))
-                        else:
-                            _clean_fields.append(_f)
-                    _SCHEMA_CACHE[cache_key] = _ST(_clean_fields)
-                    inferred_schema = _SCHEMA_CACHE[cache_key]
-
-                # ── Oracle type normalisation ─────────────────────────────────────
-                # Debezium Oracle LogMiner JSON quirks (confirmed from live traffic):
-                #
-                #   TIMESTAMP(n) cols → epoch milliseconds as int   (LongType)
-                #   NUMBER(p,0) cols  → emitted as float JSON        (DoubleType)
-                #
-                # We fix both before writing to Iceberg:
-                #   1. LongType cols matching _AT/_TIME/_TS/_DATE suffixes
-                #      → divide by 1_000 (ms→s) and cast to TimestampType
-                #   2. DoubleType cols NOT matching timestamp suffixes
-                #      → cast to LongType (restores integer primary/foreign keys)
-                #
-                # The schema cache is updated so subsequent batches and
-                # table-creation DDL both use the corrected types.
-                if source.source_key == "oracle":
-                    _TS_SUFFIXES = ("_at", "_AT", "_time", "_TIME", "_ts", "_TS",
-                                    "_date", "_DATE")
-                    # Snapshot raw fields BEFORE any mutations.
-                    # IMPORTANT: _SCHEMA_CACHE stores RAW types (LongType/DoubleType) so
-                    # from_json on subsequent batches always infers numeric types correctly.
-                    # _DDL_SCHEMA_CACHE stores the corrected types for CREATE TABLE DDL only.
-                    _orig_fields = row_df.schema.fields[:]
-                    _ddl_fields  = list(inferred_schema.fields)  # start from raw schema
-                    for _f in _orig_fields:
-                        if isinstance(_f.dataType, LongType) and any(
-                            _f.name.endswith(s) for s in _TS_SUFFIXES
-                        ):
-                            # epoch milliseconds (LongType int) → TimestampType
-                            row_df = row_df.withColumn(
-                                _f.name,
-                                (col(_f.name) / lit(1_000)).cast(TimestampType()),
-                            )
-                            _ddl_fields = [
-                                StructField(_cf.name, TimestampType(), _cf.nullable)
-                                if _cf.name == _f.name else _cf
-                                for _cf in _ddl_fields
-                            ]
-                        elif isinstance(_f.dataType, DoubleType) and not any(
-                            _f.name.endswith(s) for s in _TS_SUFFIXES
-                        ):
-                            # NUMBER(p,0) arrives as JSON float → restore as LongType
-                            row_df = row_df.withColumn(
-                                _f.name,
-                                col(_f.name).cast(LongType()),
-                            )
-                            _ddl_fields = [
-                                StructField(_cf.name, LongType(), _cf.nullable)
-                                if _cf.name == _f.name else _cf
-                                for _cf in _ddl_fields
-                            ]
-                    _DDL_SCHEMA_CACHE[cache_key] = StructType(_ddl_fields)
-
                 # ── Apply StarTransform pipeline steps ────────────────────────────
                 if transform_steps:
                     try:
@@ -1358,16 +1357,7 @@ data:
                     # before_* and after_* columns are added via mergeSchema=true
                     # at append time — not declared at table creation (schema evolves).
     
-                # Use the schema from the cache — it may have been updated by the
-                # Oracle type-normalisation block above (timestamp/float fixes).
-                # For oracle: use the DDL cache (corrected types for TIMESTAMP/BIGINT).
-                # For other sources: fall back to the raw inferred schema.
-                _schema_for_ddl = (
-                    _DDL_SCHEMA_CACHE.get(cache_key)
-                    or _SCHEMA_CACHE.get(cache_key)
-                    or inferred_schema
-                )
-                full_schema = StructType(_schema_for_ddl.fields + extra_fields)
+                full_schema = StructType(inferred_schema.fields + extra_fields)
     
                 # ── Auto-create Iceberg table if needed ───────────────────────────
                 fqn_backtick = f"`{source.catalog}`.`{namespace}`.`{table_name}`"
@@ -1682,21 +1672,8 @@ data:
         conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
     
         # Peak-hour AQE tuning
-        conf.set("spark.executor.memory", EXECUTOR_MEMORY)
-        # EXECUTOR_OFFHEAP only overrides off-heap when Gluten/Velox is disabled.
-        # When Gluten is active, bao_spark_init already set offHeap.size=1500m which
-        # Velox requires — blindly overwriting it with the 512m ConfigMap default
-        # would starve Velox off-heap.  Only apply if the env var is explicitly
-        # raised above 1500m (i.e. the operator intentionally wants more), or if
-        # Gluten is disabled (DISABLE_GLUTEN=1).
-        _gluten_off = "1500m"
-        _requested  = EXECUTOR_OFFHEAP  # e.g. "512m" default from ConfigMap
-        def _mb(s: str) -> int:
-            s = s.strip().lower()
-            return int(s[:-1]) * 1024 if s.endswith("g") else int(s[:-1])
-        if os.environ.get("DISABLE_GLUTEN", "0") == "1" or _mb(_requested) > _mb(_gluten_off):
-            conf.set("spark.memory.offHeap.size", _requested)
-        # else: keep the 1500m already set by bao_spark_init for Gluten/Velox
+        conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
+        conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
         conf.set("spark.sql.adaptive.enabled",                               "true")
         conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
         conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize",   "33554432")   # 32 MB
