@@ -71,7 +71,10 @@ data:
   EXECUTOR_INSTANCES:           "1"
   EXECUTOR_CORES:               "1"
   EXECUTOR_MEMORY:              "2g"
-  EXECUTOR_OFFHEAP:             "512m"
+  # 1500m matches the Gluten/Velox off-heap requirement set by bao_spark_init.
+  # The streaming script guards against overwriting this with a lower value when
+  # Gluten is active — raise above 1500m only if Velox needs more headroom.
+  EXECUTOR_OFFHEAP:             "1500m"
   # MAX_EXECUTORS: ceiling for dynamic allocation burst (default 3).
   # At idle = 0 executors; normal CDC = 1; sustained backlog >60s = up to 3.
   MAX_EXECUTORS:                "3"
@@ -1560,8 +1563,21 @@ data:
         conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
     
         # Peak-hour AQE tuning
-        conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
-        conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
+        conf.set("spark.executor.memory", EXECUTOR_MEMORY)
+        # EXECUTOR_OFFHEAP only overrides off-heap when Gluten/Velox is disabled.
+        # When Gluten is active, bao_spark_init already set offHeap.size=1500m which
+        # Velox requires — blindly overwriting it with the 512m ConfigMap default
+        # would starve Velox off-heap.  Only apply if the env var is explicitly
+        # raised above 1500m (i.e. the operator intentionally wants more), or if
+        # Gluten is disabled (DISABLE_GLUTEN=1).
+        _gluten_off = "1500m"
+        _requested  = EXECUTOR_OFFHEAP  # e.g. "512m" default from ConfigMap
+        def _mb(s: str) -> int:
+            s = s.strip().lower()
+            return int(s[:-1]) * 1024 if s.endswith("g") else int(s[:-1])
+        if os.environ.get("DISABLE_GLUTEN", "0") == "1" or _mb(_requested) > _mb(_gluten_off):
+            conf.set("spark.memory.offHeap.size", _requested)
+        # else: keep the 1500m already set by bao_spark_init for Gluten/Velox
         conf.set("spark.sql.adaptive.enabled",                               "true")
         conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
         conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize",   "33554432")   # 32 MB
