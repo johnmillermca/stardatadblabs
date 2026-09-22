@@ -805,27 +805,43 @@ def _apply_history_tracking(
         result_df = result_df.withColumn(pk_col, F.coalesce(_after_expr, _before_expr))
 
     # ── 4c. MongoDB history_tracking post-processing ──────────────────────────
-    # Drop internal ObjectId columns and cast BSON $date string columns to
-    # TIMESTAMP so history rows carry proper types.
+    # Debezium MongoDB connector emits BSON extended-JSON types inside the
+    # "before" / "after" JSON strings.  After JSON expansion via from_json():
+    #
+    #   _id        → STRUCT<$oid:STRING>   → drop after__id / before__id entirely
+    #   created_at → STRUCT<$date:BIGINT>  → extract epoch_ms / 1000 → TIMESTAMP
+    #   updated_at → STRUCT<$date:BIGINT>  → extract epoch_ms / 1000 → TIMESTAMP
+    #   (any _at / _ts / _time col)        → same $date struct handling
     if source_key == "mongodb":
         _oid_cols = [c for c in result_df.columns if c in ("after__id", "before__id")]
         if _oid_cols:
             result_df = result_df.drop(*_oid_cols)
         _TS_SUFFIXES_HIST = ("_at", "_ts", "_time", "_date")
+        from pyspark.sql.types import StructType as _HistST
         for _c in list(result_df.columns):
-            if (
-                (_c.startswith("after_") or _c.startswith("before_"))
-                and any(_c.endswith(s) for s in _TS_SUFFIXES_HIST)
-                and isinstance(result_df.schema[_c].dataType, StringType)
-            ):
+            if not ((_c.startswith("after_") or _c.startswith("before_"))
+                    and any(_c.endswith(s) for s in _TS_SUFFIXES_HIST)):
+                continue
+            _dtype = result_df.schema[_c].dataType
+            if isinstance(_dtype, _HistST):
+                # STRUCT<$date:BIGINT> — extract the $date sub-field (epoch_ms)
+                result_df = result_df.withColumn(
+                    _c,
+                    (col(f"`{_c}`").getField("$date") / lit(1_000)).cast(TimestampType()),
+                )
+            elif isinstance(_dtype, StringType):
+                # Plain epoch-ms string or ISO-8601 string
                 result_df = result_df.withColumn(
                     _c,
                     F.when(
                         col(_c).rlike(r"^\d{10,13}$"),
                         (col(_c).cast(LongType()) / lit(1_000)).cast(TimestampType()),
-                    ).otherwise(
-                        col(_c).cast(TimestampType()),
-                    ),
+                    ).otherwise(col(_c).cast(TimestampType())),
+                )
+            elif isinstance(_dtype, LongType):
+                # Raw epoch_ms integer (rare but handled)
+                result_df = result_df.withColumn(
+                    _c, (col(_c) / lit(1_000)).cast(TimestampType()),
                 )
 
     # ── 5. Drop internal envelope columns ────────────────────────────────────
