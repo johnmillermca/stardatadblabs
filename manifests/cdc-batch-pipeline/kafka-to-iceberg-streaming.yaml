@@ -4625,7 +4625,7 @@ spec:
             name: star-transform-script
 
 # =============================================================================
-# schema-evolution-handler — Deployment
+# schema-evolution-handler — ConfigMap + Deployment
 #
 # Watches schema-changes.{postgres,oracle,mongodb} Kafka topics and applies
 # ALTER TABLE DDL to Iceberg whenever Debezium publishes a DDL event.
@@ -4637,10 +4637,34 @@ spec:
 #                         vs batch schema before every MERGE and self-heals any
 #                         missing columns inline (schema-cache invalidation guard).
 #
-# Script delivery: 04_schema_evolution_handler.py is baked into the image at
-#   /opt/spark/work-dir/04_schema_evolution_handler.py
-# No ConfigMap override needed — update the image to change the script.
+# Script delivery: 04_schema_evolution_handler.py is NOT baked into the image.
+#   It is delivered via the schema-evolution-handler-script ConfigMap and mounted
+#   at /opt/spark/work-dir/04_schema_evolution_handler.py — same pattern as the
+#   streaming script ConfigMap (kafka-to-iceberg-script).
+#   Update via: kubectl create configmap schema-evolution-handler-script \
+#     --from-file=04_schema_evolution_handler.py=docker/spark-gluten-velox/scripts/04_schema_evolution_handler.py \
+#     -n prod --dry-run=client -o yaml | kubectl apply -f -
 # =============================================================================
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: schema-evolution-handler-script
+  namespace: prod
+  labels:
+    app: schema-evolution-handler
+    pipeline.type: ddl-handler
+binaryData: {}
+data: {}
+# NOTE: This ConfigMap is populated from the file on disk by kubectl/ArgoCD.
+# The actual content of 04_schema_evolution_handler.py is managed outside this
+# YAML because inlining 546 lines of Python inside YAML causes merge conflicts.
+# On initial cluster setup (or after image rebuild), run:
+#   kubectl create configmap schema-evolution-handler-script \
+#     --from-file=04_schema_evolution_handler.py=\
+#       docker/spark-gluten-velox/scripts/04_schema_evolution_handler.py \
+#     -n prod --dry-run=client -o yaml | kubectl apply -f -
 
 ---
 apiVersion: apps/v1
@@ -4721,3 +4745,12 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "1"
+          volumeMounts:
+            - name: evolution-handler-script
+              mountPath: /opt/spark/work-dir/04_schema_evolution_handler.py
+              subPath: 04_schema_evolution_handler.py
+              readOnly: true
+      volumes:
+        - name: evolution-handler-script
+          configMap:
+            name: schema-evolution-handler-script

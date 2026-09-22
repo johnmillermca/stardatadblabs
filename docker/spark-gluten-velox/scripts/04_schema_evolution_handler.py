@@ -67,8 +67,6 @@ from typing import Any
 
 from confluent_kafka import Consumer, KafkaError
 from confluent_kafka.schema_registry import SchemaRegistryClient
-from confluent_kafka.schema_registry.avro import AvroDeserializer
-from confluent_kafka.serialization import MessageField, SerializationContext
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType, ByteType, DateType, DecimalType, DoubleType,
@@ -399,10 +397,9 @@ def _run_source_consumer(
         "group.id":           f"schema-evolution-{source_key}",
         "auto.offset.reset":  "earliest",
         "enable.auto.commit": "true",
-        # Consumer performance tuning
+        # Consumer performance tuning (librdkafka property names)
         "fetch.min.bytes":    "65536",
         "fetch.wait.max.ms":  "500",
-        "max.poll.records":   "500",
     })
     consumer.subscribe([ddl_topic])
     logger.info("[%s] Subscribed to DDL topic: %s", source_key, ddl_topic)
