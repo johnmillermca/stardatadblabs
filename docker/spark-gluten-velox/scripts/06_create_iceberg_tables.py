@@ -327,24 +327,36 @@ _ORA_TPCDS_PROMOTION = StructType([
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
 _MGO_CUSTOMERS = StructType([
-    _S("_id",        StringType(),    False),
-    _S("name",       StringType(),    True),
-    _S("email",      StringType(),    True),
-    _S("phone",      StringType(),    True),
-    _S("address",    StringType(),    True),
-    _S("city",       StringType(),    True),
-    _S("country",    StringType(),    True),
-    _S("created_at", TimestampType(), True),
-    _S("updated_at", TimestampType(), True),
+    # "customer_id" is the application-level integer PK and Iceberg MERGE key.
+    # "_id" (ObjectId) is dropped by the BSON normalisation block in the streaming
+    # pipeline before any MERGE or append — it must not appear in the Iceberg schema.
+    _S("customer_id",  LongType(),      False),
+    _S("first_name",   StringType(),    True),
+    _S("last_name",    StringType(),    True),
+    _S("email",        StringType(),    True),
+    _S("phone",        StringType(),    True),
+    _S("city",         StringType(),    True),
+    _S("country_code", StringType(),    True),
+    _S("tier",         StringType(),    True),
+    _S("credit_limit", DoubleType(),    True),
+    _S("is_active",    BooleanType(),   True),
+    _S("created_at",   TimestampType(), True),
+    _S("updated_at",   TimestampType(), True),
 ])
 _MGO_PRODUCTS = StructType([
-    _S("_id",        StringType(),    False),
-    _S("name",       StringType(),    True),
-    _S("category",   StringType(),    True),
-    _S("price",      DoubleType(),    True),
-    _S("stock",      IntegerType(),   True),
-    _S("created_at", TimestampType(), True),
-    _S("updated_at", TimestampType(), True),
+    # "product_id" is the application-level integer PK and Iceberg MERGE key.
+    _S("product_id",   LongType(),      False),
+    _S("sku",          StringType(),    True),
+    _S("product_name", StringType(),    True),
+    _S("category",     StringType(),    True),
+    _S("subcategory",  StringType(),    True),
+    _S("unit_price",   DoubleType(),    True),
+    _S("cost_price",   DoubleType(),    True),
+    _S("stock_qty",    IntegerType(),   True),
+    _S("weight_kg",    DoubleType(),    True),
+    _S("is_active",    BooleanType(),   True),
+    _S("created_at",   TimestampType(), True),
+    _S("updated_at",   TimestampType(), True),
 ])
 
 
@@ -447,8 +459,8 @@ def _build_registry() -> list[dict]:
     _add_prod("oracle","oracle","tpcds","promotion",             "p_promo_sk",        "iceberg/ora_lakehouse",_ORA_TPCDS_PROMOTION)
 
     # MongoDB
-    _add_prod("mongodb","mongodb","cache_testing","customers","_id","iceberg/mgo_lakehouse",_MGO_CUSTOMERS)
-    _add_prod("mongodb","mongodb","cache_testing","products", "_id","iceberg/mgo_lakehouse",_MGO_PRODUCTS)
+    _add_prod("mongodb","mongodb","cache_testing","customers","customer_id","iceberg/mgo_lakehouse",_MGO_CUSTOMERS)
+    _add_prod("mongodb","mongodb","cache_testing","products", "product_id", "iceberg/mgo_lakehouse",_MGO_PRODUCTS)
 
     # ── E2E test tables — all in a single namespace: e2e_testing ───────────────
     # Write-mode variants for each source table, all in <catalog>.e2e_testing.
@@ -461,7 +473,7 @@ def _build_registry() -> list[dict]:
         ("postgres","postgres","orders",          "id", "iceberg/pg_e2e",  _PG_ORDERS),
         ("oracle",  "oracle",  "customers",       "id", "iceberg/ora_e2e", _ORA_CT_CUSTOMERS),
         ("oracle",  "oracle",  "orders",          "id", "iceberg/ora_e2e", _ORA_CT_ORDERS),
-        ("mongodb", "mongodb", "customers",       "_id","iceberg/mgo_e2e", _MGO_CUSTOMERS),
+        ("mongodb", "mongodb", "customers",       "customer_id", "iceberg/mgo_e2e", _MGO_CUSTOMERS),
     ]:
         # standard
         reg.append(dict(

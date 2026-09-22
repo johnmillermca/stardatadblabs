@@ -402,8 +402,9 @@ data:
             # Application-level integer PK used as the Iceberg MERGE key.
             # MongoDB's internal ObjectId (_id) is emitted as {"$oid":"..."} JSON
             # and cannot be used as a scalar merge key.  The cache_testing.customers
-            # and .products collections use customer_id as the unique application PK
-            # (unique index: customer_id_1) for MERGE ON matching in standard / soft_delete modes.
+            # collection uses "customer_id" as the unique application integer PK
+            # (unique index: customer_id_1) for MERGE ON matching.
+            # products collection uses "product_id".
             pk_col        = "customer_id",
             s3_prefix     = "iceberg/mgo_lakehouse",
         ),
