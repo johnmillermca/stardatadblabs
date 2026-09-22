@@ -1004,6 +1004,92 @@ def _write_micro_batch(
                     )
                     continue
 
+            # ── Schema-cache invalidation: detect DDL evolution ───────────────
+            # When ALTER TABLE ADD COLUMN has been applied to the source while
+            # this pod is running, the next batch will carry new columns that
+            # are absent from the frozen _SCHEMA_CACHE.  from_json with the old
+            # schema silently drops the new cols → MERGE crashes with
+            # UNRESOLVED_COLUMN on restart.
+            #
+            # Fix: after schema is inferred (or retrieved from cache), fetch the
+            # live Iceberg table columns via DESCRIBE TABLE and compare.  Any
+            # column present in the batch JSON but absent from the Iceberg table
+            # triggers an inline ALTER TABLE ADD COLUMN before the MERGE, and
+            # the schema cache is invalidated so the next batch re-infers fresh.
+            #
+            # Only applies to standard/soft_delete (MERGE targets).
+            # history_tracking uses mergeSchema=true append — Iceberg handles it.
+            if write_mode != _WRITE_MODE_HISTORY_TRACKING:
+                _evo_table = (
+                    f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
+                    else table_name
+                )
+                _evo_fqn = f"`{source.catalog}`.`{namespace}`.`{_evo_table}`"
+                try:
+                    _iceberg_cols = {
+                        row["col_name"].lower()
+                        for row in spark.sql(f"DESCRIBE TABLE {_evo_fqn}").collect()
+                        if not row["col_name"].startswith("#")
+                    }
+                    _batch_cols = {f.name.lower() for f in inferred_schema.fields}
+                    _new_cols = _batch_cols - _iceberg_cols - {"snap_id", "snap_timestamp"}
+                    if _new_cols:
+                        logger.info(
+                            "[%s/%s] DDL evolution detected — %d new column(s) in batch: %s",
+                            source.source_key, _evo_table, len(_new_cols), sorted(_new_cols),
+                        )
+                        for _nc in sorted(_new_cols):
+                            _nc_field = next(
+                                f for f in inferred_schema.fields
+                                if f.name.lower() == _nc
+                            )
+                            _ice_type = _nc_field.dataType.simpleString()
+                            # Map Spark simpleString types to valid Iceberg DDL types
+                            _ice_type = (
+                                _ice_type
+                                .replace("bigint", "bigint")
+                                .replace("int", "int")
+                                .replace("double", "double")
+                                .replace("float", "float")
+                                .replace("boolean", "boolean")
+                                .replace("timestamp", "timestamp")
+                                .replace("date", "date")
+                                .replace("binary", "binary")
+                            )
+                            _alter_ddl = (
+                                f"ALTER TABLE {_evo_fqn} "
+                                f"ADD COLUMN `{_nc_field.name}` {_ice_type}"
+                            )
+                            try:
+                                spark.sql(_alter_ddl)
+                                logger.info(
+                                    "[%s/%s] ALTER TABLE ADD COLUMN `%s` %s — OK",
+                                    source.source_key, _evo_table, _nc_field.name, _ice_type,
+                                )
+                            except Exception as _alt_exc:
+                                logger.warning(
+                                    "[%s/%s] ALTER TABLE ADD COLUMN `%s` failed "
+                                    "(may already exist): %s",
+                                    source.source_key, _evo_table,
+                                    _nc_field.name, _alt_exc,
+                                )
+                        # Invalidate cache so from_json re-infers on next batch
+                        _SCHEMA_CACHE.pop(cache_key, None)
+                        inferred_schema = spark.read.json(
+                            payload_df.select("payload_json").rdd.map(lambda r: r[0])
+                        ).schema
+                        _SCHEMA_CACHE[cache_key] = inferred_schema
+                        logger.info(
+                            "[%s/%s] Schema cache refreshed after DDL evolution (%d fields).",
+                            source.source_key, _evo_table, len(inferred_schema.fields),
+                        )
+                except Exception as _evo_exc:
+                    # DESCRIBE TABLE fails when table doesn't exist yet — safe to ignore
+                    logger.debug(
+                        "[%s/%s] Schema evolution check skipped: %s",
+                        source.source_key, _evo_table, _evo_exc,
+                    )
+
             # ── Parse payload JSON → typed DataFrame ──────────────────────────
             try:
                 row_df = payload_df.select(
