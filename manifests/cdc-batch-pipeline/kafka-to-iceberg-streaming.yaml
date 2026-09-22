@@ -4158,7 +4158,7 @@ metadata:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
     pipeline.write-mode-desc: "MongoDB → Kafka → Iceberg | MERGE upsert + soft-delete flag"
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
@@ -4331,7 +4331,7 @@ metadata:
     pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
     pipeline.write-mode-desc: "MongoDB → Kafka → Iceberg | Append-only full row history"
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
