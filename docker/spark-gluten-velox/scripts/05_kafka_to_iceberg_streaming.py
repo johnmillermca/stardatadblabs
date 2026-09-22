@@ -985,40 +985,61 @@ def _write_micro_batch(
                 continue
 
             # ── Infer schema from batch (cached per table) ────────────────────
+            # Schema is re-inferred fresh every 10 batches to automatically detect
+            # DDL evolution (new columns added to the source while the pod runs).
+            # from_json silently drops fields not in the declared schema — so a
+            # stale cache after a source ALTER TABLE ADD COLUMN would cause the
+            # new column to be dropped on every batch until the pod restarts.
+            # Every-10-batch re-inference catches this without the cost of a full
+            # re-infer on every single batch (which adds ~2s per batch).
             cache_key = (source.source_key, table_name)
             inferred_schema = _SCHEMA_CACHE.get(cache_key)
-            if inferred_schema is None:
+            _should_reinfer = (inferred_schema is None) or (batch_id % 10 == 0)
+            if _should_reinfer:
                 try:
-                    inferred_schema = spark.read.json(
+                    _fresh_schema = spark.read.json(
                         payload_df.select("payload_json").rdd.map(lambda r: r[0])
                     ).schema
-                    _SCHEMA_CACHE[cache_key] = inferred_schema
-                    logger.info(
-                        "[%s/%s] Schema inferred and cached (%d fields).",
-                        source.source_key, table_name, len(inferred_schema.fields),
-                    )
+                    if inferred_schema is None:
+                        inferred_schema = _fresh_schema
+                        _SCHEMA_CACHE[cache_key] = inferred_schema
+                        logger.info(
+                            "[%s/%s] Schema inferred and cached (%d fields).",
+                            source.source_key, table_name, len(inferred_schema.fields),
+                        )
+                    elif len(_fresh_schema.fields) != len(inferred_schema.fields):
+                        # Field count changed — DDL evolution detected
+                        logger.info(
+                            "[%s/%s] DDL evolution detected in batch %d: "
+                            "cached=%d fields, fresh=%d fields — refreshing cache.",
+                            source.source_key, table_name, batch_id,
+                            len(inferred_schema.fields), len(_fresh_schema.fields),
+                        )
+                        inferred_schema = _fresh_schema
+                        _SCHEMA_CACHE[cache_key] = inferred_schema
+                    else:
+                        logger.debug(
+                            "[%s/%s] Periodic schema re-check (batch %d): no change (%d fields).",
+                            source.source_key, table_name, batch_id, len(inferred_schema.fields),
+                        )
                 except Exception as exc:
-                    logger.warning(
-                        "[%s/%s] Schema inference failed: %s — skipping.",
-                        source.source_key, table_name, exc,
+                    if inferred_schema is None:
+                        logger.warning(
+                            "[%s/%s] Schema inference failed: %s — skipping.",
+                            source.source_key, table_name, exc,
+                        )
+                        continue
+                    # Non-fatal on periodic re-check: keep existing cached schema
+                    logger.debug(
+                        "[%s/%s] Periodic schema re-check failed (batch %d): %s — keeping cache.",
+                        source.source_key, table_name, batch_id, exc,
                     )
-                    continue
 
-            # ── Schema-cache invalidation: detect DDL evolution ───────────────
-            # When ALTER TABLE ADD COLUMN has been applied to the source while
-            # this pod is running, the next batch will carry new columns that
-            # are absent from the frozen _SCHEMA_CACHE.  from_json with the old
-            # schema silently drops the new cols → MERGE crashes with
-            # UNRESOLVED_COLUMN on restart.
-            #
-            # Fix: after schema is inferred (or retrieved from cache), fetch the
-            # live Iceberg table columns via DESCRIBE TABLE and compare.  Any
-            # column present in the batch JSON but absent from the Iceberg table
-            # triggers an inline ALTER TABLE ADD COLUMN before the MERGE, and
-            # the schema cache is invalidated so the next batch re-infers fresh.
-            #
-            # Only applies to standard/soft_delete (MERGE targets).
-            # history_tracking uses mergeSchema=true append — Iceberg handles it.
+            # ── Schema-cache invalidation: ALTER TABLE for new cols in Iceberg ─
+            # After DDL evolution is detected (fresh schema has new fields that
+            # the Iceberg table lacks), issue ALTER TABLE ADD COLUMN inline before
+            # the MERGE so the MERGE never hits UNRESOLVED_COLUMN.
+            # Only for standard/soft_delete — history_tracking uses mergeSchema=true.
             if write_mode != _WRITE_MODE_HISTORY_TRACKING:
                 _evo_table = (
                     f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
@@ -1035,7 +1056,7 @@ def _write_micro_batch(
                     _new_cols = _batch_cols - _iceberg_cols - {"snap_id", "snap_timestamp"}
                     if _new_cols:
                         logger.info(
-                            "[%s/%s] DDL evolution detected — %d new column(s) in batch: %s",
+                            "[%s/%s] DDL evolution: %d new column(s) to add to Iceberg: %s",
                             source.source_key, _evo_table, len(_new_cols), sorted(_new_cols),
                         )
                         for _nc in sorted(_new_cols):
@@ -1044,18 +1065,6 @@ def _write_micro_batch(
                                 if f.name.lower() == _nc
                             )
                             _ice_type = _nc_field.dataType.simpleString()
-                            # Map Spark simpleString types to valid Iceberg DDL types
-                            _ice_type = (
-                                _ice_type
-                                .replace("bigint", "bigint")
-                                .replace("int", "int")
-                                .replace("double", "double")
-                                .replace("float", "float")
-                                .replace("boolean", "boolean")
-                                .replace("timestamp", "timestamp")
-                                .replace("date", "date")
-                                .replace("binary", "binary")
-                            )
                             _alter_ddl = (
                                 f"ALTER TABLE {_evo_fqn} "
                                 f"ADD COLUMN `{_nc_field.name}` {_ice_type}"
@@ -1073,20 +1082,10 @@ def _write_micro_batch(
                                     source.source_key, _evo_table,
                                     _nc_field.name, _alt_exc,
                                 )
-                        # Invalidate cache so from_json re-infers on next batch
-                        _SCHEMA_CACHE.pop(cache_key, None)
-                        inferred_schema = spark.read.json(
-                            payload_df.select("payload_json").rdd.map(lambda r: r[0])
-                        ).schema
-                        _SCHEMA_CACHE[cache_key] = inferred_schema
-                        logger.info(
-                            "[%s/%s] Schema cache refreshed after DDL evolution (%d fields).",
-                            source.source_key, _evo_table, len(inferred_schema.fields),
-                        )
                 except Exception as _evo_exc:
                     # DESCRIBE TABLE fails when table doesn't exist yet — safe to ignore
                     logger.debug(
-                        "[%s/%s] Schema evolution check skipped: %s",
+                        "[%s/%s] Schema evolution ALTER check skipped: %s",
                         source.source_key, _evo_table, _evo_exc,
                     )
 
