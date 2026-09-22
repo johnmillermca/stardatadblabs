@@ -793,6 +793,41 @@ def _apply_history_tracking(
                         img_col, lit(None).cast(field.dataType)
                     )
 
+    # ── 4b. Inject top-level PK column ───────────────────────────────────────
+    # DELETE events have after=null so after_<pk> is always NULL on DELETE rows.
+    # Coalesce after_<pk> and before_<pk> into a single top-level identity
+    # column (<pk_col>) so every row carries the entity PK regardless of op.
+    after_pk  = f"after_{pk_col}"
+    before_pk = f"before_{pk_col}"
+    if after_pk in result_df.columns or before_pk in result_df.columns:
+        _after_expr  = col(after_pk)  if after_pk  in result_df.columns else lit(None)
+        _before_expr = col(before_pk) if before_pk in result_df.columns else lit(None)
+        result_df = result_df.withColumn(pk_col, F.coalesce(_after_expr, _before_expr))
+
+    # ── 4c. MongoDB history_tracking post-processing ──────────────────────────
+    # Drop internal ObjectId columns and cast BSON $date string columns to
+    # TIMESTAMP so history rows carry proper types.
+    if source_key == "mongodb":
+        _oid_cols = [c for c in result_df.columns if c in ("after__id", "before__id")]
+        if _oid_cols:
+            result_df = result_df.drop(*_oid_cols)
+        _TS_SUFFIXES_HIST = ("_at", "_ts", "_time", "_date")
+        for _c in list(result_df.columns):
+            if (
+                (_c.startswith("after_") or _c.startswith("before_"))
+                and any(_c.endswith(s) for s in _TS_SUFFIXES_HIST)
+                and isinstance(result_df.schema[_c].dataType, StringType)
+            ):
+                result_df = result_df.withColumn(
+                    _c,
+                    F.when(
+                        col(_c).rlike(r"^\d{10,13}$"),
+                        (col(_c).cast(LongType()) / lit(1_000)).cast(TimestampType()),
+                    ).otherwise(
+                        col(_c).cast(TimestampType()),
+                    ),
+                )
+
     # ── 5. Drop internal envelope columns ────────────────────────────────────
     _ENVELOPE_COLS = {"_op", "kafka_ts", "ts_ms"}
     result_df = result_df.drop(*[c for c in _ENVELOPE_COLS if c in result_df.columns])
