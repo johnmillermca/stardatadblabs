@@ -280,7 +280,7 @@ _ALL_SOURCES: list[_StreamingSource] = [
     ),
     _StreamingSource(
         source_key    = "oracle",
-        topic_pattern = "oracle\\.(tpcds|cache_testing|TPCDS|CACHE_TESTING)\\..*",
+        topic_pattern = "oracle\\.(tpcds|cache_testing)\\..*",
         catalog       = "oracle",
         namespace     = "tpcds",
         pk_col        = "id",

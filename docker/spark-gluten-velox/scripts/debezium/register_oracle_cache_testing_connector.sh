@@ -21,7 +21,13 @@
 #
 # ── Connector naming ──────────────────────────────────────────────────────────
 # Connector  : oracle-cache-testing-cdc
-# Topics     : oracle.cache_testing.<table>   (lowercase, Debezium normalises)
+# Topics     : oracle.cache_testing.<table>   (always lowercase — enforced by
+#              LowerCaseTopicNamingStrategy; Oracle uppercases identifiers in its
+#              data dictionary so SchemaTopicNamingStrategy would produce
+#              oracle.CACHE_TESTING.CUSTOMERS.  LowerCaseTopicNamingStrategy
+#              normalises every segment to lowercase unconditionally, which means
+#              any future table added to table.include.list automatically lands on
+#              oracle.cache_testing.<table> with no extra work.)
 # Schema hist: schema-changes.oracle-cache-testing
 #
 # ── Performance tuning ────────────────────────────────────────────────────────
@@ -128,6 +134,10 @@ if [ -n "$EXISTING" ]; then
 fi
 
 # ── 7. Build table include list (SCHEMA.TABLE uppercase for Oracle) ───────────
+# Oracle stores identifiers in uppercase in the data dictionary, so
+# table.include.list must use uppercase (CACHE_TESTING.CUSTOMERS).
+# LowerCaseTopicNamingStrategy then normalises the resulting topic name to
+# oracle.cache_testing.customers regardless of the dictionary casing.
 TABLE_INCLUDE=""
 for tbl in "${CDC_TABLES[@]}"; do
   TABLE_INCLUDE="${TABLE_INCLUDE}${SOURCE_SCHEMA}.${tbl^^},"
@@ -159,7 +169,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "table.include.list": "${TABLE_INCLUDE}",
 
     "topic.prefix": "oracle",
-    "topic.naming.strategy": "io.debezium.schema.SchemaTopicNamingStrategy",
+    "topic.naming.strategy": "io.debezium.connector.common.LowerCaseTopicNamingStrategy",
 
     "snapshot.mode":         "no_data",
     "snapshot.locking.mode": "none",
