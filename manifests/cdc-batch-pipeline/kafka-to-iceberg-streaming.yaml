@@ -1099,9 +1099,29 @@ data:
                     continue
     
                 # ── Infer schema from batch (cached per table) ────────────────────
-                # Schema is re-inferred fresh every 10 batches to detect DDL evolution.
-                # from_json silently drops fields not in the declared schema — so a
-                # stale cache after ALTER TABLE ADD COLUMN would lose the new column.
+                # DDL evolution detection strategy
+                # ─────────────────────────────────────────────────────────────────
+                # We must detect ADD COLUMN and RENAME COLUMN events on every batch
+                # so Iceberg is evolved immediately, not after up to 9 missed batches.
+                #
+                # Cost model:
+                #   • spark.read.json(rdd) costs ~2 s because it launches a full
+                #     Spark job to sample the JSON payload.
+                #   • A cheap O(1) key-scan of the first non-null payload row costs
+                #     nothing — it parses only one JSON string on the driver.
+                #
+                # Algorithm (event-driven, zero periodic overhead):
+                #   1. Extract field names from the first non-null payload row (O(1),
+                #      no Spark job).
+                #   2. If names == cached names (stable schema) → skip re-inference.
+                #      Zero cost per batch on stable schema.
+                #   3. If names differ (ADD/RENAME/DROP detected) → full re-inference
+                #      via spark.read.json.  Apply DDL evolution and update cache.
+                #   4. On first batch (cache miss) → always do full re-inference and
+                #      seed from Iceberg schema as type authority.
+                #
+                # This replaces the old "% 10" periodic timer, which missed up to
+                # 9 consecutive batches of DDL changes (rename storms fail silently).
                 #
                 # Type-stability rule (Fix: last_login_at STRING→BIGINT regression)
                 # ─────────────────────────────────────────────────────────────────
@@ -1144,9 +1164,44 @@ data:
                         and not _is_bson_struct(f)
                     ]
     
+                def _batch_field_names() -> frozenset:
+                    """
+                    O(1) key scan: extract field names from the first non-null payload
+                    row without launching a Spark job.  Returns a frozenset of
+                    lowercase field names, excluding BSON-invalid names.
+                    """
+                    try:
+                        first = payload_df.select("payload_json").first()
+                        if first and first[0]:
+                            raw_keys = set(json.loads(first[0]).keys())
+                            return frozenset(
+                                k.lower() for k in raw_keys
+                                if k.lower() not in _MGO_BSON_EXCLUDE and "$" not in k
+                            )
+                    except Exception:
+                        pass
+                    return frozenset()
+    
                 cache_key = (source.source_key, table_name)
                 inferred_schema = _SCHEMA_CACHE.get(cache_key)
-                _should_reinfer = (inferred_schema is None) or (batch_id % 10 == 0)
+    
+                if inferred_schema is None:
+                    # First batch — always do full re-inference
+                    _should_reinfer = True
+                else:
+                    # Cheap O(1) key scan: only re-infer when field names differ
+                    _batch_names  = _batch_field_names()
+                    _cached_names_set = frozenset(f.name.lower() for f in inferred_schema.fields)
+                    _should_reinfer = bool(_batch_names and _batch_names != _cached_names_set)
+                    if _should_reinfer:
+                        logger.info(
+                            "[%s/%s] batch=%d: field names changed — triggering re-inference. "
+                            "new=%s  dropped=%s",
+                            source.source_key, table_name, batch_id,
+                            sorted(_batch_names - _cached_names_set),
+                            sorted(_cached_names_set - _batch_names),
+                        )
+    
                 if _should_reinfer:
                     try:
                         _fresh_schema_raw = spark.read.json(
