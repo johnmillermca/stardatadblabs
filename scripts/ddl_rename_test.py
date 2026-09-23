@@ -223,22 +223,20 @@ def _kubectl(*args: str, check: bool = True) -> str:
     return r.stdout.strip()
 
 
-_DB_POD: str | None = None
-
-
 def _get_db_pod() -> str:
-    global _DB_POD
-    if not _DB_POD:
-        pod = _kubectl(
-            "get", "pods",
-            "-l", "app=kafka-to-iceberg,pipeline.write-mode=standard,pipeline.source=postgres",
-            "--field-selector=status.phase=Running",
-            "-o", "jsonpath={.items[0].metadata.name}",
-        )
-        if not pod:
-            raise RuntimeError("No running postgres-standard streaming pod.")
-        _DB_POD = pod
-    return _DB_POD
+    """Resolve the live postgres-standard streaming pod name on every call.
+
+    Never cached — pod name changes after every rollout restart; label selector is stable.
+    """
+    pod = _kubectl(
+        "get", "pods",
+        "-l", "app=kafka-to-iceberg,pipeline.write-mode=standard,pipeline.source=postgres",
+        "--field-selector=status.phase=Running",
+        "-o", "jsonpath={.items[0].metadata.name}",
+    )
+    if not pod:
+        raise RuntimeError("No running postgres-standard streaming pod.")
+    return pod
 
 
 def _pod_exec(code: str, timeout: int = 60) -> str:
