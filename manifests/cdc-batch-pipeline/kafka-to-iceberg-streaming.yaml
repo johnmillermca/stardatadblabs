@@ -1755,7 +1755,102 @@ data:
             "kafka.max.partition.fetch.bytes": "2097152",  # 2 MB per partition per fetch
             "kafka.receive.buffer.bytes":     "1048576",   # 1 MB socket receive buffer
         }
-    
+
+        # ── Checkpoint-topic mismatch guard ──────────────────────────────────────
+        # Problem: when new Kafka topics appear (new table added to Debezium, or
+        # partition count changes, or topic naming strategy switches), Spark's
+        # SubscribePattern picks them up on restart.  If the existing checkpoint
+        # only knows the old topic-partition set, Spark hangs indefinitely in the
+        # JVM Kafka consumer trying to reconcile new partitions it has no offsets
+        # for — no error is raised, no stage runs, the pod looks healthy but never
+        # writes a batch.
+        #
+        # Fix: before starting readStream, compare the checkpoint's known
+        # topic-partition set against the live broker topic list matched by the
+        # subscribePattern regex.  If there are new topics that the checkpoint has
+        # never seen, wipe the checkpoint so Spark starts clean from "earliest".
+        # This is safe: failOnDataLoss=false means no data is lost — Spark reads
+        # from the earliest available offset on the new partition.
+        #
+        # This guard runs once at pod startup (not per-batch) so overhead is zero
+        # during steady-state operation.
+        try:
+            import re as _re
+            from confluent_kafka.admin import AdminClient as _AdminClient
+
+            _admin = _AdminClient({
+                "bootstrap.servers":  KAFKA_BOOTSTRAP,
+                "security.protocol":  "SASL_PLAINTEXT",
+                "sasl.mechanism":     "SCRAM-SHA-512",
+                "sasl.username":      kafka_user,
+                "sasl.password":      kafka_pass,
+                "socket.timeout.ms":  "8000",
+            })
+            _meta          = _admin.list_topics(timeout=10)
+            _pat           = _re.compile(source.topic_pattern)
+            _live_topics   = {t for t in _meta.topics if _pat.match(t)}
+
+            # Read the latest checkpoint offset file to get known topics
+            _s3_bao        = BaoSparkInit()
+            _s3_creds      = _s3_bao.s3_creds()
+            import boto3 as _boto3
+            _s3 = _boto3.client(
+                "s3",
+                endpoint_url          = _s3_creds["endpoint"],
+                aws_access_key_id     = _s3_creds["access_key"],
+                aws_secret_access_key = _s3_creds["secret_key"],
+                region_name           = _s3_creds.get("region", "us-east-1"),
+            )
+            _bucket          = S3_BUCKET
+            _offset_prefix   = source.checkpoint.replace(f"s3://{_bucket}/", "") + "/offsets/"
+            _paginator       = _s3.get_paginator("list_objects_v2")
+            _offset_files    = sorted(
+                [o["Key"] for p in _paginator.paginate(Bucket=_bucket, Prefix=_offset_prefix)
+                 for o in p.get("Contents", [])],
+                reverse=True,
+            )
+
+            if _offset_files:
+                _latest = _s3.get_object(Bucket=_bucket, Key=_offset_files[0])
+                _lines  = _latest["Body"].read().decode().strip().splitlines()
+                if len(_lines) >= 3:
+                    _ckpt_topics = set(json.loads(_lines[2]).keys())
+                    _new_topics  = _live_topics - _ckpt_topics
+                    if _new_topics:
+                        logger.warning(
+                            "[%s] Checkpoint-topic mismatch — new topics not in checkpoint: %s. "
+                            "Clearing checkpoint to avoid Spark SubscribePattern hang.",
+                            source.source_key, sorted(_new_topics),
+                        )
+                        # Delete all checkpoint objects for this source+mode
+                        _ckpt_prefix = source.checkpoint.replace(f"s3://{_bucket}/", "") + "/"
+                        _all_ckpt    = [
+                            o["Key"]
+                            for p in _paginator.paginate(Bucket=_bucket, Prefix=_ckpt_prefix)
+                            for o in p.get("Contents", [])
+                        ]
+                        for _i in range(0, len(_all_ckpt), 1000):
+                            _s3.delete_objects(
+                                Bucket=_bucket,
+                                Delete={"Objects": [{"Key": k} for k in _all_ckpt[_i:_i+1000]]},
+                            )
+                        logger.warning(
+                            "[%s] Checkpoint cleared (%d objects). "
+                            "Streaming will restart from earliest offsets.",
+                            source.source_key, len(_all_ckpt),
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Checkpoint-topic guard: OK — no new topics (live=%d, ckpt=%d).",
+                            source.source_key, len(_live_topics), len(_ckpt_topics),
+                        )
+        except Exception as _ckpt_guard_exc:
+            logger.warning(
+                "[%s] Checkpoint-topic guard failed (non-fatal, continuing): %s",
+                source.source_key, _ckpt_guard_exc,
+            )
+        # ── End checkpoint-topic mismatch guard ──────────────────────────────────
+
         raw_stream = (
             spark.readStream
             .format("kafka")
