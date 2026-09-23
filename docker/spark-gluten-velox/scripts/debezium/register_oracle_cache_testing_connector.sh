@@ -24,27 +24,29 @@
 #
 # ── Connector naming ──────────────────────────────────────────────────────────
 # Connector  : oracle-cache-testing-cdc
-# Topics     : oracle.cache_testing.<table>   (always lowercase — enforced by
-#              io.debezium.schema.LowerCaseTopicNamingStrategy, a custom plugin
-#              bundled in the debezium/connect:2.7.4-lc1 image that extends
-#              DefaultTopicNamingStrategy and lowercases the full topic string.
-#              Oracle uppercases identifiers in its data dictionary so the default
-#              strategy would produce oracle.CACHE_TESTING.CUSTOMERS.)
+# Topics     : oracle.CACHE_TESTING.<table>  (uppercase — Oracle data dictionary
+#              always uses uppercase identifiers; DefaultTopicNamingStrategy is
+#              used which preserves that casing)
+#              The streaming pipeline topic_pattern already matches both cases:
+#              oracle\.(cache_testing|CACHE_TESTING)\..*
+#              Column names are normalised to lowercase by the streaming UDF
+#              before Iceberg writes — topic name casing is irrelevant downstream.
 # Schema hist: schema-changes.oracle-cache-testing
 #
-# ── Schema history reset ───────────────────────────────────────────────────────
-# The schema history topic MUST be deleted and the connector fully removed before
+# ── Schema history reset (CRITICAL) ──────────────────────────────────────────
+# The schema history topic MUST be deleted AND connector offsets reset before
 # re-registering after any of:
-#   • DDL rename/drop stress-test runs (objectVersion drift)
+#   • DDL rename/drop stress-test runs  (objectVersion increments, history drifts)
 #   • log.mining.strategy change
-#   • connector class change
 #   • any "Failed to parse redo SQL" storms that persist across restarts
-# This script handles the reset automatically (step 6a).
+# This script handles the reset automatically (steps 6a–6c).
+# Root cause: objectVersion in LogMiner redo entries increments on every ALTER
+# TABLE. Stale history entries cause parse failures on every subsequent DML
+# until the history is rebuilt from scratch.
 #
 # ── LogMiner strategy ────────────────────────────────────────────────────────
-# redo_log_catalog:  reads the schema from archived redo logs — correct after
-#   RENAME COLUMN / DROP COLUMN DDL because the column info is captured at DDL
-#   time in the redo. Requires ALL COLUMNS supplemental logging per table.
+# redo_log_catalog: reads schema from archived redo logs — correct after
+#   RENAME COLUMN / DROP COLUMN DDL. Requires ALL COLUMNS supplemental logging.
 #
 # ── Performance tuning ────────────────────────────────────────────────────────
 # LogMiner: redo_log_catalog, batch 50k–200k, memory buffer
@@ -53,6 +55,10 @@
 # Usage:
 #   export SPARK_USER=dave
 #   bash register_oracle_cache_testing_connector.sh
+#
+# NOTE: No custom topic.naming.strategy is set. DefaultTopicNamingStrategy
+# (Debezium built-in) produces oracle.CACHE_TESTING.<table>. The streaming
+# pipeline handles this via regex. Do NOT set topic.naming.strategy.
 # =============================================================================
 set -euo pipefail
 
@@ -215,9 +221,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "table.include.list": "${TABLE_INCLUDE}",
 
     "topic.prefix": "oracle",
-    "topic.naming.strategy": "io.debezium.schema.LowerCaseTopicNamingStrategy",
-
-    "snapshot.mode":         "schema_only",
+    "snapshot.mode":         "no_data",
     "snapshot.locking.mode": "none",
 
     "schema.history.internal.kafka.bootstrap.servers": "${KAFKA_BOOTSTRAP}",
