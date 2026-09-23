@@ -1548,12 +1548,28 @@ data:
                         )
                         continue
     
-                # ── PK column name (case-insensitive) ─────────────────────────────
-                pk_col_actual = source.pk_col
-                for f in inferred_schema.fields:
-                    if f.name.lower() == source.pk_col.lower():
-                        pk_col_actual = f.name
-                        break
+                # ── PK column name — always lowercase for Oracle ──────────────────
+                # Oracle Debezium emits uppercase payload keys (CUSTOMER_ID).  The
+                # Oracle normalisation UDF lowercases them before schema inference, so
+                # inferred_schema fields are already lowercase.  However, if a table
+                # was previously created with uppercase column names (e.g. by a manual
+                # DDL or an older version of this script), DESCRIBE TABLE seeds
+                # inferred_schema with uppercase field names which then propagate into
+                # the MERGE ON clause.  Spark Iceberg MERGE is case-sensitive on the
+                # target side, so `t.CUSTOMER_ID = s.customer_id` never matches.
+                #
+                # Permanent fix: for Oracle, always force pk_col_actual to the
+                # canonical lowercase source.pk_col so the MERGE ON clause always uses
+                # the lowercase name.  The ALTER TABLE RENAME COLUMN step below ensures
+                # the Iceberg column itself is also lowercased if needed.
+                if source.source_key == "oracle":
+                    pk_col_actual = source.pk_col.lower()
+                else:
+                    pk_col_actual = source.pk_col
+                    for f in inferred_schema.fields:
+                        if f.name.lower() == source.pk_col.lower():
+                            pk_col_actual = f.name
+                            break
     
                 # ── Build write-mode-specific extra schema fields ─────────────────
                 # snap_id / snap_timestamp are intentionally omitted here — they are
@@ -1644,6 +1660,58 @@ data:
                             logger.warning(
                                 "[%s/%s] Table creation failed (may already exist): %s",
                                 source.source_key, effective_table, create_exc,
+                            )
+                        # ── Bug fix: verify table actually exists after create ─────
+                        # create_table() raises on Polaris conflicts but the exception
+                        # is caught above as a warning.  If the table still does not
+                        # exist after the attempted create, skip this batch entirely
+                        # instead of letting MERGE crash with TABLE_OR_VIEW_NOT_FOUND.
+                        # The next batch will re-enter this path and retry the create.
+                        if not builder.table_exists(source.catalog, namespace, effective_table):
+                            logger.error(
+                                "[%s/%s] Table does not exist after create attempt — "
+                                "skipping batch %d to avoid TABLE_OR_VIEW_NOT_FOUND. "
+                                "Will retry on next batch.",
+                                source.source_key, effective_table, batch_id,
+                            )
+                            continue
+
+                    # ── Bug fix: rename uppercase PK column to lowercase in Iceberg ─
+                    # If the Iceberg table was created with uppercase column names
+                    # (e.g. CUSTOMER_ID from a manual DDL or a previous pipeline
+                    # version), the MERGE ON clause `t.customer_id = s.customer_id`
+                    # never resolves because Spark Iceberg MERGE is case-sensitive on
+                    # the target side.  Detect and rename in-place before every MERGE.
+                    # ALTER TABLE RENAME COLUMN is idempotent when the target name
+                    # already exists (Iceberg returns an error which we swallow).
+                    if source.source_key == "oracle":
+                        try:
+                            _desc_rows = spark.sql(
+                                f"DESCRIBE TABLE {fqn_backtick}"
+                            ).collect()
+                            for _dr in _desc_rows:
+                                _cn = _dr["col_name"]
+                                if _cn.startswith("#"):
+                                    continue
+                                # Any column whose name is not already lowercase
+                                if _cn != _cn.lower():
+                                    try:
+                                        spark.sql(
+                                            f"ALTER TABLE {fqn_backtick} "
+                                            f"RENAME COLUMN `{_cn}` TO `{_cn.lower()}`"
+                                        )
+                                        logger.info(
+                                            "[%s/%s] Renamed uppercase Iceberg column "
+                                            "`%s` → `%s`",
+                                            source.source_key, effective_table,
+                                            _cn, _cn.lower(),
+                                        )
+                                    except Exception:
+                                        pass  # already lowercase or concurrent rename
+                        except Exception as _rename_exc:
+                            logger.debug(
+                                "[%s/%s] Column case normalisation skipped: %s",
+                                source.source_key, effective_table, _rename_exc,
                             )
     
                 # ── Apply write mode ──────────────────────────────────────────────
