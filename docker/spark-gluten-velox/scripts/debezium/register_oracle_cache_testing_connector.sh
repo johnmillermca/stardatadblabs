@@ -202,7 +202,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "producer.batch.size":        "65536",
     "producer.compression.type":  "lz4",
 
-    "log.mining.strategy":              "online_catalog",
+    "log.mining.strategy":              "redo_log_catalog",
     "log.mining.continuous.mine":       "false",
     "log.mining.batch.size.default":    "20000",
     "log.mining.batch.size.max":        "100000",
