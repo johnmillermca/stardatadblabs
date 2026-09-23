@@ -1159,6 +1159,14 @@ data:
                             # ── First batch: prefer Iceberg schema as type authority ──
                             # Iceberg schema was written from real non-NULL data; batch
                             # inference may have NULL-only columns inferred as STRING.
+                            #
+                            # After seeding from Iceberg, also merge any NEW fields that
+                            # the current batch has but Iceberg doesn't yet — this handles
+                            # the pod-restart-after-DDL-ADD case where the ADD event was
+                            # already consumed from Kafka (checkpoint advanced) but the
+                            # Iceberg schema was never evolved because the pod died before
+                            # writing.  Without this merge, those new columns are silently
+                            # dropped from the cache until the next % 10 re-inference.
                             _evo_tbl_init = (
                                 f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
                                 else (f"{table_name}_hist" if write_mode == _WRITE_MODE_HISTORY_TRACKING
@@ -1189,6 +1197,25 @@ data:
                                         _patched.append(StructField(_f.name, _ICE_TO_SPARK[_ice_t], _f.nullable))
                                     else:
                                         _patched.append(_f)
+                                # Merge any NEW fields from the batch that Iceberg doesn't have.
+                                # This catches DDL ADD COLUMN events that arrived in Kafka after
+                                # the previous pod death (checkpoint advanced but Iceberg never
+                                # evolved).  Types come from batch inference — they're new columns
+                                # so Iceberg has no authoritative type yet.
+                                _patched_names = {f.name.lower() for f in _patched}
+                                _new_from_batch = [
+                                    _f for _f in _fresh_schema.fields
+                                    if _f.name.lower() not in _patched_names
+                                ]
+                                if _new_from_batch:
+                                    logger.info(
+                                        "[%s/%s] First-batch seed: batch has %d extra field(s) "
+                                        "not yet in Iceberg — appending to cache: %s",
+                                        source.source_key, table_name,
+                                        len(_new_from_batch),
+                                        [f.name for f in _new_from_batch],
+                                    )
+                                    _patched.extend(_new_from_batch)
                                 inferred_schema = StructType(_patched)
                                 logger.info(
                                     "[%s/%s] Schema seeded from Iceberg (%d fields) — "
