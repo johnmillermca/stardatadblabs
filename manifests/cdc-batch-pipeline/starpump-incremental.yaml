@@ -42,10 +42,10 @@ data:
   pg-INCLUDE_TABLES:   "customers,products,product_reviews,orders"
 
   # Oracle incremental config
-  ora-SCHEMAS:         "TPCDS"
+  ora-SCHEMAS:         "CACHE_TESTING"
   ora-DATABASE:        "XEPDB1"
   ora-ICEBERG_CATALOG: "oracle"
-  ora-INCLUDE_TABLES:  "call_center,catalog_page,household_demographics,income_band,promotion,reason,ship_mode,warehouse,web_page,web_site"
+  ora-INCLUDE_TABLES:  "customers"
 
   # MongoDB incremental config
   mgo-SCHEMAS:         "cache_testing"

@@ -136,8 +136,7 @@ data:
     Source → topic → Iceberg target mapping
     ----------------------------------------
       postgres  : postgres.cache_testing.*  → postgres.cache_testing.<table>
-      oracle    : oracle.tpcds.*            → oracle.tpcds.<table>
-                  oracle.cache_testing.*    → oracle.cache_testing.<table>
+      oracle    : oracle.cache_testing.*    → oracle.cache_testing.<table>
       mongodb   : mongodb.cache_testing.*   → mongodb.cache_testing.<table>
     
     star_transform integration
@@ -391,9 +390,9 @@ data:
         ),
         _StreamingSource(
             source_key    = "oracle",
-            topic_pattern = "oracle\\.(tpcds|cache_testing|TPCDS|CACHE_TESTING)\\..*",
+            topic_pattern = "oracle\\.(cache_testing|CACHE_TESTING)\\..*",
             catalog       = "oracle",
-            namespace     = "tpcds",
+            namespace     = "cache_testing",
             pk_col        = "id",
             s3_prefix     = "iceberg/ora_lakehouse",
         ),
@@ -532,7 +531,7 @@ data:
         """
         Derive the Iceberg table name from a Kafka topic name.
         e.g. "postgres.cache_testing.customers" → "customers"
-             "oracle.tpcds.CALL_CENTER"         → "call_center"
+             "oracle.cache_testing.CUSTOMERS"   → "customers"
         """
         import re
         # Strip the source prefix (e.g. "oracle.(tpcds|cache_testing).")
@@ -553,8 +552,7 @@ data:
             mongodb.cache_testing.customers   → mongodb.e2e_testing.customers
     
         When TARGET_NAMESPACE is empty the namespace is derived from the topic:
-            e.g. "oracle.tpcds.INCOME_BAND"           → "tpcds"
-                 "oracle.cache_testing.ORDERS"        → "cache_testing"
+            e.g. "oracle.cache_testing.CUSTOMERS"     → "cache_testing"
                  "postgres.cache_testing.orders"      → "cache_testing"
         """
         if _TARGET_NAMESPACE:
@@ -4753,8 +4751,9 @@ spec:
 # =============================================================================
 # schema-evolution-handler — ConfigMap + Deployment
 #
-# Watches schema-changes.{postgres,oracle,mongodb} Kafka topics and applies
-# ALTER TABLE DDL to Iceberg whenever Debezium publishes a DDL event.
+# Watches schema-changes.postgres / schema-changes.oracle-cache-testing /
+# schema-changes.mongodb Kafka topics and applies ALTER TABLE DDL to Iceberg
+# whenever Debezium publishes a DDL event.
 #
 # Dual-layer DDL defence:
 #   Layer 1 (this pod)  — reactive: fires when Debezium emits a DDL event on
@@ -4803,7 +4802,7 @@ metadata:
     pipeline.type: ddl-handler
   annotations:
     pipeline.description: >-
-      Watches schema-changes.postgres / schema-changes.oracle /
+      Watches schema-changes.postgres / schema-changes.oracle-cache-testing /
       schema-changes.mongodb Kafka topics. On each Debezium DDL event, fetches
       the new Avro schema from Schema Registry, diffs against the previous
       version, and applies ALTER TABLE to the target Iceberg table.

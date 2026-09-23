@@ -8,21 +8,27 @@
 #
 # Namespaces:
 #   postgres.cache_testing.*  — PostgreSQL cache_testing DB tables
-#   oracle.tpcds.*            — Oracle XEPDB1.TPCDS tables
+#   oracle.cache_testing.*    — Oracle XEPDB1.CACHE_TESTING tables
 #   mongodb.cache_testing.*   — MongoDB cache_testing collections
 #
-# Schema-change topics (one per source — DDL events from Debezium):
-#   schema-changes.postgres
-#   schema-changes.oracle
-#   schema-changes.mongodb
+# Schema-change topics (one per connector — DDL events from Debezium):
+#   schema-changes.postgres             — postgres-cache-testing-cdc
+#   schema-changes.oracle-cache-testing — oracle-cache-testing-cdc
+#   schema-changes.mongodb              — mongodb-cache-testing-cdc
+#
+# IMPORTANT: schema history topics MUST use cleanup.policy=delete.
+#   Debezium KafkaSchemaHistory writes records without a message key.
+#   Kafka's log compaction requires every message to have a key and will
+#   reject keyless messages with InvalidRecordException, crashing the
+#   connector task. Use delete + retention.ms=-1 (infinite) instead.
 #
 # Partitions: 3 per data topic (parallelism for Spark Structured Streaming)
 # Replicas: 1 (single-broker cluster)
-# Retention: 7 days (168 hours) — matches Kafka cluster default
-# Cleanup policy: delete (CDC topics are not compacted — order matters)
+# Retention: 7 days (168 hours) for data topics; infinite for schema-history topics
+# Cleanup policy: delete for all topics
 # =============================================================================
 
-# ── Schema-change topics (compacted — DDL history must be preserved) ────────
+# ── Schema-change topics (delete policy — Debezium requirement) ─────────────
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -39,30 +45,29 @@ spec:
   partitions: 1
   replicas: 1
   config:
-    cleanup.policy: compact
+    cleanup.policy: delete
     retention.ms: "-1"
     retention.bytes: "-1"
-    min.compaction.lag.ms: "0"
 
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
-  name: schema-changes-oracle
+  name: schema-changes-oracle-cache-testing
   namespace: prod
   labels:
     strimzi.io/cluster: strimzi-kafka
     pipeline.source: oracle
+    pipeline.database: cache_testing
     pipeline.type: schema-changes
 spec:
-  topicName: "schema-changes.oracle"
+  topicName: "schema-changes.oracle-cache-testing"
   partitions: 1
   replicas: 1
   config:
-    cleanup.policy: compact
+    cleanup.policy: delete
     retention.ms: "-1"
     retention.bytes: "-1"
-    min.compaction.lag.ms: "0"
 
 ---
 apiVersion: kafka.strimzi.io/v1
@@ -79,10 +84,9 @@ spec:
   partitions: 1
   replicas: 1
   config:
-    cleanup.policy: compact
+    cleanup.policy: delete
     retention.ms: "-1"
     retention.bytes: "-1"
-    min.compaction.lag.ms: "0"
 
 # ── PostgreSQL CDC topics ────────────────────────────────────────────────────
 
@@ -158,208 +162,6 @@ metadata:
     pipeline.database: cache_testing
 spec:
   topicName: "postgres.cache_testing.orders"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
-# ── Oracle CDC topics ────────────────────────────────────────────────────────
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-call-center
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.call_center"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-catalog-page
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.catalog_page"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-household-demographics
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.household_demographics"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-income-band
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.income_band"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-promotion
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.promotion"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-reason
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.reason"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-ship-mode
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.ship_mode"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-warehouse
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.warehouse"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-web-page
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.web_page"
-  partitions: 3
-  replicas: 1
-  config:
-    cleanup.policy: delete
-    retention.ms: "604800000"
-    retention.bytes: "-1"
-    compression.type: lz4
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: oracle-tpcds-web-site
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-    pipeline.source: oracle
-    pipeline.database: tpcds
-spec:
-  topicName: "oracle.tpcds.web_site"
   partitions: 3
   replicas: 1
   config:
