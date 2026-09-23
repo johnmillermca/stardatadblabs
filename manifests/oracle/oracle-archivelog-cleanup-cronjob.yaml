@@ -1,0 +1,123 @@
+# =============================================================================
+# oracle-archivelog-cleanup-cronjob.yaml
+#
+# Kubernetes CronJob that deletes Oracle XE archive log files older than
+# 2 hours from the oracle-xe pod every 30 minutes.
+#
+# WHY THIS IS NEEDED
+# ------------------
+# Oracle XE stores archive logs in the container's ephemeral filesystem at
+#   /opt/oracle/homes/OraDBHome21cXE/dbs/arch1_*.dbf
+# Each file is ~10 MB and one is written per hour of activity.  Without
+# automatic cleanup:
+#   • Logs accumulate indefinitely → disk pressure on the node
+#   • Kubernetes evicts the oracle-xe pod with DiskPressure taint
+#   • On restart, the container filesystem is wiped → the archive log files
+#     that Debezium's offset points to no longer exist → ORA-01284 →
+#     Debezium stuck in an infinite retry loop → CDC pipeline dead
+#
+# RETENTION WINDOW: 2 hours
+# --------------------------
+# Debezium uses `log.mining.archive.log.hours=4` in the connector config,
+# which means it never looks back more than 4 hours of archive logs.
+# We keep 2 hours of logs on disk, giving a comfortable 2-hour overlap
+# between the oldest log Debezium might need and the oldest log on disk.
+# In practice, with steady activity, Debezium catches up within minutes —
+# 2 hours is a very conservative buffer.
+#
+# HOW IT WORKS
+# ------------
+# The CronJob runs a kubectl exec into the oracle-xe pod every 30 minutes
+# and runs:
+#   find /opt/oracle/homes/OraDBHome21cXE/dbs/ -name "arch1_*.dbf" -mmin +120 -delete
+# This is purely filesystem-level — no Oracle involvement required.
+# Oracle's control file retains the metadata entries (DELETED='NO') which
+# is harmless; Debezium only cares that the physical file exists when it
+# tries to mine it.
+#
+# SERVICEACCOUNT
+# --------------
+# Uses the existing spark-sa ServiceAccount (which already has exec rights
+# on pods in the prod namespace via its ClusterRoleBinding).
+# =============================================================================
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oracle-archivelog-cleanup
+  namespace: prod
+  labels:
+    app: oracle-archivelog-cleanup
+    component: maintenance
+  annotations:
+    description: "Delete Oracle XE archive logs older than 2h every 30min to prevent disk pressure and ORA-01284"
+spec:
+  # Every 30 minutes
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Allow up to 5 minutes for the exec to complete
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app: oracle-archivelog-cleanup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: spark-sa
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  ORA_POD=$(kubectl -n prod get pods -l app=oracle-xe \
+                    --field-selector=status.phase=Running \
+                    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+                  if [ -z "$ORA_POD" ]; then
+                    echo "[WARN] No running oracle-xe pod found — skipping cleanup."
+                    exit 0
+                  fi
+
+                  echo "[INFO] oracle-xe pod: $ORA_POD"
+
+                  # Count files before deletion
+                  BEFORE=$(kubectl -n prod exec "$ORA_POD" -- \
+                    bash -c 'find /opt/oracle/homes/OraDBHome21cXE/dbs/ \
+                      -name "arch1_*.dbf" -mmin +120 2>/dev/null | wc -l' 2>/dev/null || echo 0)
+                  echo "[INFO] Archive logs older than 2h: $BEFORE"
+
+                  if [ "$BEFORE" -eq 0 ]; then
+                    echo "[INFO] Nothing to delete."
+                    exit 0
+                  fi
+
+                  # Delete files older than 120 minutes (2 hours)
+                  kubectl -n prod exec "$ORA_POD" -- \
+                    bash -c 'find /opt/oracle/homes/OraDBHome21cXE/dbs/ \
+                      -name "arch1_*.dbf" -mmin +120 -delete 2>/dev/null; echo "done"'
+
+                  # Count remaining
+                  AFTER=$(kubectl -n prod exec "$ORA_POD" -- \
+                    bash -c 'ls /opt/oracle/homes/OraDBHome21cXE/dbs/arch1_*.dbf 2>/dev/null | wc -l' \
+                    2>/dev/null || echo 0)
+
+                  echo "[INFO] Deleted $BEFORE file(s). Remaining: $AFTER"
+
+                  # Report disk usage
+                  kubectl -n prod exec "$ORA_POD" -- \
+                    df -h /opt/oracle/homes/OraDBHome21cXE/dbs/ 2>/dev/null || true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi

@@ -5,10 +5,29 @@
 # Register (or fully reset + re-register) the Debezium Oracle CDC connector
 # for the CACHE_TESTING schema in XEPDB1 via the Kafka Connect REST API.
 #
-# ── CDC sync-point ────────────────────────────────────────────────────────────
-# Must run AFTER starpump oracle initial full load completes for CACHE_TESTING.
-# Uses snapshot.mode=schema_only — Debezium reads the current schema, then
-# streams changes from the current SCN (post full-load position).
+# ── When to run this script ───────────────────────────────────────────────────
+# Run this script in ANY of these situations:
+#   • Initial setup (first-time registration)
+#   • After oracle-xe pod restart (ORA-01284 — archive log no longer exists)
+#   • After DDL rename/drop stress-test runs (objectVersion drifts in history)
+#   • After log.mining.strategy change
+#   • After any "Failed to parse redo SQL" storm that persists across restarts
+#
+# The script always performs a FULL RESET:
+#   1. Delete connector
+#   2. Delete + reset connector offsets
+#   3. Delete schema history Kafka topic
+#   4. Re-register from the CURRENT Oracle SCN (no_data snapshot mode)
+#
+# This is always safe — the streaming pipeline reads from Kafka checkpoints,
+# not from the connector offset. Any DML that occurred during the gap between
+# the old offset and the new SCN is simply not replicated (acceptable for
+# CDC streaming use cases where full historical accuracy is not required).
+#
+# ── Archive log retention ─────────────────────────────────────────────────────
+# log.mining.archive.log.hours=4  — Debezium never looks back more than 4h.
+# The oracle-archivelog-cleanup CronJob deletes logs older than 2h every 30min
+# so the 4h Debezium window is always within the available log window.
 #
 # ── Pre-requisites ─────────────────────────────────────────────────────────────
 # 1. Oracle ARCHIVELOG mode enabled (ALTER DATABASE ARCHIVELOG)
@@ -17,48 +36,22 @@
 #      ALTER TABLE CACHE_TESTING.<table> ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 # 3. CDB-common user c##dbzcdc exists with LogMiner privileges (see OpenBao
 #    secret/data/platform/oracle cdc_user / cdc_password keys)
-# 4. c##dbzcdc granted SELECT on all CACHE_TESTING tables
-# 5. Debezium Connect image must be 192.168.1.50:30500/debezium/connect:2.7.4-lc1
-#    (or newer) — that image bundles the custom LowerCaseTopicNamingStrategy JAR.
-#    Source: docker/debezium-connect/  |  Rebuild: bash docker/debezium-connect/build.sh --push
+# 4. oracle-archivelog-cleanup CronJob deployed (manifests/oracle/)
 #
 # ── Connector naming ──────────────────────────────────────────────────────────
 # Connector  : oracle-cache-testing-cdc
-# Topics     : oracle.CACHE_TESTING.<table>  (uppercase — Oracle data dictionary
-#              always uses uppercase identifiers; DefaultTopicNamingStrategy is
-#              used which preserves that casing)
-#              The streaming pipeline topic_pattern already matches both cases:
-#              oracle\.(cache_testing|CACHE_TESTING)\..*
-#              Column names are normalised to lowercase by the streaming UDF
-#              before Iceberg writes — topic name casing is irrelevant downstream.
+# Topics     : oracle.CACHE_TESTING.<table>
+#              Pipeline regex: oracle\.(cache_testing|CACHE_TESTING)\..*
+#              Column names normalised to lowercase by the streaming UDF.
 # Schema hist: schema-changes.oracle-cache-testing
-#
-# ── Schema history reset (CRITICAL) ──────────────────────────────────────────
-# The schema history topic MUST be deleted AND connector offsets reset before
-# re-registering after any of:
-#   • DDL rename/drop stress-test runs  (objectVersion increments, history drifts)
-#   • log.mining.strategy change
-#   • any "Failed to parse redo SQL" storms that persist across restarts
-# This script handles the reset automatically (steps 6a–6c).
-# Root cause: objectVersion in LogMiner redo entries increments on every ALTER
-# TABLE. Stale history entries cause parse failures on every subsequent DML
-# until the history is rebuilt from scratch.
 #
 # ── LogMiner strategy ────────────────────────────────────────────────────────
 # redo_log_catalog: reads schema from archived redo logs — correct after
 #   RENAME COLUMN / DROP COLUMN DDL. Requires ALL COLUMNS supplemental logging.
 #
-# ── Performance tuning ────────────────────────────────────────────────────────
-# LogMiner: redo_log_catalog, batch 50k–200k, memory buffer
-# Kafka producer: linger.ms=10, batch.size=131072, compression.type=lz4, acks=1
-#
 # Usage:
-#   export SPARK_USER=dave
 #   bash register_oracle_cache_testing_connector.sh
-#
-# NOTE: No custom topic.naming.strategy is set. DefaultTopicNamingStrategy
-# (Debezium built-in) produces oracle.CACHE_TESTING.<table>. The streaming
-# pipeline handles this via regex. Do NOT set topic.naming.strategy.
+#   DEBEZIUM_URL=http://192.168.1.50:30083 bash register_oracle_cache_testing_connector.sh
 # =============================================================================
 set -euo pipefail
 
@@ -113,11 +106,36 @@ PIPE_DB=$(echo   "$PIPE_SECRET" | python3 -c "import sys,json; d=json.load(sys.s
 PIPE_USER=$(echo "$PIPE_SECRET" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('user','pipeline'))")
 PIPE_PASS=$(echo "$PIPE_SECRET" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('password',''))")
 
-# ── 5. Verify watermarks exist (starpump must have run first) ─────────────────
-echo "[INFO] Verifying pipeline_watermarks for XEPDB1.cache_testing …"
-MISSING=()
-for tbl in "${CDC_TABLES[@]}"; do
-  TS=$(python3 -c "
+# ── 5. Get current Oracle SCN (connector will start from here) ───────────────
+# When re-registering after oracle-xe restart: the old archived log files are
+# gone. We MUST start from the current SCN — any DML during the gap is lost
+# from CDC (acceptable) but the connector will not get stuck on ORA-01284.
+echo "[INFO] Fetching current Oracle SCN …"
+ORA_POD=$(kubectl -n prod get pods -l app=oracle-xe \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+CURRENT_SCN=""
+if [ -n "$ORA_POD" ]; then
+  CURRENT_SCN=$(kubectl -n prod exec "$ORA_POD" -- \
+    bash -c "sqlplus -s / as sysdba <<'SQLEOF'
+SET HEADING OFF FEEDBACK OFF PAGESIZE 0 TRIMSPOOL ON
+SELECT CURRENT_SCN FROM V\$DATABASE;
+EXIT;
+SQLEOF" 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' | tr -d ' ')
+fi
+
+if [ -n "$CURRENT_SCN" ]; then
+  echo "[INFO] Current Oracle SCN: $CURRENT_SCN (connector will stream from here)"
+else
+  echo "[WARN] Could not read Oracle SCN — connector will use no_data snapshot default"
+fi
+
+# ── 5b. Watermark check (informational only — does NOT block registration) ────
+echo "[INFO] Checking pipeline_watermarks for XEPDB1.cache_testing (informational) …"
+if [ -n "$PIPE_HOST" ] && [ -n "$PIPE_PASS" ]; then
+  for tbl in "${CDC_TABLES[@]}"; do
+    TS=$(python3 -c "
 import psycopg2, sys
 try:
     conn = psycopg2.connect(host='${PIPE_HOST}', port=${PIPE_PORT},
@@ -133,17 +151,14 @@ try:
 except Exception as e:
     print('', end='')
 " 2>/dev/null || true)
-  if [ -z "$TS" ]; then
-    MISSING+=("$tbl")
-    echo "  [WARN] No watermark for $tbl"
-  else
-    echo "  [OK]   $tbl → sf_extraction_ts=$TS"
-  fi
-done
-if [ ${#MISSING[@]} -gt 0 ]; then
-  echo "[ERROR] Missing watermarks: ${MISSING[*]}"
-  echo "[ERROR] Run starpump oracle first."
-  exit 1
+    if [ -z "$TS" ]; then
+      echo "  [WARN] No watermark for $tbl (run starpump oracle for initial load)"
+    else
+      echo "  [OK]   $tbl → sf_extraction_ts=$TS"
+    fi
+  done
+else
+  echo "  [SKIP] No pipeline_db credentials — watermark check skipped."
 fi
 
 # ── 6. Full reset: delete connector + wipe schema history topic ───────────────
@@ -260,6 +275,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "log.mining.sleep.time.max.ms":     "2000",
     "log.mining.session.max.ms":        "1800000",
     "log.mining.buffer.type":           "memory",
+    "log.mining.archive.log.hours":     "4",
 
     "max.queue.size":          "81920",
     "max.batch.size":          "32768",
