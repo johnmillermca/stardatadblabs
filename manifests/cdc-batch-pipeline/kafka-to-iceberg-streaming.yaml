@@ -1547,6 +1547,26 @@ data:
                                         source.source_key, _evo_table,
                                         _nc_field.name, _alt_exc,
                                     )
+                        # ── Refresh Spark catalog metadata after ALTER TABLE ───────
+                        # Spark caches table metadata (columns, types) per SparkSession.
+                        # After ALTER TABLE ADD COLUMN, the cache still holds the old
+                        # schema.  The MERGE planner resolves column names against the
+                        # cached schema — not the live Iceberg schema — so newly added
+                        # columns (snap_id, snap_timestamp, etc.) appear as UNRESOLVED.
+                        # REFRESH TABLE forces Spark to re-read the Iceberg metadata
+                        # file so the next SQL operation sees the updated schema.
+                        if _new_cols:
+                            try:
+                                spark.sql(f"REFRESH TABLE {_evo_fqn}")
+                                logger.info(
+                                    "[%s/%s] REFRESH TABLE after DDL evolution — OK",
+                                    source.source_key, _evo_table,
+                                )
+                            except Exception as _ref_exc:
+                                logger.debug(
+                                    "[%s/%s] REFRESH TABLE skipped: %s",
+                                    source.source_key, _evo_table, _ref_exc,
+                                )
                     except Exception as _evo_exc:
                         # DESCRIBE TABLE fails when table doesn't exist yet — safe to ignore
                         logger.debug(
