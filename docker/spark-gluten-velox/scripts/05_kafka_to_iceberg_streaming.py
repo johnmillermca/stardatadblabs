@@ -291,7 +291,9 @@ _ALL_SOURCES: list[_StreamingSource] = [
         topic_pattern = "mongodb\\.cache_testing\\..*",
         catalog       = "mongodb",
         namespace     = "cache_testing",
-        pk_col        = "_id",
+        pk_col        = "customer_id",   # Debezium MongoDB emits _id as BSON struct<$oid:string>
+                                         # which cannot be an Iceberg column or MERGE key.
+                                         # The document-level business PK is customer_id.
         s3_prefix     = "iceberg/mgo_lakehouse",
     ),
 ]
