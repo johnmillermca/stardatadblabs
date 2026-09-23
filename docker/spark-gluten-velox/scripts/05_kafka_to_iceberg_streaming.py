@@ -1973,8 +1973,22 @@ def _run_once(bao: BaoSparkInit) -> None:
             # retry loop in main() can restart the entire Spark session cleanly.
             for q in list(queries):
                 if not q.isActive:
+                    # q.exception() contains the actual Spark/JVM cause — log it
+                    # at ERROR level BEFORE raising so it is always visible in
+                    # pod logs even when the outer handler truncates the message.
+                    spark_exc = None
+                    try:
+                        spark_exc = q.exception()
+                    except Exception:
+                        pass
+                    if spark_exc:
+                        logger.error(
+                            "Streaming query '%s' Spark exception: %s",
+                            q.name, spark_exc,
+                        )
                     raise RuntimeError(
                         f"Streaming query '{q.name}' terminated unexpectedly."
+                        + (f" Cause: {spark_exc}" if spark_exc else "")
                     )
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")
