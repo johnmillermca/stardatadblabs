@@ -1467,6 +1467,14 @@ data:
                 # history_tracking handles its own ALTER TABLE inside _apply_history_tracking.
                 # BSON struct fields (e.g. _id struct<$oid:string>) are excluded —
                 # Iceberg column names cannot contain '$'.
+                #
+                # snap_id / snap_timestamp inclusion:
+                # These audit columns are normally injected by create_table() via
+                # _inject_snap_cols().  However, if a table was created externally
+                # (manual DDL, migration) without them, the MERGE INSERT clause fails
+                # with UNRESOLVED_COLUMN because final_df.schema always includes them.
+                # Fix: include snap columns in the "new cols to add" set so they get
+                # ALTER TABLE ADD COLUMN before the first MERGE on any existing table.
                 if write_mode != _WRITE_MODE_HISTORY_TRACKING:
                     _evo_table = (
                         f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
@@ -1479,18 +1487,37 @@ data:
                             for row in spark.sql(f"DESCRIBE TABLE {_evo_fqn}").collect()
                             if not row["col_name"].startswith("#")
                         }
-                        _batch_cols = {f.name.lower() for f in inferred_schema.fields}
-                        _new_cols = _batch_cols - _iceberg_cols - {"snap_id", "snap_timestamp"}
+                        # full_schema includes inferred_schema + extra_fields (is_deleted etc).
+                        # snap_id / snap_timestamp come from the write-mode handlers via
+                        # withColumn(), so they appear in final_df but not in full_schema.
+                        # Build the complete expected column set explicitly.
+                        _expected_cols = {f.name.lower() for f in full_schema.fields} | {"snap_id", "snap_timestamp"}
+                        _new_cols = _expected_cols - _iceberg_cols
                         if _new_cols:
                             logger.info(
                                 "[%s/%s] DDL evolution: %d new column(s) to add to Iceberg: %s",
                                 source.source_key, _evo_table, len(_new_cols), sorted(_new_cols),
                             )
-                            for _nc in sorted(_new_cols):
-                                _nc_field = next(
-                                    f for f in inferred_schema.fields
-                                    if f.name.lower() == _nc
+                            # Build a lookup covering all possible fields: inferred schema,
+                            # write-mode extra fields, and snap audit columns (snap_id /
+                            # snap_timestamp are not in inferred_schema — they come from
+                            # withColumn() in the write-mode handler).
+                            _snap_audit_fields = [
+                                StructField("snap_id",        LongType(),      True),
+                                StructField("snap_timestamp", TimestampType(), True),
+                            ]
+                            _all_known_fields = {
+                                f.name.lower(): f
+                                for f in (
+                                    list(inferred_schema.fields)
+                                    + list(extra_fields)
+                                    + _snap_audit_fields
                                 )
+                            }
+                            for _nc in sorted(_new_cols):
+                                _nc_field = _all_known_fields.get(_nc)
+                                if _nc_field is None:
+                                    continue
                                 # Skip any field whose Iceberg type string would be
                                 # unparseable (e.g. struct<$oid:string>)
                                 _ice_type = _nc_field.dataType.simpleString()
