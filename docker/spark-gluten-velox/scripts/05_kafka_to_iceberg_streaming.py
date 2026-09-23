@@ -616,8 +616,36 @@ def _apply_standard(
 
     _SNAP_COLS = {"snap_id", "snap_timestamp"}
 
-    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
-    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
+    # ── Dedup within batch: last-write-wins per PK ────────────────────────────
+    # MongoDB CDC (and any high-frequency source) can produce multiple events for
+    # the same PK within one micro-batch (e.g. INSERT followed immediately by an
+    # UPDATE, or two updates to the same document).  MERGE INTO Iceberg raises
+    # MERGE_CARDINALITY_VIOLATION when the source has >1 row matching a single
+    # target row on the join key.  Deduplicate here *before* dropping kafka_ts
+    # (we need it to pick the latest event per PK).  It is a no-op for sources
+    # that never emit duplicate PKs in one batch.
+    _inserts_raw = payload_df.filter(col("_op").isin("c", "u", "r"))
+    _deletes_raw = payload_df.filter(col("_op") == "d")
+
+    if not _inserts_raw.isEmpty() and pk_col in _inserts_raw.columns:
+        from pyspark.sql import Window as _W
+        _win = _W.partitionBy(col(f"`{pk_col}`")).orderBy(col("kafka_ts").desc())
+        _inserts_raw = (
+            _inserts_raw
+            .withColumn("_rn", F.row_number().over(_win))
+            .filter(col("_rn") == 1)
+            .drop("_rn")
+        )
+    if not _deletes_raw.isEmpty() and pk_col in _deletes_raw.columns:
+        _ins_pks = {r[0] for r in _inserts_raw.select(pk_col).collect()} if not _inserts_raw.isEmpty() else set()
+        _deletes_raw = _deletes_raw.dropDuplicates([pk_col])
+        # If a PK appears in both inserts and deletes in the same batch,
+        # the insert (later event) wins — drop the delete for that PK.
+        if _ins_pks:
+            _deletes_raw = _deletes_raw.filter(~col(f"`{pk_col}`").isin(list(_ins_pks)))
+
+    inserts = _inserts_raw.drop("_op", "kafka_ts")
+    deletes = _deletes_raw.drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
         raw_df = (
@@ -709,8 +737,47 @@ def _apply_soft_delete(
 
     _SNAP_COLS = {"snap_id", "snap_timestamp"}
 
-    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
-    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
+    # ── Dedup within batch + nullable PK (same pattern as _apply_standard) ────
+    _inserts_raw = payload_df.filter(col("_op").isin("c", "u", "r"))
+    _deletes_raw = payload_df.filter(col("_op") == "d")
+
+    if not _inserts_raw.isEmpty() and pk_col in _inserts_raw.columns:
+        from pyspark.sql import Window as _W
+        _win = _W.partitionBy(col(f"`{pk_col}`")).orderBy(col("kafka_ts").desc())
+        _inserts_raw = (
+            _inserts_raw
+            .withColumn("_rn", F.row_number().over(_win))
+            .filter(col("_rn") == 1)
+            .drop("_rn")
+        )
+    if not _deletes_raw.isEmpty() and pk_col in _deletes_raw.columns:
+        _ins_pks = {r[0] for r in _inserts_raw.select(pk_col).collect()} if not _inserts_raw.isEmpty() else set()
+        _deletes_raw = _deletes_raw.dropDuplicates([pk_col])
+        if _ins_pks:
+            _deletes_raw = _deletes_raw.filter(~col(f"`{pk_col}`").isin(list(_ins_pks)))
+
+    inserts = _inserts_raw.drop("_op", "kafka_ts")
+    deletes = _deletes_raw.drop("_op", "kafka_ts")
+
+    # ── Make PK column nullable to avoid Velox NullPointerException ───────────
+    # MongoDB documents may arrive without the PK field (e.g. partial update
+    # events that set a new field on a document but don't include customer_id
+    # in the after image).  If the Iceberg table was created with pk NOT NULL
+    # (inferred from first batch where all rows had the PK), Velox/Gluten will
+    # crash with "Null value appeared in non-nullable field: <pk>".
+    # Cast the PK to nullable here so the MERGE source always allows NULLs —
+    # MERGE ON condition handles NULL safely (NULL != anything → no match →
+    # row is skipped, not inserted or updated).
+    if pk_col in inserts.columns:
+        pk_type = inserts.schema[pk_col].dataType
+        inserts = inserts.withColumn(pk_col, col(f"`{pk_col}`").cast(pk_type))
+        # Force nullable via schema reconstruction
+        from pyspark.sql.types import StructField as _SF, StructType as _ST
+        new_fields = [
+            _SF(f.name, f.dataType, True) if f.name == pk_col else f
+            for f in inserts.schema.fields
+        ]
+        inserts = spark.createDataFrame(inserts.collect(), _ST(new_fields))
 
     if not inserts.isEmpty():
         raw_df = (
