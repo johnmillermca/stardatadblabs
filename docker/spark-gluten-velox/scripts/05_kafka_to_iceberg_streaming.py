@@ -882,13 +882,53 @@ def _apply_history_tracking(
             USING iceberg
             PARTITIONED BY (hours(snap_timestamp))
             TBLPROPERTIES (
-                'pipeline.write-mode' = 'history_tracking',
-                'pipeline.source'     = '{source_key}'
+                'pipeline.write-mode'              = 'history_tracking',
+                'pipeline.source'                  = '{source_key}',
+                'write.spark.accept-any-schema'    = 'true'
             )
         """)
         logger.info(
             "[%s/%s][history_tracking] Created Iceberg table (mode=history_tracking).",
             source_key, table_name,
+        )
+
+    # ── 7b. DDL evolution for history_tracking ────────────────────────────────
+    # mergeSchema=true on the REST catalog requires 'write.spark.accept-any-schema'
+    # tblproperty.  For reliability on both new and existing tables, explicitly
+    # issue ALTER TABLE ADD COLUMN for every after_*/before_* column in the
+    # current batch that isn't already in the hist table.  This is the same
+    # strategy used by standard/soft_delete modes and avoids INSERT_COLUMN_ARITY_MISMATCH.
+    try:
+        _hist_existing_cols = {
+            row["col_name"].lower()
+            for row in spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
+            if not row["col_name"].startswith("#")
+        }
+        for _hf in final_df.schema.fields:
+            if _hf.name.lower() in _hist_existing_cols:
+                continue
+            _hf_ice_type = _PY_TO_ICEBERG.get(type(_hf.dataType).__name__, "STRING")
+            # Skip BSON-style names
+            if "$" in _hf.name or "$" in _hf_ice_type:
+                continue
+            try:
+                spark.sql(
+                    f"ALTER TABLE {fqn_backtick} ADD COLUMN `{_hf.name}` {_hf_ice_type}"
+                )
+                logger.info(
+                    "[%s/%s][history_tracking] ALTER TABLE ADD COLUMN `%s` %s — OK",
+                    source_key, table_name, _hf.name, _hf_ice_type,
+                )
+            except Exception as _hf_exc:
+                logger.debug(
+                    "[%s/%s][history_tracking] ALTER TABLE ADD COLUMN `%s` skipped: %s",
+                    source_key, table_name, _hf.name, _hf_exc,
+                )
+    except Exception as _hist_evo_exc:
+        # Table doesn't exist yet — will be created above or on next batch
+        logger.debug(
+            "[%s/%s][history_tracking] Schema evolution check skipped: %s",
+            source_key, table_name, _hist_evo_exc,
         )
 
     # ── 8. Write ──────────────────────────────────────────────────────────────
@@ -1099,6 +1139,17 @@ def _write_micro_batch(
                     # Strip BSON/invalid fields before any cache or evolution logic
                     _fresh_schema = StructType(_safe_iceberg_fields(_fresh_schema_raw.fields))
 
+                    # Iceberg→Spark type map — shared by first-batch seed and DDL evolution path
+                    _ICE_TO_SPARK = {
+                        "bigint": LongType(), "long": LongType(),
+                        "int": IntegerType(), "integer": IntegerType(),
+                        "smallint": IntegerType(), "tinyint": IntegerType(),
+                        "string": StringType(), "varchar": StringType(),
+                        "boolean": BooleanType(),
+                        "timestamp": TimestampType(),
+                        "double": DoubleType(), "float": FloatType(),
+                    }
+
                     if inferred_schema is None:
                         # ── First batch: prefer Iceberg schema as type authority ──
                         # Iceberg schema was written from real non-NULL data; batch
@@ -1123,16 +1174,6 @@ def _write_micro_batch(
                                 row["col_name"].lower(): row["data_type"].lower()
                                 for row in _ice_rows
                                 if not row["col_name"].startswith("#")
-                            }
-                            # Map Iceberg type strings back to Spark types
-                            _ICE_TO_SPARK = {
-                                "bigint": LongType(), "long": LongType(),
-                                "int": IntegerType(), "integer": IntegerType(),
-                                "smallint": IntegerType(), "tinyint": IntegerType(),
-                                "string": StringType(), "varchar": StringType(),
-                                "boolean": BooleanType(),
-                                "timestamp": TimestampType(),
-                                "double": DoubleType(), "float": FloatType(),
                             }
                             _patched = []
                             for _f in _fresh_schema.fields:
@@ -1180,11 +1221,37 @@ def _write_micro_batch(
                         # Field count changed — DDL evolution detected.
                         # Keep ALL cached fields (types are authoritative).
                         # Only append fields that are genuinely new.
+                        # Type-stability: for newly added fields, prefer the Iceberg-
+                        # resident type if the column already exists there (e.g. a
+                        # rename was processed by another pod and Iceberg already has
+                        # it as BIGINT; a NULL-only batch here infers it as STRING).
                         _cached_names = {f.name.lower(): f for f in inferred_schema.fields}
+                        # Fetch live Iceberg column types once for the evolution table
+                        _evo_tbl_evolve = (
+                            f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
+                            else (f"{table_name}_hist" if write_mode == _WRITE_MODE_HISTORY_TRACKING
+                                  else table_name)
+                        )
+                        try:
+                            _ice_evolve_rows = spark.sql(
+                                f"DESCRIBE TABLE `{source.catalog}`.`{namespace}`"
+                                f".`{_evo_tbl_evolve}`"
+                            ).collect()
+                            _ice_evolve_map = {
+                                r["col_name"].lower(): r["data_type"].lower()
+                                for r in _ice_evolve_rows
+                                if not r["col_name"].startswith("#")
+                            }
+                        except Exception:
+                            _ice_evolve_map = {}
                         _merged = list(inferred_schema.fields)
                         _added = []
                         for _nf in _fresh_schema.fields:
                             if _nf.name.lower() not in _cached_names:
+                                # Use Iceberg type if already known; else use inferred
+                                _ice_t2 = _ice_evolve_map.get(_nf.name.lower())
+                                if _ice_t2 and _ice_t2 in _ICE_TO_SPARK:
+                                    _nf = StructField(_nf.name, _ICE_TO_SPARK[_ice_t2], _nf.nullable)
                                 _merged.append(_nf)
                                 _added.append(_nf.name)
                         logger.info(
@@ -1221,7 +1288,8 @@ def _write_micro_batch(
             # After DDL evolution is detected (fresh schema has new fields that
             # the Iceberg table lacks), issue ALTER TABLE ADD COLUMN inline before
             # the MERGE so the MERGE never hits UNRESOLVED_COLUMN.
-            # Only for standard/soft_delete — history_tracking uses mergeSchema=true.
+            # history_tracking handles its own ALTER TABLE inside _apply_history_tracking
+            # (where the after_*/before_* prefixed final_df schema is known).
             # BSON struct fields (e.g. _id struct<$oid:string>) are excluded —
             # Iceberg column names cannot contain '$'.
             if write_mode != _WRITE_MODE_HISTORY_TRACKING:
@@ -1280,7 +1348,6 @@ def _write_micro_batch(
                         "[%s/%s] Schema evolution ALTER check skipped: %s",
                         source.source_key, _evo_table, _evo_exc,
                     )
-
             # ── Parse payload JSON → typed DataFrame ──────────────────────────
             try:
                 row_df = payload_df.select(
