@@ -189,7 +189,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "value.converter.schemas.enable":      "false",
 
     "decimal.handling.mode":  "double",
-    "time.precision.mode":    "connect",
+    "time.precision.mode":    "adaptive_time_microseconds",
     "tombstones.on.delete":   "false",
 
     "heartbeat.interval.ms":       "10000",

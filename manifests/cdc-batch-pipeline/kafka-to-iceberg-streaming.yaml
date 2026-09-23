@@ -393,7 +393,9 @@ data:
             topic_pattern = "oracle\\.(cache_testing|CACHE_TESTING)\\..*",
             catalog       = "oracle",
             namespace     = "cache_testing",
-            pk_col        = "id",
+            pk_col        = "customer_id",  # Oracle Debezium emits CUSTOMER_ID; lowercased
+                                            # by the Oracle column-normalisation step below
+                                            # before any schema/MERGE operation.
             s3_prefix     = "iceberg/ora_lakehouse",
         ),
         _StreamingSource(
@@ -1242,6 +1244,77 @@ data:
                         _fresh_schema_raw = spark.read.json(
                             payload_df.select("payload_json").rdd.map(lambda r: r[0])
                         ).schema
+
+                        # ── Oracle column-name normalisation ──────────────────────────
+                        # Oracle stores all identifiers in uppercase in its data
+                        # dictionary.  Debezium therefore emits JSON payload keys as
+                        # uppercase (CUSTOMER_ID, FIRST_NAME, …).  Iceberg requires
+                        # consistent casing across all sources; Postgres and MongoDB
+                        # emit lowercase names.  Lowercase every field name here so
+                        # the inferred schema, the MERGE pk_col lookup, and the
+                        # history-tracking after_*/before_* column names are all
+                        # lowercase before any Iceberg interaction.
+                        if source.source_key == "oracle":
+                            # Lowercase field names: Oracle data dictionary is all-caps.
+                            _fresh_schema_raw = StructType([
+                                StructField(f.name.lower(), f.dataType, f.nullable)
+                                for f in _fresh_schema_raw.fields
+                            ])
+                            # ── Oracle timestamp fix (time.precision.mode=connect) ────
+                            # With time.precision.mode=connect, Debezium emits Oracle
+                            # DATE/TIMESTAMP columns as epoch-microseconds (LongType).
+                            # PySpark's fromInternal treats them as milliseconds, causing
+                            # "year 58688 is out of range" on collect().
+                            # Fix: downcast every LongType field whose name ends in a
+                            # known timestamp suffix to TimestampType in the inferred
+                            # schema, and divide the raw value by 1000 in the payload
+                            # so Spark receives epoch-milliseconds.
+                            _TS_SUFFIXES_ORA = ("_at", "_ts", "_time", "_date", "_updated", "_created")
+                            _needs_ts_fix = {
+                                f.name.lower()
+                                for f in _fresh_schema_raw.fields
+                                if isinstance(f.dataType, LongType)
+                                and any(f.name.lower().endswith(s) for s in _TS_SUFFIXES_ORA)
+                            }
+                            if _needs_ts_fix:
+                                _fresh_schema_raw = StructType([
+                                    StructField(
+                                        f.name,
+                                        TimestampType() if f.name in _needs_ts_fix else f.dataType,
+                                        f.nullable,
+                                    )
+                                    for f in _fresh_schema_raw.fields
+                                ])
+
+                            def _normalise_oracle_payload(s):
+                                if not s:
+                                    return s
+                                d = json.loads(s)
+                                out = {}
+                                for k, v in d.items():
+                                    lk = k.lower()
+                                    # divide microsecond timestamps to milliseconds
+                                    if lk in _needs_ts_fix and isinstance(v, (int, float)):
+                                        v = v / 1000
+                                    out[lk] = v
+                                return json.dumps(out)
+
+                            _lower_payload = F.udf(_normalise_oracle_payload, StringType())
+                            payload_df = payload_df.withColumn(
+                                "payload_json", _lower_payload(col("payload_json"))
+                            )
+                            # Also normalise before/after JSON keys in full_envelope_df
+                            # so history-tracking after_*/before_* expansion works.
+                            full_envelope_df = full_envelope_df.withColumn(
+                                "before",
+                                F.when(col("before").isNotNull(),
+                                       _lower_payload(col("before"))),
+                            ).withColumn(
+                                "after",
+                                F.when(col("after").isNotNull(),
+                                       _lower_payload(col("after"))),
+                            )
+
                         # Strip BSON/invalid fields before any cache or evolution logic
                         _fresh_schema = StructType(_safe_iceberg_fields(_fresh_schema_raw.fields))
     
