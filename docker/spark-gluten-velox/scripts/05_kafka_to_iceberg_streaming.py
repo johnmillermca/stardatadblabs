@@ -255,14 +255,14 @@ class _StreamingSource:
         topic_pattern: str,
         catalog:       str,
         namespace:     str,
-        pk_col:        str,
+        pk_col:        "str | None",
         s3_prefix:     str,
     ) -> None:
         self.source_key    = source_key
         self.topic_pattern = topic_pattern
         self.catalog       = catalog
         self.namespace     = namespace
-        self.pk_col        = pk_col
+        self.pk_col        = pk_col   # None → resolved dynamically per-batch from schema
         self.s3_prefix     = s3_prefix
         self.checkpoint    = (
             f"s3://{S3_BUCKET}/checkpoints/streaming/{source_key}/{WRITE_MODE}"
@@ -291,9 +291,11 @@ _ALL_SOURCES: list[_StreamingSource] = [
         topic_pattern = "mongodb\\.cache_testing\\..*",
         catalog       = "mongodb",
         namespace     = "cache_testing",
-        pk_col        = "customer_id",   # Debezium MongoDB emits _id as BSON struct<$oid:string>
-                                         # which cannot be an Iceberg column or MERGE key.
-                                         # The document-level business PK is customer_id.
+        pk_col        = None,            # Debezium MongoDB _id is a BSON struct<$oid:string>
+                                         # which cannot be used as an Iceberg MERGE key.
+                                         # pk_col=None → _resolve_pk() detects the business PK
+                                         # dynamically from the inferred schema at batch time,
+                                         # making this source-config table-agnostic.
         s3_prefix     = "iceberg/mgo_lakehouse",
     ),
 ]
@@ -307,6 +309,69 @@ if _SOURCE_FILTER:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+# ── Dynamic PK resolver ────────────────────────────────────────────────────────
+
+def _resolve_pk(schema: "StructType", table_name: str) -> str:
+    """
+    Determine the business primary-key column name from an inferred schema.
+
+    Used when _StreamingSource.pk_col is None (e.g. MongoDB, where _id is an
+    unserializable BSON struct and cannot serve as the Iceberg MERGE key).
+
+    Resolution order — first match wins:
+      1. ``id``                         — canonical single-column PK
+      2. ``<singular(table_name)>_id``  — e.g. table "customers" → "customer_id"
+                                          table "orders"          → "order_id"
+      3. ``<table_name>_id``            — direct table-name prefix match
+      4. First column whose name ends with ``_id`` (excluding ``_id`` itself)
+      5. ``snap_id`` excluded — it is a pipeline audit column, not a source PK
+      6. Fallback: first non-``_id`` column in the schema (last resort — logs a warning)
+
+    The comparison is case-insensitive; the returned name preserves the original
+    casing from the schema so downstream MERGE ON clauses use the correct identifier.
+    """
+    col_names = [f.name for f in schema.fields]
+    lower_map = {f.name.lower(): f.name for f in schema.fields}  # lower → original
+
+    # 1. "id"
+    if "id" in lower_map:
+        return lower_map["id"]
+
+    # 2. singular(<table>)_id  — strip common plural suffixes
+    singular = table_name.rstrip("s")  # "customers" → "customer", "orders" → "order"
+    candidate = f"{singular}_id"
+    if candidate in lower_map:
+        return lower_map[candidate]
+
+    # 3. <table>_id  (table name without modification)
+    candidate = f"{table_name}_id"
+    if candidate in lower_map:
+        return lower_map[candidate]
+
+    # 4. first *_id col that isn't "_id" or "snap_id"
+    _EXCLUDE = {"_id", "snap_id"}
+    for name in col_names:
+        if name.lower().endswith("_id") and name.lower() not in _EXCLUDE:
+            return name
+
+    # 5. fallback — use first non-_id column (very unlikely, emit a warning)
+    for name in col_names:
+        if name.lower() != "_id":
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Could not determine PK for table %r from schema %s — "
+                "falling back to first non-_id column %r. "
+                "Consider setting pk_col explicitly on the _StreamingSource.",
+                table_name, [f.name for f in schema.fields], name,
+            )
+            return name
+
+    raise ValueError(
+        f"Cannot determine a PK column for table {table_name!r}; "
+        f"schema has no usable columns: {[f.name for f in schema.fields]}"
+    )
 
 
 # ── Debezium envelope schema ───────────────────────────────────────────────────
@@ -457,11 +522,16 @@ def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
 
 def _build_transform_pipeline(
     source_key: str,
-    pk_col:     str,
+    pk_col:     "str | None",
 ) -> list[tuple[Any, dict]]:
     """
     Build the list of (fn, kwargs) steps from TRANSFORM_STEPS env config.
     Called once per source at stream startup.
+
+    When ``pk_col`` is None (dynamic PK source such as MongoDB), the
+    ``deduplicate`` step is omitted from the returned list — it will be
+    injected per-batch inside ``_write_micro_batch`` once the PK has been
+    resolved from the inferred schema via ``_resolve_pk()``.
     """
     registry: dict[str, tuple[Any, dict]] = {
         "deduplicate":         (ST.deduplicate,         {"pk": pk_col, "order_col": "kafka_ts"}),
@@ -472,6 +542,14 @@ def _build_transform_pipeline(
     }
     steps = []
     for step_name in _TRANSFORM_STEPS:
+        if step_name == "deduplicate" and pk_col is None:
+            # PK not known at startup — defer to per-batch injection
+            logger.debug(
+                "[%s] 'deduplicate' step deferred to per-batch (pk_col=None, "
+                "will be resolved dynamically from inferred schema).",
+                source_key,
+            )
+            continue
         if step_name in registry:
             steps.append(registry[step_name])
         else:
@@ -1405,23 +1483,47 @@ def _write_micro_batch(
                 )
                 continue
 
-            # ── Apply StarTransform pipeline steps ────────────────────────────
-            if transform_steps:
+            # ── PK column name (case-insensitive, dynamic for MongoDB) ─────────
+            # When source.pk_col is None the business PK is inferred from the
+            # batch schema — this makes the pipeline table-agnostic (any MongoDB
+            # collection, not just "customers").
+            if source.pk_col is None:
                 try:
-                    row_df = ST.apply_pipeline(row_df, transform_steps)
+                    pk_col_actual = _resolve_pk(inferred_schema, table_name)
+                except ValueError as _pk_exc:
+                    logger.error(
+                        "[%s/%s] Cannot resolve PK — skipping batch: %s",
+                        source.source_key, table_name, _pk_exc,
+                    )
+                    continue
+                logger.info(
+                    "[%s/%s] Dynamic PK resolved: %r",
+                    source.source_key, table_name, pk_col_actual,
+                )
+            else:
+                pk_col_actual = source.pk_col
+                for f in inferred_schema.fields:
+                    if f.name.lower() == source.pk_col.lower():
+                        pk_col_actual = f.name
+                        break
+
+            # ── Apply StarTransform pipeline steps ────────────────────────────
+            # For sources with dynamic PK (source.pk_col is None), inject the
+            # deduplicate step here with the now-resolved pk_col_actual so that
+            # dedup runs with the correct column name for this specific table.
+            effective_steps = list(transform_steps)
+            if source.pk_col is None and "deduplicate" in _TRANSFORM_STEPS:
+                effective_steps.insert(0, (ST.deduplicate, {"pk": pk_col_actual, "order_col": "kafka_ts"}))
+
+            if effective_steps:
+                try:
+                    row_df = ST.apply_pipeline(row_df, effective_steps)
                 except Exception as exc:
                     logger.error(
                         "[%s/%s] StarTransform pipeline failed: %s",
                         source.source_key, table_name, exc,
                     )
                     continue
-
-            # ── PK column name (case-insensitive) ─────────────────────────────
-            pk_col_actual = source.pk_col
-            for f in inferred_schema.fields:
-                if f.name.lower() == source.pk_col.lower():
-                    pk_col_actual = f.name
-                    break
 
             # ── Build write-mode-specific extra schema fields ─────────────────
             # snap_id / snap_timestamp are intentionally omitted here — they are
@@ -1479,8 +1581,10 @@ def _write_micro_batch(
             if write_mode != _WRITE_MODE_HISTORY_TRACKING:
                 table_exists = builder.table_exists(source.catalog, namespace, effective_table)
                 if not table_exists:
+                    # pk_col_actual is already resolved (statically from source.pk_col
+                    # or dynamically via _resolve_pk) — use it directly here.
                     pk_col_exists = any(
-                        f.name.lower() == source.pk_col.lower()
+                        f.name.lower() == pk_col_actual.lower()
                         for f in inferred_schema.fields
                     )
                     pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
