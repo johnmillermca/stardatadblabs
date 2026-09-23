@@ -2,13 +2,13 @@
 # =============================================================================
 # register_oracle_cache_testing_connector.sh
 #
-# Register the Debezium Oracle CDC connector for the CACHE_TESTING schema
-# in XEPDB1 via the Kafka Connect REST API.
+# Register (or fully reset + re-register) the Debezium Oracle CDC connector
+# for the CACHE_TESTING schema in XEPDB1 via the Kafka Connect REST API.
 #
 # ── CDC sync-point ────────────────────────────────────────────────────────────
 # Must run AFTER starpump oracle initial full load completes for CACHE_TESTING.
-# Uses snapshot.mode=no_data — Debezium reads schema only, then streams
-# changes from the current SCN (post full-load position).
+# Uses snapshot.mode=schema_only — Debezium reads the current schema, then
+# streams changes from the current SCN (post full-load position).
 #
 # ── Pre-requisites ─────────────────────────────────────────────────────────────
 # 1. Oracle ARCHIVELOG mode enabled (ALTER DATABASE ARCHIVELOG)
@@ -18,21 +18,37 @@
 # 3. CDB-common user c##dbzcdc exists with LogMiner privileges (see OpenBao
 #    secret/data/platform/oracle cdc_user / cdc_password keys)
 # 4. c##dbzcdc granted SELECT on all CACHE_TESTING tables
+# 5. Debezium Connect image must be 192.168.1.50:30500/debezium/connect:2.7.4-lc1
+#    (or newer) — that image bundles the custom LowerCaseTopicNamingStrategy JAR.
+#    Source: docker/debezium-connect/  |  Rebuild: bash docker/debezium-connect/build.sh --push
 #
 # ── Connector naming ──────────────────────────────────────────────────────────
 # Connector  : oracle-cache-testing-cdc
 # Topics     : oracle.cache_testing.<table>   (always lowercase — enforced by
-#              LowerCaseTopicNamingStrategy; Oracle uppercases identifiers in its
-#              data dictionary so SchemaTopicNamingStrategy would produce
-#              oracle.CACHE_TESTING.CUSTOMERS.  LowerCaseTopicNamingStrategy
-#              normalises every segment to lowercase unconditionally, which means
-#              any future table added to table.include.list automatically lands on
-#              oracle.cache_testing.<table> with no extra work.)
+#              io.debezium.schema.LowerCaseTopicNamingStrategy, a custom plugin
+#              bundled in the debezium/connect:2.7.4-lc1 image that extends
+#              DefaultTopicNamingStrategy and lowercases the full topic string.
+#              Oracle uppercases identifiers in its data dictionary so the default
+#              strategy would produce oracle.CACHE_TESTING.CUSTOMERS.)
 # Schema hist: schema-changes.oracle-cache-testing
 #
+# ── Schema history reset ───────────────────────────────────────────────────────
+# The schema history topic MUST be deleted and the connector fully removed before
+# re-registering after any of:
+#   • DDL rename/drop stress-test runs (objectVersion drift)
+#   • log.mining.strategy change
+#   • connector class change
+#   • any "Failed to parse redo SQL" storms that persist across restarts
+# This script handles the reset automatically (step 6a).
+#
+# ── LogMiner strategy ────────────────────────────────────────────────────────
+# redo_log_catalog:  reads the schema from archived redo logs — correct after
+#   RENAME COLUMN / DROP COLUMN DDL because the column info is captured at DDL
+#   time in the redo. Requires ALL COLUMNS supplemental logging per table.
+#
 # ── Performance tuning ────────────────────────────────────────────────────────
-# LogMiner: online_catalog strategy, batch 20k–100k, memory buffer
-# Kafka producer: linger.ms=5, batch.size=65536, compression.type=lz4, acks=1
+# LogMiner: redo_log_catalog, batch 50k–200k, memory buffer
+# Kafka producer: linger.ms=10, batch.size=131072, compression.type=lz4, acks=1
 #
 # Usage:
 #   export SPARK_USER=dave
@@ -124,13 +140,43 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   exit 1
 fi
 
-# ── 6. Delete existing connector if present ───────────────────────────────────
+# ── 6. Full reset: delete connector + wipe schema history topic ───────────────
+# Wiping the schema history forces Debezium to re-snapshot the current schema
+# from Oracle's data dictionary on next start. Without this, stale objectVersion
+# entries in the history topic cause "Failed to parse redo SQL" for every DML
+# event after a RENAME/DROP COLUMN — even when redo_log_catalog is active.
 EXISTING=$(curl -sf "$DEBEZIUM_URL/connectors/$CONNECT_NAME" 2>/dev/null | python3 -c \
   "import sys,json; d=json.load(sys.stdin); print(d.get('name',''))" 2>/dev/null || true)
 if [ -n "$EXISTING" ]; then
   echo "[INFO] Removing existing connector $CONNECT_NAME …"
   curl -sf -X DELETE "$DEBEZIUM_URL/connectors/$CONNECT_NAME"
+  sleep 3
+fi
+
+echo "[INFO] Deleting schema history topic (schema-changes.oracle-cache-testing) …"
+cat > /tmp/kafka-reset-client.properties <<KAFKAEOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USER}" password="${KAFKA_PASS}";
+KAFKAEOF
+
+# Delete via a kubectl exec into the Debezium pod (which has kafka-topics.sh)
+DBZ_POD=$(kubectl get pods -n prod -l app=debezium-connect \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$DBZ_POD" ]; then
+  kubectl cp /tmp/kafka-reset-client.properties prod/"$DBZ_POD":/tmp/kafka-reset-client.properties 2>/dev/null || true
+  kubectl exec -n prod "$DBZ_POD" -- \
+    /kafka/bin/kafka-topics.sh \
+      --bootstrap-server "${KAFKA_BOOTSTRAP}" \
+      --command-config /tmp/kafka-reset-client.properties \
+      --delete \
+      --topic schema-changes.oracle-cache-testing 2>/dev/null \
+    && echo "[INFO] Schema history topic deleted." \
+    || echo "[WARN] Topic not found or already deleted — continuing."
   sleep 2
+else
+  echo "[WARN] No running Debezium pod found — skipping topic deletion."
 fi
 
 # ── 7. Build table include list (SCHEMA.TABLE uppercase for Oracle) ───────────
@@ -169,9 +215,9 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "table.include.list": "${TABLE_INCLUDE}",
 
     "topic.prefix": "oracle",
-    "topic.naming.strategy": "io.debezium.connector.common.LowerCaseTopicNamingStrategy",
+    "topic.naming.strategy": "io.debezium.schema.LowerCaseTopicNamingStrategy",
 
-    "snapshot.mode":         "no_data",
+    "snapshot.mode":         "schema_only",
     "snapshot.locking.mode": "none",
 
     "schema.history.internal.kafka.bootstrap.servers": "${KAFKA_BOOTSTRAP}",
@@ -204,15 +250,16 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
 
     "log.mining.strategy":              "redo_log_catalog",
     "log.mining.continuous.mine":       "false",
-    "log.mining.batch.size.default":    "20000",
-    "log.mining.batch.size.max":        "100000",
-    "log.mining.sleep.time.default.ms": "1000",
-    "log.mining.sleep.time.max.ms":     "3000",
+    "log.mining.batch.size.default":    "50000",
+    "log.mining.batch.size.max":        "200000",
+    "log.mining.sleep.time.default.ms": "500",
+    "log.mining.sleep.time.max.ms":     "2000",
     "log.mining.session.max.ms":        "1800000",
     "log.mining.buffer.type":           "memory",
 
-    "max.queue.size":          "16384",
-    "max.batch.size":          "8192",
+    "max.queue.size":          "81920",
+    "max.batch.size":          "32768",
+    "max.queue.size.in.bytes": "524288000",
     "poll.interval.ms":        "500",
 
     "event.processing.failure.handling.mode": "warn",

@@ -53,6 +53,8 @@ Environment variables
   POLL_SECS   max seconds to wait for Iceberg column (default 240)
   DML_ROWS    rows per DML batch (default 5)
   SETTLE_S    seconds to sleep between phases (default 3)
+  SOURCE      comma-separated sources to run: oracle,postgres,mongodb (default: all)
+              e.g. SOURCE=oracle python3 scripts/ddl_rename_test.py
 """
 
 from __future__ import annotations
@@ -147,9 +149,10 @@ def _ora_dsn() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Test parameters
 # ─────────────────────────────────────────────────────────────────────────────
-POLL_SECS = int(os.environ.get("POLL_SECS", "240"))
-DML_ROWS  = int(os.environ.get("DML_ROWS",  "5"))
-SETTLE_S  = int(os.environ.get("SETTLE_S",  "3"))
+POLL_SECS      = int(os.environ.get("POLL_SECS", "240"))
+DML_ROWS       = int(os.environ.get("DML_ROWS",  "5"))
+SETTLE_S       = int(os.environ.get("SETTLE_S",  "3"))
+_SOURCE_FILTER = {s.strip().lower() for s in os.environ.get("SOURCE", "").split(",") if s.strip()}
 
 # 5 test columns — short names to avoid Oracle 30-char limit
 # Rename chain: test_col_a → test_col_a_r1 → test_col_a_r2 → test_col_a_r3 → DROP
@@ -734,19 +737,29 @@ def _poll_iceberg_col(col: str, tables: list[tuple], timeout: int = POLL_SECS) -
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
+    _run_pg  = not _SOURCE_FILTER or "postgres" in _SOURCE_FILTER
+    _run_ora = not _SOURCE_FILTER or "oracle"   in _SOURCE_FILTER
+    _run_mgo = not _SOURCE_FILTER or "mongodb"  in _SOURCE_FILTER
+    _sources_label = ", ".join(
+        s for s, active in [("Oracle", _run_ora), ("PostgreSQL", _run_pg), ("MongoDB", _run_mgo)]
+        if active
+    )
+
     print()
     print("=" * 72)
     print("  CDC RENAME/DROP COLUMN STRESS TEST")
     print(f"  Columns: {_TEST_COLS}")
     print("  Sequence per column: ADD → DML → RENAME×3 (DML each) → DROP")
-    print("  Sources: Oracle, PostgreSQL, MongoDB")
+    print(f"  Sources: {_sources_label}")
     print(f"  DML_ROWS={DML_ROWS}  SETTLE_S={SETTLE_S}s  POLL_SECS={POLL_SECS}s")
     print(f"  Started: {datetime.now(timezone.utc).isoformat()}")
     print("=" * 72)
 
     _info("Resolving OpenBao credentials …")
-    _resolve_dsns()
-    _ora_dsn()
+    if _run_pg or _run_mgo:
+        _resolve_dsns()
+    if _run_ora:
+        _ora_dsn()
     _ok("Credentials resolved")
 
     restarts_before = snapshot_restarts()
@@ -767,50 +780,53 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # PostgreSQL
     # ─────────────────────────────────────────────────────────────────────────
-    _hdr("PostgreSQL — 5 columns ADD/RENAME×3/DROP")
-    pg_id = _PG_BASE
-    for col_base in _TEST_COLS:
-        phases, pg_id = run_column_rename_test(
-            "PG", col_base, pg_id,
-            pg_add_col, pg_rename_col, pg_drop_col, pg_dml,
-        )
-        for col_name, ids in phases:
-            all_ids["postgres"].setdefault(col_name, []).extend(ids)
-            all_renamed_cols.add(col_name)
-        _record(f"PG {col_base}: all phases completed",
-                len(phases) == 4, f"{len(phases)}/4 DML phases")
+    if _run_pg:
+        _hdr("PostgreSQL — 5 columns ADD/RENAME×3/DROP")
+        pg_id = _PG_BASE
+        for col_base in _TEST_COLS:
+            phases, pg_id = run_column_rename_test(
+                "PG", col_base, pg_id,
+                pg_add_col, pg_rename_col, pg_drop_col, pg_dml,
+            )
+            for col_name, ids in phases:
+                all_ids["postgres"].setdefault(col_name, []).extend(ids)
+                all_renamed_cols.add(col_name)
+            _record(f"PG {col_base}: all phases completed",
+                    len(phases) == 4, f"{len(phases)}/4 DML phases")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Oracle
     # ─────────────────────────────────────────────────────────────────────────
-    _hdr("Oracle — 5 columns ADD/RENAME×3/DROP")
-    ora_id = _ORA_BASE
-    for col_base in _TEST_COLS:
-        phases, ora_id = run_column_rename_test(
-            "ORA", col_base, ora_id,
-            ora_add_col, ora_rename_col, ora_drop_col, ora_dml,
-        )
-        for col_name, ids in phases:
-            all_ids["oracle"].setdefault(col_name, []).extend(ids)
-            all_renamed_cols.add(col_name)
-        _record(f"ORA {col_base}: all phases completed",
-                len(phases) == 4, f"{len(phases)}/4 DML phases")
+    if _run_ora:
+        _hdr("Oracle — 5 columns ADD/RENAME×3/DROP")
+        ora_id = _ORA_BASE
+        for col_base in _TEST_COLS:
+            phases, ora_id = run_column_rename_test(
+                "ORA", col_base, ora_id,
+                ora_add_col, ora_rename_col, ora_drop_col, ora_dml,
+            )
+            for col_name, ids in phases:
+                all_ids["oracle"].setdefault(col_name, []).extend(ids)
+                all_renamed_cols.add(col_name)
+            _record(f"ORA {col_base}: all phases completed",
+                    len(phases) == 4, f"{len(phases)}/4 DML phases")
 
     # ─────────────────────────────────────────────────────────────────────────
     # MongoDB
     # ─────────────────────────────────────────────────────────────────────────
-    _hdr("MongoDB — 5 columns ADD/RENAME×3/DROP")
-    mgo_id = _MGO_BASE
-    for col_base in _TEST_COLS:
-        phases, mgo_id = run_column_rename_test(
-            "MGO", col_base, mgo_id,
-            mgo_add_col, mgo_rename_col, mgo_drop_col, mgo_dml,
-        )
-        for col_name, ids in phases:
-            all_ids["mongodb"].setdefault(col_name, []).extend(ids)
-            all_renamed_cols.add(col_name)
-        _record(f"MGO {col_base}: all phases completed",
-                len(phases) == 4, f"{len(phases)}/4 DML phases")
+    if _run_mgo:
+        _hdr("MongoDB — 5 columns ADD/RENAME×3/DROP")
+        mgo_id = _MGO_BASE
+        for col_base in _TEST_COLS:
+            phases, mgo_id = run_column_rename_test(
+                "MGO", col_base, mgo_id,
+                mgo_add_col, mgo_rename_col, mgo_drop_col, mgo_dml,
+            )
+            for col_name, ids in phases:
+                all_ids["mongodb"].setdefault(col_name, []).extend(ids)
+                all_renamed_cols.add(col_name)
+            _record(f"MGO {col_base}: all phases completed",
+                    len(phases) == 4, f"{len(phases)}/4 DML phases")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Wait for pipeline flush
@@ -831,8 +847,10 @@ def main() -> None:
     # For Iceberg verification, check r1/r2/r3 names per source:
     # postgres and oracle: all 7 tables
     # mongodb: only the 3 mongodb tables
-    pg_ora_tables = [t for t in _ICE_TABLES if t[0] in ("postgres", "oracle")]
-    mgo_tables    = [t for t in _ICE_TABLES if t[0] == "mongodb"]
+    pg_ora_tables = [t for t in _ICE_TABLES if t[0] in ("postgres", "oracle")
+                     and (t[0] != "postgres" or _run_pg)
+                     and (t[0] != "oracle"   or _run_ora)]
+    mgo_tables    = [t for t in _ICE_TABLES if t[0] == "mongodb" and _run_mgo]
 
     for col_base in _TEST_COLS:
         for suffix in ("_r1", "_r2", "_r3"):
@@ -863,13 +881,20 @@ def main() -> None:
     # Verify DML rows in Iceberg — IS NOT NULL check per renamed column
     # ─────────────────────────────────────────────────────────────────────────
     _hdr("Verifying DML rows in Iceberg (IS NOT NULL) per renamed column")
-    pk_map = {"postgres": "id", "oracle": "CUSTOMER_ID", "mongodb": "customer_id"}
+    # Oracle columns are normalised to lowercase by the streaming pipeline.
+    pk_map = {"postgres": "id", "oracle": "customer_id", "mongodb": "customer_id"}
 
     for src_key, src_tables in [
         ("postgres", pg_ora_tables),
         ("oracle",   pg_ora_tables),
         ("mongodb",  mgo_tables),
     ]:
+        if src_key == "postgres" and not _run_pg:
+            continue
+        if src_key == "oracle"   and not _run_ora:
+            continue
+        if src_key == "mongodb"  and not _run_mgo:
+            continue
         src_id_map = all_ids[src_key]
         if not src_id_map:
             continue
