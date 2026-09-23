@@ -931,6 +931,50 @@ def _apply_history_tracking(
             source_key, table_name, _hist_evo_exc,
         )
 
+    # ── 7c. Drop Iceberg columns absent from the current batch ────────────────
+    # When a column is dropped at the source (e.g. after a DDL stress test),
+    # Debezium stops emitting it.  The hist table still has the old column and
+    # writeTo().append() raises CANNOT_FIND_DATA because Iceberg expects a value
+    # for every existing column.  Permanently fix this by issuing ALTER TABLE
+    # DROP COLUMN for every Iceberg column not present in the current batch's
+    # DataFrame.  Only after_*/before_* test columns are eligible — core metadata
+    # columns (snap_id, snap_timestamp, _change_type, _change_ts, pk_col) are
+    # always present and never dropped.
+    _PROTECTED_COLS = {
+        "snap_id", "snap_timestamp", "_change_type", "_change_ts",
+        pk_col.lower(), f"after_{pk_col}".lower(), f"before_{pk_col}".lower(),
+    }
+    try:
+        _batch_cols_lower = {f.name.lower() for f in final_df.schema.fields}
+        _iceberg_cols = {
+            row["col_name"].lower()
+            for row in spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
+            if not row["col_name"].startswith("#")
+        }
+        _stale = _iceberg_cols - _batch_cols_lower - _PROTECTED_COLS
+        for _stale_col in sorted(_stale):
+            if "$" in _stale_col:
+                continue
+            try:
+                spark.sql(
+                    f"ALTER TABLE {fqn_backtick} DROP COLUMN `{_stale_col}`"
+                )
+                logger.info(
+                    "[%s/%s][history_tracking] ALTER TABLE DROP COLUMN `%s` "
+                    "(no longer in source schema) — OK",
+                    source_key, table_name, _stale_col,
+                )
+            except Exception as _drop_exc:
+                logger.debug(
+                    "[%s/%s][history_tracking] ALTER TABLE DROP COLUMN `%s` skipped: %s",
+                    source_key, table_name, _stale_col, _drop_exc,
+                )
+    except Exception as _stale_exc:
+        logger.debug(
+            "[%s/%s][history_tracking] Stale column check skipped: %s",
+            source_key, table_name, _stale_exc,
+        )
+
     # ── 8. Write ──────────────────────────────────────────────────────────────
     # Collect again after snap col injection so write_df is a clean LocalRelation
     # with the evaluated snap_id / snap_timestamp values baked in — same
