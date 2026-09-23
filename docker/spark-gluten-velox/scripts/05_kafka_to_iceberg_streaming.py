@@ -1565,7 +1565,15 @@ def _start_source_stream(
         "kafka.sasl.mechanism":           "SCRAM-SHA-512",
         "kafka.sasl.jaas.config":         jaas_cfg,
         "subscribePattern":               source.topic_pattern,
-        "startingOffsets":                "latest",
+        # "earliest" not "latest":
+        # Once an S3 checkpoint exists, Spark ignores startingOffsets entirely —
+        # the checkpoint committed offset is used unconditionally.
+        # This setting only matters on the very first start (no checkpoint yet).
+        # "latest" = silently skip all messages Debezium wrote before the pod started.
+        # "earliest" = read everything from the beginning on first start, so no
+        # messages are ever lost due to a gap between Debezium producing and the
+        # pod consuming for the first time.
+        "startingOffsets":                "earliest",
         "maxOffsetsPerTrigger":           str(MAX_OFFSETS_PER_TRIGGER),
         "failOnDataLoss":                 "false",
         # Consumer throughput tuning for peak-hour workloads

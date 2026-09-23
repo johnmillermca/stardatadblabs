@@ -155,10 +155,30 @@ SETTLE_S  = int(os.environ.get("SETTLE_S",  "3"))
 # Rename chain: test_col_a → test_col_a_r1 → test_col_a_r2 → test_col_a_r3 → DROP
 _TEST_COLS = ["test_col_a", "test_col_b", "test_col_c", "test_col_d", "test_col_e"]
 
-# ID space: 4_000_001+ (far from existing data)
-_PG_BASE  = 4_000_001
-_ORA_BASE = 4_100_001
-_MGO_BASE = 4_200_001
+# ID space: epoch-derived so every test run gets a FRESH block of IDs.
+#
+# WHY THIS IS CRITICAL (permanent fix for Oracle no-op update problem):
+# ──────────────────────────────────────────────────────────────────────
+# Oracle MERGE executes UPDATE when the PK already exists. If the row's column
+# values are IDENTICAL to what's already stored, Oracle writes NO redo log entry
+# (no-op update optimisation). Debezium reads from redo logs — a no-op update is
+# invisible to LogMiner. Result: Debezium emits nothing, the Kafka topic offset
+# doesn't advance, and Iceberg never sees those rows.
+#
+# Hardcoded bases (e.g. 4_100_001) reuse the same PKs on every test run.
+# After run 1 inserts the rows, runs 2+ MERGE→UPDATE with identical values → no-op.
+#
+# Fix: derive bases from the current epoch second so each run occupies a
+# brand-new, never-before-seen PK range. The formula gives enough headroom:
+#   _PG_BASE  = epoch_sec * 10 + 0  (PostgreSQL ids are sequential integers)
+#   _ORA_BASE = epoch_sec * 10 + 1  (Oracle CUSTOMER_ID)
+#   _MGO_BASE = epoch_sec * 10 + 2  (MongoDB customer_id)
+# Each run uses at most DML_ROWS * phases * columns = 5*4*5 = 100 IDs per source.
+# epoch_sec * 10 spacing ensures no collision across runs within a 1-second window.
+_RUN_EPOCH = int(time.time())   # captured once at import so all bases are consistent
+_PG_BASE   = _RUN_EPOCH * 10 + 0
+_ORA_BASE  = _RUN_EPOCH * 10 + 1
+_MGO_BASE  = _RUN_EPOCH * 10 + 2
 
 # Iceberg tables to verify
 _ICE_TABLES = [
@@ -369,12 +389,24 @@ END;
 
 
 def ora_dml(base_id: int, col_name: str, col_value: int) -> list[int]:
+    """
+    DELETE then INSERT — never MERGE/UPDATE.
+
+    Why DELETE+INSERT instead of MERGE:
+    Oracle's no-op update optimisation: if a MERGE executes the WHEN MATCHED UPDATE
+    path but no column value actually changes, Oracle writes NO redo log entry.
+    Debezium reads from redo logs (LogMiner) — a no-op update is invisible.
+    Kafka offset stays flat, Iceberg never receives the row.
+
+    DELETE always writes a redo entry (even if the row doesn't exist — it's a no-op
+    at the data level but the DELETE statement itself is logged).
+    INSERT always writes a redo entry unconditionally.
+    Together they guarantee Debezium captures the event regardless of prior state.
+    """
     ids = list(range(base_id, base_id + DML_ROWS))
     stmts = "\n".join(
-        f"MERGE INTO CUSTOMERS t USING (SELECT {cid} AS CUSTOMER_ID FROM dual) s "
-        f"ON (t.CUSTOMER_ID=s.CUSTOMER_ID) "
-        f"WHEN MATCHED THEN UPDATE SET t.{col_name.upper()}={col_value + i},t.TIER='GOLD' "
-        f"WHEN NOT MATCHED THEN INSERT(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
+        f"DELETE FROM CUSTOMERS WHERE CUSTOMER_ID={cid};\n"
+        f"INSERT INTO CUSTOMERS(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
         f"CITY,COUNTRY_CODE,TIER,CREDIT_LIMIT,IS_ACTIVE,{col_name.upper()}) "
         f"VALUES({cid},'RenameORA{cid}','Test','rt{cid}@ora.test',"
         f"'TestCity','US','GOLD',5000,'Y',{col_value + i});"

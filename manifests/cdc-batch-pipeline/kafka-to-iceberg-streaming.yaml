@@ -1670,7 +1670,11 @@ data:
             "kafka.sasl.mechanism":           "SCRAM-SHA-512",
             "kafka.sasl.jaas.config":         jaas_cfg,
             "subscribePattern":               source.topic_pattern,
-            "startingOffsets":                "latest",
+            # "earliest" not "latest": once a checkpoint exists Spark ignores this
+            # and uses the committed checkpoint offset. Only affects first-ever start
+            # (no checkpoint). "earliest" ensures no messages are lost if Debezium
+            # produced events before the pod first started consuming.
+            "startingOffsets":                "earliest",
             "maxOffsetsPerTrigger":           str(MAX_OFFSETS_PER_TRIGGER),
             "failOnDataLoss":                 "false",
             # Consumer throughput tuning for peak-hour workloads

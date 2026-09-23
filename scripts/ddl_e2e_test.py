@@ -150,10 +150,13 @@ DML_EVERY  = int(os.environ.get("DML_EVERY",  "5"))
 NEW_COL  = "loyalty_tier_v2"
 NEW_TYPE = "SMALLINT"
 
-# ID space — 50 000 slots per source, far from existing data
-_PG_BASE  = 3_000_001
-_ORA_BASE = 3_100_001
-_MGO_BASE = 3_200_001
+# ID space — epoch-derived so every test run gets a fresh PK block.
+# Prevents Oracle no-op update (MERGE on existing row with same values writes no
+# redo → LogMiner sees nothing → Debezium emits nothing → Iceberg misses the row).
+_RUN_EPOCH = int(time.time())
+_PG_BASE   = _RUN_EPOCH * 10 + 0
+_ORA_BASE  = _RUN_EPOCH * 10 + 1
+_MGO_BASE  = _RUN_EPOCH * 10 + 2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Result accumulator
@@ -331,14 +334,17 @@ END;
 
 # Oracle CHK_CUST_TIER: tier IN ('STANDARD','SILVER','GOLD','PLATINUM') — UPPERCASE only
 # Oracle CHK_CUST_ACTIVE: is_active IN ('Y','N')
+#
+# DELETE+INSERT strategy (permanent fix — do not revert to MERGE):
+# MERGE WHEN MATCHED UPDATE with identical values = Oracle no-op = zero redo entry
+# = LogMiner sees nothing = Debezium emits nothing = Iceberg never gets the row.
+# DELETE+INSERT unconditionally writes redo entries for both statements.
 def ora_dml(base_id: int) -> list[int]:
-    """Insert rows WITH loyalty_tier_v2."""
+    """DELETE+INSERT rows WITH loyalty_tier_v2."""
     ids = list(range(base_id, base_id + DML_ROWS))
     stmts = "\n".join(
-        f"MERGE INTO CUSTOMERS t USING (SELECT {cid} AS CUSTOMER_ID FROM dual) s "
-        f"ON (t.CUSTOMER_ID=s.CUSTOMER_ID) "
-        f"WHEN MATCHED THEN UPDATE SET t.{NEW_COL.upper()}={i+1},t.TIER='GOLD' "
-        f"WHEN NOT MATCHED THEN INSERT(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
+        f"DELETE FROM CUSTOMERS WHERE CUSTOMER_ID={cid};\n"
+        f"INSERT INTO CUSTOMERS(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
         f"CITY,COUNTRY_CODE,TIER,CREDIT_LIMIT,IS_ACTIVE,{NEW_COL.upper()}) "
         f"VALUES({cid},'StressORA{cid}','Stress','s{cid}@ora.test',"
         f"'TestCity','US','GOLD',5000,'Y',{i+1});"
@@ -349,13 +355,11 @@ def ora_dml(base_id: int) -> list[int]:
 
 
 def ora_dml_no_col(base_id: int) -> list[int]:
-    """Insert rows WITHOUT loyalty_tier_v2."""
+    """DELETE+INSERT rows WITHOUT loyalty_tier_v2."""
     ids = list(range(base_id, base_id + DML_ROWS))
     stmts = "\n".join(
-        f"MERGE INTO CUSTOMERS t USING (SELECT {cid} AS CUSTOMER_ID FROM dual) s "
-        f"ON (t.CUSTOMER_ID=s.CUSTOMER_ID) "
-        f"WHEN MATCHED THEN UPDATE SET t.TIER='STANDARD' "
-        f"WHEN NOT MATCHED THEN INSERT(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
+        f"DELETE FROM CUSTOMERS WHERE CUSTOMER_ID={cid};\n"
+        f"INSERT INTO CUSTOMERS(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
         f"CITY,COUNTRY_CODE,TIER,CREDIT_LIMIT,IS_ACTIVE) "
         f"VALUES({cid},'StressORApre{cid}','Stress','s{cid}@ora.test',"
         f"'TestCity','US','STANDARD',3000,'Y');"
