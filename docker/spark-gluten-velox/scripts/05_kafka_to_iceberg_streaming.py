@@ -893,45 +893,84 @@ def _apply_history_tracking(
         )
 
     # ── 7b. DDL evolution for history_tracking ────────────────────────────────
-    # mergeSchema=true on the REST catalog requires 'write.spark.accept-any-schema'
-    # tblproperty.  For reliability on both new and existing tables, explicitly
-    # issue ALTER TABLE ADD COLUMN for every after_*/before_* column in the
-    # current batch that isn't already in the hist table.
+    # history_tracking tables (_hist) are USER-MANAGED for DDL.
+    # We intentionally do NOT issue ALTER TABLE ADD/DROP COLUMN here because:
+    #   • The hist table accumulates a complete audit trail — silently adding or
+    #     removing columns would corrupt the historical record.
+    #   • Column type changes (e.g. Oracle BIGINT epoch → TIMESTAMP after a
+    #     pipeline version bump) require a deliberate migration, not an auto-cast.
+    #   • The write path below casts every batch column to match the existing
+    #     Iceberg type, so new source columns that aren't in the hist table are
+    #     simply dropped from the batch (no write failure, no silent data loss of
+    #     existing columns).
+    # To add a new column to a hist table, run manually:
+    #   ALTER TABLE <cat>.<ns>.<tbl>_hist ADD COLUMN `<col>` <type>
+    _hist_existing_type_map: dict[str, str] = {}
     try:
-        _hist_existing_cols = {
-            row["col_name"].lower()
-            for row in spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
+        _hist_rows = spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
+        _hist_existing_type_map = {
+            row["col_name"].lower(): row["data_type"].lower()
+            for row in _hist_rows
             if not row["col_name"].startswith("#")
         }
-        for _hf in final_df.schema.fields:
-            if _hf.name.lower() in _hist_existing_cols:
-                continue
-            _hf_ice_type = _PY_TO_ICEBERG.get(type(_hf.dataType).__name__, "STRING")
-            if "$" in _hf.name or "$" in _hf_ice_type:
-                continue
-            try:
-                spark.sql(
-                    f"ALTER TABLE {fqn_backtick} ADD COLUMN `{_hf.name}` {_hf_ice_type}"
-                )
-                logger.info(
-                    "[%s/%s][history_tracking] ALTER TABLE ADD COLUMN `%s` %s — OK",
-                    source_key, table_name, _hf.name, _hf_ice_type,
-                )
-            except Exception as _hf_exc:
-                logger.debug(
-                    "[%s/%s][history_tracking] ALTER TABLE ADD COLUMN `%s` skipped: %s",
-                    source_key, table_name, _hf.name, _hf_exc,
-                )
-    except Exception as _hist_evo_exc:
+    except Exception as _hist_desc_exc:
         logger.debug(
-            "[%s/%s][history_tracking] Schema evolution check skipped: %s",
-            source_key, table_name, _hist_evo_exc,
+            "[%s/%s][history_tracking] DESCRIBE TABLE skipped (new table): %s",
+            source_key, table_name, _hist_desc_exc,
         )
 
+    # ── 7c. Cast batch columns to match existing Iceberg hist schema ──────────
+    # Prevents CANNOT_SAFELY_CAST errors when:
+    #   • Oracle epoch-ms timestamps were previously stored as BIGINT but the
+    #     current pipeline converts them to TIMESTAMP (or vice-versa after a
+    #     pipeline version change).
+    #   • Any type widening/narrowing mismatch between batch inference and the
+    #     committed Iceberg schema.
+    # Columns NOT in the existing hist table are dropped from the batch so they
+    # don't cause INSERT_COLUMN_ARITY_MISMATCH — they will appear as NULL in
+    # existing rows, which is correct for an append-only history table.
+    _ICEBERG_TO_SPARK_CAST = {
+        "bigint":    LongType(),
+        "long":      LongType(),
+        "int":       IntegerType(),
+        "integer":   IntegerType(),
+        "smallint":  IntegerType(),
+        "string":    StringType(),
+        "varchar":   StringType(),
+        "boolean":   BooleanType(),
+        "timestamp": TimestampType(),
+        "double":    DoubleType(),
+        "float":     FloatType(),
+    }
+    if _hist_existing_type_map:
+        cols_to_keep = []
+        for _hf in final_df.schema.fields:
+            _ice_type = _hist_existing_type_map.get(_hf.name.lower())
+            if _ice_type is None:
+                # Column not yet in hist table — drop from this batch
+                logger.debug(
+                    "[%s/%s][history_tracking] batch col '%s' not in hist table — dropping",
+                    source_key, table_name, _hf.name,
+                )
+                continue
+            _target_spark_type = _ICEBERG_TO_SPARK_CAST.get(_ice_type)
+            if _target_spark_type and not isinstance(_hf.dataType, type(_target_spark_type)):
+                # Type mismatch — cast to match Iceberg
+                final_df = final_df.withColumn(
+                    _hf.name,
+                    col(f"`{_hf.name}`").cast(_target_spark_type),
+                )
+                logger.debug(
+                    "[%s/%s][history_tracking] cast '%s' %s → %s to match Iceberg",
+                    source_key, table_name, _hf.name,
+                    type(_hf.dataType).__name__, _ice_type,
+                )
+            cols_to_keep.append(_hf.name)
+        # Keep only columns that exist in the hist table
+        final_df = final_df.select(*[f"`{c}`" for c in cols_to_keep])
+
     # ── 8. Write ──────────────────────────────────────────────────────────────
-    # Collect again after snap col injection so write_df is a clean LocalRelation
-    # with the evaluated snap_id / snap_timestamp values baked in — same
-    # two-collect pattern used by _apply_standard and _apply_soft_delete.
+    # Collect again after snap col injection and type reconciliation.
     write_rows = final_df.collect()
     write_df   = spark.createDataFrame(write_rows, final_df.schema)
     (

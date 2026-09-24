@@ -186,12 +186,18 @@ RUN echo 'export SPARK_JAVA_OPTS="-Dlog4j.configurationFile=/opt/spark/conf/log4
 # Scripts are maintained in docs/runbooks/snowflake-to-iceberg/ and mirrored
 # into docker/spark-gluten-velox/scripts/ so they are part of the build context.
 # Update scripts/ whenever the source files change, then rebuild the image.
+# 05_kafka_to_iceberg_streaming.py is baked into the image here — NOT delivered
+# via ConfigMap — so every pod always runs the exact version that was built and
+# tested.  ConfigMap delivery was unreliable: IfNotPresent pull policy meant pods
+# kept stale cached images, and ArgoCD selfHeal instantly reverted any manual
+# ConfigMap patch before pods restarted.
 RUN mkdir -p /opt/spark/work-dir
-COPY scripts/bao_spark_init.py           /opt/spark/work-dir/bao_spark_init.py
-COPY scripts/spark_iceberg_utils.py      /opt/spark/work-dir/spark_iceberg_utils.py
-COPY scripts/starpump.py                 /opt/spark/work-dir/starpump.py
-COPY scripts/databricks_customer_seed.py /opt/spark/work-dir/databricks_customer_seed.py
-COPY scripts/databricks_product_seed.py  /opt/spark/work-dir/databricks_product_seed.py
+COPY scripts/bao_spark_init.py                    /opt/spark/work-dir/bao_spark_init.py
+COPY scripts/spark_iceberg_utils.py               /opt/spark/work-dir/spark_iceberg_utils.py
+COPY scripts/05_kafka_to_iceberg_streaming.py     /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+COPY scripts/starpump.py                          /opt/spark/work-dir/starpump.py
+COPY scripts/databricks_customer_seed.py          /opt/spark/work-dir/databricks_customer_seed.py
+COPY scripts/databricks_product_seed.py           /opt/spark/work-dir/databricks_product_seed.py
 RUN chmod 644 /opt/spark/work-dir/*.py
 
 # ── CLI entry-points ──────────────────────────────────────────────────────────
