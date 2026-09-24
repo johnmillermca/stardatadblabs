@@ -389,6 +389,36 @@ END;
 /""")
 
 
+def ora_modify_col_number(col: str, new_type: str = "NUMBER(18,4)") -> None:
+    """ALTER TABLE MODIFY an existing NUMBER column to a wider precision."""
+    _ora_run(f"""
+DECLARE v NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v FROM all_tab_columns
+  WHERE owner='CACHE_TESTING' AND table_name='CUSTOMERS'
+    AND column_name='{col.upper()}';
+  IF v > 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE CUSTOMERS MODIFY ({col.upper()} {new_type})';
+  END IF;
+END;
+/""")
+
+
+def ora_modify_col_varchar(col: str, new_length: int = 200) -> None:
+    """ALTER TABLE MODIFY an existing VARCHAR2 column to a new length."""
+    _ora_run(f"""
+DECLARE v NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v FROM all_tab_columns
+  WHERE owner='CACHE_TESTING' AND table_name='CUSTOMERS'
+    AND column_name='{col.upper()}';
+  IF v > 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE CUSTOMERS MODIFY ({col.upper()} VARCHAR2({new_length}))';
+  END IF;
+END;
+/""")
+
+
 def ora_dml(base_id: int, col_name: str, col_value: int) -> list[int]:
     """
     DELETE then INSERT — never MERGE/UPDATE.
@@ -703,6 +733,142 @@ def run_column_rename_test(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Oracle ALTER TABLE MODIFY test runner
+# ─────────────────────────────────────────────────────────────────────────────
+def run_ora_modify_test(ora_id: int) -> tuple[dict[str, list[int]], int]:
+    """
+    Test ALTER TABLE MODIFY for Oracle:
+      1. ADD test_mod_num  SMALLINT       → DML → MODIFY to NUMBER(18,4) → DML
+      2. ADD test_mod_str  VARCHAR2(50)   → DML → MODIFY to VARCHAR2(200) → DML
+
+    Returns:
+      ids_map: { col_name: [ids] }  for final Iceberg verification
+      next_id: next available base ID
+    """
+    ids_map: dict[str, list[int]] = {}
+    cur_id = ora_id
+
+    # ── Case 1: NUMBER column (SMALLINT → NUMBER(18,4)) ──────────────────────
+    num_col = "test_mod_num"
+    _phase(f"[ORA] MODIFY test — ADD {num_col} SMALLINT")
+    try:
+        ora_add_col(num_col)
+        _ok(f"ADD {num_col} SMALLINT")
+    except Exception as e:
+        _fail(f"ADD {num_col}: {e}")
+
+    time.sleep(SETTLE_S)
+    try:
+        ids = ora_dml(cur_id, num_col, 50)
+        ids_map.setdefault(num_col, []).extend(ids)
+        _ok(f"DML {len(ids)} rows with {num_col} (pre-MODIFY)")
+    except Exception as e:
+        _fail(f"DML {num_col} pre-MODIFY: {e}")
+    cur_id += DML_ROWS
+
+    _phase(f"[ORA] MODIFY {num_col} → NUMBER(18,4)")
+    time.sleep(SETTLE_S)
+    try:
+        ora_modify_col_number(num_col, "NUMBER(18,4)")
+        _ok(f"ALTER TABLE CUSTOMERS MODIFY ({num_col.upper()} NUMBER(18,4))")
+    except Exception as e:
+        _fail(f"MODIFY {num_col}: {e}")
+
+    time.sleep(SETTLE_S)
+    try:
+        ids = ora_dml(cur_id, num_col, 60)
+        ids_map.setdefault(num_col, []).extend(ids)
+        _ok(f"DML {len(ids)} rows with {num_col} (post-MODIFY NUMBER(18,4))")
+    except Exception as e:
+        _fail(f"DML {num_col} post-MODIFY: {e}")
+    cur_id += DML_ROWS
+
+    # Clean up
+    time.sleep(SETTLE_S)
+    try:
+        ora_drop_col(num_col)
+        _ok(f"DROP {num_col}")
+    except Exception as e:
+        _fail(f"DROP {num_col}: {e}")
+
+    # ── Case 2: VARCHAR2 column (VARCHAR2(50) → VARCHAR2(200)) ───────────────
+    str_col = "test_mod_str"
+    _phase(f"[ORA] MODIFY test — ADD {str_col} VARCHAR2(50)")
+    time.sleep(SETTLE_S)
+    try:
+        _ora_run(f"""
+DECLARE v NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v FROM all_tab_columns
+  WHERE owner='CACHE_TESTING' AND table_name='CUSTOMERS'
+    AND column_name='{str_col.upper()}';
+  IF v = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE CUSTOMERS ADD ({str_col.upper()} VARCHAR2(50))';
+  END IF;
+END;
+/""")
+        _ok(f"ADD {str_col} VARCHAR2(50)")
+    except Exception as e:
+        _fail(f"ADD {str_col}: {e}")
+
+    # DML: insert rows with a short string value in the new column
+    time.sleep(SETTLE_S)
+    str_ids = list(range(cur_id, cur_id + DML_ROWS))
+    str_stmts = "\n".join(
+        f"DELETE FROM CUSTOMERS WHERE CUSTOMER_ID={cid};\n"
+        f"INSERT INTO CUSTOMERS(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
+        f"CITY,COUNTRY_CODE,TIER,CREDIT_LIMIT,IS_ACTIVE,{str_col.upper()}) "
+        f"VALUES({cid},'ModStrORA{cid}','Test','mods{cid}@ora.test',"
+        f"'TestCity','US','GOLD',5000,'Y','short_{cid}');"
+        for cid in str_ids
+    )
+    try:
+        _ora_run(str_stmts + "\nCOMMIT;")
+        ids_map.setdefault(str_col, []).extend(str_ids)
+        _ok(f"DML {len(str_ids)} rows with {str_col} (pre-MODIFY)")
+    except Exception as e:
+        _fail(f"DML {str_col} pre-MODIFY: {e}")
+    cur_id += DML_ROWS
+
+    _phase(f"[ORA] MODIFY {str_col} → VARCHAR2(200)")
+    time.sleep(SETTLE_S)
+    try:
+        ora_modify_col_varchar(str_col, 200)
+        _ok(f"ALTER TABLE CUSTOMERS MODIFY ({str_col.upper()} VARCHAR2(200))")
+    except Exception as e:
+        _fail(f"MODIFY {str_col}: {e}")
+
+    # DML after MODIFY: insert rows with a longer string (proves widened column works)
+    time.sleep(SETTLE_S)
+    post_ids = list(range(cur_id, cur_id + DML_ROWS))
+    post_stmts = "\n".join(
+        f"DELETE FROM CUSTOMERS WHERE CUSTOMER_ID={cid};\n"
+        f"INSERT INTO CUSTOMERS(CUSTOMER_ID,FIRST_NAME,LAST_NAME,EMAIL,"
+        f"CITY,COUNTRY_CODE,TIER,CREDIT_LIMIT,IS_ACTIVE,{str_col.upper()}) "
+        f"VALUES({cid},'ModStrORA{cid}','Test','mods{cid}@ora.test',"
+        f"'TestCity','US','GOLD',5000,'Y','this_is_a_longer_value_{cid}');"
+        for cid in post_ids
+    )
+    try:
+        _ora_run(post_stmts + "\nCOMMIT;")
+        ids_map.setdefault(str_col, []).extend(post_ids)
+        _ok(f"DML {len(post_ids)} rows with {str_col} (post-MODIFY VARCHAR2(200))")
+    except Exception as e:
+        _fail(f"DML {str_col} post-MODIFY: {e}")
+    cur_id += DML_ROWS
+
+    # Clean up
+    time.sleep(SETTLE_S)
+    try:
+        ora_drop_col(str_col)
+        _ok(f"DROP {str_col}")
+    except Exception as e:
+        _fail(f"DROP {str_col}: {e}")
+
+    return ids_map, cur_id
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Poll Iceberg for a column  (with timeout)
 # ─────────────────────────────────────────────────────────────────────────────
 def _poll_iceberg_col(col: str, tables: list[tuple], timeout: int = POLL_SECS) -> dict:
@@ -810,6 +976,18 @@ def main() -> None:
                 all_renamed_cols.add(col_name)
             _record(f"ORA {col_base}: all phases completed",
                     len(phases) == 4, f"{len(phases)}/4 DML phases")
+
+        # MODIFY sub-test: NUMBER and VARCHAR2 column type changes
+        _hdr("Oracle — ALTER TABLE MODIFY (NUMBER + VARCHAR2)")
+        mod_ids, ora_id = run_ora_modify_test(ora_id)
+        for col_name, ids in mod_ids.items():
+            all_ids["oracle"].setdefault(col_name, []).extend(ids)
+        _record("ORA MODIFY test_mod_num: NUMBER(18,4)",
+                bool(mod_ids.get("test_mod_num")),
+                f"{len(mod_ids.get('test_mod_num', []))} rows captured")
+        _record("ORA MODIFY test_mod_str: VARCHAR2(200)",
+                bool(mod_ids.get("test_mod_str")),
+                f"{len(mod_ids.get('test_mod_str', []))} rows captured")
 
     # ─────────────────────────────────────────────────────────────────────────
     # MongoDB

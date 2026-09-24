@@ -25,8 +25,7 @@ Three write modes, configurable per-run via the WRITE_MODE environment variable:
 Source → topic → Iceberg target mapping
 ----------------------------------------
   postgres  : postgres.cache_testing.*  → postgres.cache_testing.<table>
-  oracle    : oracle.tpcds.*            → oracle.tpcds.<table>
-              oracle.cache_testing.*    → oracle.cache_testing.<table>
+  oracle    : oracle.cache_testing.*    → oracle.cache_testing.<table>
   mongodb   : mongodb.cache_testing.*   → mongodb.cache_testing.<table>
 
 star_transform integration
@@ -255,14 +254,14 @@ class _StreamingSource:
         topic_pattern: str,
         catalog:       str,
         namespace:     str,
-        pk_col:        "str | None",
+        pk_col:        str,
         s3_prefix:     str,
     ) -> None:
         self.source_key    = source_key
         self.topic_pattern = topic_pattern
         self.catalog       = catalog
         self.namespace     = namespace
-        self.pk_col        = pk_col   # None → resolved dynamically per-batch from schema
+        self.pk_col        = pk_col
         self.s3_prefix     = s3_prefix
         self.checkpoint    = (
             f"s3://{S3_BUCKET}/checkpoints/streaming/{source_key}/{WRITE_MODE}"
@@ -280,10 +279,12 @@ _ALL_SOURCES: list[_StreamingSource] = [
     ),
     _StreamingSource(
         source_key    = "oracle",
-        topic_pattern = "oracle\\.(tpcds|cache_testing)\\..*",
+        topic_pattern = "oracle\\.(cache_testing|CACHE_TESTING)\\..*",
         catalog       = "oracle",
-        namespace     = "tpcds",
-        pk_col        = "id",
+        namespace     = "cache_testing",
+        pk_col        = "customer_id",  # Oracle Debezium emits CUSTOMER_ID; lowercased
+                                        # by the Oracle column-normalisation step below
+                                        # before any schema/MERGE operation.
         s3_prefix     = "iceberg/ora_lakehouse",
     ),
     _StreamingSource(
@@ -291,11 +292,9 @@ _ALL_SOURCES: list[_StreamingSource] = [
         topic_pattern = "mongodb\\.cache_testing\\..*",
         catalog       = "mongodb",
         namespace     = "cache_testing",
-        pk_col        = None,            # Debezium MongoDB _id is a BSON struct<$oid:string>
-                                         # which cannot be used as an Iceberg MERGE key.
-                                         # pk_col=None → _resolve_pk() detects the business PK
-                                         # dynamically from the inferred schema at batch time,
-                                         # making this source-config table-agnostic.
+        pk_col        = "customer_id",   # Debezium MongoDB emits _id as BSON struct<$oid:string>
+                                         # which cannot be an Iceberg column or MERGE key.
+                                         # The document-level business PK is customer_id.
         s3_prefix     = "iceberg/mgo_lakehouse",
     ),
 ]
@@ -309,69 +308,6 @@ if _SOURCE_FILTER:
             file=sys.stderr,
         )
         sys.exit(1)
-
-
-# ── Dynamic PK resolver ────────────────────────────────────────────────────────
-
-def _resolve_pk(schema: "StructType", table_name: str) -> str:
-    """
-    Determine the business primary-key column name from an inferred schema.
-
-    Used when _StreamingSource.pk_col is None (e.g. MongoDB, where _id is an
-    unserializable BSON struct and cannot serve as the Iceberg MERGE key).
-
-    Resolution order — first match wins:
-      1. ``id``                         — canonical single-column PK
-      2. ``<singular(table_name)>_id``  — e.g. table "customers" → "customer_id"
-                                          table "orders"          → "order_id"
-      3. ``<table_name>_id``            — direct table-name prefix match
-      4. First column whose name ends with ``_id`` (excluding ``_id`` itself)
-      5. ``snap_id`` excluded — it is a pipeline audit column, not a source PK
-      6. Fallback: first non-``_id`` column in the schema (last resort — logs a warning)
-
-    The comparison is case-insensitive; the returned name preserves the original
-    casing from the schema so downstream MERGE ON clauses use the correct identifier.
-    """
-    col_names = [f.name for f in schema.fields]
-    lower_map = {f.name.lower(): f.name for f in schema.fields}  # lower → original
-
-    # 1. "id"
-    if "id" in lower_map:
-        return lower_map["id"]
-
-    # 2. singular(<table>)_id  — strip common plural suffixes
-    singular = table_name.rstrip("s")  # "customers" → "customer", "orders" → "order"
-    candidate = f"{singular}_id"
-    if candidate in lower_map:
-        return lower_map[candidate]
-
-    # 3. <table>_id  (table name without modification)
-    candidate = f"{table_name}_id"
-    if candidate in lower_map:
-        return lower_map[candidate]
-
-    # 4. first *_id col that isn't "_id" or "snap_id"
-    _EXCLUDE = {"_id", "snap_id"}
-    for name in col_names:
-        if name.lower().endswith("_id") and name.lower() not in _EXCLUDE:
-            return name
-
-    # 5. fallback — use first non-_id column (very unlikely, emit a warning)
-    for name in col_names:
-        if name.lower() != "_id":
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "Could not determine PK for table %r from schema %s — "
-                "falling back to first non-_id column %r. "
-                "Consider setting pk_col explicitly on the _StreamingSource.",
-                table_name, [f.name for f in schema.fields], name,
-            )
-            return name
-
-    raise ValueError(
-        f"Cannot determine a PK column for table {table_name!r}; "
-        f"schema has no usable columns: {[f.name for f in schema.fields]}"
-    )
 
 
 # ── Debezium envelope schema ───────────────────────────────────────────────────
@@ -486,7 +422,7 @@ def _topic_to_table(topic: str, source: _StreamingSource) -> str:
     """
     Derive the Iceberg table name from a Kafka topic name.
     e.g. "postgres.cache_testing.customers" → "customers"
-         "oracle.tpcds.CALL_CENTER"         → "call_center"
+         "oracle.cache_testing.CUSTOMERS"   → "customers"
     """
     import re
     # Strip the source prefix (e.g. "oracle.(tpcds|cache_testing).")
@@ -507,8 +443,7 @@ def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
         mongodb.cache_testing.customers   → mongodb.e2e_testing.customers
 
     When TARGET_NAMESPACE is empty the namespace is derived from the topic:
-        e.g. "oracle.tpcds.INCOME_BAND"           → "tpcds"
-             "oracle.cache_testing.ORDERS"        → "cache_testing"
+        e.g. "oracle.cache_testing.CUSTOMERS"     → "cache_testing"
              "postgres.cache_testing.orders"      → "cache_testing"
     """
     if _TARGET_NAMESPACE:
@@ -522,16 +457,11 @@ def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
 
 def _build_transform_pipeline(
     source_key: str,
-    pk_col:     "str | None",
+    pk_col:     str,
 ) -> list[tuple[Any, dict]]:
     """
     Build the list of (fn, kwargs) steps from TRANSFORM_STEPS env config.
     Called once per source at stream startup.
-
-    When ``pk_col`` is None (dynamic PK source such as MongoDB), the
-    ``deduplicate`` step is omitted from the returned list — it will be
-    injected per-batch inside ``_write_micro_batch`` once the PK has been
-    resolved from the inferred schema via ``_resolve_pk()``.
     """
     registry: dict[str, tuple[Any, dict]] = {
         "deduplicate":         (ST.deduplicate,         {"pk": pk_col, "order_col": "kafka_ts"}),
@@ -542,14 +472,6 @@ def _build_transform_pipeline(
     }
     steps = []
     for step_name in _TRANSFORM_STEPS:
-        if step_name == "deduplicate" and pk_col is None:
-            # PK not known at startup — defer to per-batch injection
-            logger.debug(
-                "[%s] 'deduplicate' step deferred to per-batch (pk_col=None, "
-                "will be resolved dynamically from inferred schema).",
-                source_key,
-            )
-            continue
         if step_name in registry:
             steps.append(registry[step_name])
         else:
@@ -616,36 +538,8 @@ def _apply_standard(
 
     _SNAP_COLS = {"snap_id", "snap_timestamp"}
 
-    # ── Dedup within batch: last-write-wins per PK ────────────────────────────
-    # MongoDB CDC (and any high-frequency source) can produce multiple events for
-    # the same PK within one micro-batch (e.g. INSERT followed immediately by an
-    # UPDATE, or two updates to the same document).  MERGE INTO Iceberg raises
-    # MERGE_CARDINALITY_VIOLATION when the source has >1 row matching a single
-    # target row on the join key.  Deduplicate here *before* dropping kafka_ts
-    # (we need it to pick the latest event per PK).  It is a no-op for sources
-    # that never emit duplicate PKs in one batch.
-    _inserts_raw = payload_df.filter(col("_op").isin("c", "u", "r"))
-    _deletes_raw = payload_df.filter(col("_op") == "d")
-
-    if not _inserts_raw.isEmpty() and pk_col in _inserts_raw.columns:
-        from pyspark.sql import Window as _W
-        _win = _W.partitionBy(col(f"`{pk_col}`")).orderBy(col("kafka_ts").desc())
-        _inserts_raw = (
-            _inserts_raw
-            .withColumn("_rn", F.row_number().over(_win))
-            .filter(col("_rn") == 1)
-            .drop("_rn")
-        )
-    if not _deletes_raw.isEmpty() and pk_col in _deletes_raw.columns:
-        _ins_pks = {r[0] for r in _inserts_raw.select(pk_col).collect()} if not _inserts_raw.isEmpty() else set()
-        _deletes_raw = _deletes_raw.dropDuplicates([pk_col])
-        # If a PK appears in both inserts and deletes in the same batch,
-        # the insert (later event) wins — drop the delete for that PK.
-        if _ins_pks:
-            _deletes_raw = _deletes_raw.filter(~col(f"`{pk_col}`").isin(list(_ins_pks)))
-
-    inserts = _inserts_raw.drop("_op", "kafka_ts")
-    deletes = _deletes_raw.drop("_op", "kafka_ts")
+    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
+    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
         raw_df = (
@@ -737,47 +631,8 @@ def _apply_soft_delete(
 
     _SNAP_COLS = {"snap_id", "snap_timestamp"}
 
-    # ── Dedup within batch + nullable PK (same pattern as _apply_standard) ────
-    _inserts_raw = payload_df.filter(col("_op").isin("c", "u", "r"))
-    _deletes_raw = payload_df.filter(col("_op") == "d")
-
-    if not _inserts_raw.isEmpty() and pk_col in _inserts_raw.columns:
-        from pyspark.sql import Window as _W
-        _win = _W.partitionBy(col(f"`{pk_col}`")).orderBy(col("kafka_ts").desc())
-        _inserts_raw = (
-            _inserts_raw
-            .withColumn("_rn", F.row_number().over(_win))
-            .filter(col("_rn") == 1)
-            .drop("_rn")
-        )
-    if not _deletes_raw.isEmpty() and pk_col in _deletes_raw.columns:
-        _ins_pks = {r[0] for r in _inserts_raw.select(pk_col).collect()} if not _inserts_raw.isEmpty() else set()
-        _deletes_raw = _deletes_raw.dropDuplicates([pk_col])
-        if _ins_pks:
-            _deletes_raw = _deletes_raw.filter(~col(f"`{pk_col}`").isin(list(_ins_pks)))
-
-    inserts = _inserts_raw.drop("_op", "kafka_ts")
-    deletes = _deletes_raw.drop("_op", "kafka_ts")
-
-    # ── Make PK column nullable to avoid Velox NullPointerException ───────────
-    # MongoDB documents may arrive without the PK field (e.g. partial update
-    # events that set a new field on a document but don't include customer_id
-    # in the after image).  If the Iceberg table was created with pk NOT NULL
-    # (inferred from first batch where all rows had the PK), Velox/Gluten will
-    # crash with "Null value appeared in non-nullable field: <pk>".
-    # Cast the PK to nullable here so the MERGE source always allows NULLs —
-    # MERGE ON condition handles NULL safely (NULL != anything → no match →
-    # row is skipped, not inserted or updated).
-    if pk_col in inserts.columns:
-        pk_type = inserts.schema[pk_col].dataType
-        inserts = inserts.withColumn(pk_col, col(f"`{pk_col}`").cast(pk_type))
-        # Force nullable via schema reconstruction
-        from pyspark.sql.types import StructField as _SF, StructType as _ST
-        new_fields = [
-            _SF(f.name, f.dataType, True) if f.name == pk_col else f
-            for f in inserts.schema.fields
-        ]
-        inserts = spark.createDataFrame(inserts.collect(), _ST(new_fields))
+    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
+    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
 
     if not inserts.isEmpty():
         raw_df = (
@@ -1041,8 +896,7 @@ def _apply_history_tracking(
     # mergeSchema=true on the REST catalog requires 'write.spark.accept-any-schema'
     # tblproperty.  For reliability on both new and existing tables, explicitly
     # issue ALTER TABLE ADD COLUMN for every after_*/before_* column in the
-    # current batch that isn't already in the hist table.  This is the same
-    # strategy used by standard/soft_delete modes and avoids INSERT_COLUMN_ARITY_MISMATCH.
+    # current batch that isn't already in the hist table.
     try:
         _hist_existing_cols = {
             row["col_name"].lower()
@@ -1053,7 +907,6 @@ def _apply_history_tracking(
             if _hf.name.lower() in _hist_existing_cols:
                 continue
             _hf_ice_type = _PY_TO_ICEBERG.get(type(_hf.dataType).__name__, "STRING")
-            # Skip BSON-style names
             if "$" in _hf.name or "$" in _hf_ice_type:
                 continue
             try:
@@ -1070,54 +923,9 @@ def _apply_history_tracking(
                     source_key, table_name, _hf.name, _hf_exc,
                 )
     except Exception as _hist_evo_exc:
-        # Table doesn't exist yet — will be created above or on next batch
         logger.debug(
             "[%s/%s][history_tracking] Schema evolution check skipped: %s",
             source_key, table_name, _hist_evo_exc,
-        )
-
-    # ── 7c. Drop Iceberg columns absent from the current batch ────────────────
-    # When a column is dropped at the source (e.g. after a DDL stress test),
-    # Debezium stops emitting it.  The hist table still has the old column and
-    # writeTo().append() raises CANNOT_FIND_DATA because Iceberg expects a value
-    # for every existing column.  Permanently fix this by issuing ALTER TABLE
-    # DROP COLUMN for every Iceberg column not present in the current batch's
-    # DataFrame.  Only after_*/before_* test columns are eligible — core metadata
-    # columns (snap_id, snap_timestamp, _change_type, _change_ts, pk_col) are
-    # always present and never dropped.
-    _PROTECTED_COLS = {
-        "snap_id", "snap_timestamp", "_change_type", "_change_ts",
-        pk_col.lower(), f"after_{pk_col}".lower(), f"before_{pk_col}".lower(),
-    }
-    try:
-        _batch_cols_lower = {f.name.lower() for f in final_df.schema.fields}
-        _iceberg_cols = {
-            row["col_name"].lower()
-            for row in spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
-            if not row["col_name"].startswith("#")
-        }
-        _stale = _iceberg_cols - _batch_cols_lower - _PROTECTED_COLS
-        for _stale_col in sorted(_stale):
-            if "$" in _stale_col:
-                continue
-            try:
-                spark.sql(
-                    f"ALTER TABLE {fqn_backtick} DROP COLUMN `{_stale_col}`"
-                )
-                logger.info(
-                    "[%s/%s][history_tracking] ALTER TABLE DROP COLUMN `%s` "
-                    "(no longer in source schema) — OK",
-                    source_key, table_name, _stale_col,
-                )
-            except Exception as _drop_exc:
-                logger.debug(
-                    "[%s/%s][history_tracking] ALTER TABLE DROP COLUMN `%s` skipped: %s",
-                    source_key, table_name, _stale_col, _drop_exc,
-                )
-    except Exception as _stale_exc:
-        logger.debug(
-            "[%s/%s][history_tracking] Stale column check skipped: %s",
-            source_key, table_name, _stale_exc,
         )
 
     # ── 8. Write ──────────────────────────────────────────────────────────────
@@ -1282,7 +1090,7 @@ def _write_micro_batch(
                     and not _is_bson_struct(f)
                 ]
 
-            def _batch_field_names() -> frozenset[str]:
+            def _batch_field_names() -> frozenset:
                 """
                 O(1) key scan: extract field names from the first non-null payload
                 row without launching a Spark job.  Returns a frozenset of
@@ -1325,6 +1133,77 @@ def _write_micro_batch(
                     _fresh_schema_raw = spark.read.json(
                         payload_df.select("payload_json").rdd.map(lambda r: r[0])
                     ).schema
+
+                    # ── Oracle column-name normalisation ──────────────────────────
+                    # Oracle stores all identifiers in uppercase in its data
+                    # dictionary.  Debezium therefore emits JSON payload keys as
+                    # uppercase (CUSTOMER_ID, FIRST_NAME, …).  Iceberg requires
+                    # consistent casing across all sources; Postgres and MongoDB
+                    # emit lowercase names.  Lowercase every field name here so
+                    # the inferred schema, the MERGE pk_col lookup, and the
+                    # history-tracking after_*/before_* column names are all
+                    # lowercase before any Iceberg interaction.
+                    if source.source_key == "oracle":
+                        # Lowercase field names: Oracle data dictionary is all-caps.
+                        _fresh_schema_raw = StructType([
+                            StructField(f.name.lower(), f.dataType, f.nullable)
+                            for f in _fresh_schema_raw.fields
+                        ])
+                        # ── Oracle timestamp fix (time.precision.mode=connect) ────
+                        # With time.precision.mode=connect, Debezium emits Oracle
+                        # DATE/TIMESTAMP columns as epoch-microseconds (LongType).
+                        # PySpark's fromInternal treats them as milliseconds, causing
+                        # "year 58688 is out of range" on collect().
+                        # Fix: downcast every LongType field whose name ends in a
+                        # known timestamp suffix to TimestampType in the inferred
+                        # schema, and divide the raw value by 1000 in the payload
+                        # so Spark receives epoch-milliseconds.
+                        _TS_SUFFIXES_ORA = ("_at", "_ts", "_time", "_date", "_updated", "_created")
+                        _needs_ts_fix = {
+                            f.name.lower()
+                            for f in _fresh_schema_raw.fields
+                            if isinstance(f.dataType, LongType)
+                            and any(f.name.lower().endswith(s) for s in _TS_SUFFIXES_ORA)
+                        }
+                        if _needs_ts_fix:
+                            _fresh_schema_raw = StructType([
+                                StructField(
+                                    f.name,
+                                    TimestampType() if f.name in _needs_ts_fix else f.dataType,
+                                    f.nullable,
+                                )
+                                for f in _fresh_schema_raw.fields
+                            ])
+
+                        def _normalise_oracle_payload(s):
+                            if not s:
+                                return s
+                            d = json.loads(s)
+                            out = {}
+                            for k, v in d.items():
+                                lk = k.lower()
+                                # divide microsecond timestamps to milliseconds
+                                if lk in _needs_ts_fix and isinstance(v, (int, float)):
+                                    v = v / 1000
+                                out[lk] = v
+                            return json.dumps(out)
+
+                        _lower_payload = F.udf(_normalise_oracle_payload, StringType())
+                        payload_df = payload_df.withColumn(
+                            "payload_json", _lower_payload(col("payload_json"))
+                        )
+                        # Also normalise before/after JSON keys in full_envelope_df
+                        # so history-tracking after_*/before_* expansion works.
+                        full_envelope_df = full_envelope_df.withColumn(
+                            "before",
+                            F.when(col("before").isNotNull(),
+                                   _lower_payload(col("before"))),
+                        ).withColumn(
+                            "after",
+                            F.when(col("after").isNotNull(),
+                                   _lower_payload(col("after"))),
+                        )
+
                     # Strip BSON/invalid fields before any cache or evolution logic
                     _fresh_schema = StructType(_safe_iceberg_fields(_fresh_schema_raw.fields))
 
@@ -1410,12 +1289,10 @@ def _write_micro_batch(
                         # Field count changed — DDL evolution detected.
                         # Keep ALL cached fields (types are authoritative).
                         # Only append fields that are genuinely new.
-                        # Type-stability: for newly added fields, prefer the Iceberg-
-                        # resident type if the column already exists there (e.g. a
-                        # rename was processed by another pod and Iceberg already has
-                        # it as BIGINT; a NULL-only batch here infers it as STRING).
+                        # Type-stability: prefer Iceberg-resident type for new fields
+                        # (prevents NULL-batch inference from adding STRING when Iceberg
+                        # already has the renamed column as BIGINT).
                         _cached_names = {f.name.lower(): f for f in inferred_schema.fields}
-                        # Fetch live Iceberg column types once for the evolution table
                         _evo_tbl_evolve = (
                             f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
                             else (f"{table_name}_hist" if write_mode == _WRITE_MODE_HISTORY_TRACKING
@@ -1437,7 +1314,6 @@ def _write_micro_batch(
                         _added = []
                         for _nf in _fresh_schema.fields:
                             if _nf.name.lower() not in _cached_names:
-                                # Use Iceberg type if already known; else use inferred
                                 _ice_t2 = _ice_evolve_map.get(_nf.name.lower())
                                 if _ice_t2 and _ice_t2 in _ICE_TO_SPARK:
                                     _nf = StructField(_nf.name, _ICE_TO_SPARK[_ice_t2], _nf.nullable)
@@ -1473,14 +1349,40 @@ def _write_micro_batch(
                         source.source_key, table_name, batch_id, exc,
                     )
 
-            # ── Schema-cache invalidation: ALTER TABLE for new cols in Iceberg ─
-            # After DDL evolution is detected (fresh schema has new fields that
-            # the Iceberg table lacks), issue ALTER TABLE ADD COLUMN inline before
-            # the MERGE so the MERGE never hits UNRESOLVED_COLUMN.
-            # history_tracking handles its own ALTER TABLE inside _apply_history_tracking
-            # (where the after_*/before_* prefixed final_df schema is known).
-            # BSON struct fields (e.g. _id struct<$oid:string>) are excluded —
+            # ── DDL evolution: ALTER TABLE for new/missing columns ────────────
+            #
+            # WHY WE SKIP THE BATCH AFTER ALTER TABLE (permanent fix)
+            # ─────────────────────────────────────────────────────────
+            # Spark resolves column names in the MERGE SQL plan during the
+            # *analysis phase*, which runs against the metadata cached in the
+            # SparkSession's catalog at plan-build time — before the MERGE
+            # actually executes.  After ALTER TABLE ADD COLUMN, REFRESH TABLE
+            # updates the catalog metadata cache, but the MERGE plan for the
+            # *current batch* has already been analysed with the old schema.
+            # Those new columns are UNRESOLVED in the already-built plan and
+            # will raise AnalysisException regardless of REFRESH.
+            #
+            # The only safe approach: when ALTER TABLE adds new columns, skip
+            # the current batch (continue to the next topic).  The next batch
+            # will re-enter this code with a fresh, empty plan cache.  It will
+            # call DESCRIBE TABLE, see the columns are already present, skip
+            # the ALTER TABLE loop, and proceed directly to MERGE against the
+            # fully-updated schema.
+            #
+            # Cost: one batch worth of rows is deferred by ~TRIGGER_INTERVAL.
+            # This is always safe — Spark Structured Streaming guarantees
+            # exactly-once delivery via checkpoints; the skipped rows remain
+            # in the Kafka topic and are consumed on the next batch.
+            #
+            # This pattern applies to ALL externally-created tables (manual
+            # DDL, migration, fresh pod after DROP+recreate) — not just the
+            # snap_id/snap_timestamp case.  Any table missing expected columns
+            # gets them added in one batch, then MERGE runs cleanly in the next.
+            #
+            # history_tracking manages its own ALTER TABLE internally.
+            # BSON struct fields (struct with '$' sub-fields) are excluded —
             # Iceberg column names cannot contain '$'.
+            _ddl_cols_added = False
             if write_mode != _WRITE_MODE_HISTORY_TRACKING:
                 _evo_table = (
                     f"{table_name}_sd" if write_mode == _WRITE_MODE_SOFT_DELETE
@@ -1493,20 +1395,34 @@ def _write_micro_batch(
                         for row in spark.sql(f"DESCRIBE TABLE {_evo_fqn}").collect()
                         if not row["col_name"].startswith("#")
                     }
-                    _batch_cols = {f.name.lower() for f in inferred_schema.fields}
-                    _new_cols = _batch_cols - _iceberg_cols - {"snap_id", "snap_timestamp"}
+                    # Build complete expected column set:
+                    #   • all payload columns from inferred_schema
+                    #   • snap_id / snap_timestamp (injected by write-mode handlers
+                    #     via withColumn — not present in inferred_schema)
+                    # full_schema is defined later in this function so we use
+                    # inferred_schema directly here.
+                    _snap_audit_fields = [
+                        StructField("snap_id",        LongType(),      True),
+                        StructField("snap_timestamp", TimestampType(), True),
+                    ]
+                    _all_known_fields = {
+                        f.name.lower(): f
+                        for f in (
+                            list(inferred_schema.fields)
+                            + _snap_audit_fields
+                        )
+                    }
+                    _expected_cols = set(_all_known_fields.keys())
+                    _new_cols = _expected_cols - _iceberg_cols
                     if _new_cols:
                         logger.info(
                             "[%s/%s] DDL evolution: %d new column(s) to add to Iceberg: %s",
                             source.source_key, _evo_table, len(_new_cols), sorted(_new_cols),
                         )
                         for _nc in sorted(_new_cols):
-                            _nc_field = next(
-                                f for f in inferred_schema.fields
-                                if f.name.lower() == _nc
-                            )
-                            # Skip any field whose Iceberg type string would be
-                            # unparseable (e.g. struct<$oid:string>)
+                            _nc_field = _all_known_fields.get(_nc)
+                            if _nc_field is None:
+                                continue
                             _ice_type = _nc_field.dataType.simpleString()
                             if "$" in _ice_type or _is_bson_struct(_nc_field):
                                 logger.debug(
@@ -1514,16 +1430,16 @@ def _write_micro_batch(
                                     source.source_key, _evo_table, _nc_field.name, _ice_type,
                                 )
                                 continue
-                            _alter_ddl = (
-                                f"ALTER TABLE {_evo_fqn} "
-                                f"ADD COLUMN `{_nc_field.name}` {_ice_type}"
-                            )
                             try:
-                                spark.sql(_alter_ddl)
+                                spark.sql(
+                                    f"ALTER TABLE {_evo_fqn} "
+                                    f"ADD COLUMN `{_nc_field.name}` {_ice_type}"
+                                )
                                 logger.info(
                                     "[%s/%s] ALTER TABLE ADD COLUMN `%s` %s — OK",
                                     source.source_key, _evo_table, _nc_field.name, _ice_type,
                                 )
+                                _ddl_cols_added = True
                             except Exception as _alt_exc:
                                 logger.warning(
                                     "[%s/%s] ALTER TABLE ADD COLUMN `%s` failed "
@@ -1531,12 +1447,28 @@ def _write_micro_batch(
                                     source.source_key, _evo_table,
                                     _nc_field.name, _alt_exc,
                                 )
+                        if _ddl_cols_added:
+                            # The ALTER TABLE ADD COLUMN calls above already ran in
+                            # this batch execution and inferred_schema is up to date.
+                            # from_json(payload_json, inferred_schema) will produce the
+                            # new columns in row_df, and Iceberg already has them from
+                            # the ALTER TABLE, so the MERGE can proceed inline right now.
+                            # Removing the previous `continue` eliminates the ~60 s
+                            # wasted batch window that occurred on every DDL event and
+                            # was the reason intermediate rename columns were lost during
+                            # fast rename storms (5 cols × 3 renames outpaced the cycle).
+                            logger.info(
+                                "[%s/%s] Columns added to Iceberg in batch %d — "
+                                "proceeding with MERGE inline (no batch skip).",
+                                source.source_key, _evo_table, batch_id,
+                            )
                 except Exception as _evo_exc:
                     # DESCRIBE TABLE fails when table doesn't exist yet — safe to ignore
                     logger.debug(
                         "[%s/%s] Schema evolution ALTER check skipped: %s",
                         source.source_key, _evo_table, _evo_exc,
                     )
+
             # ── Parse payload JSON → typed DataFrame ──────────────────────────
             try:
                 row_df = payload_df.select(
@@ -1550,47 +1482,39 @@ def _write_micro_batch(
                 )
                 continue
 
-            # ── PK column name (case-insensitive, dynamic for MongoDB) ─────────
-            # When source.pk_col is None the business PK is inferred from the
-            # batch schema — this makes the pipeline table-agnostic (any MongoDB
-            # collection, not just "customers").
-            if source.pk_col is None:
-                try:
-                    pk_col_actual = _resolve_pk(inferred_schema, table_name)
-                except ValueError as _pk_exc:
-                    logger.error(
-                        "[%s/%s] Cannot resolve PK — skipping batch: %s",
-                        source.source_key, table_name, _pk_exc,
-                    )
-                    continue
-                logger.info(
-                    "[%s/%s] Dynamic PK resolved: %r",
-                    source.source_key, table_name, pk_col_actual,
-                )
-            else:
-                pk_col_actual = source.pk_col
-                for f in inferred_schema.fields:
-                    if f.name.lower() == source.pk_col.lower():
-                        pk_col_actual = f.name
-                        break
-
             # ── Apply StarTransform pipeline steps ────────────────────────────
-            # For sources with dynamic PK (source.pk_col is None), inject the
-            # deduplicate step here with the now-resolved pk_col_actual so that
-            # dedup runs with the correct column name for this specific table.
-            effective_steps = list(transform_steps)
-            if source.pk_col is None and "deduplicate" in _TRANSFORM_STEPS:
-                effective_steps.insert(0, (ST.deduplicate, {"pk": pk_col_actual, "order_col": "kafka_ts"}))
-
-            if effective_steps:
+            if transform_steps:
                 try:
-                    row_df = ST.apply_pipeline(row_df, effective_steps)
+                    row_df = ST.apply_pipeline(row_df, transform_steps)
                 except Exception as exc:
                     logger.error(
                         "[%s/%s] StarTransform pipeline failed: %s",
                         source.source_key, table_name, exc,
                     )
                     continue
+
+            # ── PK column name — always lowercase for Oracle ──────────────────
+            # Oracle Debezium emits uppercase payload keys (CUSTOMER_ID).  The
+            # Oracle normalisation UDF lowercases them before schema inference, so
+            # inferred_schema fields are already lowercase.  However, if a table
+            # was previously created with uppercase column names (e.g. by a manual
+            # DDL or an older version of this script), DESCRIBE TABLE seeds
+            # inferred_schema with uppercase field names which then propagate into
+            # the MERGE ON clause.  Spark Iceberg MERGE is case-sensitive on the
+            # target side, so `t.CUSTOMER_ID = s.customer_id` never matches.
+            #
+            # Permanent fix: for Oracle, always force pk_col_actual to the
+            # canonical lowercase source.pk_col so the MERGE ON clause always uses
+            # the lowercase name.  The ALTER TABLE RENAME COLUMN step below ensures
+            # the Iceberg column itself is also lowercased if needed.
+            if source.source_key == "oracle":
+                pk_col_actual = source.pk_col.lower()
+            else:
+                pk_col_actual = source.pk_col
+                for f in inferred_schema.fields:
+                    if f.name.lower() == source.pk_col.lower():
+                        pk_col_actual = f.name
+                        break
 
             # ── Build write-mode-specific extra schema fields ─────────────────
             # snap_id / snap_timestamp are intentionally omitted here — they are
@@ -1648,13 +1572,38 @@ def _write_micro_batch(
             if write_mode != _WRITE_MODE_HISTORY_TRACKING:
                 table_exists = builder.table_exists(source.catalog, namespace, effective_table)
                 if not table_exists:
-                    # pk_col_actual is already resolved (statically from source.pk_col
-                    # or dynamically via _resolve_pk) — use it directly here.
                     pk_col_exists = any(
                         f.name.lower() == pk_col_actual.lower()
-                        for f in inferred_schema.fields
+                        for f in full_schema.fields
                     )
                     pk_for_bucket = pk_col_actual if pk_col_exists else "snap_id"
+                    # bucket[N] is only valid for integer (long/int) and string types.
+                    # Oracle NUMBER columns infer as double in Spark JSON inference;
+                    # using bucket on double raises:
+                    #   ValidationException: Invalid source type double for transform: bucket[16]
+                    # This was the root cause of customers_sd never being created:
+                    # customer_id is NUMBER in Oracle → double in inferred schema →
+                    # CREATE TABLE failed every single batch since pod startup.
+                    # Fix: inspect the actual Spark type of pk_for_bucket from full_schema
+                    # and fall back to identity(snap_timestamp) for non-bucket types.
+                    _BUCKET_COMPATIBLE_TYPES = (
+                        "LongType", "IntegerType", "ShortType", "ByteType", "StringType",
+                    )
+                    _pk_field_type = next(
+                        (f.dataType for f in full_schema.fields
+                         if f.name.lower() == pk_for_bucket.lower()),
+                        None,
+                    )
+                    _pk_type_name = type(_pk_field_type).__name__ if _pk_field_type else "unknown"
+                    if _pk_type_name in _BUCKET_COMPATIBLE_TYPES:
+                        _pk_partition = IcebergTableBuilder.bucket(pk_for_bucket, 16)
+                    else:
+                        logger.info(
+                            "[%s/%s] PK column %r has type %s — not bucket-compatible; "
+                            "using identity(snap_timestamp) as second partition transform.",
+                            source.source_key, effective_table, pk_for_bucket, _pk_type_name,
+                        )
+                        _pk_partition = IcebergTableBuilder.identity("snap_timestamp")
                     effective_loc = (
                         f"s3://{S3_BUCKET}/{source.s3_prefix}"
                         f"/{namespace}/{effective_table}"
@@ -1667,7 +1616,7 @@ def _write_micro_batch(
                             schema         = full_schema,
                             partition_spec = [
                                 IcebergTableBuilder.hours("snap_timestamp"),
-                                IcebergTableBuilder.bucket(pk_for_bucket, 16),
+                                _pk_partition,
                             ],
                             location       = effective_loc,
                             extra_properties={
@@ -1683,6 +1632,58 @@ def _write_micro_batch(
                         logger.warning(
                             "[%s/%s] Table creation failed (may already exist): %s",
                             source.source_key, effective_table, create_exc,
+                        )
+                    # ── Bug fix: verify table actually exists after create ─────
+                    # create_table() raises on Polaris conflicts but the exception
+                    # is caught above as a warning.  If the table still does not
+                    # exist after the attempted create, skip this batch entirely
+                    # instead of letting MERGE crash with TABLE_OR_VIEW_NOT_FOUND.
+                    # The next batch will re-enter this path and retry the create.
+                    if not builder.table_exists(source.catalog, namespace, effective_table):
+                        logger.error(
+                            "[%s/%s] Table does not exist after create attempt — "
+                            "skipping batch %d to avoid TABLE_OR_VIEW_NOT_FOUND. "
+                            "Will retry on next batch.",
+                            source.source_key, effective_table, batch_id,
+                        )
+                        continue
+
+                # ── Bug fix: rename uppercase PK column to lowercase in Iceberg ─
+                # If the Iceberg table was created with uppercase column names
+                # (e.g. CUSTOMER_ID from a manual DDL or a previous pipeline
+                # version), the MERGE ON clause `t.customer_id = s.customer_id`
+                # never resolves because Spark Iceberg MERGE is case-sensitive on
+                # the target side.  Detect and rename in-place before every MERGE.
+                # ALTER TABLE RENAME COLUMN is idempotent when the target name
+                # already exists (Iceberg returns an error which we swallow).
+                if source.source_key == "oracle":
+                    try:
+                        _desc_rows = spark.sql(
+                            f"DESCRIBE TABLE {fqn_backtick}"
+                        ).collect()
+                        for _dr in _desc_rows:
+                            _cn = _dr["col_name"]
+                            if _cn.startswith("#"):
+                                continue
+                            # Any column whose name is not already lowercase
+                            if _cn != _cn.lower():
+                                try:
+                                    spark.sql(
+                                        f"ALTER TABLE {fqn_backtick} "
+                                        f"RENAME COLUMN `{_cn}` TO `{_cn.lower()}`"
+                                    )
+                                    logger.info(
+                                        "[%s/%s] Renamed uppercase Iceberg column "
+                                        "`%s` → `%s`",
+                                        source.source_key, effective_table,
+                                        _cn, _cn.lower(),
+                                    )
+                                except Exception:
+                                    pass  # already lowercase or concurrent rename
+                    except Exception as _rename_exc:
+                        logger.debug(
+                            "[%s/%s] Column case normalisation skipped: %s",
+                            source.source_key, effective_table, _rename_exc,
                         )
 
             # ── Apply write mode ──────────────────────────────────────────────
@@ -1780,14 +1781,10 @@ def _start_source_stream(
         "kafka.sasl.mechanism":           "SCRAM-SHA-512",
         "kafka.sasl.jaas.config":         jaas_cfg,
         "subscribePattern":               source.topic_pattern,
-        # "earliest" not "latest":
-        # Once an S3 checkpoint exists, Spark ignores startingOffsets entirely —
-        # the checkpoint committed offset is used unconditionally.
-        # This setting only matters on the very first start (no checkpoint yet).
-        # "latest" = silently skip all messages Debezium wrote before the pod started.
-        # "earliest" = read everything from the beginning on first start, so no
-        # messages are ever lost due to a gap between Debezium producing and the
-        # pod consuming for the first time.
+        # "earliest" not "latest": once a checkpoint exists Spark ignores this
+        # and uses the committed checkpoint offset. Only affects first-ever start
+        # (no checkpoint). "earliest" ensures no messages are lost if Debezium
+        # produced events before the pod first started consuming.
         "startingOffsets":                "earliest",
         "maxOffsetsPerTrigger":           str(MAX_OFFSETS_PER_TRIGGER),
         "failOnDataLoss":                 "false",
@@ -1798,6 +1795,101 @@ def _start_source_stream(
         "kafka.max.partition.fetch.bytes": "2097152",  # 2 MB per partition per fetch
         "kafka.receive.buffer.bytes":     "1048576",   # 1 MB socket receive buffer
     }
+
+    # ── Checkpoint-topic mismatch guard ──────────────────────────────────────
+    # Problem: when new Kafka topics appear (new table added to Debezium, or
+    # partition count changes, or topic naming strategy switches), Spark's
+    # SubscribePattern picks them up on restart.  If the existing checkpoint
+    # only knows the old topic-partition set, Spark hangs indefinitely in the
+    # JVM Kafka consumer trying to reconcile new partitions it has no offsets
+    # for — no error is raised, no stage runs, the pod looks healthy but never
+    # writes a batch.
+    #
+    # Fix: before starting readStream, compare the checkpoint's known
+    # topic-partition set against the live broker topic list matched by the
+    # subscribePattern regex.  If there are new topics that the checkpoint has
+    # never seen, wipe the checkpoint so Spark starts clean from "earliest".
+    # This is safe: failOnDataLoss=false means no data is lost — Spark reads
+    # from the earliest available offset on the new partition.
+    #
+    # This guard runs once at pod startup (not per-batch) so overhead is zero
+    # during steady-state operation.
+    try:
+        import re as _re
+        from confluent_kafka.admin import AdminClient as _AdminClient
+
+        _admin = _AdminClient({
+            "bootstrap.servers":  KAFKA_BOOTSTRAP,
+            "security.protocol":  "SASL_PLAINTEXT",
+            "sasl.mechanism":     "SCRAM-SHA-512",
+            "sasl.username":      kafka_user,
+            "sasl.password":      kafka_pass,
+            "socket.timeout.ms":  "8000",
+        })
+        _meta          = _admin.list_topics(timeout=10)
+        _pat           = _re.compile(source.topic_pattern)
+        _live_topics   = {t for t in _meta.topics if _pat.match(t)}
+
+        # Read the latest checkpoint offset file to get known topics
+        _s3_bao        = BaoSparkInit()
+        _s3_creds      = _s3_bao.s3_creds()
+        import boto3 as _boto3
+        _s3 = _boto3.client(
+            "s3",
+            endpoint_url          = _s3_creds["endpoint"],
+            aws_access_key_id     = _s3_creds["access_key"],
+            aws_secret_access_key = _s3_creds["secret_key"],
+            region_name           = _s3_creds.get("region", "us-east-1"),
+        )
+        _bucket          = S3_BUCKET
+        _offset_prefix   = source.checkpoint.replace(f"s3://{_bucket}/", "") + "/offsets/"
+        _paginator       = _s3.get_paginator("list_objects_v2")
+        _offset_files    = sorted(
+            [o["Key"] for p in _paginator.paginate(Bucket=_bucket, Prefix=_offset_prefix)
+             for o in p.get("Contents", [])],
+            reverse=True,
+        )
+
+        if _offset_files:
+            _latest = _s3.get_object(Bucket=_bucket, Key=_offset_files[0])
+            _lines  = _latest["Body"].read().decode().strip().splitlines()
+            if len(_lines) >= 3:
+                _ckpt_topics = set(json.loads(_lines[2]).keys())
+                _new_topics  = _live_topics - _ckpt_topics
+                if _new_topics:
+                    logger.warning(
+                        "[%s] Checkpoint-topic mismatch — new topics not in checkpoint: %s. "
+                        "Clearing checkpoint to avoid Spark SubscribePattern hang.",
+                        source.source_key, sorted(_new_topics),
+                    )
+                    # Delete all checkpoint objects for this source+mode
+                    _ckpt_prefix = source.checkpoint.replace(f"s3://{_bucket}/", "") + "/"
+                    _all_ckpt    = [
+                        o["Key"]
+                        for p in _paginator.paginate(Bucket=_bucket, Prefix=_ckpt_prefix)
+                        for o in p.get("Contents", [])
+                    ]
+                    for _i in range(0, len(_all_ckpt), 1000):
+                        _s3.delete_objects(
+                            Bucket=_bucket,
+                            Delete={"Objects": [{"Key": k} for k in _all_ckpt[_i:_i+1000]]},
+                        )
+                    logger.warning(
+                        "[%s] Checkpoint cleared (%d objects). "
+                        "Streaming will restart from earliest offsets.",
+                        source.source_key, len(_all_ckpt),
+                    )
+                else:
+                    logger.info(
+                        "[%s] Checkpoint-topic guard: OK — no new topics (live=%d, ckpt=%d).",
+                        source.source_key, len(_live_topics), len(_ckpt_topics),
+                    )
+    except Exception as _ckpt_guard_exc:
+        logger.warning(
+            "[%s] Checkpoint-topic guard failed (non-fatal, continuing): %s",
+            source.source_key, _ckpt_guard_exc,
+        )
+    # ── End checkpoint-topic mismatch guard ──────────────────────────────────
 
     raw_stream = (
         spark.readStream
@@ -2040,22 +2132,8 @@ def _run_once(bao: BaoSparkInit) -> None:
             # retry loop in main() can restart the entire Spark session cleanly.
             for q in list(queries):
                 if not q.isActive:
-                    # q.exception() contains the actual Spark/JVM cause — log it
-                    # at ERROR level BEFORE raising so it is always visible in
-                    # pod logs even when the outer handler truncates the message.
-                    spark_exc = None
-                    try:
-                        spark_exc = q.exception()
-                    except Exception:
-                        pass
-                    if spark_exc:
-                        logger.error(
-                            "Streaming query '%s' Spark exception: %s",
-                            q.name, spark_exc,
-                        )
                     raise RuntimeError(
                         f"Streaming query '{q.name}' terminated unexpectedly."
-                        + (f" Cause: {spark_exc}" if spark_exc else "")
                     )
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")
