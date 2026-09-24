@@ -195,6 +195,8 @@ RUN mkdir -p /opt/spark/work-dir
 COPY scripts/bao_spark_init.py                    /opt/spark/work-dir/bao_spark_init.py
 COPY scripts/spark_iceberg_utils.py               /opt/spark/work-dir/spark_iceberg_utils.py
 COPY scripts/05_kafka_to_iceberg_streaming.py     /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
+COPY scripts/04_schema_evolution_handler.py       /opt/spark/work-dir/04_schema_evolution_handler.py
+COPY scripts/star_transform.py                    /opt/spark/work-dir/star_transform.py
 COPY scripts/starpump.py                          /opt/spark/work-dir/starpump.py
 COPY scripts/databricks_customer_seed.py          /opt/spark/work-dir/databricks_customer_seed.py
 COPY scripts/databricks_product_seed.py           /opt/spark/work-dir/databricks_product_seed.py

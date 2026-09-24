@@ -85,7 +85,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:latest
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -175,7 +175,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:latest
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -265,7 +265,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:latest
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash

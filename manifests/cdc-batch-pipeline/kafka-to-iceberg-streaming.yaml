@@ -19,7 +19,7 @@
 # Script delivery
 # ───────────────
 # 05_kafka_to_iceberg_streaming.py is NOT baked into the spark-gluten-velox
-# image.  As of 3.5.1-17, the script is baked directly into the Docker image.
+# image.  As of 3.5.1-18, the script is baked directly into the Docker image.
 # mounted into every pod at /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
 # (overlaying the image filesystem at that path).
 # To update the script: modify scripts/05_kafka_to_iceberg_streaming.py and
@@ -104,7 +104,7 @@ data: {}
 kind: ConfigMap
 metadata:
   annotations:
-    pipeline.note: Script baked into image as of 3.5.1-17. This ConfigMap is retained for compatibility but its data is empty.
+    pipeline.note: Script baked into image as of 3.5.1-18. This ConfigMap is retained for compatibility but its data is empty.
   labels:
     app: kafka-to-iceberg
     pipeline.type: streaming
@@ -1385,7 +1385,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1407,18 +1407,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1552,7 +1543,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1574,18 +1565,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1719,7 +1701,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1741,18 +1723,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1886,7 +1859,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1908,18 +1881,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2053,7 +2017,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2075,18 +2039,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2220,7 +2175,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2242,18 +2197,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2387,7 +2333,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2409,18 +2355,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2554,7 +2491,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2576,18 +2513,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2721,7 +2649,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2743,18 +2671,9 @@ spec:
           requests:
             cpu: '1'
             memory: 2Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/star_transform.py
-          name: star-transform-script
-          readOnly: true
-          subPath: star_transform.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 90
-      volumes:
-      - configMap:
-          name: star-transform-script
-        name: star-transform-script
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -2764,16 +2683,11 @@ metadata:
   labels:
     app: schema-evolution-handler
     pipeline.type: ddl-handler
-binaryData: {}
 data: {}
-# NOTE: This ConfigMap is populated from the file on disk by kubectl/ArgoCD.
-# The actual content of 04_schema_evolution_handler.py is managed outside this
-# YAML because inlining 546 lines of Python inside YAML causes merge conflicts.
-# On initial cluster setup (or after image rebuild), run:
-#   kubectl create configmap schema-evolution-handler-script \
-#     --from-file=04_schema_evolution_handler.py=\
-#       docker/spark-gluten-velox/scripts/04_schema_evolution_handler.py \
-#     -n prod --dry-run=client -o yaml | kubectl apply -f -
+# NOTE: 04_schema_evolution_handler.py is baked into the Docker image as of
+# 3.5.1-18 (COPY in Dockerfile step 36). This ConfigMap is retained for
+# compatibility but its data is intentionally empty — the image provides the
+# script. The volume mount below is also removed.
 
 ---
 apiVersion: apps/v1
@@ -2820,7 +2734,7 @@ spec:
             configMapKeyRef:
               key: ADDR
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
           exec:
@@ -2844,15 +2758,6 @@ spec:
           requests:
             cpu: 500m
             memory: 1Gi
-        volumeMounts:
-        - mountPath: /opt/spark/work-dir/04_schema_evolution_handler.py
-          name: evolution-handler-script
-          readOnly: true
-          subPath: 04_schema_evolution_handler.py
       restartPolicy: Always
       serviceAccountName: spark-cleanup
       terminationGracePeriodSeconds: 30
-      volumes:
-      - configMap:
-          name: schema-evolution-handler-script
-        name: evolution-handler-script
