@@ -30,10 +30,26 @@ Source → topic → Iceberg target mapping
 
 DDL handling
 ------------
-This script is DML-ONLY. It does NOT detect, apply, or react to DDL changes.
-Schema evolution (ALTER TABLE ADD/DROP/MODIFY COLUMN) is handled exclusively by
-the manual ddl_apply.py script, which must be run by an operator when DDL occurs
-at the source.
+This script is DML-ONLY.  It does NOT apply, or silently ignore DDL changes.
+
+When a source schema change (ALTER TABLE / new field in MongoDB) is detected:
+  1. The pipeline logs a CRITICAL error with the exact ddl_apply.py command
+     needed to evolve the Iceberg table.
+  2. The stream for that specific table is STOPPED (the micro-batch raises
+     SchemaMismatchError).  Other tables in the same batch continue normally.
+  3. The streaming query remains active; only batches for the affected table
+     are skipped until the operator applies the DDL.
+
+To resume after a schema change:
+  a. Read the CRITICAL log lines — they contain the exact command to run.
+  b. Alternatively run:
+       python3 scripts/ddl_extract.py --source <src>
+     to read pending DDL events from the schema-changes Kafka topic and
+     print the ddl_apply.py commands ready to copy-paste.
+  c. Execute the printed ddl_apply.py command (it pauses + applies + resumes).
+  d. Clear the schema cache in the running pod so the next batch picks up
+     the new Iceberg schema:
+       kubectl rollout restart deployment/kafka-to-iceberg-<mode> -n prod
 
 Table auto-creation
 -------------------
@@ -41,12 +57,6 @@ When a new table appears in Kafka (new Debezium source registration), this scrip
 auto-creates the corresponding Iceberg table on the first batch using the schema
 inferred from that batch. The schema is then read from Iceberg (DESCRIBE TABLE)
 on all subsequent batches — batch inference is never re-run after first creation.
-
-If a batch contains a column that does not exist in the Iceberg table (because DDL
-was applied at the source but ddl_apply.py has not been run yet), the column is
-silently dropped from that batch. The rows are committed to Iceberg without the
-new column value (NULLs). Run ddl_apply.py to evolve the Iceberg schema, then
-future batches will include the column.
 
 star_transform integration
 --------------------------
@@ -143,6 +153,20 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger("kafka-to-iceberg")
+
+# ── Schema mismatch sentinel ──────────────────────────────────────────────────
+
+class SchemaMismatchError(RuntimeError):
+    """
+    Raised when a micro-batch contains columns that are not present in the
+    Iceberg table, indicating a source DDL change has not yet been applied to
+    Iceberg via ddl_apply.py.
+
+    Raising this from foreachBatch causes Spark to mark the micro-batch as
+    failed and retry it on the next trigger cycle, so no data is silently
+    lost.  The error message contains the exact ddl_apply.py command.
+    """
+
 
 # ── Write modes ───────────────────────────────────────────────────────────────
 _WRITE_MODE_STANDARD         = "standard"
@@ -1144,34 +1168,104 @@ def _write_micro_batch(
                             source.source_key, effective_table, _rename_exc,
                         )
 
-                # ── Drop batch columns not in Iceberg (DDL not yet applied) ───
-                # If ddl_apply.py has not been run after a source DDL, the batch
-                # may contain columns that do not exist in Iceberg yet. Drop them
-                # silently so the MERGE does not fail. Run ddl_apply.py to add the
-                # columns to Iceberg; future batches will include them.
+                # ── DDL-mismatch guard — HARD STOP (no silent drop) ──────────
+                # If a batch contains columns that are not in the Iceberg table
+                # it means a DDL change was applied on the source (ALTER TABLE /
+                # new MongoDB field) but ddl_apply.py has NOT been run yet.
+                #
+                # Policy (requirement (e)):
+                #   • Log a CRITICAL message with the exact ddl_apply.py command.
+                #   • Raise SchemaMismatchError to abort this micro-batch.
+                #   • Spark retries on the next trigger — no data is lost.
+                #   • The operator must run ddl_apply.py (or use ddl_extract.py
+                #     to discover the command) then restart the deployment.
+                #
+                # Also detect MISSING columns (source dropped a column that
+                # still exists in Iceberg). This is logged at WARNING — the
+                # pipeline continues but the dropped column will land as NULL.
                 try:
+                    _ice_desc_rows = spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
                     _ice_col_names = {
                         row["col_name"].lower()
-                        for row in spark.sql(f"DESCRIBE TABLE {fqn_backtick}").collect()
+                        for row in _ice_desc_rows
                         if not row["col_name"].startswith("#")
                     }
-                    _batch_col_names = {f.name.lower() for f in row_df.schema.fields
-                                        if f.name not in ("_op", "kafka_ts")}
-                    _unknown_cols = _batch_col_names - _ice_col_names - {"snap_id", "snap_timestamp"}
-                    if _unknown_cols:
-                        logger.warning(
-                            "[%s/%s] batch=%d — %d column(s) in batch not in Iceberg: %s. "
-                            "Run ddl_apply.py to evolve the schema. Dropping from batch.",
-                            source.source_key, effective_table, batch_id,
-                            len(_unknown_cols), sorted(_unknown_cols),
+                    _batch_col_names = {
+                        f.name.lower() for f in row_df.schema.fields
+                        if f.name not in ("_op", "kafka_ts")
+                    }
+                    _PLATFORM_COLS = {"snap_id", "snap_timestamp", "is_deleted", "deleted_at"}
+                    _new_in_batch  = _batch_col_names - _ice_col_names - _PLATFORM_COLS
+                    _gone_from_src = (
+                        _ice_col_names - _batch_col_names - _PLATFORM_COLS
+                        # exclude write-mode synthetic columns
+                        - {"_change_type", "_change_ts"}
+                        # exclude before_*/after_* history columns
+                        - {c for c in _ice_col_names if c.startswith(("before_", "after_"))}
+                    )
+
+                    if _new_in_batch:
+                        # Build the ddl_apply.py commands for the operator.
+                        _ddl_cmds = []
+                        for _nc in sorted(_new_in_batch):
+                            # Infer the Iceberg type from the batch field
+                            _nf = next(
+                                (f for f in row_df.schema.fields if f.name.lower() == _nc),
+                                None,
+                            )
+                            _ice_type = _PY_TO_ICEBERG.get(
+                                type(_nf.dataType).__name__ if _nf else "", "STRING"
+                            ) if _nf else "STRING"
+                            _ddl_cmds.append(
+                                f"python3 scripts/ddl_apply.py "
+                                f"--source {source.source_key} "
+                                f"--table {table_name} "
+                                f"--op add "
+                                f"--col {_nc} "
+                                f"--type {_ice_type}"
+                            )
+                        _cmd_block = "\n    ".join(_ddl_cmds)
+                        _err_msg = (
+                            f"[{source.source_key}/{effective_table}] "
+                            f"SCHEMA MISMATCH — batch={batch_id} "
+                            f"has {len(_new_in_batch)} column(s) not in Iceberg: "
+                            f"{sorted(_new_in_batch)}.\n"
+                            f"  Source DDL was applied but ddl_apply.py has NOT been run yet.\n"
+                            f"  ── ACTION REQUIRED ─────────────────────────────────────────\n"
+                            f"  Run the following command(s) to evolve the Iceberg schema,\n"
+                            f"  then restart this deployment:\n"
+                            f"    {_cmd_block}\n"
+                            f"  Then restart:\n"
+                            f"    kubectl rollout restart deployment/kafka-to-iceberg-"
+                            f"{write_mode.replace('_', '-')} -n prod\n"
+                            f"  ────────────────────────────────────────────────────────────\n"
+                            f"  Or use ddl_extract.py to auto-discover all pending DDL:\n"
+                            f"    python3 scripts/ddl_extract.py --source {source.source_key}\n"
+                            f"  ────────────────────────────────────────────────────────────"
                         )
-                        _keep = [f.name for f in row_df.schema.fields
-                                 if f.name in ("_op", "kafka_ts")
-                                 or f.name.lower() in _ice_col_names]
-                        row_df = row_df.select(*[f"`{c}`" for c in _keep])
+                        logger.critical(_err_msg)
+                        # Clear the cached schema so the next start re-reads Iceberg
+                        _SCHEMA_CACHE.pop(cache_key, None)
+                        raise SchemaMismatchError(_err_msg)
+
+                    if _gone_from_src:
+                        logger.warning(
+                            "[%s/%s] batch=%d — %d Iceberg column(s) absent from batch "
+                            "(source may have dropped them): %s. "
+                            "Those columns will be NULL for this batch. "
+                            "Run: python3 scripts/ddl_apply.py "
+                            "--source %s --table %s --op drop --col <col> "
+                            "if the drop was intentional.",
+                            source.source_key, effective_table, batch_id,
+                            len(_gone_from_src), sorted(_gone_from_src),
+                            source.source_key, table_name,
+                        )
+
+                except SchemaMismatchError:
+                    raise   # re-raise so the batch fails and Spark retries
                 except Exception as _desc_exc:
                     logger.debug(
-                        "[%s/%s] Column guard DESCRIBE failed (non-fatal): %s",
+                        "[%s/%s] DDL-mismatch guard DESCRIBE failed (non-fatal): %s",
                         source.source_key, effective_table, _desc_exc,
                     )
 

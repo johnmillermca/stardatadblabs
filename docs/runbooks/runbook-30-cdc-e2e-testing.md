@@ -3821,462 +3821,365 @@ db.customers.deleteOne({ id: 900062 });
 
 ---
 
-## 8. Section 7 — Schema Evolution (DDL) Tests
+## 8. Section 7 — DDL Changes: Detection, Error Logging & Manual Apply
 
-**Purpose:** Verify that DDL changes propagate through Debezium and are handled correctly by Iceberg via `mergeSchema=true`.
+**Pipeline policy (changed from auto-evolution to manual-apply):**
 
-> **How DDL flows through the pipeline:**
-> 1. DDL executes on source DB
-> 2. Debezium captures the DDL event → publishes to `schema-changes.<source>`
-> 3. Avro schema for the topic updated in Schema Registry (new schema ID issued)
-> 4. On next DML, Debezium message carries the new schema ID
-> 5. Executor-level SR cache fetches new schema once (one HTTP GET per new schema ID)
-> 6. Spark `mergeSchema=true` on Iceberg write adds the new column automatically
-> 7. Pre-DDL rows return NULL for the new column
+> The streaming pipeline (`05_kafka_to_iceberg_streaming.py`) is **DML-only**.
+> It does **not** silently drop unknown columns and does **not** auto-apply schema changes.
+>
+> When a DDL event is detected (source `ALTER TABLE` / MongoDB new field / removed field),
+> the pipeline **stops replication for that table** and emits a `CRITICAL` log with the
+> exact `ddl_apply.py` command needed.  Other tables in the same batch continue normally.
+>
+> Debezium continues to publish DDL events to `schema-changes.<source>` topics — this
+> is unchanged.  No Debezium connector configuration changes are required.
 
-All Iceberg verification queries in this section target **`postgres.e2e_testing.customers`**.
+---
+
+### How DDL Flows Through the System
+
+```
+Source DB (ALTER TABLE / new MongoDB field)
+  ↓
+Debezium connector
+  ↓  publishes DDL event to:  schema-changes.<source>  (Kafka)
+  ↓  publishes DML rows  to:  <source>.cache_testing.<table>  (Kafka)
+  ↓
+05_kafka_to_iceberg_streaming.py  (micro-batch)
+  ↓
+  DDL mismatch guard:
+    batch has column not in Iceberg table?
+      YES → log CRITICAL with ddl_apply.py command → raise SchemaMismatchError
+             (batch retried next trigger; NO data lost)
+      NO  → proceed with MERGE / soft-delete / history-tracking write
+```
+
+---
+
+### Operator Response When the Pipeline Stops
+
+#### Option A — Read the CRITICAL log directly
+
+```bash
+# The CRITICAL message contains the exact command to run
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg -o jsonpath='{.items[0].metadata.name}') \
+  | grep "CRITICAL\|SCHEMA MISMATCH\|ACTION REQUIRED"
+```
+
+Expected output format:
+```
+CRITICAL kafka-to-iceberg –
+[postgres/customers] SCHEMA MISMATCH — batch=42 has 1 column(s) not in Iceberg: ['loyalty_tier'].
+  Source DDL was applied but ddl_apply.py has NOT been run yet.
+  ── ACTION REQUIRED ─────────────────────────────────────────
+  Run the following command(s) to evolve the Iceberg schema,
+  then restart this deployment:
+    python3 scripts/ddl_apply.py --source postgres --table customers --op add --col loyalty_tier --type STRING
+  Then restart:
+    kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
+  ────────────────────────────────────────────────────────────
+  Or use ddl_extract.py to auto-discover all pending DDL:
+    python3 scripts/ddl_extract.py --source postgres
+  ────────────────────────────────────────────────────────────
+```
+
+Copy the `python3 scripts/ddl_apply.py …` line and proceed to **Step 2** below.
+
+---
+
+#### Option B — Use `ddl_extract.py` to auto-discover pending DDL
+
+`ddl_extract.py` reads the Debezium `schema-changes.<source>` Kafka topics from the
+beginning, parses all DDL events, and prints ready-to-run `ddl_apply.py` commands.
+
+```bash
+# All three sources:
+python3 scripts/ddl_extract.py
+
+# Single source only:
+python3 scripts/ddl_extract.py --source postgres
+python3 scripts/ddl_extract.py --source oracle
+python3 scripts/ddl_extract.py --source mongodb
+
+# Non-interactive (CI / scripted use):
+python3 scripts/ddl_extract.py --source postgres --yes
+
+# Read from a specific Kafka offset (useful when topic has many old events):
+python3 scripts/ddl_extract.py --source postgres --from-offset 50
+
+# Show raw Debezium JSON events without parsing:
+python3 scripts/ddl_extract.py --source oracle --raw
+```
+
+Expected output (one block per detected change):
+
+```
+  ┌─ [postgres/customers] ADD COLUMN loyalty_tier STRING
+  │  Detected at : 2026-09-21T10:42:15Z  (offset=17)
+  │  Source DDL  : ALTER TABLE public.customers ADD COLUMN loyalty_tier VARCHAR(20) DEFAULT NULL
+  │  Command     :
+  │    python3 scripts/ddl_apply.py --source postgres --table customers \
+  │        --op add --col loyalty_tier --type STRING
+  │
+  │  After running the command, restart the pipeline:
+  │    kubectl rollout restart deployment/kafka-to-iceberg-standard  (or soft-delete / history-tracking)  -n prod
+  └──────────────────────────────────────────────────────────────────────
+```
 
 ---
 
 ### Test 7a — PostgreSQL: ADD COLUMN
 
-**Scenario:** Add a `loyalty_tier` column. Verify it propagates to `postgres.e2e_testing.customers`.
+**Scenario:** Add a `loyalty_tier` column to `customers` in PostgreSQL.
+Verify the pipeline stops with a CRITICAL error, apply DDL, then verify replication resumes.
 
-#### Step 1 — Baseline
-
-```bash
-PGPASSWORD=vb2dJms4c1fKi0uYD87Vv4YpCsZQJm1f \
-  psql -h 192.168.1.50 -p 30532 -U rbac -d cache_testing -c "
-SELECT column_name, data_type FROM information_schema.columns
-WHERE table_schema = 'public' AND table_name = 'customers'
-ORDER BY ordinal_position;"
-```
+#### Step 1 — Add the column in PostgreSQL
 
 ```sql
-DESCRIBE postgres.e2e_testing.customers;
-```
-
-```bash
-curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects \
-  | jq '[.[] | select(startswith("postgres.cache_testing.customers"))]'
-```
-
-#### Step 2 — Add the column in PostgreSQL
-
-```sql
--- psql
+-- psql (cache_testing, user: rbac)
 ALTER TABLE public.customers ADD COLUMN loyalty_tier VARCHAR(20) DEFAULT NULL;
 ```
 
-#### Step 3 — Insert a row using the new column
+#### Step 2 — Insert a row using the new column
 
 ```sql
--- psql
 INSERT INTO public.customers (id, name, email, phone, address, city, country, created_at, loyalty_tier)
 VALUES (900070, 'SchemaEvo Test', 'evo@example.com', '555-0001',
         '70 Evo St', 'Sydney', 'AU', NOW(), 'GOLD');
+COMMIT;
 ```
 
-#### Step 4 — Verify in Schema Registry
+#### Step 3 — Verify the pipeline logged a CRITICAL error
 
 ```bash
 sleep 5
-curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions
-# Expected: [1, 2]  ← version 2 has loyalty_tier
-
-curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions/latest \
-  | jq '.schema | fromjson | .fields[] | select(.name == "loyalty_tier")'
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s | grep -E "CRITICAL|SCHEMA MISMATCH|ACTION REQUIRED"
 ```
 
-#### Step 5 — Verify in Iceberg
+✅ Expected: CRITICAL log block with `loyalty_tier` and the `ddl_apply.py` command.
+
+#### Step 4 — Apply the DDL to Iceberg using `ddl_apply.py`
 
 ```bash
-sleep 10
+python3 scripts/ddl_apply.py \
+    --source postgres \
+    --table customers \
+    --op add \
+    --col loyalty_tier \
+    --type STRING
 ```
 
+`ddl_apply.py` will:
+1. Scale down `kafka-to-iceberg-postgres-standard` (and soft-delete + history-tracking)
+2. Wait until all pods are fully stopped
+3. Execute `ALTER TABLE postgres.cache_testing.customers ADD COLUMN loyalty_tier STRING`
+4. Verify with `DESCRIBE TABLE`
+5. Scale deployments back up
+
+✅ Expected final line: `✓  DDL apply completed successfully.`
+
+#### Step 5 — Wait for the pipeline to process the buffered row
+
+```bash
+sleep 20
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=60s | grep -E "batch=|upsert|CRITICAL|ERROR"
+```
+
+✅ Expected: `batch=N upsert rows=1` — no more CRITICAL or SCHEMA MISMATCH lines.
+
+#### Step 6 — Verify the column and data in Iceberg
+
 ```sql
-DESCRIBE postgres.e2e_testing.customers;
--- Expected: loyalty_tier  string
+-- Spark SQL
+DESCRIBE TABLE postgres.e2e_testing.customers;
+-- Expected: loyalty_tier  string  present in schema
 
 SELECT id, name, loyalty_tier, snap_timestamp
 FROM postgres.e2e_testing.customers
 WHERE id = 900070;
--- Expected: loyalty_tier = 'GOLD'
+-- Expected: 1 row · loyalty_tier = 'GOLD'
 
 SELECT id, loyalty_tier
 FROM postgres.e2e_testing.customers
-WHERE id != 900070
+WHERE id < 900070
 LIMIT 5;
--- Expected: loyalty_tier = NULL for all pre-DDL rows
+-- Expected: loyalty_tier = NULL for pre-DDL rows
 ```
 
-#### Step 6 — Cleanup
+#### Step 7 — Cleanup
 
 ```sql
 -- psql
 DELETE FROM public.customers WHERE id = 900070;
+COMMIT;
 ```
 
 ---
 
 ### Test 7b — PostgreSQL: DROP COLUMN
 
-> **Note:** Iceberg does NOT physically drop the column. It stays in the schema and returns NULL for future rows. Physical removal requires `ALTER TABLE ... DROP COLUMN` in Spark SQL.
-
-#### Step 1 — Drop the column added in 7a
+#### Step 1 — Drop the column (must have been added first in 7a)
 
 ```sql
 -- psql
 ALTER TABLE public.customers DROP COLUMN loyalty_tier;
 ```
 
-#### Step 2 — Insert a row after the DROP
-
-```sql
--- psql
-INSERT INTO public.customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900071, 'PostDrop Test', 'postdrop@example.com', '555-0002',
-        '71 Drop St', 'Melbourne', 'AU', NOW());
-```
-
-#### Step 3 — Verify behaviour in Iceberg
+#### Step 2 — Verify pipeline WARNING (not CRITICAL — column absent from source is non-fatal)
 
 ```bash
-sleep 10
+sleep 5
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s | grep -E "absent from batch|gone_from_src|WARNING"
 ```
 
-```sql
-SELECT id, name, loyalty_tier
-FROM postgres.e2e_testing.customers
-WHERE id = 900071;
--- Expected: loyalty_tier = NULL (column kept in Iceberg schema, value absent)
-```
+✅ Expected: WARNING log about `loyalty_tier` absent from batch. Pipeline continues.
+
+#### Step 3 — (Optional) Remove the column from Iceberg too
+
+If the column drop was intentional and you want to clean it up from Iceberg:
 
 ```bash
-curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects/postgres.cache_testing.customers-value/versions \
-  | jq 'length'
-# Expected: 3  (original, +loyalty_tier, -loyalty_tier)
-```
-
-#### Step 4 — (Optional) Remove the column from Iceberg too
-
-```sql
-ALTER TABLE postgres.e2e_testing.customers DROP COLUMN loyalty_tier;
-```
-
-#### Step 5 — Cleanup
-
-```sql
--- psql
-DELETE FROM public.customers WHERE id = 900071;
+python3 scripts/ddl_apply.py \
+    --source postgres \
+    --table customers \
+    --op drop \
+    --col loyalty_tier
 ```
 
 ---
 
-### Test 7c — PostgreSQL: ALTER COLUMN (widen VARCHAR)
-
-#### Step 1 — Widen `address` from VARCHAR(255) to TEXT
+### Test 7c — Oracle: ADD COLUMN
 
 ```sql
--- psql
-ALTER TABLE public.customers ALTER COLUMN address TYPE TEXT;
-```
-
-#### Step 2 — Insert a row with a long address
-
-```sql
--- psql
-INSERT INTO public.customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900072, 'LongAddr Test', 'longaddr@example.com', '555-0003',
-        'This is a very long address that exceeds VARCHAR(255) but fits TEXT perfectly fine for testing schema evolution purposes in Iceberg',
-        'Brisbane', 'AU', NOW());
-```
-
-#### Step 3 — Verify
-
-```bash
-sleep 10
-```
-
-```sql
-DESCRIBE postgres.e2e_testing.customers;
--- Expected: address still string (VARCHAR and TEXT both map to string)
-
-SELECT id, LEFT(address, 60) AS addr_preview
-FROM postgres.e2e_testing.customers
-WHERE id = 900072;
-```
-
-#### Step 4 — Cleanup
-
-```sql
--- psql
-DELETE FROM public.customers WHERE id = 900072;
-```
-
----
-
-### Test 7d — Oracle: ADD COLUMN via LogMiner
-
-#### Step 1 — Add a column to CACHE_TESTING.CUSTOMERS in Oracle
-
-```bash
-ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n prod $ORACLE_POD -- bash -c "
-sqlplus -s CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1 <<'EOF'
-ALTER TABLE CUSTOMERS ADD (loyalty_points NUMBER(10) DEFAULT 0);
+-- sqlplus (XEPDB1, CACHE_TESTING schema)
+ALTER TABLE CACHE_TESTING.CUSTOMERS ADD (loyalty_points NUMBER(10) DEFAULT 0);
 COMMIT;
-SELECT column_name, data_type FROM user_tab_columns
-WHERE table_name = 'CUSTOMERS' ORDER BY column_id;
-EXIT;
-EOF
-"
-```
 
-#### Step 2 — Insert a row with the new column
-
-```bash
-ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n prod $ORACLE_POD -- bash -c "
-sqlplus -s CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1 <<'EOF'
-INSERT INTO CUSTOMERS
+INSERT INTO CACHE_TESTING.CUSTOMERS
   (ID, NAME, EMAIL, PHONE, ADDRESS, CITY, COUNTRY, CREATED_AT, UPDATED_AT, LOYALTY_POINTS)
-VALUES
-  (900073, 'OraSchemaEvo', 'oraevo@example.com', '555-9001',
-   '73 Oracle St', 'Sydney', 'AU', SYSDATE, SYSDATE, 500);
+VALUES (900075, 'OraEvo', 'ora_evo@example.com', '555-0075',
+        '75 Ora St', 'Sydney', 'AU', SYSDATE, SYSDATE, 500);
 COMMIT;
-EXIT;
-EOF
-"
 ```
-
-#### Step 3 — Verify the DDL event reached Kafka
 
 ```bash
-kubectl exec -n prod \
-  $(kubectl get pod -n prod -l app=debezium-connect -o jsonpath='{.items[0].metadata.name}') -- \
-  bash -c "
-kafka-console-consumer.sh \
-  --bootstrap-server strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
-  --topic schema-changes.oracle --from-beginning --max-messages 50 \
-  --consumer-property security.protocol=SASL_PLAINTEXT \
-  --consumer-property sasl.mechanism=SCRAM-SHA-512 \
-  --consumer-property 'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"debezium-user\" password=\"i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H\";' \
-  2>/dev/null | grep -i 'loyalty_points' | head -5"
+# Watch for CRITICAL log
+sleep 10
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=oracle \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s | grep "CRITICAL\|SCHEMA MISMATCH"
 ```
 
-#### Step 4 — Verify in Iceberg
-
+Apply the DDL:
 ```bash
-sleep 15   # Oracle LogMiner has slightly higher latency than PostgreSQL WAL
+python3 scripts/ddl_apply.py \
+    --source oracle \
+    --table customers \
+    --op add \
+    --col loyalty_points \
+    --type "DECIMAL(10,0)"
 ```
 
+Verify:
 ```sql
-DESCRIBE oracle.e2e_testing.customers;
--- Expected: loyalty_points  bigint
-
-SELECT id, name, loyalty_points, snap_timestamp
-FROM oracle.e2e_testing.customers
-WHERE id = 900073;
+-- Spark SQL
+SELECT id, loyalty_points FROM oracle.e2e_testing.customers WHERE id = 900075;
 -- Expected: loyalty_points = 500
 ```
 
-#### Step 5 — Cleanup
-
-```bash
-ORACLE_POD=$(kubectl get pod -n prod -l app=oracle-xe -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n prod $ORACLE_POD -- bash -c "
-sqlplus -s CACHE_TESTING/CacheTesting2024@//localhost:1521/XEPDB1 <<'EOF'
-DELETE FROM CUSTOMERS WHERE ID = 900073;
-COMMIT;
-EXIT;
-EOF
-"
+Cleanup:
+```sql
+-- sqlplus
+DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900075; COMMIT;
 ```
 
 ---
 
-### Test 7e — MongoDB: New Field (implicit schema evolution)
+### Test 7d — MongoDB: New Field (ADD)
 
-#### Step 1 — Insert a document with extra fields
+MongoDB does not have `ALTER TABLE` DDL. A new field in a document triggers the
+DDL-mismatch guard in the pipeline.
 
-```bash
-kubectl exec -n prod \
-  $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
-  mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
-  --quiet --eval '
+```javascript
+// mongosh (cache_testing database)
 db.customers.insertOne({
-  id:           900074,
-  name:         "MongoSchemaEvo",
-  email:        "mongoevo@example.com",
-  phone:        "555-0004",
-  address:      "74 Mongo St",
-  city:         "Perth",
-  country:      "AU",
-  loyalty_tier: "PLATINUM",
-  referral_code: "REF2025XYZ",
-  created_at:   new Date()
+  _id:           ObjectId("000000000000000000900078"),
+  id:            900078,
+  name:          "MDB EvoTest",
+  email:         "mdb_evo@example.com",
+  loyalty_tier:  "platinum",   // ← new field not in Iceberg
+  created_at:    new Date()
 });
-'
 ```
-
-#### Step 2 — Verify in Iceberg
 
 ```bash
 sleep 10
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=mongodb \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=30s | grep "CRITICAL\|SCHEMA MISMATCH"
 ```
 
-```sql
-DESCRIBE mongodb.e2e_testing.customers;
--- Expected: loyalty_tier and referral_code columns now present
+✅ Expected: CRITICAL log with `loyalty_tier` and ddl_apply command.
 
-SELECT id, name, loyalty_tier, referral_code, snap_timestamp
-FROM mongodb.e2e_testing.customers
-WHERE id = 900074;
--- Expected: loyalty_tier = 'PLATINUM', referral_code = 'REF2025XYZ'
-```
-
-#### Step 3 — Cleanup
-
+Apply:
 ```bash
-kubectl exec -n prod \
-  $(kubectl get pod -n prod -l app=mongodb -o jsonpath='{.items[0].metadata.name}') -- \
-  mongosh "mongodb://root:oEtCgw554IP3ua0SrJCTsWYM@localhost:27017/cache_testing?authSource=admin" \
-  --quiet --eval 'db.customers.deleteOne({ id: 900074 });'
+python3 scripts/ddl_apply.py \
+    --source mongodb \
+    --table customers \
+    --op add \
+    --col loyalty_tier \
+    --type STRING
+```
+
+Verify:
+```sql
+SELECT id, loyalty_tier FROM mongodb.e2e_testing.customers WHERE id = 900078;
+-- Expected: loyalty_tier = 'platinum'
+```
+
+Cleanup:
+```javascript
+db.customers.deleteOne({ id: 900078 });
 ```
 
 ---
 
-### Test 7f — Schema Registry Version History Verification
+### Using `ddl_extract.py` After All Tests
+
+After running all DDL tests, use `ddl_extract.py` to get a consolidated view of
+all detected DDL events since the beginning of the schema-changes topics:
 
 ```bash
-curl -s http://schema-registry.prod.svc.cluster.local:8081/subjects | jq 'sort'
-
-for SUBJECT in \
-  "postgres.cache_testing.customers-value" \
-  "oracle.cache_testing.customers-value" \
-  "mongodb.cache_testing.customers-value"; do
-  echo "=== $SUBJECT ==="
-  VERSIONS=$(curl -s "http://schema-registry.prod.svc.cluster.local:8081/subjects/${SUBJECT}/versions")
-  echo "Versions: $VERSIONS"
-  curl -s "http://schema-registry.prod.svc.cluster.local:8081/subjects/${SUBJECT}/versions/latest" \
-    | jq '.schema | fromjson | .fields[].name'
-  echo ""
-done
+python3 scripts/ddl_extract.py --yes
 ```
 
-**Confirm executor-level SR cache working:**
-```bash
-kubectl logs -n prod \
-  $(kubectl get pod -n prod -l pipeline.write-mode=standard -o jsonpath='{.items[0].metadata.name}') \
-  | grep "avro_to_json\|schema_id\|SR_CLIENT" | tail -20
-# Expected: schema_id fetch logged only once per NEW schema ID, not per message
-```
+Expected: all ADD/DROP changes from tests 7a–7d listed with ready-to-run commands.
 
 ---
 
 ### DDL Tests Summary
 
-| Test | Source | DDL Operation | Debezium behaviour | Iceberg outcome |
+| Test | Source | DDL Operation | Pipeline behaviour | Resolution |
 |---|---|---|---|---|
-| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | New Avro schema version in SR | Column added via `mergeSchema`; old rows = NULL |
-| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | New Avro schema without field | Column kept in Iceberg; future rows = NULL |
-| **7c** | PostgreSQL | `ALTER COLUMN address TYPE TEXT` | New Avro schema; string → string | No Iceberg type change |
-| **7d** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | DDL in `schema-changes.oracle` | Column added; old rows = NULL |
-| **7e** | MongoDB | New field in document (no DDL) | Full document with new field in `after` | Column added via `mergeSchema` |
-| **7f** | All | SR audit | — | All versions visible; SR cache verified |
+| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | CRITICAL log — pipeline stops for table | `ddl_apply.py --op add` |
+| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | WARNING log — pipeline continues (NULL for missing col) | `ddl_apply.py --op drop` (optional) |
+| **7c** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | CRITICAL log — pipeline stops for table | `ddl_apply.py --op add` |
+| **7d** | MongoDB | New field `loyalty_tier` in document | CRITICAL log — pipeline stops for table | `ddl_apply.py --op add` |
 
 ---
-
-## 9. Section 8 — Peak-Hour Simulation
-
-**Purpose:** Verify the pipeline handles burst load with the parallelism tuning knobs.
-
-### Step 1 — Check current ConfigMap settings
-
-```bash
-kubectl get configmap kafka-to-iceberg-config -n prod -o yaml
-```
-
-### Step 2 — Apply peak-hour settings
-
-```bash
-kubectl patch configmap kafka-to-iceberg-config -n prod --type merge -p '{
-  "data": {
-    "MERGE_PARALLELISM": "16",
-    "COALESCE_BEFORE_MERGE": "8"
-  }
-}'
-kubectl get configmap kafka-to-iceberg-config -n prod \
-  -o jsonpath='{.data.MERGE_PARALLELISM} / {.data.COALESCE_BEFORE_MERGE}{"\n"}'
-# Expected: 16 / 8
-```
-
-### Step 3 — Rolling restart to apply
-
-```bash
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-### Step 4 — Verify settings are active in logs
-
-```bash
-kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard --tail=50 \
-  | grep -E "MERGE_PARALLELISM|COALESCE_BEFORE_MERGE"
-```
-
-### Step 5 — Generate a burst of inserts
-
-```sql
--- psql — 1000 rows
-DO $$
-BEGIN
-  FOR i IN 901000..901999 LOOP
-    INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-    VALUES (i, 'BurstTest', 'burst_' || i || '@example.com', '555-' || i,
-            i || ' Burst St', 'Sydney', 'AU', NOW());
-  END LOOP;
-END $$;
-COMMIT;
-```
-
-### Step 6 — Monitor batch duration
-
-```bash
-kubectl logs -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard -f | grep -E "Batch [0-9]+ took"
-```
-
-### Step 7 — Restore normal settings
-
-```bash
-kubectl patch configmap kafka-to-iceberg-config -n prod --type merge -p '{
-  "data": {
-    "MERGE_PARALLELISM": "8",
-    "COALESCE_BEFORE_MERGE": "4"
-  }
-}'
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-### Step 8 — Cleanup burst rows
-
-```sql
--- psql
-DELETE FROM customers WHERE id BETWEEN 901000 AND 901999;
-COMMIT;
-```
-
-```bash
-sleep 10
-```
-
-```sql
-SELECT COUNT(*) FROM postgres.e2e_testing.customers
-WHERE id BETWEEN 901000 AND 901999;
--- Expected: 0
-```
 
 ---
 

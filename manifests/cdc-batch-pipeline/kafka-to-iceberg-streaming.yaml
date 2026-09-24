@@ -2690,18 +2690,41 @@ data: {}
 # script. The volume mount below is also removed.
 
 ---
+# ─────────────────────────────────────────────────────────────────────────────
+# RETIRED — schema-evolution-handler (replicas: 0)
+#
+# This Deployment ran 04_schema_evolution_handler.py, which watched the
+# schema-changes.* Kafka topics and auto-applied ALTER TABLE to Iceberg
+# when Debezium published a DDL event.
+#
+# It has been retired from the Kafka→Iceberg CDC pipeline because automatic
+# schema evolution was replaced with operator-gated DDL apply:
+#   1. When a batch contains columns not in Iceberg, 05_kafka_to_iceberg_streaming.py
+#      now logs a CRITICAL error with the exact ddl_apply.py command and stops
+#      replication for that table (no silent column drop).
+#   2. The operator reads the CRITICAL log (or runs ddl_extract.py) to get
+#      the ready-to-run ddl_apply.py command and applies it manually.
+#
+# NOTE: 04_schema_evolution_handler.py is intentionally left in the Docker image
+#       and is NOT removed from the Dockerfile. starpump.py is a separate pipeline
+#       that may use schema evolution independently — this Deployment retirement
+#       only affects the Kafka→Iceberg streaming path.
+#
+# To re-enable: change replicas back to 1 and apply.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
-    pipeline.description: Watches schema-changes.postgres / schema-changes.oracle-cache-testing / schema-changes.mongodb Kafka topics. On each Debezium DDL event, fetches the new Avro schema from Schema Registry, diffs against the previous version, and applies ALTER TABLE to the target Iceberg table. Runs as user dave (can_admin_catalog=true, can_write_iceberg=true).
+    pipeline.description: "RETIRED — see comment above. Previously watched schema-changes.* Kafka topics and auto-applied ALTER TABLE to Iceberg. Replaced by operator-gated ddl_apply.py workflow. See scripts/ddl_extract.py and docs/runbooks/runbook-30-cdc-e2e-testing.md Section 7."
   labels:
     app: schema-evolution-handler
     pipeline.type: ddl-handler
+    pipeline.status: retired
   name: schema-evolution-handler
   namespace: prod
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: schema-evolution-handler
