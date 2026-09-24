@@ -95,6 +95,17 @@ data:
   #   oracle.cache_testing.CUSTOMERS   → oracle.e2e_testing.customers
   #   mongodb.cache_testing.customers  → mongodb.e2e_testing.customers
   TARGET_NAMESPACE:             ""
+  # JVM DNS caching fix — prevents Java from caching DNS failures/successes forever.
+  # Without this, if the Kafka broker DNS is unresolvable at JVM startup (e.g. during
+  # rolling restarts or broker pod churn), Java permanently caches the failure for the
+  # lifetime of the JVM and never retries — even though Python/OS DNS resolves fine.
+  # networkaddress.cache.ttl=30        → re-resolve successful lookups every 30s
+  # networkaddress.cache.negative.ttl=5 → retry failed lookups after 5s (not forever)
+  JAVA_TOOL_OPTIONS: >-
+    -Dsun.net.inetaddr.ttl=30
+    -Dsun.net.inetaddr.negative.ttl=5
+    -Dnetworkaddress.cache.ttl=30
+    -Dnetworkaddress.cache.negative.ttl=5
 
 # ── ConfigMap: streaming script (managed by ArgoCD) ──────────────────────────
 
@@ -1385,6 +1396,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
+              name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -1542,6 +1558,11 @@ spec:
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
@@ -1701,6 +1722,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
+              name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -1858,6 +1884,11 @@ spec:
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
@@ -2017,6 +2048,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
+              name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -2174,6 +2210,11 @@ spec:
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
@@ -2333,6 +2374,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
+              name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -2491,6 +2537,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
+              name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -2648,6 +2699,11 @@ spec:
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: JAVA_TOOL_OPTIONS
+          valueFrom:
+            configMapKeyRef:
+              key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
         image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
         imagePullPolicy: IfNotPresent
