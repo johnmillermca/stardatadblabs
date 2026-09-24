@@ -3504,7 +3504,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -3677,7 +3677,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -3850,7 +3850,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -4027,7 +4027,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -4200,7 +4200,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -4373,7 +4373,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -4550,7 +4550,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -4723,7 +4723,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -4896,7 +4896,7 @@ spec:
       terminationGracePeriodSeconds: 90
       containers:
         - name: kafka-to-iceberg
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -5111,7 +5111,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: schema-evolution-handler
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-14
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-15
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
