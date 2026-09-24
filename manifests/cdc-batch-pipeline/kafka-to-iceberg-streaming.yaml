@@ -19,7 +19,7 @@
 # Script delivery
 # ───────────────
 # 05_kafka_to_iceberg_streaming.py is NOT baked into the spark-gluten-velox
-# image.  As of 3.5.1-16, the script is baked directly into the Docker image.
+# image.  As of 3.5.1-17, the script is baked directly into the Docker image.
 # mounted into every pod at /opt/spark/work-dir/05_kafka_to_iceberg_streaming.py
 # (overlaying the image filesystem at that path).
 # To update the script: modify scripts/05_kafka_to_iceberg_streaming.py and
@@ -104,7 +104,7 @@ data: {}
 kind: ConfigMap
 metadata:
   annotations:
-    pipeline.note: Script baked into image as of 3.5.1-16. This ConfigMap is retained for compatibility but its data is empty.
+    pipeline.note: Script baked into image as of 3.5.1-17. This ConfigMap is retained for compatibility but its data is empty.
   labels:
     app: kafka-to-iceberg
     pipeline.type: streaming
@@ -1385,7 +1385,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1552,7 +1552,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1719,7 +1719,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1886,7 +1886,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2053,7 +2053,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2220,7 +2220,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2387,7 +2387,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2554,7 +2554,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2721,7 +2721,7 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2820,7 +2820,7 @@ spec:
             configMapKeyRef:
               key: ADDR
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-16
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-17
         imagePullPolicy: IfNotPresent
         livenessProbe:
           exec:
