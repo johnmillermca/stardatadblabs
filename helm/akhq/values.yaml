@@ -34,7 +34,8 @@ extraEnv:
           default-group: no-roles
           basic-auth:
             - username: admin
-              password: "{bcrypt}$2b$10$IfatwWvq6ul4AK1tcZib2OXMhig8GQb/m.pb7tm4c9kmLlYUxx52."
+              password: "$2b$10$QYOFAdC8BCYhQ/rTfPoWf.BlBqsIKB6az3PHD8LV8AnYQ3077rqjC"
+              passwordHash: BCRYPT
               groups:
                 - admin
   - name: MICRONAUT_SECURITY_ENABLED
