@@ -24,7 +24,7 @@ extraEnv:
               bootstrap.servers: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
               security.protocol: SASL_PLAINTEXT
               sasl.mechanism: SCRAM-SHA-512
-              sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$(AKHQ_KAFKA_USER)\" password=\"$(AKHQ_KAFKA_PASS)\";"
+              sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"K7Z3n7LYMb79iIQIxszzvzEl\";"
             schema-registry:
               url: "http://schema-registry.prod.svc.cluster.local:8081"
             connect:
@@ -34,24 +34,9 @@ extraEnv:
           default-group: no-roles
           basic-auth:
             - username: admin
-              password: "$(AKHQ_ADMIN_PASS)"
+              password: "$2b$10$tXD0by2eOaUbgNQQSG2Yuuexe/EI6kTvUjBiuTVmg3fSGJ3AEBFlG"
               groups:
                 - admin
-  - name: AKHQ_KAFKA_USER
-    valueFrom:
-      secretKeyRef:
-        name: akhq-credentials
-        key: kafka-sasl-username
-  - name: AKHQ_KAFKA_PASS
-    valueFrom:
-      secretKeyRef:
-        name: akhq-credentials
-        key: kafka-sasl-password
-  - name: AKHQ_ADMIN_PASS
-    valueFrom:
-      secretKeyRef:
-        name: akhq-credentials
-        key: admin-password
   - name: MICRONAUT_SECURITY_TOKEN_JWT_SIGNATURES_SECRET_GENERATOR_SECRET
     valueFrom:
       secretKeyRef:
