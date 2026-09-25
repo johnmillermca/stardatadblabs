@@ -1401,7 +1401,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1564,7 +1564,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1727,7 +1727,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1890,7 +1890,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2053,7 +2053,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2216,7 +2216,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2379,7 +2379,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2542,7 +2542,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2705,7 +2705,7 @@ spec:
             configMapKeyRef:
               key: JAVA_TOOL_OPTIONS
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -2813,7 +2813,7 @@ spec:
             configMapKeyRef:
               key: ADDR
               name: kafka-to-iceberg-config
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-19
         imagePullPolicy: IfNotPresent
         livenessProbe:
           exec:
