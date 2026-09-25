@@ -34,7 +34,7 @@ extraEnv:
           default-group: no-roles
           basic-auth:
             - username: admin
-              password: "$2b$10$QYOFAdC8BCYhQ/rTfPoWf.BlBqsIKB6az3PHD8LV8AnYQ3077rqjC"
+              password: "$2a$10$P4mActUIGj39Q/PyE6rt.O6h9s5QUMR7urMGeT94rCAE7D0Yskm/a"
               passwordHash: BCRYPT
               groups:
                 - admin
