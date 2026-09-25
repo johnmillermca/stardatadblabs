@@ -37,6 +37,8 @@ extraEnv:
               password: "$2b$10$tXD0by2eOaUbgNQQSG2Yuuexe/EI6kTvUjBiuTVmg3fSGJ3AEBFlG"
               groups:
                 - admin
+  - name: MICRONAUT_SECURITY_ENABLED
+    value: "true"
   - name: MICRONAUT_SECURITY_TOKEN_JWT_SIGNATURES_SECRET_GENERATOR_SECRET
     valueFrom:
       secretKeyRef:
