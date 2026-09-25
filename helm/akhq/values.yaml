@@ -24,7 +24,7 @@ extraEnv:
               bootstrap.servers: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
               security.protocol: SASL_PLAINTEXT
               sasl.mechanism: SCRAM-SHA-512
-              sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"K7Z3n7LYMb79iIQIxszzvzEl\";"
+              sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"kafka-app-user\" password=\"mJnehIiUo9zzg4qTPVK8LmLeuC0yNM2T\";"
             schema-registry:
               url: "http://schema-registry.prod.svc.cluster.local:8081"
             connect:
