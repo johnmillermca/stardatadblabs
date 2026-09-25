@@ -37,14 +37,6 @@ extraEnv:
               password: "$(AKHQ_ADMIN_PASS)"
               groups:
                 - admin
-      micronaut:
-        security:
-          token:
-            jwt:
-              signatures:
-                secret:
-                  generator:
-                    secret: "$(AKHQ_JWT_SECRET)"
   - name: AKHQ_KAFKA_USER
     valueFrom:
       secretKeyRef:
@@ -60,7 +52,7 @@ extraEnv:
       secretKeyRef:
         name: akhq-credentials
         key: admin-password
-  - name: AKHQ_JWT_SECRET
+  - name: MICRONAUT_SECURITY_TOKEN_JWT_SIGNATURES_SECRET_GENERATOR_SECRET
     valueFrom:
       secretKeyRef:
         name: akhq-credentials
