@@ -25,9 +25,9 @@
 # CDC streaming use cases where full historical accuracy is not required).
 #
 # ── Archive log retention ─────────────────────────────────────────────────────
-# log.mining.archive.log.hours=4  — Debezium never looks back more than 4h.
-# The oracle-archivelog-cleanup CronJob deletes logs older than 2h every 30min
-# so the 4h Debezium window is always within the available log window.
+# log.mining.archive.log.hours=1  — Debezium never looks back more than 1h.
+# The oracle-archivelog-cleanup CronJob deletes logs older than 90min every 30min
+# so the 1h Debezium window always has a 30-minute safety buffer on disk.
 #
 # ── Pre-requisites ─────────────────────────────────────────────────────────────
 # 1. Oracle ARCHIVELOG mode enabled (ALTER DATABASE ARCHIVELOG)
@@ -275,7 +275,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "log.mining.sleep.time.max.ms":     "2000",
     "log.mining.session.max.ms":        "1800000",
     "log.mining.buffer.type":           "memory",
-    "log.mining.archive.log.hours":     "4",
+    "log.mining.archive.log.hours":     "1",
 
     "max.queue.size":          "81920",
     "max.batch.size":          "32768",
