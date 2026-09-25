@@ -60,7 +60,7 @@ extraEnv:
 
 service:
   type: NodePort
-  nodePort: 30808
+  httpNodePort: 30808
   port: 8080
 
 resources:
