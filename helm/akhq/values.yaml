@@ -27,6 +27,16 @@ extraEnv:
               sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$(AKHQ_KAFKA_USER)\" password=\"$(AKHQ_KAFKA_PASS)\";"
             schema-registry:
               url: "http://schema-registry.prod.svc.cluster.local:8081"
+            connect:
+              - name: debezium-connect
+                url: "http://debezium-connect.prod.svc.cluster.local:8083"
+        security:
+          default-group: no-roles
+          basic-auth:
+            - username: admin
+              password: "$(AKHQ_ADMIN_PASS)"
+              groups:
+                - admin
   - name: AKHQ_KAFKA_USER
     valueFrom:
       secretKeyRef:
@@ -37,6 +47,11 @@ extraEnv:
       secretKeyRef:
         name: akhq-credentials
         key: kafka-sasl-password
+  - name: AKHQ_ADMIN_PASS
+    valueFrom:
+      secretKeyRef:
+        name: akhq-credentials
+        key: admin-password
 
 service:
   type: NodePort
