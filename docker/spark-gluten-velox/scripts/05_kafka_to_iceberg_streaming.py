@@ -758,7 +758,9 @@ def _apply_history_tracking(
         _hist_existing_type_map = {
             row["col_name"].lower(): row["data_type"].lower()
             for row in _hist_rows
-            if row["col_name"] and not row["col_name"].startswith("#")
+            # Stop at the blank separator row — 'Part 0'/'Part 1' partition rows follow
+            if row["col_name"]
+            and not row["col_name"].startswith(("#", "Part "))
         }
     except Exception as _hist_desc_exc:
         logger.debug(
@@ -937,7 +939,13 @@ def _write_micro_batch(
                     _ice_rows = spark.sql(f"DESCRIBE TABLE {_fqn_describe}").collect()
                     _ice_fields = []
                     for row in _ice_rows:
-                        if not row["col_name"] or row["col_name"].startswith("#"):
+                        # DESCRIBE TABLE returns real columns first, then a blank
+                        # separator row, then partition rows ('Part 0', 'Part 1', …)
+                        # and '# Partitioning' / '# Partition Information' headers.
+                        # Stop at the blank separator — everything after it is metadata.
+                        if not row["col_name"]:
+                            break
+                        if row["col_name"].startswith("#"):
                             continue
                         _ice_t = row["data_type"].lower().split("(")[0].strip()
                         _spark_t = _ICE_TO_SPARK.get(_ice_t, StringType())
@@ -1194,7 +1202,9 @@ def _write_micro_batch(
                     _ice_col_names = {
                         row["col_name"].lower()
                         for row in _ice_desc_rows
-                        if row["col_name"] and not row["col_name"].startswith("#")
+                        # Stop at blank separator — 'Part 0'/'Part 1' partition rows follow
+                        if row["col_name"]
+                        and not row["col_name"].startswith(("#", "Part "))
                     }
                     _batch_col_names = {
                         f.name.lower() for f in row_df.schema.fields
