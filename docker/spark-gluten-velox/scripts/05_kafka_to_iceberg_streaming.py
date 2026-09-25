@@ -767,22 +767,28 @@ def _apply_history_tracking(
         )
 
     if _hist_existing_type_map:
+        # Build a name→dataType map of the DataFrame for fast lookup.
+        _df_type_map = {f.name.lower(): f.dataType for f in final_df.schema.fields}
+        # Iterate in TABLE schema order (not DataFrame order) so the SELECT
+        # produces columns in exactly the same sequence as the Iceberg table.
+        # Iceberg rejects appends where columns arrive out of order even when
+        # write.spark.accept-any-schema is set.
         cols_to_keep = []
-        for _hf in final_df.schema.fields:
-            _ice_type = _hist_existing_type_map.get(_hf.name.lower())
-            if _ice_type is None:
+        for _col_name, _ice_type in _hist_existing_type_map.items():
+            if _col_name not in _df_type_map:
                 logger.debug(
-                    "[%s/%s][history_tracking] col '%s' not in hist table — dropping from batch",
-                    source_key, table_name, _hf.name,
+                    "[%s/%s][history_tracking] col '%s' in hist table but absent from batch — will land as NULL",
+                    source_key, table_name, _col_name,
                 )
                 continue
             _target_spark_type = _ICE_TO_SPARK.get(_ice_type)
-            if _target_spark_type and not isinstance(_hf.dataType, type(_target_spark_type)):
+            _actual_dtype = _df_type_map[_col_name]
+            if _target_spark_type and not isinstance(_actual_dtype, type(_target_spark_type)):
                 final_df = final_df.withColumn(
-                    _hf.name,
-                    col(f"`{_hf.name}`").cast(_target_spark_type),
+                    _col_name,
+                    col(f"`{_col_name}`").cast(_target_spark_type),
                 )
-            cols_to_keep.append(_hf.name)
+            cols_to_keep.append(_col_name)
         final_df = final_df.select(*[f"`{c}`" for c in cols_to_keep])
 
     # ── 8. Write ──────────────────────────────────────────────────────────────
