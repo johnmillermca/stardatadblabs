@@ -112,7 +112,7 @@
 | PostgreSQL | CDC source — WAL replication | `postgresql.prod.svc.cluster.local:5432` | db: `cache_testing`; replication user: `rbac` |
 | Oracle XE | CDC source — LogMiner | `oracle-xe.prod.svc.cluster.local:1521` | PDB: `XEPDB1`; CDC user: `c##dbzcdc` |
 | MongoDB | CDC source — change streams | `mongodb.prod.svc.cluster.local:27017` | user: `root`; db: `cache_testing` |
-| Debezium Kafka Connect | Capture & publish CDC events | `http://192.168.1.54:30083` (NodePort) | Pod on `worker2.local`; 4 connectors |
+| Debezium Kafka Connect | Capture & publish CDC events | `http://192.168.1.54:30083` (NodePort) | Pod on `worker2.local`; 4 connectors; image `debezium/connect:2.7.4` |
 | Schema Registry (Confluent-compat) | Avro schema storage & evolution | `http://schema-registry.prod.svc.cluster.local:8081` | Keyed by subject (topic + key/value) |
 | Kafka (Strimzi KRaft) | Message bus — durable ordered log | `strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092` | SASL/SCRAM-SHA-512; 3 partitions; lz4; 7-day retention |
 | Spark Structured Streaming | Stream processing & Iceberg writes | Kubernetes `prod` namespace | Spark 3.5.1 + Gluten/Velox; image `192.168.1.50:30500/spark-gluten-velox:3.5.1-12` |

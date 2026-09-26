@@ -1,15 +1,12 @@
 # =============================================================================
 # Debezium Kafka Connect — ConfigMap + Deployment + Service
 # Namespace : prod
-# Node      : worker4.local (co-located with Kafka)
+# Node      : worker2.local (co-located with Kafka)
 # Access    : http://192.168.1.54:30083 (REST API)
 # Connects to: Kafka at strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # CDC sources: PostgreSQL (pgoutput), MongoDB, Oracle (LogMiner)
 # Secret    : debezium-credentials  (kafka-sasl-username, kafka-sasl-password)
-# Image     : 192.168.1.50:30500/debezium/connect:2.7.4-lc1
-#             Custom build — adds io.debezium.schema.LowerCaseTopicNamingStrategy
-#             plugin JAR so the Oracle connector can emit lowercase topic names.
-#             Source: docker/debezium-connect/  | Build: bash docker/debezium-connect/build.sh --push
+# Image     : debezium/connect:2.7.4  (official upstream image)
 # =============================================================================
 ---
 apiVersion: v1
@@ -82,7 +79,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: debezium-connect
-          image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
+          image: debezium/connect:2.7.4
           imagePullPolicy: IfNotPresent
           ports:
             - name: rest-api

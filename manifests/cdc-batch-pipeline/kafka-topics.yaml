@@ -8,20 +8,15 @@
 #
 # ── Oracle topic naming note ──────────────────────────────────────────────────
 # Oracle stores all identifiers in uppercase in its data dictionary.
-# Using SchemaTopicNamingStrategy (the Debezium default) would therefore produce
-# oracle.CACHE_TESTING.CUSTOMERS — inconsistent with every other source.
-# The connector is configured with LowerCaseTopicNamingStrategy, which forces
-# every segment of the topic name to lowercase regardless of the source DB's
-# casing.  This means:
-#   • table.include.list stays uppercase (CACHE_TESTING.CUSTOMERS) — required by Oracle
-#   • Kafka topics are always lowercase:  oracle.cache_testing.customers
-#   • Adding a future table (e.g. CACHE_TESTING.INVOICES) automatically produces
-#     oracle.cache_testing.invoices — no extra work, no casing surprises.
+# Debezium's default SchemaTopicNamingStrategy preserves Oracle's casing, so
+# Oracle topics use uppercase schema and table names:
+#   oracle.CACHE_TESTING.CUSTOMERS, oracle.CACHE_TESTING.ORDERS, etc.
+# table.include.list values must also be uppercase (Oracle data-dictionary requirement).
 #
 # Namespaces:
-#   postgres.cache_testing.*  — PostgreSQL cache_testing DB tables
-#   oracle.cache_testing.*    — Oracle XEPDB1.CACHE_TESTING tables (always lowercase)
-#   mongodb.cache_testing.*   — MongoDB cache_testing collections
+#   postgres.cache_testing.*   — PostgreSQL cache_testing DB tables
+#   oracle.CACHE_TESTING.*     — Oracle XEPDB1.CACHE_TESTING tables (uppercase)
+#   mongodb.cache_testing.*    — MongoDB cache_testing collections
 #
 # Schema-change topics (one per connector — DDL events from Debezium):
 #   schema-changes.postgres             — postgres-cache-testing-cdc
@@ -183,17 +178,11 @@ spec:
     compression.type: lz4
 
 # ── Oracle CDC topics ────────────────────────────────────────────────────────
-# Topics are always lowercase thanks to LowerCaseTopicNamingStrategy on the
-# oracle-cache-testing-cdc connector.  To replicate a new Oracle table:
+# Topics use Oracle data-dictionary casing (uppercase) via Debezium's default
+# SchemaTopicNamingStrategy.  To replicate a new Oracle table:
 #   1. Add its name to CDC_TABLES in register_oracle_cache_testing_connector.sh
 #   2. Add a KafkaTopic block here following the same pattern below
 #   3. Re-run the registration script (it deletes and re-creates the connector)
-
-# NOTE: topicNames below use uppercase CACHE_TESTING because the connector
-# currently runs with SchemaTopicNamingStrategy (Oracle data-dictionary casing).
-# Once register_oracle_cache_testing_connector.sh is re-run with
-# LowerCaseTopicNamingStrategy these will become oracle.cache_testing.<table>
-# and the topicName values here should be updated to match at that time.
 
 ---
 apiVersion: kafka.strimzi.io/v1
