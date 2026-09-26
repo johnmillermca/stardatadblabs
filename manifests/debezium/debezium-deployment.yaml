@@ -6,7 +6,7 @@
 # Connects to: Kafka at strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # CDC sources: PostgreSQL (pgoutput), MongoDB, Oracle (LogMiner)
 # Secret    : debezium-credentials  (kafka-sasl-username, kafka-sasl-password)
-# Image     : debezium/connect:2.7.4  (official upstream image)
+# Image     : 192.168.1.50:30500/debezium/connect:2.7  (standard upstream image, no custom plugins)
 # =============================================================================
 ---
 apiVersion: v1
@@ -79,7 +79,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: debezium-connect
-          image: debezium/connect:2.7.4
+          image: 192.168.1.50:30500/debezium/connect:2.7
           imagePullPolicy: IfNotPresent
           ports:
             - name: rest-api
