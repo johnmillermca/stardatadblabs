@@ -1,0 +1,191 @@
+---
+# =============================================================================
+# Platform Backup — CronJob
+# =============================================================================
+#
+# Runs backup-platform.sh every day at 02:00 UTC from a pod on master.local.
+# Uploads the resulting archive to:
+#   s3://xdatatoiceberg1/k8s-backups/platform-backup-<TIMESTAMP>.tar.gz
+#
+# The pod runs on master.local (same node as etcd, PKI, and local-path PVCs)
+# with hostPID + privileged so it can:
+#   - reach etcd via 127.0.0.1:2379
+#   - read /etc/kubernetes/pki
+#   - read /home/local-path-provisioner PV directories
+#   - exec into prod pods (postgresql, kerberos-kdc) via kubectl
+#
+# APPLY
+# -----
+#   kubectl apply -f manifests/backup/platform-backup-cronjob.yaml
+#
+# TRIGGER MANUALLY
+# ----------------
+#   kubectl create job -n kube-system --from=cronjob/platform-backup platform-backup-manual-$(date +%s)
+#
+# WATCH LOGS
+# ----------
+#   kubectl logs -n kube-system -l job-name=<job-name> -f
+#
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-backup
+  namespace: kube-system
+  labels:
+    app: platform-backup
+
+---
+# ---------------------------------------------------------------------------
+# ClusterRole — read/exec pods across all namespaces + read secrets + read nodes
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-backup
+  labels:
+    app: platform-backup
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "persistentvolumes", "persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list"]
+
+---
+# ---------------------------------------------------------------------------
+# ClusterRoleBinding
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-backup
+  labels:
+    app: platform-backup
+subjects:
+  - kind: ServiceAccount
+    name: platform-backup
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: platform-backup
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ---------------------------------------------------------------------------
+# CronJob — daily at 02:00 UTC
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: platform-backup
+  namespace: kube-system
+  labels:
+    app: platform-backup
+spec:
+  # ── 02:00 UTC every day ──────────────────────────────────────────────────
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid          # never overlap two backup jobs
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # kill the job if it runs longer than 2 hours
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app: platform-backup
+        spec:
+          serviceAccountName: platform-backup
+          restartPolicy: OnFailure
+
+          # ── Pin to master.local — etcd, PKI, and local-path PVCs live here ──
+          nodeSelector:
+            kubernetes.io/hostname: master.local
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+
+          # ── Host filesystem access for PKI + local-path PV dirs ──────────
+          volumes:
+            - name: host-root
+              hostPath:
+                path: /
+            - name: repo
+              hostPath:
+                path: /home/star_master/k8s-platform
+
+          containers:
+            - name: backup
+              image: 192.168.1.50:30500/library/bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+
+              # Override entrypoint — install awscli + bash, then run the script
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  echo "[backup-cron] Installing aws-cli..."
+                  apt-get update -qq && apt-get install -y -qq awscli 2>/dev/null \
+                    || (curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+                        && unzip -q /tmp/awscliv2.zip -d /tmp \
+                        && /tmp/aws/install --bin-dir /usr/local/bin 2>/dev/null)
+                  echo "[backup-cron] Running backup-platform.sh..."
+                  exec bash /repo/scripts/master/backup-platform.sh
+
+              env:
+                - name: S3_BUCKET
+                  value: "xdatatoiceberg1"
+                - name: S3_PREFIX
+                  value: "k8s-backups"
+                - name: S3_REGION
+                  value: "us-east-2"
+                - name: LOCAL_KEEP
+                  value: "3"
+                - name: S3_KEEP
+                  value: "30"
+                # AWS credentials — read at runtime from the prod secret via kubectl
+                # (the pod's service-account has ClusterRole that can get secrets)
+                - name: AWS_ACCESS_KEY_ID
+                  value: ""   # overridden at runtime by backup-platform.sh
+                - name: AWS_SECRET_ACCESS_KEY
+                  value: ""   # overridden at runtime by backup-platform.sh
+
+              volumeMounts:
+                # Full host filesystem — allows reading /etc/kubernetes/pki,
+                # /home/local-path-provisioner, /opt/k8s-backups, etcdctl binary
+                - name: host-root
+                  mountPath: /host
+                - name: repo
+                  mountPath: /repo
+
+              securityContext:
+                privileged: true     # needed to read etcd certs + PV directories
+
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 256Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi

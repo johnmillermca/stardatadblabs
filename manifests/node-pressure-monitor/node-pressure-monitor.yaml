@@ -1,0 +1,259 @@
+---
+# =============================================================================
+# Node Pressure Monitor — Dynamic Cordon / Uncordon
+# =============================================================================
+#
+# WHAT IT DOES
+# ------------
+# Continuously watches every worker node. When a node's pod *requests*
+# reach or exceed 75 % of allocatable CPU  OR  75 % of allocatable memory
+# the node is cordoned (NoSchedule) so the scheduler stops placing new pods
+# there. When usage drops back below BOTH thresholds the node is automatically
+# uncordoned.
+#
+# CONFIGURATION
+# -------------
+# Tune the thresholds and poll interval via the Deployment env vars:
+#   CPU_THRESHOLD  — default 75  (%)
+#   MEM_THRESHOLD  — default 75  (%)
+#   POLL_INTERVAL  — default 60  (seconds)
+#
+# APPLY
+# -----
+#   kubectl apply -f manifests/node-pressure-monitor/node-pressure-monitor.yaml
+#
+# LOGS
+# ----
+#   kubectl logs -n kube-system -l app=node-pressure-monitor -f
+#
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-pressure-monitor
+  namespace: kube-system
+  labels:
+    app: node-pressure-monitor
+
+---
+# ---------------------------------------------------------------------------
+# ClusterRole — needs cluster-wide read on nodes + pods, and patch on nodes
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-pressure-monitor
+  labels:
+    app: node-pressure-monitor
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+# ---------------------------------------------------------------------------
+# ClusterRoleBinding
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-pressure-monitor
+  labels:
+    app: node-pressure-monitor
+subjects:
+  - kind: ServiceAccount
+    name: node-pressure-monitor
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: node-pressure-monitor
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ---------------------------------------------------------------------------
+# ConfigMap — the monitor script
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-pressure-monitor-script
+  namespace: kube-system
+  labels:
+    app: node-pressure-monitor
+data:
+  monitor.py: |
+    #!/usr/bin/env python3
+    import logging, os, sys, time
+    from kubernetes import client, config
+    from kubernetes.client.exceptions import ApiException
+
+    CPU_THRESHOLD = float(os.environ.get("CPU_THRESHOLD", 75))
+    MEM_THRESHOLD = float(os.environ.get("MEM_THRESHOLD", 75))
+    POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL",   60))
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stdout,
+    )
+    log = logging.getLogger("node-pressure-monitor")
+
+    def init_k8s():
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
+        return client.CoreV1Api()
+
+    def parse_cpu(v):
+        return float(v[:-1]) if v.endswith("m") else float(v) * 1000
+
+    def parse_mem(v):
+        for sfx, mul in [("Ki",1024),("Mi",1024**2),("Gi",1024**3),("Ti",1024**4),
+                         ("K",1000),("M",1000**2),("G",1000**3),("T",1000**4)]:
+            if v.endswith(sfx):
+                return float(v[:-len(sfx)]) * mul
+        return float(v)
+
+    def is_worker(node):
+        labels = node.metadata.labels or {}
+        taints = node.spec.taints or []
+        cp_keys = {"node-role.kubernetes.io/control-plane",
+                   "node-role.kubernetes.io/master"}
+        if cp_keys & set(labels):
+            return False
+        if any(t.key in cp_keys for t in taints):
+            return False
+        return True
+
+    def get_requests(api, node_name):
+        pods = api.list_pod_for_all_namespaces(
+            field_selector=(
+                f"spec.nodeName={node_name},"
+                "status.phase!=Failed,status.phase!=Succeeded"
+            )
+        )
+        cpu_m = mem_b = 0.0
+        for pod in pods.items:
+            for c in pod.spec.containers:
+                if c.resources and c.resources.requests:
+                    r = c.resources.requests
+                    cpu_m += parse_cpu(r["cpu"])    if "cpu"    in r else 0
+                    mem_b += parse_mem(r["memory"]) if "memory" in r else 0
+        return cpu_m, mem_b
+
+    def patch_node(api, name, unschedulable):
+        api.patch_node(name, {"spec": {"unschedulable": unschedulable}})
+        verb = "CORDONED  " if unschedulable else "UNCORDONED"
+        log.warning("%s %s", verb, name)
+
+    def poll(api):
+        for node in api.list_node().items:
+            if not is_worker(node):
+                continue
+            name  = node.metadata.name
+            alloc = node.status.allocatable or {}
+            a_cpu = parse_cpu(alloc.get("cpu",    "0"))
+            a_mem = parse_mem(alloc.get("memory", "0"))
+            r_cpu, r_mem = get_requests(api, name)
+            cpu_pct = r_cpu / a_cpu * 100 if a_cpu else 0
+            mem_pct = r_mem / a_mem * 100 if a_mem else 0
+            over    = cpu_pct >= CPU_THRESHOLD or mem_pct >= MEM_THRESHOLD
+            cordoned = bool(node.spec.unschedulable)
+            log.info("%-20s  CPU:%5.1f%%  MEM:%5.1f%%  cordoned=%-5s  over_threshold=%s",
+                     name, cpu_pct, mem_pct, cordoned, over)
+            try:
+                if over and not cordoned:
+                    patch_node(api, name, True)
+                elif not over and cordoned:
+                    patch_node(api, name, False)
+            except ApiException as e:
+                log.error("Failed to patch node %s: %s", name, e)
+
+    def main():
+        log.info("node-pressure-monitor started  CPU=%.0f%%  MEM=%.0f%%  interval=%ds",
+                 CPU_THRESHOLD, MEM_THRESHOLD, POLL_INTERVAL)
+        api = init_k8s()
+        while True:
+            try:
+                poll(api)
+            except Exception as e:
+                log.error("Poll error: %s", e)
+            time.sleep(POLL_INTERVAL)
+
+    if __name__ == "__main__":
+        main()
+
+---
+# ---------------------------------------------------------------------------
+# Deployment — single replica, runs forever in kube-system
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-pressure-monitor
+  namespace: kube-system
+  labels:
+    app: node-pressure-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-pressure-monitor
+  template:
+    metadata:
+      labels:
+        app: node-pressure-monitor
+    spec:
+      serviceAccountName: node-pressure-monitor
+      # Run on the master/control-plane node so it survives worker pressure
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      containers:
+        - name: monitor
+          image: python:3.12-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              pip install --quiet kubernetes && \
+              exec python3 /scripts/monitor.py
+          env:
+            # ── Cordon when requests reach this % of allocatable ──────────
+            - name: CPU_THRESHOLD
+              value: "75"
+            - name: MEM_THRESHOLD
+              value: "75"
+            # ── How often to poll (seconds) ───────────────────────────────
+            - name: POLL_INTERVAL
+              value: "60"
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: script
+          configMap:
+            name: node-pressure-monitor-script
+            defaultMode: 0755
