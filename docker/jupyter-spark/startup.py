@@ -107,18 +107,28 @@ except Exception as _exc:
     print("    Set DISABLE_GLUTEN=1 and restart the kernel to try without Velox.", flush=True)
     spark = None
 
-# ── Register globals in the IPython namespace ──────────────────────────────────
-# IPython kernels use get_ipython() to access the interactive shell namespace.
+# ── Register globals in the IPython namespace + builtins ──────────────────────
+# Two-layer injection so spark/sql() are always reachable:
+#   1. builtins — available in every Python scope immediately, no timing dependency
+#   2. IPython user_ns via push() — shows up in tab-completion and %whos
+import builtins as _builtins
+
+if spark is not None:
+    def sql(query: str, **kwargs):
+        """Shortcut for spark.sql(). Returns a Spark DataFrame."""
+        return spark.sql(query, **kwargs)
+else:
+    sql = None  # type: ignore
+
+# Inject into builtins first — works even if IPython isn't ready yet
+_builtins.spark = spark  # type: ignore
+_builtins.sql   = sql    # type: ignore
+
+# Also push into IPython user namespace for tab-completion / %whos
 try:
     _ip = get_ipython()   # noqa: F821 — available in IPython kernel context
-    _ip.push({"spark": spark})
-
-    # sql() shortcut — equivalent to spark.sql() but shorter to type
-    if spark is not None:
-        def sql(query: str, **kwargs):
-            """Shortcut for spark.sql(). Returns a Spark DataFrame."""
-            return spark.sql(query, **kwargs)
-        _ip.push({"sql": sql})
+    if _ip is not None:
+        _ip.push({"spark": spark, "sql": sql})
 except Exception:
     pass   # Not in an IPython context (e.g. unit test) — skip push
 
