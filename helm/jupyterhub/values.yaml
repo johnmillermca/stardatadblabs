@@ -90,6 +90,10 @@ singleuser:
     name: 192.168.1.50:30500/jupyter-spark
     tag: latest
     pullPolicy: Always
+  # Pin singleuser pods to worker2 — low resource pressure, no PVC affinity conflict.
+  # Change to {} to let the scheduler decide freely.
+  nodeSelector:
+    kubernetes.io/hostname: worker2.local
   # Inject pod IP as SPARK_LOCAL_IP so the Spark driver binds to and advertises
   # the pod's routable IP — executors can then connect back without DNS.
   # status.podIP is available via the Downward API at pod start.
@@ -104,11 +108,17 @@ singleuser:
       valueFrom:
         fieldRef:
           fieldPath: metadata.annotations['hub.jupyter.org/username']
+  # Temporary: use emptyDir so the pod runs on worker2 without needing
+  # the claim-admin PVC (which has node affinity to worker5).
+  # Switch back to dynamic after verifying Spark/Iceberg works from Jupyter.
   storage:
-    type: dynamic
-    capacity: 10Gi
-    dynamic:
-      storageClass: local-path
+    type: none
+    extraVolumes:
+      - name: home
+        emptyDir: {}
+    extraVolumeMounts:
+      - name: home
+        mountPath: /home/jovyan
   cpu:
     limit: 2
     guarantee: 0.25
