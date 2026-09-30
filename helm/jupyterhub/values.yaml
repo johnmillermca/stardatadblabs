@@ -116,9 +116,18 @@ singleuser:
     extraVolumes:
       - name: home
         emptyDir: {}
+      # Mount the IPython startup script from a ConfigMap so it survives the
+      # emptyDir wipe of /home/jovyan on every pod start. Without this the
+      # Dockerfile-baked startup script is lost and `spark` is never defined.
+      - name: jupyter-spark-startup
+        configMap:
+          name: jupyter-spark-startup
     extraVolumeMounts:
       - name: home
         mountPath: /home/jovyan
+      - name: jupyter-spark-startup
+        mountPath: /home/jovyan/.ipython/profile_default/startup
+        readOnly: true
   cpu:
     limit: 2
     guarantee: 0.25
