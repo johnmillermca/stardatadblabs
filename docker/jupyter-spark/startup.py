@@ -96,7 +96,7 @@ try:
     _conf.set("spark.memory.offHeap.enabled",                    "true")
     _conf.set("spark.memory.offHeap.size",                       "1g")
 
-    spark = SparkSession.builder.config(_conf).getOrCreate()
+    spark = SparkSession.builder.config(conf=_conf).getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
     print(f"✅  Spark {spark.version} ready  |  user={_jh_user}  |  master={spark.sparkContext.master}", flush=True)
