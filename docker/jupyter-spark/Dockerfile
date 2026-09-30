@@ -94,12 +94,18 @@ COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
 ENV SPARK_CONF_DIR=/usr/local/spark/conf
 
 # ── Auto-start Spark on every kernel boot ────────────────────────────────────
-# IPython runs every .py file in the startup directory before the first cell.
-# startup.py reads credentials from OpenBao and creates the `spark` global
-# so users can run Spark SQL immediately without any setup cell.
-RUN mkdir -p /home/${NB_USER}/.ipython/profile_default/startup
-COPY startup.py /home/${NB_USER}/.ipython/profile_default/startup/00-spark-auto-init.py
-RUN chown -R ${NB_USER}:users /home/${NB_USER}/.ipython
+# ipykernel_launcher does NOT auto-load ~/.ipython/profile_default/startup/
+# because the home dir is wiped by emptyDir on every pod start, and the
+# ConfigMap mount makes .ipython read-only (IPython falls back to /tmp and
+# ignores startup files entirely).
+#
+# Solution: write an ipython_kernel_config.py to the system IPython config dir
+# (/opt/conda/etc/ipython/) pointing exec_files at /etc/jupyter/startup/
+# which is where the ConfigMap mounts 00-spark-auto-init.py.
+# This file survives the emptyDir wipe and is read by every kernel on boot.
+RUN mkdir -p /opt/conda/etc/ipython && \
+    echo "c.IPKernelApp.exec_files = ['/etc/jupyter/startup/00-spark-auto-init.py']" \
+    > /opt/conda/etc/ipython/ipython_kernel_config.py
 
 USER ${NB_USER}
 WORKDIR /home/${NB_USER}
