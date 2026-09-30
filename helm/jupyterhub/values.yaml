@@ -36,8 +36,10 @@ hub:
     02-no-cloud-metadata: |
       c.KubeSpawner.extra_container_config = {}
       c.KubeSpawner.init_containers = []
-  # Workers only — no master
-  nodeSelector: {}
+  # Pin hub to worker4 — hub-db-dir PVC has node affinity to worker4.local.
+  # worker4 must remain uncordoned for the hub pod to schedule.
+  nodeSelector:
+    kubernetes.io/hostname: worker4.local
 
 proxy:
   service:
