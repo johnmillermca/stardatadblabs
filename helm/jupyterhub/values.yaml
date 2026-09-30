@@ -98,6 +98,12 @@ singleuser:
       valueFrom:
         fieldRef:
           fieldPath: status.podIP
+    # Pass the JupyterHub username into the kernel so startup.py can set
+    # SPARK_USER correctly (used by IcebergTableBuilder RBAC and Spark app name).
+    JUPYTERHUB_USER:
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.annotations['hub.jupyter.org/username']
   storage:
     type: dynamic
     capacity: 10Gi

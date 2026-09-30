@@ -21,6 +21,9 @@ ARG POSTGRES_JDBC_VERSION=42.7.3
 ARG HADOOP_AWS_VERSION=3.3.4
 ARG AWS_SDK_VERSION=1.12.262
 
+# NB_USER is set by the base singleuser image (default: jovyan)
+ARG NB_USER=jovyan
+
 USER root
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,7 +37,8 @@ RUN pip install --no-cache-dir \
     pandas pyarrow \
     "pyiceberg==${PYICEBERG_VERSION}" \
     "s3fs>=2023.1.0" \
-    sqlmesh boto3 matplotlib seaborn scikit-learn
+    sqlmesh boto3 matplotlib seaborn scikit-learn \
+    urllib3
 
 # Download Iceberg + PostgreSQL JARs from Maven (small files, fast).
 # hadoop-aws, aws-java-sdk-bundle, and iceberg-aws-bundle are COPY'd from the
@@ -75,6 +79,11 @@ COPY gluten-velox-bundle-spark3.5_2.12-centos_7_x86_64-1.2.0.jar \
 # Copied from docker/spark-gluten-velox/scripts/ (keep in sync).
 COPY spark_iceberg_utils.py /opt/conda/lib/python3.11/site-packages/spark_iceberg_utils.py
 
+# bao_spark_init.py — OpenBao credential loader; builds SparkConf with all
+# Iceberg catalogs (postgres, oracle, mongodb, polaris, databricks) wired.
+# Used by startup.py to auto-initialise Spark on every kernel start.
+COPY bao_spark_init.py /opt/conda/lib/python3.11/site-packages/bao_spark_init.py
+
 RUN mkdir -p /usr/local/spark/conf
 COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
 
@@ -83,6 +92,14 @@ COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
 # (spark.sql.catalog.polaris) are absent from the JVM, causing:
 #   CatalogNotFoundException: spark.sql.catalog.polaris is not defined
 ENV SPARK_CONF_DIR=/usr/local/spark/conf
+
+# ── Auto-start Spark on every kernel boot ────────────────────────────────────
+# IPython runs every .py file in the startup directory before the first cell.
+# startup.py reads credentials from OpenBao and creates the `spark` global
+# so users can run Spark SQL immediately without any setup cell.
+RUN mkdir -p /home/${NB_USER}/.ipython/profile_default/startup
+COPY startup.py /home/${NB_USER}/.ipython/profile_default/startup/00-spark-auto-init.py
+RUN chown -R ${NB_USER}:users /home/${NB_USER}/.ipython
 
 USER ${NB_USER}
 WORKDIR /home/${NB_USER}
