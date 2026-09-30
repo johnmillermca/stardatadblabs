@@ -32,14 +32,32 @@ import os
 import urllib.request
 from typing import Any
 
+import pyspark
 from pyspark import SparkConf
 
 logger = logging.getLogger(__name__)
 
-# ── OpenBao addresses ──────────────────────────────────────────────────────────
-_BAO_IN_CLUSTER  = "http://openbao.prod.svc.cluster.local:8200"
-_BAO_NODEPORT    = "http://192.168.1.50:30820"
-_K8S_SA_JWT_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+# ── OpenBao address ────────────────────────────────────────────────────────────
+# Resolution order (first wins):
+#   1. ADDR / BAO_ADDR env var (explicit override)
+#   2. In-cluster DNS: openbao.<namespace>.svc.cluster.local:8200
+#      Namespace resolved from K8s Downward API file, then POD_NAMESPACE env,
+#      then falls back to "prod".
+_K8S_SA_JWT_FILE      = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_K8S_NAMESPACE_FILE   = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+def _resolve_namespace() -> str:
+    """Read the pod's own namespace from the SA projection (most reliable)."""
+    if os.path.exists(_K8S_NAMESPACE_FILE):
+        return open(_K8S_NAMESPACE_FILE).read().strip()
+    return os.environ.get("POD_NAMESPACE", "prod")
+
+def _resolve_bao_address() -> str:
+    """Build the OpenBao address dynamically — no hardcoded IPs or namespaces."""
+    if explicit := (os.environ.get("ADDR") or os.environ.get("BAO_ADDR")):
+        return explicit
+    ns = _resolve_namespace()
+    return f"http://openbao.{ns}.svc.cluster.local:8200"
 
 # ── Secret paths (OpenBao KV v2 — read via secret/data/<path>) ───────────────
 _PATH_S3             = "secret/data/platform/s3"
@@ -52,27 +70,74 @@ _PATH_PIPELINE_DB    = "secret/data/platform/pipeline_db"
 _PATH_DATABRICKS     = "secret/data/platform/databricks"
 _PATH_POSTGRES       = "secret/data/platform/postgres"
 _PATH_MONGODB        = "secret/data/platform/mongodb"
-# JARs baked into the spark-gluten-velox image
-_ICEBERG_JAR_NAME    = "iceberg-spark-runtime-3.5_2.12-1.9.2.jar"
-_ICEBERG_JAR_PATH    = f"/opt/spark/jars/{_ICEBERG_JAR_NAME}"
-_SNOWFLAKE_JAR_NAME  = "spark-snowflake_2.12-3.2.1-spark_3.5.jar"
-_SNOWFLAKE_JAR_PATH  = f"/opt/spark/jars/{_SNOWFLAKE_JAR_NAME}"
-# spark-snowflake 3.2.1 requires JDBC 4.x (internal API package restructure)
-_SNOWFLAKE_JDBC_JAR  = "/opt/spark/jars/snowflake-jdbc-4.0.2.jar"
-# Databricks JDBC driver (Simba) — baked into image
-_DATABRICKS_JDBC_JAR = "/opt/spark/jars/databricks-jdbc-2.6.36.1070.jar"
-# Oracle JDBC thin driver (ojdbc11) — baked into image
-_ORACLE_JDBC_JAR     = "/opt/spark/jars/ojdbc11-23.4.0.24.05.jar"
-# MongoDB Spark connector uber-jar — baked into image
-_MONGODB_CONNECTOR_JAR = "/opt/spark/jars/mongo-spark-connector_2.12-10.4.0-all.jar"
 
-_POLARIS_URI = "http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
-# Default URI — overridden at runtime by the 'url' key in secret/data/platform/polaris
-# if that key is present.  The constant is kept as a fallback for environments that
-# have not yet written the url key to OpenBao.
-# In-cluster drivers connect directly on port 17077 (bypasses krb-spark-guard sidecar).
-# External spark-submit should use spark-master-svc:7077 (guard-proxied NodePort).
-_SPARK_MASTER = "spark://spark-master-internal.prod.svc.cluster.local:17077"
+# ── JAR path resolution ────────────────────────────────────────────────────────
+# Resolve JARs dynamically so the same bao_spark_init.py works in both:
+#   - Spark worker/master pods:  JARs live at /opt/spark/jars/
+#   - JupyterHub singleuser pods: JARs live at <pyspark_install>/jars/
+# Prefer /opt/spark/jars/ if it exists (worker image), otherwise fall back to
+# the pyspark package jars directory (Jupyter image).
+# Override entirely with JAR_DIR env var if set.
+_SPARK_WORKER_JARS = "/opt/spark/jars"
+_PYSPARK_JARS      = os.path.join(os.path.dirname(pyspark.__file__), "jars")
+_JAR_DIR           = (
+    os.environ.get("JAR_DIR")
+    or (_SPARK_WORKER_JARS if os.path.isdir(_SPARK_WORKER_JARS) else _PYSPARK_JARS)
+)
+
+def _jar(name: str) -> str:
+    """Return the full path for a JAR from the resolved jars directory."""
+    return os.path.join(_JAR_DIR, name)
+
+def _find_jar(glob_pattern: str) -> str:
+    """
+    Find a JAR by glob pattern inside _JAR_DIR.
+    Allows version-agnostic matching, e.g. _find_jar("iceberg-spark-runtime*.jar").
+    Returns the first match, or raises FileNotFoundError if none found.
+    """
+    import glob as _glob
+    matches = sorted(_glob.glob(os.path.join(_JAR_DIR, glob_pattern)))
+    if not matches:
+        raise FileNotFoundError(
+            f"No JAR matching '{glob_pattern}' found in {_JAR_DIR}"
+        )
+    return matches[0]
+
+# JARs — discovered by glob so version bumps in the image don't break init.
+# Falls back gracefully: if a JAR is absent it is omitted from spark.jars
+# rather than crashing SparkContext with FileNotFoundException.
+def _optional_jar(glob_pattern: str) -> str | None:
+    """Like _find_jar but returns None instead of raising if not found."""
+    try:
+        return _find_jar(glob_pattern)
+    except FileNotFoundError:
+        return None
+
+# Spark master — env var first, then read from spark-defaults.conf if present,
+# then fall back to in-cluster DNS using the resolved namespace.
+def _resolve_spark_master() -> str:
+    if explicit := os.environ.get("SPARK_MASTER"):
+        return explicit
+    # Try reading from spark-defaults.conf (present in both images)
+    conf_dir = os.environ.get("SPARK_CONF_DIR", "/usr/local/spark/conf")
+    defaults_file = os.path.join(conf_dir, "spark-defaults.conf")
+    if os.path.exists(defaults_file):
+        for line in open(defaults_file):
+            line = line.strip()
+            if line.startswith("spark.master") and not line.startswith("#"):
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    return parts[1].strip()
+    ns = _resolve_namespace()
+    return f"spark://spark-master-internal.{ns}.svc.cluster.local:17077"
+
+# Polaris URI — resolved from OpenBao secret at runtime in spark_conf().
+# This constant is the last-resort fallback only.
+def _resolve_polaris_uri() -> str:
+    if explicit := os.environ.get("POLARIS_URI"):
+        return explicit
+    ns = _resolve_namespace()
+    return f"http://polaris-rest.{ns}.svc.cluster.local:8181/api/catalog"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,12 +153,8 @@ class BaoSparkInit:
         bao_role: str = "platform-secrets-read",
         k8s_auth_path: str = "auth/kubernetes/login",
     ) -> None:
-        # Accept TOKEN/ADDR (starpump convention) or legacy BAO_TOKEN/BAO_ADDR.
-        self._address = (
-            bao_address
-            or os.environ.get("ADDR")
-            or os.environ.get("BAO_ADDR", _BAO_IN_CLUSTER)
-        )
+        # Address resolved dynamically — no hardcoded IPs or namespaces.
+        self._address = bao_address or _resolve_bao_address()
         self._role = bao_role
         self._k8s_auth_path = k8s_auth_path
         self._token: str | None = None
@@ -384,14 +445,12 @@ class BaoSparkInit:
         sf  = self.snowflake_creds()
         pol = self.polaris_creds()
 
-        # Resolve the Polaris REST URI: prefer the 'url' key stored in OpenBao so
-        # the endpoint can be changed without rebuilding the image.  Fall back to
-        # the in-cluster default if the key is absent (older OpenBao deployments).
-        polaris_uri = pol.get("url") or _POLARIS_URI
+        # Resolve Polaris URI: OpenBao secret → POLARIS_URI env → in-cluster DNS.
+        polaris_uri = pol.get("url") or _resolve_polaris_uri()
 
         conf = SparkConf()
         conf.setAppName(app_name)
-        conf.setMaster(_SPARK_MASTER)
+        conf.setMaster(_resolve_spark_master())
 
         # ── Driver host: use pod IP so executors on other nodes can reach it ──
         # Default Spark behaviour advertises the pod hostname
@@ -623,27 +682,27 @@ class BaoSparkInit:
         conf.set("spark.sql.catalog.mongodb.s3.path-style-access", "true")
         conf.set("spark.sql.catalog.mongodb.client.region",        s3["region"])
 
-        # ── JARs (baked into image — list for explicitness) ───────────────────
-        conf.set("spark.jars", ",".join([
-            _ICEBERG_JAR_PATH,
-            "/opt/spark/jars/iceberg-aws-bundle-1.9.2.jar",
-            _SNOWFLAKE_JAR_PATH,
-            _SNOWFLAKE_JDBC_JAR,
-            "/opt/spark/jars/hadoop-aws-3.3.4.jar",
-            "/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
-            "/opt/spark/jars/postgresql-42.7.4.jar",
-            _DATABRICKS_JDBC_JAR,
-            _ORACLE_JDBC_JAR,
-            _MONGODB_CONNECTOR_JAR,
-            # Kafka Structured Streaming support — must be listed here so Spark
-            # distributes them to executor nodes in cluster mode.  The JARs live
-            # in /opt/spark/jars/ on the driver image; executors on worker nodes
-            # receive them via spark.jars distribution, not from the local FS.
-            "/opt/spark/jars/spark-sql-kafka-0-10_2.12-3.5.1.jar",
-            "/opt/spark/jars/spark-token-provider-kafka-0-10_2.12-3.5.1.jar",
-            "/opt/spark/jars/kafka-clients-3.4.1.jar",
-            "/opt/spark/jars/commons-pool2-2.11.1.jar",
-        ]))
+        # ── JARs — version-agnostic glob discovery, works in worker + Jupyter pods.
+        # Each _optional_jar() returns None if absent — filtered out below so a
+        # missing optional JAR never crashes SparkContext with FileNotFoundException.
+        _jars = [
+            _optional_jar("iceberg-spark-runtime*.jar"),
+            _optional_jar("iceberg-aws-bundle*.jar"),
+            _optional_jar("spark-snowflake_2.12-*-spark_3.5.jar"),
+            _optional_jar("snowflake-jdbc-*.jar"),
+            _optional_jar("hadoop-aws-*.jar"),
+            _optional_jar("aws-java-sdk-bundle-*.jar"),
+            _optional_jar("postgresql-*.jar"),
+            _optional_jar("databricks-jdbc-*.jar"),
+            _optional_jar("ojdbc11-*.jar"),
+            _optional_jar("mongo-spark-connector_2.12-*-all.jar"),
+            # Kafka Structured Streaming — distributed to executors via spark.jars
+            _optional_jar("spark-sql-kafka-0-10_2.12-*.jar"),
+            _optional_jar("spark-token-provider-kafka-0-10_2.12-*.jar"),
+            _optional_jar("kafka-clients-*.jar"),
+            _optional_jar("commons-pool2-*.jar"),
+        ]
+        conf.set("spark.jars", ",".join(j for j in _jars if j))
 
         if extra_conf:
             for k, v in extra_conf.items():
