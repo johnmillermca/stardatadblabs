@@ -50,6 +50,12 @@ proxy:
       tag: "4.6.2"
 
 singleuser:
+  # Allow the singleuser pod to use its K8s SA JWT to authenticate to OpenBao.
+  # The default SA in prod is bound to the platform-secrets-read role in OpenBao.
+  # Without this, bao_spark_init.py cannot obtain a token and spark fails to start.
+  serviceAccountName: default
+  extraPodConfig:
+    automountServiceAccountToken: true
   cloudMetadata:
     blockWithIptables: false
   networkPolicy:
