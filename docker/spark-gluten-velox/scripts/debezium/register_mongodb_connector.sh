@@ -62,10 +62,12 @@ MGO_PASS=$(echo "$MGO_SECRET"  | python3 -c "import sys,json; d=json.load(sys.st
 MGO_AUTH=$(echo "$MGO_SECRET"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('auth_source','admin'))")
 
 # Build MongoDB connection string (Debezium uses mongodb.connection.string)
+# replicaSet=rs0 is required — Debezium rejects REPLICA_SET clusters without it.
+MGO_REPLSET=$(echo "$MGO_SECRET" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('replica_set','rs0'))")
 if [ -n "$MGO_USER" ] && [ -n "$MGO_PASS" ]; then
-  MGO_CONN_STR="mongodb://${MGO_USER}:${MGO_PASS}@${MGO_HOST}:${MGO_PORT}/?authSource=${MGO_AUTH}"
+  MGO_CONN_STR="mongodb://${MGO_USER}:${MGO_PASS}@${MGO_HOST}:${MGO_PORT}/?authSource=${MGO_AUTH}&replicaSet=${MGO_REPLSET}"
 else
-  MGO_CONN_STR="mongodb://${MGO_HOST}:${MGO_PORT}/"
+  MGO_CONN_STR="mongodb://${MGO_HOST}:${MGO_PORT}/?replicaSet=${MGO_REPLSET}"
 fi
 
 # ── 3. Kafka credentials ──────────────────────────────────────────────────────
@@ -154,9 +156,9 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "schema.history.internal.producer.sasl.mechanism":     "SCRAM-SHA-512",
     "schema.history.internal.producer.sasl.jaas.config":   "${JAAS_CFG}",
 
-    "key.converter":                       "io.confluent.kafka.serializers.KafkaAvroSerializer",
+    "key.converter":                       "io.confluent.connect.avro.AvroConverter",
     "key.converter.schema.registry.url":   "${SR_URL}",
-    "value.converter":                     "io.confluent.kafka.serializers.KafkaAvroSerializer",
+    "value.converter":                     "io.confluent.connect.avro.AvroConverter",
     "value.converter.schema.registry.url": "${SR_URL}",
 
     "tombstones.on.delete":   "false",
