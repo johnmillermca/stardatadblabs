@@ -684,14 +684,36 @@ data:
             """
             for fn, kwargs in steps:
                 try:
-                    # Methods like filter_op take df directly; others return a transform fn
-                    result = fn(df, **kwargs)
-                    if isinstance(result, DataFrame):
-                        df = result
-                    elif callable(result):
+                    # Two calling conventions coexist:
+                    #   factory  — fn(**kwargs) returns a DataFrame→DataFrame callable
+                    #              e.g. deduplicate, mask_columns, add_processing_time
+                    #   direct   — fn(df, **kwargs) returns a DataFrame directly
+                    #              e.g. filter_op
+                    # Try factory first; if the result is callable, apply via transform.
+                    result = fn(**kwargs)
+                    if callable(result):
                         df = df.transform(result)
+                    elif isinstance(result, DataFrame):
+                        df = result
                     else:
-                        logger.warning("apply_pipeline: step %r returned unexpected type.", fn)
+                        result = fn(df, **kwargs)
+                        if isinstance(result, DataFrame):
+                            df = result
+                        else:
+                            logger.warning("apply_pipeline: step %r returned unexpected type.", fn)
+                except TypeError:
+                    # fn(**kwargs) failed — fn requires df as first positional arg
+                    try:
+                        result = fn(df, **kwargs)
+                        if isinstance(result, DataFrame):
+                            df = result
+                        elif callable(result):
+                            df = df.transform(result)
+                        else:
+                            logger.warning("apply_pipeline: step %r returned unexpected type.", fn)
+                    except Exception as exc:
+                        logger.error("apply_pipeline: step %r failed: %s", fn, exc, exc_info=True)
+                        raise
                 except Exception as exc:
                     logger.error("apply_pipeline: step %r failed: %s", fn, exc, exc_info=True)
                     raise
