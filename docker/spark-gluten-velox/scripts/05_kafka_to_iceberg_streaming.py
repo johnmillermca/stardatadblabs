@@ -1480,8 +1480,12 @@ class _HealthHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class _ReuseAddrHTTPServer(http.server.HTTPServer):
+    allow_reuse_address = True
+
+
 def _start_health_server() -> None:
-    server = http.server.HTTPServer(("0.0.0.0", HEALTH_PORT), _HealthHandler)
+    server = _ReuseAddrHTTPServer(("0.0.0.0", HEALTH_PORT), _HealthHandler)
     t = threading.Thread(target=server.serve_forever, name="health-server", daemon=True)
     t.start()
     logger.info("Health server listening on port %d", HEALTH_PORT)
