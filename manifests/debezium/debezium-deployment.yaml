@@ -239,7 +239,7 @@ spec:
             - |
               source /vault-env/creds.sh
               cat /vault-env/jaas.properties >> /kafka/config/connect-distributed.properties
-              exec /docker-entrypoint.sh start
+              exec /kafka/bin/connect-distributed.sh /kafka/config/connect-distributed.properties
           ports:
             - name: rest-api
               containerPort: 8083
