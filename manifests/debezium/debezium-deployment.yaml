@@ -174,7 +174,7 @@ spec:
       labels:
         app: debezium-connect
     spec:
-      serviceAccountName: platform-secrets-read   # same SA used by Spark pods — has OpenBao K8s auth role
+      serviceAccountName: default   # bound to platform-secrets-read OpenBao K8s auth role
       nodeSelector:
         kubernetes.io/hostname: worker2.local
       terminationGracePeriodSeconds: 60
