@@ -115,15 +115,15 @@ data:
 
     security.protocol=SASL_PLAINTEXT
     sasl.mechanism=SCRAM-SHA-512
-    sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_SASL_USERNAME}" password="${KAFKA_SASL_PASSWORD}";
+    sasl.jaas.config=${env:CONNECT_SASL_JAAS_CONFIG}
 
     producer.security.protocol=SASL_PLAINTEXT
     producer.sasl.mechanism=SCRAM-SHA-512
-    producer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_SASL_USERNAME}" password="${KAFKA_SASL_PASSWORD}";
+    producer.sasl.jaas.config=${env:CONNECT_PRODUCER_SASL_JAAS_CONFIG}
 
     consumer.security.protocol=SASL_PLAINTEXT
     consumer.sasl.mechanism=SCRAM-SHA-512
-    consumer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_SASL_USERNAME}" password="${KAFKA_SASL_PASSWORD}";
+    consumer.sasl.jaas.config=${env:CONNECT_CONSUMER_SASL_JAAS_CONFIG}
 
     # ── EnvVar config provider ──────────────────────────────────────────────────
     # Connector JSON can use ${env:VAR_NAME} to resolve values at runtime from
