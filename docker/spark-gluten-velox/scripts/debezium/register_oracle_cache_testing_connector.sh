@@ -211,7 +211,13 @@ for tbl in "${CDC_TABLES[@]}"; do
 done
 TABLE_INCLUDE="${TABLE_INCLUDE%,}"
 
-JAAS_CFG="org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_USER}\" password=\"${KAFKA_PASS}\";"
+# producer.sasl.jaas.config → resolved at runtime via EnvVar config provider
+# (password comes from K8s secret, never hardcoded in the connector JSON).
+JAAS_CFG="\${env:CONNECT_PRODUCER_SASL_JAAS_CONFIG}"
+
+# schema.history.internal fields are processed by a separate Kafka client before
+# the config provider runs — they must contain the real JAAS literal.
+JAAS_CFG_HISTORY="org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_USER}\" password=\"${KAFKA_PASS}\";"
 
 # ── 8. Register connector ─────────────────────────────────────────────────────
 echo "[INFO] Registering connector: $CONNECT_NAME …"
@@ -243,10 +249,10 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "schema.history.internal.kafka.topic":             "schema-changes.oracle-cache-testing",
     "schema.history.internal.consumer.security.protocol":  "SASL_PLAINTEXT",
     "schema.history.internal.consumer.sasl.mechanism":     "SCRAM-SHA-512",
-    "schema.history.internal.consumer.sasl.jaas.config":   "${JAAS_CFG}",
+    "schema.history.internal.consumer.sasl.jaas.config":   "${JAAS_CFG_HISTORY}",
     "schema.history.internal.producer.security.protocol":  "SASL_PLAINTEXT",
     "schema.history.internal.producer.sasl.mechanism":     "SCRAM-SHA-512",
-    "schema.history.internal.producer.sasl.jaas.config":   "${JAAS_CFG}",
+    "schema.history.internal.producer.sasl.jaas.config":   "${JAAS_CFG_HISTORY}",
 
     "key.converter":                              "io.confluent.connect.avro.AvroConverter",
     "key.converter.schema.registry.url":          "http://schema-registry.prod.svc.cluster.local:8081",

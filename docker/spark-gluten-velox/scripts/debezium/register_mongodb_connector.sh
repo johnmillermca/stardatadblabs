@@ -123,7 +123,10 @@ for col in "${CDC_COLLECTIONS[@]}"; do
 done
 COLL_INCLUDE="${COLL_INCLUDE%,}"
 
-JAAS_CFG="org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_USER}\" password=\"${KAFKA_PASS}\";"
+# Use the EnvVar config provider so the JAAS string is resolved at runtime
+# from the CONNECT_PRODUCER_SASL_JAAS_CONFIG env var (injected from the
+# debezium-credentials K8s secret) — never hardcoded in the connector config.
+JAAS_CFG="\${env:CONNECT_PRODUCER_SASL_JAAS_CONFIG}"
 
 # ── 8. Register connector ─────────────────────────────────────────────────────
 echo "[INFO] Registering connector: $CONNECT_NAME …"
