@@ -100,8 +100,9 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
     col, current_timestamp, from_json, lit,
-    monotonically_increasing_id, udf,
+    monotonically_increasing_id, row_number, udf,
 )
+from pyspark.sql.window import Window
 from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import (
     BooleanType, DoubleType, FloatType, IntegerType,
@@ -402,8 +403,24 @@ def _apply_standard(
 
     _SNAP_COLS = {"snap_id", "snap_timestamp"}
 
-    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
-    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
+    # Deduplicate within the batch on PK — keep the last event per key (highest kafka_ts).
+    # Without this, a batch containing INSERT+UPDATE for the same PK triggers a
+    # MERGE_CARDINALITY_VIOLATION: one target row matched by multiple source rows.
+    _w_ins = Window.partitionBy(pk_col).orderBy(col("kafka_ts").desc())
+    _w_del = Window.partitionBy(pk_col).orderBy(col("kafka_ts").desc())
+
+    inserts = (
+        payload_df.filter(col("_op").isin("c", "u", "r"))
+        .withColumn("_rn", row_number().over(_w_ins))
+        .filter(col("_rn") == 1)
+        .drop("_rn", "_op", "kafka_ts")
+    )
+    deletes = (
+        payload_df.filter(col("_op") == "d")
+        .withColumn("_rn", row_number().over(_w_del))
+        .filter(col("_rn") == 1)
+        .drop("_rn", "_op", "kafka_ts")
+    )
 
     if not inserts.isEmpty():
         raw_df = (
@@ -468,8 +485,22 @@ def _apply_soft_delete(
 
     _SNAP_COLS = {"snap_id", "snap_timestamp"}
 
-    inserts = payload_df.filter(col("_op").isin("c", "u", "r")).drop("_op", "kafka_ts")
-    deletes = payload_df.filter(col("_op") == "d").drop("_op", "kafka_ts")
+    # Deduplicate within the batch on PK — keep last event per key (highest kafka_ts).
+    _w_ins = Window.partitionBy(pk_col).orderBy(col("kafka_ts").desc())
+    _w_del = Window.partitionBy(pk_col).orderBy(col("kafka_ts").desc())
+
+    inserts = (
+        payload_df.filter(col("_op").isin("c", "u", "r"))
+        .withColumn("_rn", row_number().over(_w_ins))
+        .filter(col("_rn") == 1)
+        .drop("_rn", "_op", "kafka_ts")
+    )
+    deletes = (
+        payload_df.filter(col("_op") == "d")
+        .withColumn("_rn", row_number().over(_w_del))
+        .filter(col("_rn") == 1)
+        .drop("_rn", "_op", "kafka_ts")
+    )
 
     if not inserts.isEmpty():
         raw_df = (
