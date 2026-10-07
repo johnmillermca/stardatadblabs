@@ -1,0 +1,499 @@
+# =============================================================================
+# star-transform-streaming.yaml
+#
+# Three Kubernetes Deployments — one per CDC source — running the dedicated
+# star_transform_pipeline.py Spark Structured Streaming job.
+#
+# Each pod:
+#   • Subscribes to the raw CDC Kafka topics for its source
+#   • In every foreachBatch (5-second trigger), applies all 28 StarTransform
+#     functions and writes results to:
+#       - Kafka output topics:  st.<fn>.<source>.<table>
+#       - Iceberg tables:       <catalog>.st_transforms.<fn>__<src>__<table>
+#   • Reads credentials from OpenBao via BaoSparkInit (never hardcoded)
+#   • Exposes a health endpoint for the Kubernetes liveness probe
+#
+# Deployments:
+#   star-transform-pipeline-postgres  — SOURCE=postgres  HEALTH_PORT=8090
+#   star-transform-pipeline-oracle    — SOURCE=oracle    HEALTH_PORT=8091
+#   star-transform-pipeline-mongodb   — SOURCE=mongodb   HEALTH_PORT=8092
+#
+# All three run with replicas=1 and strategy=Recreate (RWO checkpoint PVC).
+# Image:            192.168.1.50:30500/spark-gluten-velox:3.5.1-22
+# ServiceAccount:   spark-cleanup  (pods/get, pods/exec permissions in prod ns)
+# Namespace:        prod
+#
+# Script delivery
+# ───────────────
+# star_transform_pipeline.py is not yet baked into the Spark image.
+# It is delivered via ConfigMap star-transform-pipeline-script, which is
+# mounted into /opt/spark/work-dir/ and overlays the image filesystem.
+# To update the script: kubectl create configmap star-transform-pipeline-script
+#   --from-file=star_transform_pipeline.py=docker/spark-gluten-velox/scripts/star_transform_pipeline.py
+#   -n prod --dry-run=client -o yaml | kubectl apply -f -
+# Then restart the pods: kubectl rollout restart deploy/star-transform-pipeline-* -n prod
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PostgreSQL source
+# Topics:   postgres.cache_testing.customers, orders, products, …
+# Catalog:  postgres   Namespace: st_transforms
+# PK cols:  customers=id, orders=id
+# ─────────────────────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: star-transform-pipeline-postgres
+  namespace: prod
+  labels:
+    app: star-transform-pipeline
+    pipeline.source: postgres
+    pipeline.type: st-transforms
+  annotations:
+    pipeline.description: "StarTransform pipeline — PostgreSQL CDC → 28 ST functions → Kafka + Iceberg"
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: star-transform-pipeline
+      pipeline.source: postgres
+  template:
+    metadata:
+      labels:
+        app: star-transform-pipeline
+        pipeline.source: postgres
+        pipeline.type: st-transforms
+    spec:
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: star-transform-pipeline
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-22
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 star_transform_pipeline.py
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: postgres
+            - name: HEALTH_PORT
+              value: "8090"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: EXECUTOR_INSTANCES
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_INSTANCES
+            - name: EXECUTOR_CORES
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_CORES
+            - name: EXECUTOR_MEMORY
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_MEMORY
+            - name: EXECUTOR_OFFHEAP
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_OFFHEAP
+            - name: JAVA_TOOL_OPTIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: JAVA_TOOL_OPTIONS
+          ports:
+            - name: health
+              containerPort: 8090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: st-pipeline-script
+              mountPath: /opt/spark/work-dir/star_transform_pipeline.py
+              subPath: star_transform_pipeline.py
+            - name: st-library-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: st-pipeline-script
+          configMap:
+            name: star-transform-pipeline-script
+        - name: st-library-script
+          configMap:
+            name: star-transform-script
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Oracle source  (XEPDB1 · CACHE_TESTING)
+# Topics:   oracle.CACHE_TESTING.CUSTOMERS, ORDERS, PRODUCTS, …
+# Catalog:  oracle   Namespace: st_transforms
+# PK cols:  customers=customer_id, orders=order_id
+# NOTE: Oracle CDC emits uppercase JSON keys; the pipeline lowercases them
+#       before any StarTransform operation.
+# ─────────────────────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: star-transform-pipeline-oracle
+  namespace: prod
+  labels:
+    app: star-transform-pipeline
+    pipeline.source: oracle
+    pipeline.type: st-transforms
+  annotations:
+    pipeline.description: "StarTransform pipeline — Oracle XEPDB1 CDC → 28 ST functions → Kafka + Iceberg"
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: star-transform-pipeline
+      pipeline.source: oracle
+  template:
+    metadata:
+      labels:
+        app: star-transform-pipeline
+        pipeline.source: oracle
+        pipeline.type: st-transforms
+    spec:
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: star-transform-pipeline
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-22
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 star_transform_pipeline.py
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: oracle
+            - name: HEALTH_PORT
+              value: "8091"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: EXECUTOR_INSTANCES
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_INSTANCES
+            - name: EXECUTOR_CORES
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_CORES
+            - name: EXECUTOR_MEMORY
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_MEMORY
+            - name: EXECUTOR_OFFHEAP
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_OFFHEAP
+            - name: JAVA_TOOL_OPTIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: JAVA_TOOL_OPTIONS
+          ports:
+            - name: health
+              containerPort: 8091
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: st-pipeline-script
+              mountPath: /opt/spark/work-dir/star_transform_pipeline.py
+              subPath: star_transform_pipeline.py
+            - name: st-library-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: st-pipeline-script
+          configMap:
+            name: star-transform-pipeline-script
+        - name: st-library-script
+          configMap:
+            name: star-transform-script
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MongoDB source  (cache_testing database)
+# Topics:   mongodb.cache_testing.customers, orders, products, …
+# Catalog:  mongodb   Namespace: st_transforms
+# PK cols:  customers=customer_id, orders=order_id
+# ─────────────────────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: star-transform-pipeline-mongodb
+  namespace: prod
+  labels:
+    app: star-transform-pipeline
+    pipeline.source: mongodb
+    pipeline.type: st-transforms
+  annotations:
+    pipeline.description: "StarTransform pipeline — MongoDB cache_testing CDC → 28 ST functions → Kafka + Iceberg"
+    pipeline.auto-restart: "Deployment restartPolicy=Always + internal retry loop"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: star-transform-pipeline
+      pipeline.source: mongodb
+  template:
+    metadata:
+      labels:
+        app: star-transform-pipeline
+        pipeline.source: mongodb
+        pipeline.type: st-transforms
+    spec:
+      serviceAccountName: spark-cleanup
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: star-transform-pipeline
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-22
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              cd /opt/spark/work-dir && \
+              exec python3 star_transform_pipeline.py
+          env:
+            - name: USER
+              value: dave
+            - name: SPARK_USER
+              value: dave
+            - name: SOURCE
+              value: mongodb
+            - name: HEALTH_PORT
+              value: "8092"
+            - name: TRIGGER_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: TRIGGER_INTERVAL
+            - name: MAX_OFFSETS_PER_TRIGGER
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_OFFSETS_PER_TRIGGER
+            - name: MAX_RESTART_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MAX_RESTART_ATTEMPTS
+            - name: RESTART_BACKOFF_BASE_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_BASE_S
+            - name: RESTART_BACKOFF_MAX_S
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: RESTART_BACKOFF_MAX_S
+            - name: ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: ADDR
+            - name: MERGE_PARALLELISM
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: MERGE_PARALLELISM
+            - name: COALESCE_BEFORE_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: COALESCE_BEFORE_MERGE
+            - name: EXECUTOR_INSTANCES
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_INSTANCES
+            - name: EXECUTOR_CORES
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_CORES
+            - name: EXECUTOR_MEMORY
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_MEMORY
+            - name: EXECUTOR_OFFHEAP
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: EXECUTOR_OFFHEAP
+            - name: JAVA_TOOL_OPTIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-to-iceberg-config
+                  key: JAVA_TOOL_OPTIONS
+          ports:
+            - name: health
+              containerPort: 8092
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: st-pipeline-script
+              mountPath: /opt/spark/work-dir/star_transform_pipeline.py
+              subPath: star_transform_pipeline.py
+            - name: st-library-script
+              mountPath: /opt/spark/work-dir/star_transform.py
+              subPath: star_transform.py
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: st-pipeline-script
+          configMap:
+            name: star-transform-pipeline-script
+        - name: st-library-script
+          configMap:
+            name: star-transform-script
