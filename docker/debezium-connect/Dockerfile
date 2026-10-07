@@ -63,4 +63,7 @@ RUN mkdir -p /kafka/connect/confluent-avro-converter && \
     # jackson-databind (Avro JSON encoder dep — already in base image but pin to be safe)
     curl -fsSL "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.15.3/jackson-databind-2.15.3.jar" \
          -o "jackson-databind-2.15.3.jar" && \
+    # guava (CachedSchemaRegistryClient uses Ticker from com.google.common.base)
+    curl -fsSL "https://repo1.maven.org/maven2/com/google/guava/guava/32.1.3-jre/guava-32.1.3-jre.jar" \
+         -o "guava-32.1.3-jre.jar" && \
     echo "Confluent Avro converter JARs installed:" && ls -lh .
