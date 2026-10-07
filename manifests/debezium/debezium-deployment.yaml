@@ -115,15 +115,18 @@ data:
 
     security.protocol=SASL_PLAINTEXT
     sasl.mechanism=SCRAM-SHA-512
-    sasl.jaas.config=${env:CONNECT_SASL_JAAS_CONFIG}
 
     producer.security.protocol=SASL_PLAINTEXT
     producer.sasl.mechanism=SCRAM-SHA-512
-    producer.sasl.jaas.config=${env:CONNECT_PRODUCER_SASL_JAAS_CONFIG}
 
     consumer.security.protocol=SASL_PLAINTEXT
     consumer.sasl.mechanism=SCRAM-SHA-512
-    consumer.sasl.jaas.config=${env:CONNECT_CONSUMER_SASL_JAAS_CONFIG}
+
+    # sasl.jaas.config is NOT set here — the Debezium container entrypoint
+    # converts CONNECT_SASL_JAAS_CONFIG / CONNECT_PRODUCER_SASL_JAAS_CONFIG /
+    # CONNECT_CONSUMER_SASL_JAAS_CONFIG env vars (exported by the fetch-secrets
+    # init container via /vault-env/creds.sh) into the correct properties
+    # automatically before the worker starts.
 
     # ── EnvVar config provider ──────────────────────────────────────────────────
     # Connector JSON can use ${env:VAR_NAME} to resolve values at runtime from
