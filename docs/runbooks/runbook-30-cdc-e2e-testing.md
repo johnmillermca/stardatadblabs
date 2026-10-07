@@ -17,20 +17,11 @@
    - 1.1 PostgreSQL (full depth) · 1.2 Oracle · 1.3 MongoDB
 3. [Section 2 — Soft Delete Mode Tests](#3-section-2--soft-delete-mode-tests)
 4. [Section 3 — History Tracking Mode Tests](#4-section-3--history-tracking-mode-tests)
-5. [Section 4 — StarTransform Tests](#5-section-4--startransform-tests) *(Tests 4.1–4.25, one per function)*
-   - 4.1 deduplicate · 4.2 mask_columns · 4.3 add_processing_time · 4.4 add_op_label
-   - 4.5 add_source_tag · 4.6 filter_op (ins/upd) · 4.7 filter_op (del)
-   - 4.8 enrich_from_broadcast · 4.9 pivot_before_after · 4.10 null_coalesce
-   - 4.11 windowed_aggregate · 4.12 rolling_sum/rolling_avg · 4.13 count_distinct_per_key
-   - 4.14 top_n_per_group · 4.15 stream_join · 4.16 multi_topic_union
-   - 4.17 rename_columns · 4.18 cast_columns · 4.19 drop_columns
-   - 4.20 flatten_json_col · 4.21 filter_columns · 4.22 aggregate_counts
-   - 4.23 event_rate · 4.24 temporal_join · 4.25 apply_pipeline
-6. [Section 5 — snap_id and snap_timestamp Validation](#6-section-5--snap_id-and-snap_timestamp-validation)
-7. [Section 6 — Multi-Source Validation](#7-section-6--multi-source-validation)
-8. [Section 7 — Schema Evolution (DDL) Tests](#8-section-7--schema-evolution-ddl-tests)
-9. [Section 8 — Peak-Hour Simulation](#9-section-8--peak-hour-simulation)
-10. [Expected Results Summary](#10-expected-results-summary)
+5. [Section 5 — snap_id and snap_timestamp Validation](#5-section-5--snap_id-and-snap_timestamp-validation)
+6. [Section 6 — Multi-Source Validation](#6-section-6--multi-source-validation)
+7. [Section 7 — Schema Evolution (DDL) Tests](#7-section-7--schema-evolution-ddl-tests)
+8. [Section 8 — Peak-Hour Simulation](#8-section-8--peak-hour-simulation)
+9. [Expected Results Summary](#9-expected-results-summary)
 
 ---
 
@@ -81,7 +72,7 @@ SHOW NAMESPACES IN mongodb;    -- should include e2e_testing
 
 ## Iceberg Test Table Layout
 
-All E2E test and StarTransform tables live in **one shared namespace per catalog**: `e2e_testing`.
+All E2E test tables live in **one shared namespace per catalog**: `e2e_testing`.
 The `e2e_testing` namespace is identical across all three catalogs — the table names and schemas
 are the same regardless of source.
 
@@ -103,74 +94,6 @@ are the same regardless of source.
 > The table **name** matches the Kafka topic's last segment lowercased:
 > `postgres.cache_testing.customers` → `postgres.e2e_testing.customers`
 > `oracle.cache_testing.CUSTOMERS` → `oracle.e2e_testing.customers`
-
-### StarTransform test tables — dedicated output tables (Section 4)
-
-Each StarTransform test uses its own Iceberg table so transforms can be tested in isolation
-without contaminating the main `customers` / `orders` tables.  The `TARGET_TABLE` env-var
-(set per-test via `kubectl set env`) overrides the write target for that specific test.
-
-| Iceberg Table | Write Mode | Section | Transform |
-|---|---|---|---|
-| `postgres.e2e_testing.customers_dedup` | standard | 4.1 | deduplicate() |
-| `oracle.e2e_testing.customers_dedup` | standard | 4.1 | deduplicate() |
-| `mongodb.e2e_testing.customers_dedup` | standard | 4.1 | deduplicate() |
-| `postgres.e2e_testing.customers_masked` | standard | 4.2 | mask_columns() |
-| `oracle.e2e_testing.customers_masked` | standard | 4.2 | mask_columns() |
-| `mongodb.e2e_testing.customers_masked` | standard | 4.2 | mask_columns() |
-| `postgres.e2e_testing.customers_proc_time` | standard | 4.3 | add_processing_time() |
-| `oracle.e2e_testing.customers_proc_time` | standard | 4.3 | add_processing_time() |
-| `mongodb.e2e_testing.customers_proc_time` | standard | 4.3 | add_processing_time() |
-| `postgres.e2e_testing.customers_op_label` | standard | 4.4 | add_op_label() |
-| `oracle.e2e_testing.customers_op_label` | standard | 4.4 | add_op_label() |
-| `mongodb.e2e_testing.customers_op_label` | standard | 4.4 | add_op_label() |
-| `postgres.e2e_testing.customers_source_tag` | standard | 4.5 | add_source_tag() |
-| `oracle.e2e_testing.customers_source_tag` | standard | 4.5 | add_source_tag() |
-| `mongodb.e2e_testing.customers_source_tag` | standard | 4.5 | add_source_tag() |
-| `postgres.e2e_testing.customers_filter_ins` | standard | 4.6 | filter_op(c/u) |
-| `oracle.e2e_testing.customers_filter_ins` | standard | 4.6 | filter_op(c/u) |
-| `mongodb.e2e_testing.customers_filter_ins` | standard | 4.6 | filter_op(c/u) |
-| `postgres.e2e_testing.customers_filter_del` | standard | 4.7 | filter_op(d) |
-| `oracle.e2e_testing.customers_filter_del` | standard | 4.7 | filter_op(d) |
-| `mongodb.e2e_testing.customers_filter_del` | standard | 4.7 | filter_op(d) |
-| `postgres.e2e_testing.orders_enriched` | standard | 4.8 | enrich_from_broadcast() |
-| `oracle.e2e_testing.orders_enriched` | standard | 4.8 | enrich_from_broadcast() |
-| `postgres.e2e_testing.customers_before_after` | history_tracking | 4.9 | pivot_before_after() |
-| `oracle.e2e_testing.customers_before_after` | history_tracking | 4.9 | pivot_before_after() |
-| `postgres.e2e_testing.customers_nullcoal` | standard | 4.10 | null_coalesce() |
-| `oracle.e2e_testing.customers_nullcoal` | standard | 4.10 | null_coalesce() |
-| `mongodb.e2e_testing.customers_nullcoal` | standard | 4.10 | null_coalesce() |
-| `postgres.e2e_testing.orders_agg_summary` | standard | 4.11 | windowed_aggregate() |
-| `oracle.e2e_testing.orders_agg_summary` | standard | 4.11 | windowed_aggregate() |
-| `postgres.e2e_testing.orders_rolling` | standard | 4.12 | rolling_sum/avg() |
-| `oracle.e2e_testing.orders_rolling` | standard | 4.12 | rolling_sum/avg() |
-| `postgres.e2e_testing.customers_country_stats` | standard | 4.13 | count_distinct_per_key() |
-| `oracle.e2e_testing.customers_country_stats` | standard | 4.13 | count_distinct_per_key() |
-| `mongodb.e2e_testing.customers_country_stats` | standard | 4.13 | count_distinct_per_key() |
-| `postgres.e2e_testing.orders_top5` | standard | 4.14 | top_n_per_group() |
-| `oracle.e2e_testing.orders_top5` | standard | 4.14 | top_n_per_group() |
-| `postgres.e2e_testing.orders_products_joined` | standard | 4.15 | stream_join() |
-| `postgres.e2e_testing.all_topics_union` | standard | 4.16 | multi_topic_union() |
-| `postgres.e2e_testing.customers_renamed` | standard | 4.17 | rename_columns() |
-| `oracle.e2e_testing.customers_renamed` | standard | 4.17 | rename_columns() |
-| `mongodb.e2e_testing.customers_renamed` | standard | 4.17 | rename_columns() |
-| `postgres.e2e_testing.orders_cast` | standard | 4.18 | cast_columns() |
-| `oracle.e2e_testing.orders_cast` | standard | 4.18 | cast_columns() |
-| `postgres.e2e_testing.customers_dropped` | standard | 4.19 | drop_columns() |
-| `oracle.e2e_testing.customers_dropped` | standard | 4.19 | drop_columns() |
-| `mongodb.e2e_testing.customers_dropped` | standard | 4.19 | drop_columns() |
-| `postgres.e2e_testing.customers_flat_addr` | standard | 4.20 | flatten_json_col() |
-| `postgres.e2e_testing.customers_projected` | standard | 4.21 | filter_columns() |
-| `oracle.e2e_testing.customers_projected` | standard | 4.21 | filter_columns() |
-| `mongodb.e2e_testing.customers_projected` | standard | 4.21 | filter_columns() |
-| `postgres.e2e_testing.event_counts` | standard | 4.22 | aggregate_counts() |
-| `oracle.e2e_testing.event_counts` | standard | 4.22 | aggregate_counts() |
-| `mongodb.e2e_testing.event_counts` | standard | 4.22 | aggregate_counts() |
-| `postgres.e2e_testing.pipeline_event_rate` | standard | 4.23 | event_rate() |
-| `postgres.e2e_testing.orders_payments_temporal` | standard | 4.24 | temporal_join() |
-| `postgres.e2e_testing.customers_pipeline` | standard | 4.25 | apply_pipeline() |
-| `oracle.e2e_testing.customers_pipeline` | standard | 4.25 | apply_pipeline() |
-| `mongodb.e2e_testing.customers_pipeline` | standard | 4.25 | apply_pipeline() |
 
 **Source table columns** (PostgreSQL / Oracle `cache_testing.customers`):
 `id`, `name`, `email`, `phone`, `address`, `city`, `country`, `created_at`, `updated_at`
@@ -1536,2124 +1459,7 @@ kubectl scale deployment kafka-to-iceberg-standard         -n prod --replicas=1
 kubectl rollout status deployment/kafka-to-iceberg-standard -n prod
 ```
 
----
-
-## 5. Section 4 — StarTransform Tests
-
-Each test uses its own dedicated Iceberg table inside `postgres.e2e_testing`.  
-All tests use `kafka-to-iceberg-standard` (replicas=1). Change `TRANSFORM_PIPELINE`, restart, and query the dedicated table.
-
-### How to apply TRANSFORM_PIPELINE changes
-
-All StarTransform tests run against `kafka-to-iceberg-standard` with `TARGET_NAMESPACE=e2e_testing`.
-Both must be set together — `TARGET_NAMESPACE` routes all three sources into `e2e_testing`;
-`TRANSFORM_PIPELINE` applies the transform before the write.
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=<function_name>
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-Each StarTransform test below also specifies `TARGET_TABLE` to redirect output to its
-dedicated Iceberg table (e.g. `postgres.e2e_testing.customers_dedup`).
-**The test DML shown uses PostgreSQL** (`psql`). For Oracle and MongoDB, run equivalent
-INSERT/UPDATE/DELETE in `sqlplus`/`mongosh` — the same Iceberg table receives events
-from all three sources automatically because `TARGET_NAMESPACE=e2e_testing` is active.
-
----
-
-### Test 4.1 — `deduplicate` → `postgres.e2e_testing.customers_dedup`
-
-**Purpose:** Rapid-fire updates to the same row within one micro-batch result in only the latest state landing in Iceberg.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_dedup (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate \
-  TARGET_TABLE=postgres.e2e_testing.customers_dedup
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Fire 3 rapid updates
-
-```sql
--- psql — run all three before the 2-second micro-batch closes
-UPDATE customers SET email = 'dedup_v1@example.com' WHERE id = 900030;
-UPDATE customers SET email = 'dedup_v2@example.com' WHERE id = 900030;
-UPDATE customers SET email = 'dedup_v3@example.com' WHERE id = 900030;
-COMMIT;
-```
-
-> If id=900030 does not exist, INSERT it first then run the 3 updates.
-
-#### Verify in Iceberg
-
-```bash
-sleep 5
-```
-
-```sql
-SELECT id, email, snap_id, snap_timestamp
-FROM postgres.e2e_testing.customers_dedup
-WHERE id = 900030;
-```
-
-**Expected:** Exactly 1 row; `email = 'dedup_v3@example.com'` (last write wins).
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900030; COMMIT;
-```
-
----
-
-### Test 4.2 — `mask_columns` → `postgres.e2e_testing.customers_masked`
-
-**Purpose:** `email` and `phone` columns are stored as SHA-256 hex digests — plaintext never reaches Iceberg.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
--- email and phone columns are STRING to hold either plaintext or SHA-256 hex
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_masked (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,mask_columns \
-  PII_COLUMNS=email,phone \
-  TARGET_TABLE=postgres.e2e_testing.customers_masked
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a customer with known PII
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900031, 'PII MaskTest', 'pii_clear@example.com', '555-0030',
-        '31 PII St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-#### Verify SHA-256 hash in Iceberg
-
-```bash
-sleep 5
-# Pre-compute expected hash
-echo -n 'pii_clear@example.com' | sha256sum
-# Expected: 3b37ebfda7f90dc9ce8d59e45d7f5ea5cddfae2f8f27e98d9671218f92c2a6ad  -
-```
-
-```sql
-SELECT id, email, phone
-FROM postgres.e2e_testing.customers_masked
-WHERE id = 900031;
-```
-
-**Expected:** `email = '3b37ebfda7f90dc9ce8d59e45d7f5ea5cddfae2f8f27e98d9671218f92c2a6ad'` (SHA-256, not plaintext). `phone` column contains the SHA-256 hash of `555-0030`.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900031; COMMIT;
-```
-
----
-
-### Test 4.3 — `add_processing_time` → `postgres.e2e_testing.customers_proc_time`
-
-**Purpose:** A `proc_time` TIMESTAMP column is injected by the transform — distinct from `snap_timestamp`.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_proc_time (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    proc_time      TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,add_processing_time \
-  TARGET_TABLE=postgres.e2e_testing.customers_proc_time
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert and verify
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900032, 'ProcTime Test', 'proctime@example.com', '555-0040',
-        '32 Proc St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
-SELECT id, proc_time, snap_timestamp
-FROM postgres.e2e_testing.customers_proc_time
-WHERE id = 900032;
-```
-
-**Expected:** `proc_time` is a non-null TIMESTAMP within 30 seconds of now. `proc_time` is set by the StarTransform step; `snap_timestamp` is set slightly later at Iceberg write time — both should be close but `proc_time` ≤ `snap_timestamp`.
-
-#### Cleanup
-
-```sql
-DELETE FROM customers WHERE id = 900032; COMMIT;
-```
-
----
-
-### Test 4.4 — `add_op_label` → `postgres.e2e_testing.customers_op_label`
-
-**Purpose:** An `op_label` STRING column (`'INSERT'`/`'UPDATE'`/`'DELETE'`) is injected per event.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_op_label (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    op_label       STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,add_op_label \
-  TARGET_TABLE=postgres.e2e_testing.customers_op_label
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert, update, and verify labels
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900033, 'OpLabel Test', 'oplabel@example.com', '555-0050',
-        '33 Label St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
-SELECT id, op_label FROM postgres.e2e_testing.customers_op_label WHERE id = 900033;
-```
-
-**Expected:** `op_label = 'INSERT'`
-
-```sql
--- psql
-UPDATE customers SET email = 'oplabel_updated@example.com' WHERE id = 900033;
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
-SELECT id, op_label FROM postgres.e2e_testing.customers_op_label WHERE id = 900033;
-```
-
-**Expected:** `op_label = 'UPDATE'`
-
-#### Cleanup
-
-```sql
-DELETE FROM customers WHERE id = 900033; COMMIT;
-```
-
----
-
-### Test 4.5 — `add_source_tag` → `postgres.e2e_testing.customers_source_tag`
-
-**Purpose:** A `source_system` STRING column is injected with the value of the `SOURCE` env var.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_source_tag (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    source_system  STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,add_source_tag \
-  SOURCE=postgres \
-  TARGET_TABLE=postgres.e2e_testing.customers_source_tag
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert and verify
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900034, 'SourceTag Test', 'sourcetag@example.com', '555-0060',
-        '34 Tag St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
-SELECT id, source_system FROM postgres.e2e_testing.customers_source_tag WHERE id = 900034;
-```
-
-**Expected:** `source_system = 'postgres'`
-
-#### Cleanup
-
-```sql
-DELETE FROM customers WHERE id = 900034; COMMIT;
-```
-
----
-
-### Test 4.6 — `filter_op` (inserts/updates only) → `postgres.e2e_testing.customers_filter_ins`
-
-**Purpose:** DELETE events are dropped; only `c` (create) and `u` (update) reach Iceberg.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_filter_ins (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op \
-  FILTER_OPS=c,u \
-  TARGET_TABLE=postgres.e2e_testing.customers_filter_ins
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert, then delete
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900035, 'FilterIns Test', 'filterins@example.com', '555-0070',
-        '35 Filter St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
--- INSERT should have landed
-SELECT id FROM postgres.e2e_testing.customers_filter_ins WHERE id = 900035;
--- Expected: 1 row
-```
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900035;
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
--- DELETE was filtered — row still present in Iceberg
-SELECT id FROM postgres.e2e_testing.customers_filter_ins WHERE id = 900035;
--- Expected: STILL 1 row
-```
-
-**Expected:** Row remains in `customers_filter_ins` after the source DELETE because `filter_op` excluded the `d` op.
-
-#### Cleanup (manual Iceberg delete)
-
-```sql
--- Spark SQL — remove the test row directly from Iceberg
-DELETE FROM postgres.e2e_testing.customers_filter_ins WHERE id = 900035;
-```
-
----
-
-### Test 4.7 — `filter_op` (deletes only) → `postgres.e2e_testing.customers_filter_del`
-
-**Purpose:** Only DELETE events reach Iceberg; inserts/updates are dropped.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_filter_del (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op \
-  FILTER_OPS=d \
-  TARGET_TABLE=postgres.e2e_testing.customers_filter_del
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert (should be dropped), then delete (should land)
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900036, 'FilterDel Test', 'filterdel@example.com', '555-0071',
-        '36 Filter St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
--- INSERT was filtered — should NOT appear in customers_filter_del
-SELECT id FROM postgres.e2e_testing.customers_filter_del WHERE id = 900036;
--- Expected: 0 rows
-```
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900036;
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
--- DELETE should appear in customers_filter_del
-SELECT id FROM postgres.e2e_testing.customers_filter_del WHERE id = 900036;
--- Expected: 1 row (the delete event marker)
-```
-
-#### Cleanup
-
-```sql
--- Spark SQL
-DELETE FROM postgres.e2e_testing.customers_filter_del WHERE id = 900036;
-```
-
----
-
-### Test 4.8 — `enrich_from_broadcast` → `postgres.e2e_testing.orders_enriched`
-
-**Purpose:** Orders stream is enriched at write time with `product_name` and `product_category` from a broadcast products dimension.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_enriched (
-    id               BIGINT,
-    customer_id      BIGINT,
-    status           STRING,
-    total_amount     DOUBLE,
-    product_name     STRING,
-    product_category STRING,
-    _op              STRING,
-    kafka_ts         TIMESTAMP,
-    snap_id          STRING,
-    snap_timestamp   TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-Broadcast enrichment is configured in the streaming job code (not purely via env var). Patch the `TARGET_TABLE` to direct output to `orders_enriched`:
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,enrich_from_broadcast \
-  BROADCAST_DIM_TABLE=postgres.cache_testing.products_std \
-  BROADCAST_JOIN_COL=product_id \
-  TARGET_TABLE=postgres.e2e_testing.orders_enriched
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert an order with a known product_id
-
-```sql
--- psql — insert an order that references an existing product
-INSERT INTO orders (id, customer_id, status, total_amount, created_at)
-VALUES (900040, 900001, 'pending', 99.99, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify enrichment in Iceberg
-
-```sql
-SELECT id, customer_id, status, product_name, product_category, snap_timestamp
-FROM postgres.e2e_testing.orders_enriched
-WHERE id = 900040;
-```
-
-**Expected:** `product_name` and `product_category` are populated from the broadcast join, not from the orders source table.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders WHERE id = 900040; COMMIT;
-```
-
----
-
-### Test 4.9 — `pivot_before_after` → `postgres.e2e_testing.customers_before_after`
-
-**Purpose:** Both `before_*` and `after_*` columns appear side-by-side for each change event.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
--- Columns are prefixed before_/after_ for every customer field
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_before_after (
-    _change_type    STRING,
-    _change_ts      TIMESTAMP,
-    before_id       BIGINT,
-    before_name     STRING,
-    before_email    STRING,
-    before_phone    STRING,
-    before_address  STRING,
-    before_city     STRING,
-    before_country  STRING,
-    after_id        BIGINT,
-    after_name      STRING,
-    after_email     STRING,
-    after_phone     STRING,
-    after_address   STRING,
-    after_city      STRING,
-    after_country   STRING,
-    snap_id         STRING,
-    snap_timestamp  TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable (requires history_tracking mode)
-
-```bash
-kubectl scale deployment kafka-to-iceberg-standard          -n prod --replicas=0
-kubectl scale deployment kafka-to-iceberg-history-tracking  -n prod --replicas=1
-kubectl set env deployment/kafka-to-iceberg-history-tracking -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=pivot_before_after \
-  TARGET_TABLE=postgres.e2e_testing.customers_before_after
-kubectl rollout restart deployment/kafka-to-iceberg-history-tracking -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-history-tracking -n prod
-```
-
-#### INSERT and UPDATE to generate before/after rows
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900041, 'BeforeAfter Test', 'ba_test@example.com', '555-0080',
-        '41 BA St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
--- psql
-UPDATE customers SET email = 'ba_updated@example.com' WHERE id = 900041;
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify before/after columns
-
-```sql
-SELECT _change_type, _change_ts,
-       before_id, before_email,
-       after_id,  after_email
-FROM postgres.e2e_testing.customers_before_after
-WHERE after_id = 900041 OR before_id = 900041
-ORDER BY _change_ts;
-```
-
-**Expected:**
-- Row 1 (INSERT): `before_id = NULL`, `before_email = NULL`, `after_id = 900041`, `after_email = 'ba_test@example.com'`
-- Row 2 (UPDATE): `before_email = 'ba_test@example.com'`, `after_email = 'ba_updated@example.com'`
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900041; COMMIT;
-```
-
-```bash
-# Restore standard mode
-kubectl scale deployment kafka-to-iceberg-history-tracking -n prod --replicas=0
-kubectl scale deployment kafka-to-iceberg-standard         -n prod --replicas=1
-kubectl rollout status deployment/kafka-to-iceberg-standard -n prod
-```
-
----
-
-### Test 4.10 — `null_coalesce` → `postgres.e2e_testing.customers_nullcoal`
-
-**Purpose:** NULL values in `country` and `phone` are replaced with configured defaults before landing in Iceberg.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_nullcoal (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,null_coalesce \
-  NULL_COALESCE_MAP='{"country":"N/A","phone":"UNKNOWN"}' \
-  TARGET_TABLE=postgres.e2e_testing.customers_nullcoal
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a row with NULL country and phone
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900042, 'NullCoal Test', 'nullcoal@example.com', NULL,
-        '42 Coal St', 'Sydney', NULL, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify defaults applied in Iceberg
-
-```sql
-SELECT id, name, phone, country
-FROM postgres.e2e_testing.customers_nullcoal
-WHERE id = 900042;
-```
-
-**Expected:** `phone = 'UNKNOWN'`; `country = 'N/A'` — NULL replaced by configured defaults; source row still has NULL in PostgreSQL.
-
-#### Cleanup
-
-```sql
-DELETE FROM customers WHERE id = 900042; COMMIT;
-```
-
----
-
-### Test 4.11 — `windowed_aggregate` → `postgres.e2e_testing.orders_agg_summary`
-
-**Purpose:** Verify that `windowed_aggregate` produces a correct grouped multi-aggregate summary (sum, avg, count) from the `orders` Kafka topic and lands it in a dedicated Iceberg table.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_agg_summary (
-    country          STRING,
-    _op              STRING,
-    total_revenue    DOUBLE,
-    event_count      BIGINT,
-    avg_order_value  DOUBLE,
-    proc_batch_ts    TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(proc_batch_ts));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op,windowed_aggregate \
-  FILTER_OPS=c,u \
-  AGG_GROUP_COLS=country,_op \
-  AGG_SPECS='[["total_amount","sum","total_revenue"],["id","count","event_count"],["total_amount","avg","avg_order_value"]]' \
-  TARGET_TABLE=postgres.e2e_testing.orders_agg_summary
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert test orders for two countries
-
-```sql
--- psql — 3 orders for AU, 2 for US
-INSERT INTO orders (id, customer_id, status, total_amount, country, created_at)
-VALUES
-  (900050, 900001, 'pending',   120.00, 'AU', NOW()),
-  (900051, 900002, 'pending',    80.00, 'AU', NOW()),
-  (900052, 900003, 'completed', 200.00, 'AU', NOW()),
-  (900053, 900004, 'pending',    60.00, 'US', NOW()),
-  (900054, 900005, 'completed', 140.00, 'US', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify aggregate in Iceberg
-
-```sql
-SELECT country, _op, total_revenue, event_count, avg_order_value, proc_batch_ts
-FROM postgres.e2e_testing.orders_agg_summary
-ORDER BY country, _op;
-```
-
-**Expected:**
-
-| country | _op | total_revenue | event_count | avg_order_value |
-|---------|-----|---------------|-------------|-----------------|
-| AU      | c   | 400.00        | 3           | 133.33          |
-| US      | c   | 200.00        | 2           | 100.00          |
-
-`proc_batch_ts` must be a non-null TIMESTAMP within 30 seconds of now.
-**No raw order rows appear in this table** — only the per-group summary.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders WHERE id BETWEEN 900050 AND 900054; COMMIT;
-```
-
----
-
-### Test 4.12 — `rolling_sum` / `rolling_avg` → `postgres.e2e_testing.orders_rolling`
-
-**Purpose:** Verify that a running cumulative sum and running average of `total_amount` are computed per `customer_id` within the micro-batch.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_rolling (
-    id                         BIGINT,
-    customer_id                BIGINT,
-    total_amount               DOUBLE,
-    kafka_ts                   TIMESTAMP,
-    total_amount_rolling_sum   DOUBLE,
-    total_amount_rolling_avg   DOUBLE,
-    snap_id                    STRING,
-    snap_timestamp             TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op,rolling_sum,rolling_avg \
-  FILTER_OPS=c,u \
-  ROLLING_VALUE_COL=total_amount \
-  ROLLING_ORDER_COL=kafka_ts \
-  ROLLING_PARTITION_COLS=customer_id \
-  TARGET_TABLE=postgres.e2e_testing.orders_rolling
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a sequence of orders for the same customer
-
-```sql
--- psql — 3 orders for customer 900001 in ascending amount
-INSERT INTO orders (id, customer_id, status, total_amount, created_at)
-VALUES
-  (900055,  900001, 'pending',    50.00, NOW()),
-  (900056,  900001, 'pending',   150.00, NOW() + interval '1 second'),
-  (900057,  900001, 'completed', 100.00, NOW() + interval '2 seconds');
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify rolling columns in Iceberg
-
-```sql
-SELECT id, customer_id, total_amount,
-       total_amount_rolling_sum,
-       total_amount_rolling_avg
-FROM postgres.e2e_testing.orders_rolling
-WHERE customer_id = 900001
-ORDER BY kafka_ts;
-```
-
-**Expected (rows ordered by kafka_ts):**
-
-| id     | total_amount | total_amount_rolling_sum | total_amount_rolling_avg |
-|--------|--------------|--------------------------|--------------------------|
-| 900055 | 50.00        | 50.00                    | 50.00                    |
-| 900056 | 150.00       | 200.00                   | 100.00                   |
-| 900057 | 100.00       | 300.00                   | 100.00                   |
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders WHERE id BETWEEN 900055 AND 900057; COMMIT;
-```
-
----
-
-### Test 4.13 — `count_distinct_per_key` → `postgres.e2e_testing.customers_country_stats`
-
-**Purpose:** Verify that the distinct-customer count per `country` produces a correct batch-level summary and lands in a dedicated stats Iceberg table.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_country_stats (
-    country             STRING,
-    id_distinct_count   BIGINT,
-    proc_batch_ts       TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(proc_batch_ts));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op,count_distinct_per_key \
-  FILTER_OPS=c,u \
-  CDPK_GROUP_COL=country \
-  CDPK_VALUE_COL=id \
-  TARGET_TABLE=postgres.e2e_testing.customers_country_stats
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert customers across multiple countries
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES
-  (900060, 'AU User 1', 'au1@example.com', '555-0101', '1 AU St', 'Sydney',    'AU', NOW()),
-  (900061, 'AU User 2', 'au2@example.com', '555-0102', '2 AU St', 'Melbourne', 'AU', NOW()),
-  (900062, 'US User 1', 'us1@example.com', '555-0103', '1 US St', 'New York',  'US', NOW()),
-  (900063, 'GB User 1', 'gb1@example.com', '555-0104', '1 GB St', 'London',    'GB', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify distinct counts in Iceberg
-
-```sql
-SELECT country, id_distinct_count, proc_batch_ts
-FROM postgres.e2e_testing.customers_country_stats
-ORDER BY country;
-```
-
-**Expected:**
-
-| country | id_distinct_count |
-|---------|-------------------|
-| AU      | 2                 |
-| GB      | 1                 |
-| US      | 1                 |
-
-`proc_batch_ts` is non-null and within 30 seconds of now.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id BETWEEN 900060 AND 900063; COMMIT;
-```
-
----
-
-### Test 4.14 — `top_n_per_group` → `postgres.e2e_testing.orders_top5`
-
-**Purpose:** Verify that only the top-3 highest-value orders per `country` reach Iceberg; lower-value orders are dropped within the batch.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_top5 (
-    id            BIGINT,
-    customer_id   BIGINT,
-    total_amount  DOUBLE,
-    country       STRING,
-    snap_id       STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op,top_n_per_group \
-  FILTER_OPS=c,u \
-  TOP_N_GROUP_COL=country \
-  TOP_N_RANK_COL=total_amount \
-  TOP_N=3 \
-  TARGET_TABLE=postgres.e2e_testing.orders_top5
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert 5 orders for AU — only top 3 should land
-
-```sql
--- psql — 5 orders for AU; amounts are 10, 200, 50, 500, 300
-INSERT INTO orders (id, customer_id, status, total_amount, country, created_at)
-VALUES
-  (900070, 900001, 'pending',    10.00, 'AU', NOW()),
-  (900071, 900002, 'pending',   200.00, 'AU', NOW()),
-  (900072, 900003, 'pending',    50.00, 'AU', NOW()),
-  (900073, 900004, 'completed', 500.00, 'AU', NOW()),
-  (900074, 900005, 'completed', 300.00, 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify only top 3 landed
-
-```sql
-SELECT id, total_amount, country
-FROM postgres.e2e_testing.orders_top5
-WHERE country = 'AU'
-ORDER BY total_amount DESC;
-```
-
-**Expected:** Exactly 3 rows — ids `900073` (500), `900074` (300), `900071` (200).
-Rows `900072` (50) and `900070` (10) must **not** appear.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders WHERE id BETWEEN 900070 AND 900074; COMMIT;
--- Spark SQL — manual cleanup for filtered rows that stayed in Iceberg
-DELETE FROM postgres.e2e_testing.orders_top5 WHERE id BETWEEN 900070 AND 900074;
-```
-
----
-
-### Test 4.15 — `stream_join` (multi-topic) → `postgres.e2e_testing.orders_products_joined`
-
-**Purpose:** Verify that a batch from the `orders` Kafka topic is joined against the `products` topic batch on `product_id`, and the joined result (with both order and product columns) lands in Iceberg with correct column provenance.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_products_joined (
-    id                   BIGINT,
-    customer_id          BIGINT,
-    product_id           BIGINT,
-    total_amount         DOUBLE,
-    right_name           STRING,
-    right_category       STRING,
-    right_price          DOUBLE,
-    left_topic           STRING,
-    right_topic          STRING,
-    snap_id              STRING,
-    snap_timestamp       TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-The `stream_join` function operates on two DataFrames extracted from the same multi-topic batch using `route_by_topic`.  Configure the job to subscribe to **both** topics and enable the join pipeline:
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  KAFKA_TOPICS=postgres.public.orders,postgres.public.products \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=route_by_topic,stream_join,join_and_tag_source \
-  JOIN_LEFT_TOPIC=postgres.public.orders \
-  JOIN_RIGHT_TOPIC=postgres.public.products \
-  JOIN_KEY_COL=product_id \
-  JOIN_HOW=left \
-  TARGET_TABLE=postgres.e2e_testing.orders_products_joined
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a product and then an order referencing it
-
-```sql
--- psql — ensure a known product exists
-INSERT INTO products (id, name, category, price)
-VALUES (800001, 'Widget Pro', 'Hardware', 49.99)
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
-COMMIT;
-
--- Insert an order referencing that product
-INSERT INTO orders (id, customer_id, product_id, status, total_amount, created_at)
-VALUES (900080, 900001, 800001, 'pending', 149.97, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify the join output in Iceberg
-
-```sql
-SELECT id, customer_id, product_id,
-       total_amount,
-       right_name, right_category, right_price,
-       left_topic, right_topic,
-       snap_timestamp
-FROM postgres.e2e_testing.orders_products_joined
-WHERE id = 900080;
-```
-
-**Expected:**
-
-| Column | Value |
-|--------|-------|
-| `id` | 900080 |
-| `product_id` | 800001 |
-| `right_name` | `'Widget Pro'` |
-| `right_category` | `'Hardware'` |
-| `right_price` | 49.99 |
-| `left_topic` | `'postgres.public.orders'` |
-| `right_topic` | `'postgres.public.products'` |
-
-`right_name`, `right_category`, and `right_price` come from the products topic, not the orders topic.
-The `left_topic` / `right_topic` provenance columns confirm which Kafka topics contributed each side.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders WHERE id = 900080; COMMIT;
--- Spark SQL
-DELETE FROM postgres.e2e_testing.orders_products_joined WHERE id = 900080;
-```
-
----
-
-### Test 4.16 — `multi_topic_union` → `postgres.e2e_testing.all_topics_union`
-
-**Purpose:** Verify that events from the `customers`, `orders`, and `products` Kafka topics are UNION ALL'd into a single Iceberg table with a `source_topic` tag column identifying each row's origin.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
--- Schema must be the superset of all three topic schemas.
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.all_topics_union (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    customer_id    BIGINT,
-    product_id     BIGINT,
-    status         STRING,
-    total_amount   DOUBLE,
-    price          DOUBLE,
-    category       STRING,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    source_topic   STRING,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (source_topic, days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  KAFKA_TOPICS=postgres.public.customers,postgres.public.orders,postgres.public.products \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=route_by_topic,multi_topic_union \
-  UNION_TAG_COL=source_topic \
-  TARGET_TABLE=postgres.e2e_testing.all_topics_union
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert one row into each source table simultaneously
-
-```sql
--- psql — run as a single transaction to target the same micro-batch
-BEGIN;
-
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900090, 'Union CustTest', 'union_cust@example.com', '555-0200',
-        '90 Union St', 'Sydney', 'AU', NOW());
-
-INSERT INTO orders (id, customer_id, status, total_amount, created_at)
-VALUES (900091, 900090, 'pending', 75.00, NOW());
-
-INSERT INTO products (id, name, category, price)
-VALUES (800002, 'Union Widget', 'Software', 19.99)
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
-
-COMMIT;
-```
-
-```bash
-sleep 10
-```
-
-#### Verify all three rows landed with correct topic tags
-
-```sql
-SELECT id, source_topic, name, total_amount, price, _op, snap_timestamp
-FROM postgres.e2e_testing.all_topics_union
-WHERE id IN (900090, 900091, 800002)
-ORDER BY source_topic, id;
-```
-
-**Expected:**
-
-| id     | source_topic                    | Populated field |
-|--------|---------------------------------|-----------------|
-| 800002 | `postgres.public.products`      | `price = 19.99` |
-| 900090 | `postgres.public.customers`     | `name = 'Union CustTest'` |
-| 900091 | `postgres.public.orders`        | `total_amount = 75.00` |
-
-- Columns that do not exist in a given topic's schema appear as `NULL` (schema harmonisation).
-- `source_topic` must be the fully-qualified Kafka topic name for every row.
-
-#### Verify NULL harmonisation
-
-```sql
--- For the customers row: order-only fields should be NULL
-SELECT id, source_topic, total_amount, price
-FROM postgres.e2e_testing.all_topics_union
-WHERE id = 900090;
-```
-
-**Expected:** `total_amount = NULL`, `price = NULL` — neither column exists in the customers topic.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900090; COMMIT;
-DELETE FROM orders    WHERE id = 900091; COMMIT;
--- Spark SQL
-DELETE FROM postgres.e2e_testing.all_topics_union WHERE id IN (900090, 900091, 800002);
-```
-
----
-
-### Test 4.17 — `rename_columns` → `postgres.e2e_testing.customers_renamed`
-
-**Purpose:** Verify that `rename_columns` renames `id → customer_id` and `name → full_name` in the streaming batch before the row lands in Iceberg — the original column names must not appear.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_renamed (
-    customer_id    BIGINT,
-    full_name      STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,rename_columns \
-  RENAME_MAP='{"id":"customer_id","name":"full_name"}' \
-  TARGET_TABLE=postgres.e2e_testing.customers_renamed
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a customer
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900100, 'Rename Test', 'rename@example.com', '555-0300',
-        '100 Rename St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify column names in Iceberg
-
-```sql
--- Confirm renamed columns exist and hold correct values
-SELECT customer_id, full_name, email
-FROM postgres.e2e_testing.customers_renamed
-WHERE customer_id = 900100;
-```
-
-**Expected:** `customer_id = 900100`; `full_name = 'Rename Test'`.
-The columns `id` and `name` must **not** exist in this table (schema was renamed, not added).
-
-```sql
--- Confirm original column names are absent
-DESCRIBE postgres.e2e_testing.customers_renamed;
--- Expected: column list contains customer_id and full_name; no id or name column
-```
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900100; COMMIT;
--- Spark SQL
-DELETE FROM postgres.e2e_testing.customers_renamed WHERE customer_id = 900100;
-```
-
----
-
-### Test 4.18 — `cast_columns` → `postgres.e2e_testing.orders_cast`
-
-**Purpose:** Verify that `cast_columns` casts `total_amount` from DOUBLE to DECIMAL(10,2) and `status` to uppercase STRING — the Iceberg table stores the casted types.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_cast (
-    id             BIGINT,
-    customer_id    BIGINT,
-    status         STRING,
-    total_amount   DECIMAL(10,2),
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=filter_op,deduplicate,cast_columns \
-  FILTER_OPS=c,u \
-  CAST_MAP='{"total_amount":"decimal(10,2)"}' \
-  TARGET_TABLE=postgres.e2e_testing.orders_cast
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert an order with a fractional amount
-
-```sql
--- psql
-INSERT INTO orders (id, customer_id, status, total_amount, created_at)
-VALUES (900101, 900001, 'pending', 123.456789, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify the cast value in Iceberg
-
-```sql
-SELECT id, total_amount, status
-FROM postgres.e2e_testing.orders_cast
-WHERE id = 900101;
-```
-
-**Expected:** `total_amount = 123.46` — cast to `DECIMAL(10,2)` rounds to 2 decimal places.
-The raw value in PostgreSQL is `123.456789` (DOUBLE PRECISION).
-
-```sql
--- Confirm the Iceberg column type
-DESCRIBE postgres.e2e_testing.orders_cast;
--- Expected: total_amount   decimal(10,2)
-```
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders WHERE id = 900101; COMMIT;
-```
-
----
-
-### Test 4.19 — `drop_columns` → `postgres.e2e_testing.customers_dropped`
-
-**Purpose:** Verify that `drop_columns` removes `address`, `phone`, and `updated_at` from the batch before the row lands in Iceberg — those columns must not appear in the output table.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
--- address, phone, updated_at intentionally omitted — they are dropped by the transform
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_dropped (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,drop_columns \
-  DROP_COLS=address,phone,updated_at \
-  TARGET_TABLE=postgres.e2e_testing.customers_dropped
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a customer
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900102, 'Drop Test', 'drop@example.com', '555-0301',
-        '102 Drop St', 'Melbourne', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify dropped columns are absent
-
-```sql
-SELECT id, name, email, city, country
-FROM postgres.e2e_testing.customers_dropped
-WHERE id = 900102;
-```
-
-**Expected:** Row lands with `id`, `name`, `email`, `city`, `country` populated.
-
-```sql
--- Confirm dropped columns are absent from schema
-DESCRIBE postgres.e2e_testing.customers_dropped;
--- Expected: no address, phone, or updated_at column
-```
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900102; COMMIT;
-```
-
----
-
-### Test 4.20 — `flatten_json_col` → `postgres.e2e_testing.customers_flat_addr`
-
-**Purpose:** Verify that a JSON string `address_json` column is parsed and its fields (`street`, `city`, `zip`) are expanded as top-level Iceberg columns with the `addr_` prefix.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_flat_addr (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    addr_street    STRING,
-    addr_city      STRING,
-    addr_zip       STRING,
-    _op            STRING,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-The `flatten_json_col` transform requires the source event to carry a JSON string column (`address_json`).
-Set up the pipeline to parse that column:
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,flatten_json_col \
-  FLATTEN_JSON_COL=address_json \
-  FLATTEN_JSON_PREFIX=addr_ \
-  FLATTEN_JSON_SCHEMA='{"type":"struct","fields":[{"name":"street","type":"string"},{"name":"city","type":"string"},{"name":"zip","type":"string"}]}' \
-  TARGET_TABLE=postgres.e2e_testing.customers_flat_addr
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a customer carrying a JSON address field
-
-```sql
--- psql — customers table must have an address_json column (add if missing)
-ALTER TABLE customers ADD COLUMN IF NOT EXISTS address_json TEXT;
-
-INSERT INTO customers (id, name, email, phone, address_json, city, country, created_at)
-VALUES (900103, 'Flatten Test', 'flatten@example.com', '555-0302',
-        '{"street":"103 Flat St","city":"Brisbane","zip":"4000"}',
-        'Brisbane', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify flattened columns in Iceberg
-
-```sql
-SELECT id, name, addr_street, addr_city, addr_zip
-FROM postgres.e2e_testing.customers_flat_addr
-WHERE id = 900103;
-```
-
-**Expected:**
-
-| id     | name           | addr_street     | addr_city  | addr_zip |
-|--------|----------------|-----------------|------------|----------|
-| 900103 | Flatten Test   | 103 Flat St     | Brisbane   | 4000     |
-
-The original `address_json` column must **not** appear — `flatten_json_col` drops it after expansion.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900103; COMMIT;
-```
-
----
-
-### Test 4.21 — `filter_columns` → `postgres.e2e_testing.customers_projected`
-
-**Purpose:** Verify that `filter_columns` keeps only `id`, `name`, `email`, and `country` — all other columns from the Kafka event are dropped before the row lands in Iceberg.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
--- Only the projected subset of columns
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_projected (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    country        STRING,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=deduplicate,filter_columns \
-  KEEP_COLS=id,name,email,country,snap_id,snap_timestamp \
-  TARGET_TABLE=postgres.e2e_testing.customers_projected
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a customer
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900104, 'Project Test', 'project@example.com', '555-0303',
-        '104 Proj St', 'Perth', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify only projected columns are present
-
-```sql
-SELECT id, name, email, country
-FROM postgres.e2e_testing.customers_projected
-WHERE id = 900104;
-```
-
-**Expected:** Row lands with only `id`, `name`, `email`, `country` (and system columns `snap_id`, `snap_timestamp`).
-
-```sql
-DESCRIBE postgres.e2e_testing.customers_projected;
--- Expected: no phone, address, city, created_at, updated_at, _op, or kafka_ts columns
-```
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900104; COMMIT;
-```
-
----
-
-### Test 4.22 — `aggregate_counts` → `postgres.e2e_testing.event_counts`
-
-**Purpose:** Verify that `aggregate_counts` produces a per-`(id, _op)` event count summary in `event_counts` — one summary row per unique (id, op) combination within the batch.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.event_counts (
-    id            BIGINT,
-    _op           STRING,
-    event_count   BIGINT,
-    snap_id       STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=aggregate_counts \
-  AGG_PK_COL=id \
-  TARGET_TABLE=postgres.e2e_testing.event_counts
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Generate multiple events for the same customer
-
-```sql
--- psql — INSERT then two UPDATEs within a short window
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900105, 'AggCount Test', 'aggcount@example.com', '555-0304',
-        '105 Agg St', 'Sydney', 'AU', NOW());
-COMMIT;
-
-UPDATE customers SET email = 'aggcount_v2@example.com' WHERE id = 900105; COMMIT;
-UPDATE customers SET city  = 'Melbourne'               WHERE id = 900105; COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify the aggregate counts
-
-```sql
-SELECT id, _op, event_count
-FROM postgres.e2e_testing.event_counts
-WHERE id = 900105
-ORDER BY _op;
-```
-
-**Expected:**
-
-| id     | _op | event_count |
-|--------|-----|-------------|
-| 900105 | c   | 1           |
-| 900105 | u   | 2           |
-
-One row per `(id, _op)` combination; `event_count` reflects how many CDC events of that type arrived in the batch.
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id = 900105; COMMIT;
-```
-
----
-
-### Test 4.23 — `event_rate` → `postgres.e2e_testing.pipeline_event_rate`
-
-**Purpose:** Verify that `event_rate` produces a single-row throughput summary per micro-batch — `event_count`, `batch_duration_seconds`, and `events_per_second` must all be non-null and arithmetically consistent.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.pipeline_event_rate (
-    event_count              BIGINT,
-    batch_duration_seconds   DOUBLE,
-    events_per_second        DOUBLE,
-    min_ts                   TIMESTAMP,
-    max_ts                   TIMESTAMP,
-    proc_batch_ts            TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(proc_batch_ts));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=event_rate \
-  EVENT_RATE_TS_COL=kafka_ts \
-  TARGET_TABLE=postgres.e2e_testing.pipeline_event_rate
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Generate a burst of events
-
-```sql
--- psql — 5 rapid inserts to fill a micro-batch
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES
-  (900110, 'Rate Test 1', 'rate1@example.com', '555-0401', '1 Rate St', 'Sydney', 'AU', NOW()),
-  (900111, 'Rate Test 2', 'rate2@example.com', '555-0402', '2 Rate St', 'Sydney', 'AU', NOW()),
-  (900112, 'Rate Test 3', 'rate3@example.com', '555-0403', '3 Rate St', 'Sydney', 'AU', NOW()),
-  (900113, 'Rate Test 4', 'rate4@example.com', '555-0404', '4 Rate St', 'Sydney', 'AU', NOW()),
-  (900114, 'Rate Test 5', 'rate5@example.com', '555-0405', '5 Rate St', 'Sydney', 'AU', NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify the throughput metrics
-
-```sql
-SELECT event_count, batch_duration_seconds, events_per_second,
-       min_ts, max_ts, proc_batch_ts
-FROM postgres.e2e_testing.pipeline_event_rate
-ORDER BY proc_batch_ts DESC
-LIMIT 3;
-```
-
-**Expected:**
-- `event_count ≥ 5` (the 5 inserts, possibly batched with other events).
-- `batch_duration_seconds ≥ 1.0` (the `GREATEST(delta, 1.0)` floor).
-- `events_per_second = event_count / batch_duration_seconds` — verify arithmetic: `event_count / batch_duration_seconds ≈ events_per_second`.
-- `min_ts ≤ max_ts` and both are within the last 60 seconds.
-- `proc_batch_ts` is non-null and within 30 seconds of now.
-
-```sql
--- Arithmetic consistency check
-SELECT event_count, batch_duration_seconds, events_per_second,
-       ABS(events_per_second - (event_count / batch_duration_seconds)) AS rounding_error
-FROM postgres.e2e_testing.pipeline_event_rate
-ORDER BY proc_batch_ts DESC
-LIMIT 1;
--- Expected: rounding_error < 0.001
-```
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM customers WHERE id BETWEEN 900110 AND 900114; COMMIT;
-```
-
----
-
-### Test 4.24 — `temporal_join` → `postgres.e2e_testing.orders_payments_temporal`
-
-**Purpose:** Verify that `temporal_join` matches each order event to the closest-in-time payment event from the `payments` Kafka topic sharing the same `order_id`, within a 5-second tolerance window.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.orders_payments_temporal (
-    id                   BIGINT,
-    customer_id          BIGINT,
-    total_amount         DOUBLE,
-    kafka_ts             TIMESTAMP,
-    right_payment_method STRING,
-    right_payment_status STRING,
-    right_amount_paid    DOUBLE,
-    snap_id              STRING,
-    snap_timestamp       TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  KAFKA_TOPICS=postgres.public.orders,postgres.public.payments \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=route_by_topic,temporal_join \
-  TEMPORAL_JOIN_LEFT_TOPIC=postgres.public.orders \
-  TEMPORAL_JOIN_RIGHT_TOPIC=postgres.public.payments \
-  TEMPORAL_JOIN_KEY_COL=id \
-  TEMPORAL_JOIN_LEFT_TS=kafka_ts \
-  TEMPORAL_JOIN_RIGHT_TS=kafka_ts \
-  TEMPORAL_JOIN_TOLERANCE_MS=5000 \
-  TARGET_TABLE=postgres.e2e_testing.orders_payments_temporal
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a matching order and payment within the tolerance window
-
-```sql
--- psql — insert order then payment for the same order_id within 2 seconds
-INSERT INTO orders (id, customer_id, status, total_amount, created_at)
-VALUES (900120, 900001, 'pending', 250.00, NOW());
-COMMIT;
-```
-
-```bash
-sleep 2
-```
-
-```sql
--- psql — payment arrives 2 seconds after order (within 5 s tolerance)
-INSERT INTO payments (order_id, payment_method, payment_status, amount_paid, created_at)
-VALUES (900120, 'credit_card', 'approved', 250.00, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify the temporal join output
-
-```sql
-SELECT id, customer_id, total_amount, kafka_ts,
-       right_payment_method, right_payment_status, right_amount_paid,
-       snap_timestamp
-FROM postgres.e2e_testing.orders_payments_temporal
-WHERE id = 900120;
-```
-
-**Expected:**
-
-| Column | Value |
-|--------|-------|
-| `id` | 900120 |
-| `total_amount` | 250.00 |
-| `right_payment_method` | `'credit_card'` |
-| `right_payment_status` | `'approved'` |
-| `right_amount_paid` | 250.00 |
-
-#### Verify tolerance cutoff — insert an order with NO matching payment
-
-```sql
--- psql — order with no corresponding payment
-INSERT INTO orders (id, customer_id, status, total_amount, created_at)
-VALUES (900121, 900002, 'pending', 75.00, NOW());
-COMMIT;
-```
-
-```bash
-sleep 8
-```
-
-```sql
--- Payment arrives 8 seconds later — beyond 5 s tolerance — should not join
-INSERT INTO payments (order_id, payment_method, payment_status, amount_paid, created_at)
-VALUES (900121, 'paypal', 'pending', 75.00, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
-SELECT id, right_payment_method
-FROM postgres.e2e_testing.orders_payments_temporal
-WHERE id = 900121;
-```
-
-**Expected:** Row for `id = 900121` has `right_payment_method = NULL` (outside tolerance → no join).
-
-#### Cleanup
-
-```sql
--- psql
-DELETE FROM orders    WHERE id IN (900120, 900121); COMMIT;
-DELETE FROM payments  WHERE order_id IN (900120, 900121); COMMIT;
--- Spark SQL
-DELETE FROM postgres.e2e_testing.orders_payments_temporal WHERE id IN (900120, 900121);
-```
-
----
-
-### Test 4.25 — `apply_pipeline` → `postgres.e2e_testing.customers_pipeline`
-
-**Purpose:** Verify that `apply_pipeline` correctly chains six transforms in sequence — `filter_op` → `deduplicate` → `mask_columns` → `add_processing_time` → `add_op_label` → `null_coalesce` — and that all six effects are visible in the output Iceberg table.
-
-#### Create the Iceberg table
-
-```sql
--- Spark SQL — run once before the test
--- Contains all injected columns: proc_time, op_label, masked email/phone, coalesced country
-CREATE TABLE IF NOT EXISTS postgres.e2e_testing.customers_pipeline (
-    id             BIGINT,
-    name           STRING,
-    email          STRING,
-    phone          STRING,
-    address        STRING,
-    city           STRING,
-    country        STRING,
-    created_at     TIMESTAMP,
-    updated_at     TIMESTAMP,
-    _op            STRING,
-    op_label       STRING,
-    proc_time      TIMESTAMP,
-    kafka_ts       TIMESTAMP,
-    snap_id        STRING,
-    snap_timestamp TIMESTAMP
-)
-USING iceberg
-PARTITIONED BY (days(snap_timestamp));
-```
-
-#### Enable
-
-```bash
-kubectl set env deployment/kafka-to-iceberg-standard -n prod \
-  TARGET_NAMESPACE=e2e_testing \
-  TRANSFORM_PIPELINE=apply_pipeline \
-  PIPELINE_STEPS='filter_op:ops=c,u|deduplicate:pk=id|mask_columns:columns=email,phone|add_processing_time|add_op_label|null_coalesce:country=N/A' \
-  TARGET_TABLE=postgres.e2e_testing.customers_pipeline
-kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod && \
-kubectl rollout status  deployment/kafka-to-iceberg-standard -n prod
-```
-
-#### Insert a customer with NULL country
-
-```sql
--- psql
-INSERT INTO customers (id, name, email, phone, address, city, country, created_at)
-VALUES (900130, 'Pipeline Test', 'pipe_clear@example.com', '555-0500',
-        '130 Pipe St', 'Sydney', NULL, NOW());
-COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-#### Verify all six transform effects in Iceberg
-
-```sql
-SELECT id, name, email, phone, country, op_label, proc_time, snap_timestamp
-FROM postgres.e2e_testing.customers_pipeline
-WHERE id = 900130;
-```
-
-**Expected — verify each pipeline step's effect:**
-
-| Check | Expected |
-|-------|----------|
-| `filter_op` | Row present (`_op = 'c'` passed the filter) |
-| `deduplicate` | Exactly 1 row for `id = 900130` |
-| `mask_columns` | `email` = SHA-256 hex of `'pipe_clear@example.com'` (not plaintext) |
-| `mask_columns` | `phone` = SHA-256 hex of `'555-0500'` (not plaintext) |
-| `add_processing_time` | `proc_time` is non-null TIMESTAMP ≤ `snap_timestamp` |
-| `add_op_label` | `op_label = 'INSERT'` |
-| `null_coalesce` | `country = 'N/A'` (was NULL in source) |
-
-```bash
-# Pre-compute expected email hash to confirm masking
-echo -n 'pipe_clear@example.com' | sha256sum
-```
-
-```sql
--- Fire a DELETE — it should be filtered out (filter_op excludes 'd')
--- psql
-DELETE FROM customers WHERE id = 900130; COMMIT;
-```
-
-```bash
-sleep 5
-```
-
-```sql
--- Row must still exist in Iceberg — delete was filtered
-SELECT id FROM postgres.e2e_testing.customers_pipeline WHERE id = 900130;
--- Expected: 1 row (delete suppressed)
-```
-
-#### Cleanup
-
-```sql
--- Spark SQL — manually remove since the delete was filtered
-DELETE FROM postgres.e2e_testing.customers_pipeline WHERE id = 900130;
-```
-
----
-
-## 6. Section 5 — snap_id and snap_timestamp Validation
+## 5. Section 5 — snap_id and snap_timestamp Validation
 
 ### Test 5.1 — Verify hourly partitions exist
 
@@ -3732,7 +1538,7 @@ WHERE snap_timestamp >= (CURRENT_TIMESTAMP - INTERVAL 1 HOUR);
 
 ---
 
-## 7. Section 6 — Multi-Source Validation
+## 6. Section 6 — Multi-Source Validation
 
 **Purpose:** Verify all three source connectors propagate changes to their respective Iceberg catalogs within 10 seconds.
 
@@ -3821,119 +1627,154 @@ db.customers.deleteOne({ id: 900062 });
 
 ---
 
-## 8. Section 7 — DDL Changes: Detection, Error Logging & Manual Apply
+## 7. Section 7 — DDL Changes & Schema Evolution
 
-**Pipeline policy (changed from auto-evolution to manual-apply):**
+**How DDL is handled per source:**
 
-> The streaming pipeline (`05_kafka_to_iceberg_streaming.py`) is **DML-only**.
-> It does **not** silently drop unknown columns and does **not** auto-apply schema changes.
->
-> When a DDL event is detected (source `ALTER TABLE` / MongoDB new field / removed field),
-> the pipeline **stops replication for that table** and emits a `CRITICAL` log with the
-> exact `ddl_apply.py` command needed.  Other tables in the same batch continue normally.
->
-> Debezium continues to publish DDL events to `schema-changes.<source>` topics — this
-> is unchanged.  No Debezium connector configuration changes are required.
+| Source | Who applies DDL to Iceberg | Action required |
+|---|---|---|
+| **PostgreSQL** | `schema-evolution-handler` — automatic | Restart streaming pods after DDL |
+| **Oracle** | `schema-evolution-handler` — automatic | Restart streaming pods after DDL |
+| **MongoDB** | Manual — `ddl_apply.py` | Run `ddl_apply.py`, then restart streaming pods |
+
+> **Why a restart is needed:**
+> `05_kafka_to_iceberg_streaming.py` caches the Iceberg schema in memory at pod startup.
+> After a DDL change is applied to Iceberg (automatically or manually), the pods must be
+> restarted so they re-read the updated schema. Until then, new columns are silently dropped
+> from batches.
 
 ---
 
 ### How DDL Flows Through the System
 
+#### PostgreSQL & Oracle (automatic)
+
 ```
-Source DB (ALTER TABLE / new MongoDB field)
+Source DB  →  ALTER TABLE
   ↓
 Debezium connector
-  ↓  publishes DDL event to:  schema-changes.<source>  (Kafka)
-  ↓  publishes DML rows  to:  <source>.cache_testing.<table>  (Kafka)
+  ↓  publishes DDL event → schema-changes.<source>  (Kafka)
+  ↓  publishes DML rows → <source>.cache_testing.<table>  (Kafka)
   ↓
-05_kafka_to_iceberg_streaming.py  (micro-batch)
+schema-evolution-handler  (04_schema_evolution_handler.py)
+  ↓  reads schema-changes.<source>
+  ↓  fetches new Avro schema from Schema Registry
+  ↓  runs:  ALTER TABLE <catalog>.<namespace>.<table> ADD COLUMN ...
+  ↓  (automatic — no operator action needed for this step)
+
+Operator:
+  ↓  restart kafka-to-iceberg pods  ← required to flush schema cache
   ↓
-  DDL mismatch guard:
-    batch has column not in Iceberg table?
-      YES → log CRITICAL with ddl_apply.py command → raise SchemaMismatchError
-             (batch retried next trigger; NO data lost)
-      NO  → proceed with MERGE / soft-delete / history-tracking write
+05_kafka_to_iceberg_streaming.py  re-reads Iceberg schema on startup
+  ↓  new column now flows through normally
+```
+
+#### MongoDB (manual)
+
+```
+MongoDB  →  new field added to document (no DDL event emitted)
+  ↓
+05_kafka_to_iceberg_streaming.py  silently drops unknown fields from batch
+
+Operator:
+  ↓  run ddl_apply.py --source mongodb --table <t> --op add --col <c> --type <T>
+  ↓  restart kafka-to-iceberg pods
+  ↓
+new field now flows through normally
 ```
 
 ---
 
-### Operator Response When the Pipeline Stops
+### Operator Steps — PostgreSQL & Oracle DDL
 
-#### Option A — Read the CRITICAL log directly
+When you run an `ALTER TABLE` on the source database:
+
+**Step 1 — Confirm the evolution handler applied the DDL**
 
 ```bash
-# The CRITICAL message contains the exact command to run
+# Watch the handler logs (it applies within seconds of the DDL event)
+kubectl logs -n prod -l app=schema-evolution-handler --since=60s \
+  | grep -E "DDL event|Applied|ALTER TABLE|WARNING|ERROR"
+```
+
+✅ Expected:
+```
+[postgres] DDL event for table 'customers': ALTER TABLE ...
+[postgres/customers] DDL: ALTER TABLE `postgres`.`cache_testing`.`customers` ADD COLUMN `loyalty_tier` STRING
+[postgres/customers] Applied: add loyalty_tier STRING
+```
+
+**Step 2 — Restart the streaming pods**
+
+```bash
+# For PostgreSQL DDL:
+kubectl rollout restart deployment/kafka-to-iceberg-postgres-standard \
+  deployment/kafka-to-iceberg-postgres-soft-delete \
+  deployment/kafka-to-iceberg-postgres-history-tracking -n prod
+
+# For Oracle DDL:
+kubectl rollout restart deployment/kafka-to-iceberg-oracle-standard \
+  deployment/kafka-to-iceberg-oracle-soft-delete \
+  deployment/kafka-to-iceberg-oracle-history-tracking -n prod
+```
+
+**Step 3 — Verify the new column is flowing**
+
+```bash
+sleep 20
 kubectl logs -n prod \
-  $(kubectl get pod -n prod -l app=kafka-to-iceberg -o jsonpath='{.items[0].metadata.name}') \
-  | grep "CRITICAL\|SCHEMA MISMATCH\|ACTION REQUIRED"
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=postgres,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=60s | grep -E "batch=|upsert|ERROR"
 ```
 
-Expected output format:
+Then confirm in Spark SQL:
+```sql
+DESCRIBE TABLE postgres.cache_testing.<table>;
+-- Expected: new column present
 ```
-CRITICAL kafka-to-iceberg –
-[postgres/customers] SCHEMA MISMATCH — batch=42 has 1 column(s) not in Iceberg: ['loyalty_tier'].
-  Source DDL was applied but ddl_apply.py has NOT been run yet.
-  ── ACTION REQUIRED ─────────────────────────────────────────
-  Run the following command(s) to evolve the Iceberg schema,
-  then restart this deployment:
-    python3 scripts/ddl_apply.py --source postgres --table customers --op add --col loyalty_tier --type STRING
-  Then restart:
-    kubectl rollout restart deployment/kafka-to-iceberg-standard -n prod
-  ────────────────────────────────────────────────────────────
-  Or use ddl_extract.py to auto-discover all pending DDL:
-    python3 scripts/ddl_extract.py --source postgres
-  ────────────────────────────────────────────────────────────
-```
-
-Copy the `python3 scripts/ddl_apply.py …` line and proceed to **Step 2** below.
 
 ---
 
-#### Option B — Use `ddl_extract.py` to auto-discover pending DDL
+### Operator Steps — MongoDB DDL
 
-`ddl_extract.py` reads the Debezium `schema-changes.<source>` Kafka topics from the
-beginning, parses all DDL events, and prints ready-to-run `ddl_apply.py` commands.
+When a new field appears in MongoDB documents:
+
+**Step 1 — Apply the DDL to Iceberg manually**
 
 ```bash
-# All three sources:
-python3 scripts/ddl_extract.py
-
-# Single source only:
-python3 scripts/ddl_extract.py --source postgres
-python3 scripts/ddl_extract.py --source oracle
-python3 scripts/ddl_extract.py --source mongodb
-
-# Non-interactive (CI / scripted use):
-python3 scripts/ddl_extract.py --source postgres --yes
-
-# Read from a specific Kafka offset (useful when topic has many old events):
-python3 scripts/ddl_extract.py --source postgres --from-offset 50
-
-# Show raw Debezium JSON events without parsing:
-python3 scripts/ddl_extract.py --source oracle --raw
+python3 scripts/ddl_apply.py \
+    --source mongodb \
+    --table <table_name> \
+    --op add \
+    --col <column_name> \
+    --type STRING   # or INT, BIGINT, DOUBLE, BOOLEAN, TIMESTAMP, etc.
 ```
 
-Expected output (one block per detected change):
+**Step 2 — Restart the MongoDB streaming pods**
 
+```bash
+kubectl rollout restart deployment/kafka-to-iceberg-mongodb-standard \
+  deployment/kafka-to-iceberg-mongodb-soft-delete \
+  deployment/kafka-to-iceberg-mongodb-history-tracking -n prod
 ```
-  ┌─ [postgres/customers] ADD COLUMN loyalty_tier STRING
-  │  Detected at : 2026-09-21T10:42:15Z  (offset=17)
-  │  Source DDL  : ALTER TABLE public.customers ADD COLUMN loyalty_tier VARCHAR(20) DEFAULT NULL
-  │  Command     :
-  │    python3 scripts/ddl_apply.py --source postgres --table customers \
-  │        --op add --col loyalty_tier --type STRING
-  │
-  │  After running the command, restart the pipeline:
-  │    kubectl rollout restart deployment/kafka-to-iceberg-standard  (or soft-delete / history-tracking)  -n prod
-  └──────────────────────────────────────────────────────────────────────
+
+**Step 3 — Verify**
+
+```bash
+sleep 20
+kubectl logs -n prod \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=mongodb,pipeline.write-mode=standard \
+    -o jsonpath='{.items[0].metadata.name}') \
+  --since=60s | grep -E "batch=|upsert|ERROR"
 ```
 
 ---
 
 ### Test 7a — PostgreSQL: ADD COLUMN
 
-**Scenario:** Add a `loyalty_tier` column to `customers` in PostgreSQL.
-Verify the pipeline stops with a CRITICAL error, apply DDL, then verify replication resumes.
+**Scenario:** Add a `loyalty_tier` column to `customers` in PostgreSQL and verify it
+appears in Iceberg automatically.
 
 #### Step 1 — Add the column in PostgreSQL
 
@@ -3951,49 +1792,35 @@ VALUES (900070, 'SchemaEvo Test', 'evo@example.com', '555-0001',
 COMMIT;
 ```
 
-#### Step 3 — Verify the pipeline logged a CRITICAL error
+#### Step 3 — Confirm schema-evolution-handler applied the DDL
 
 ```bash
 sleep 5
-kubectl logs -n prod \
-  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard \
-    -o jsonpath='{.items[0].metadata.name}') \
-  --since=30s | grep -E "CRITICAL|SCHEMA MISMATCH|ACTION REQUIRED"
+kubectl logs -n prod -l app=schema-evolution-handler --since=30s \
+  | grep -E "DDL event|Applied|loyalty_tier"
 ```
 
-✅ Expected: CRITICAL log block with `loyalty_tier` and the `ddl_apply.py` command.
+✅ Expected: `[postgres/customers] Applied: add loyalty_tier STRING`
 
-#### Step 4 — Apply the DDL to Iceberg using `ddl_apply.py`
+#### Step 4 — Restart the PostgreSQL streaming pods
 
 ```bash
-python3 scripts/ddl_apply.py \
-    --source postgres \
-    --table customers \
-    --op add \
-    --col loyalty_tier \
-    --type STRING
+kubectl rollout restart deployment/kafka-to-iceberg-postgres-standard \
+  deployment/kafka-to-iceberg-postgres-soft-delete \
+  deployment/kafka-to-iceberg-postgres-history-tracking -n prod
 ```
-
-`ddl_apply.py` will:
-1. Scale down `kafka-to-iceberg-postgres-standard` (and soft-delete + history-tracking)
-2. Wait until all pods are fully stopped
-3. Execute `ALTER TABLE postgres.cache_testing.customers ADD COLUMN loyalty_tier STRING`
-4. Verify with `DESCRIBE TABLE`
-5. Scale deployments back up
-
-✅ Expected final line: `✓  DDL apply completed successfully.`
 
 #### Step 5 — Wait for the pipeline to process the buffered row
 
 ```bash
 sleep 20
 kubectl logs -n prod \
-  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard \
+  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=postgres,pipeline.write-mode=standard \
     -o jsonpath='{.items[0].metadata.name}') \
-  --since=60s | grep -E "batch=|upsert|CRITICAL|ERROR"
+  --since=60s | grep -E "batch=|upsert|ERROR"
 ```
 
-✅ Expected: `batch=N upsert rows=1` — no more CRITICAL or SCHEMA MISMATCH lines.
+✅ Expected: `batch=N upsert rows=1` — no errors.
 
 #### Step 6 — Verify the column and data in Iceberg
 
@@ -4033,28 +1860,22 @@ COMMIT;
 ALTER TABLE public.customers DROP COLUMN loyalty_tier;
 ```
 
-#### Step 2 — Verify pipeline WARNING (not CRITICAL — column absent from source is non-fatal)
+#### Step 2 — Confirm evolution handler removed the column from Iceberg
 
 ```bash
 sleep 5
-kubectl logs -n prod \
-  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.write-mode=standard \
-    -o jsonpath='{.items[0].metadata.name}') \
-  --since=30s | grep -E "absent from batch|gone_from_src|WARNING"
+kubectl logs -n prod -l app=schema-evolution-handler --since=30s \
+  | grep -E "DDL event|Applied|loyalty_tier"
 ```
 
-✅ Expected: WARNING log about `loyalty_tier` absent from batch. Pipeline continues.
+✅ Expected: `[postgres/customers] Applied: remove loyalty_tier`
 
-#### Step 3 — (Optional) Remove the column from Iceberg too
-
-If the column drop was intentional and you want to clean it up from Iceberg:
+#### Step 3 — Restart the PostgreSQL streaming pods
 
 ```bash
-python3 scripts/ddl_apply.py \
-    --source postgres \
-    --table customers \
-    --op drop \
-    --col loyalty_tier
+kubectl rollout restart deployment/kafka-to-iceberg-postgres-standard \
+  deployment/kafka-to-iceberg-postgres-soft-delete \
+  deployment/kafka-to-iceberg-postgres-history-tracking -n prod
 ```
 
 ---
@@ -4073,33 +1894,30 @@ VALUES (900075, 'OraEvo', 'ora_evo@example.com', '555-0075',
 COMMIT;
 ```
 
+**Confirm evolution handler applied the DDL:**
 ```bash
-# Watch for CRITICAL log
 sleep 10
-kubectl logs -n prod \
-  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=oracle \
-    -o jsonpath='{.items[0].metadata.name}') \
-  --since=30s | grep "CRITICAL\|SCHEMA MISMATCH"
+kubectl logs -n prod -l app=schema-evolution-handler --since=30s \
+  | grep -E "DDL event|Applied|loyalty_points"
 ```
 
-Apply the DDL:
+✅ Expected: `[oracle/customers] Applied: add loyalty_points DECIMAL(10,0)`
+
+**Restart Oracle streaming pods:**
 ```bash
-python3 scripts/ddl_apply.py \
-    --source oracle \
-    --table customers \
-    --op add \
-    --col loyalty_points \
-    --type "DECIMAL(10,0)"
+kubectl rollout restart deployment/kafka-to-iceberg-oracle-standard \
+  deployment/kafka-to-iceberg-oracle-soft-delete \
+  deployment/kafka-to-iceberg-oracle-history-tracking -n prod
 ```
 
-Verify:
+**Verify:**
 ```sql
 -- Spark SQL
 SELECT id, loyalty_points FROM oracle.e2e_testing.customers WHERE id = 900075;
 -- Expected: loyalty_points = 500
 ```
 
-Cleanup:
+**Cleanup:**
 ```sql
 -- sqlplus
 DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900075; COMMIT;
@@ -4109,8 +1927,7 @@ DELETE FROM CACHE_TESTING.CUSTOMERS WHERE ID = 900075; COMMIT;
 
 ### Test 7d — MongoDB: New Field (ADD)
 
-MongoDB does not have `ALTER TABLE` DDL. A new field in a document triggers the
-DDL-mismatch guard in the pipeline.
+MongoDB has no DDL — new fields must be applied manually via `ddl_apply.py`.
 
 ```javascript
 // mongosh (cache_testing database)
@@ -4119,22 +1936,15 @@ db.customers.insertOne({
   id:            900078,
   name:          "MDB EvoTest",
   email:         "mdb_evo@example.com",
-  loyalty_tier:  "platinum",   // ← new field not in Iceberg
+  loyalty_tier:  "platinum",   // ← new field not yet in Iceberg
   created_at:    new Date()
 });
 ```
 
-```bash
-sleep 10
-kubectl logs -n prod \
-  $(kubectl get pod -n prod -l app=kafka-to-iceberg,pipeline.source=mongodb \
-    -o jsonpath='{.items[0].metadata.name}') \
-  --since=30s | grep "CRITICAL\|SCHEMA MISMATCH"
-```
+> ⚠️ The `loyalty_tier` field will be **silently dropped** from the batch until the
+> Iceberg schema is updated and pods are restarted.
 
-✅ Expected: CRITICAL log with `loyalty_tier` and ddl_apply command.
-
-Apply:
+**Apply the DDL manually:**
 ```bash
 python3 scripts/ddl_apply.py \
     --source mongodb \
@@ -4144,46 +1954,40 @@ python3 scripts/ddl_apply.py \
     --type STRING
 ```
 
-Verify:
+**Restart MongoDB streaming pods:**
+```bash
+kubectl rollout restart deployment/kafka-to-iceberg-mongodb-standard \
+  deployment/kafka-to-iceberg-mongodb-soft-delete \
+  deployment/kafka-to-iceberg-mongodb-history-tracking -n prod
+```
+
+**Verify:**
 ```sql
 SELECT id, loyalty_tier FROM mongodb.e2e_testing.customers WHERE id = 900078;
 -- Expected: loyalty_tier = 'platinum'
 ```
 
-Cleanup:
+**Cleanup:**
 ```javascript
 db.customers.deleteOne({ id: 900078 });
 ```
 
 ---
 
-### Using `ddl_extract.py` After All Tests
-
-After running all DDL tests, use `ddl_extract.py` to get a consolidated view of
-all detected DDL events since the beginning of the schema-changes topics:
-
-```bash
-python3 scripts/ddl_extract.py --yes
-```
-
-Expected: all ADD/DROP changes from tests 7a–7d listed with ready-to-run commands.
-
----
-
 ### DDL Tests Summary
 
-| Test | Source | DDL Operation | Pipeline behaviour | Resolution |
+| Test | Source | DDL Operation | Who applies to Iceberg | Operator action |
 |---|---|---|---|---|
-| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | CRITICAL log — pipeline stops for table | `ddl_apply.py --op add` |
-| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | WARNING log — pipeline continues (NULL for missing col) | `ddl_apply.py --op drop` (optional) |
-| **7c** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | CRITICAL log — pipeline stops for table | `ddl_apply.py --op add` |
-| **7d** | MongoDB | New field `loyalty_tier` in document | CRITICAL log — pipeline stops for table | `ddl_apply.py --op add` |
+| **7a** | PostgreSQL | `ADD COLUMN loyalty_tier VARCHAR(20)` | `schema-evolution-handler` (auto) | Restart postgres streaming pods |
+| **7b** | PostgreSQL | `DROP COLUMN loyalty_tier` | `schema-evolution-handler` (auto) | Restart postgres streaming pods |
+| **7c** | Oracle | `ADD COLUMN loyalty_points NUMBER(10)` | `schema-evolution-handler` (auto) | Restart oracle streaming pods |
+| **7d** | MongoDB | New field `loyalty_tier` in document | Manual — `ddl_apply.py` | Run `ddl_apply.py`, restart mongodb streaming pods |
 
 ---
 
 ---
 
-## 10. Expected Results Summary
+## 9. Expected Results Summary
 
 > **Pipeline prerequisite for all tests:** `TARGET_NAMESPACE=e2e_testing` must be set on
 > the active deployment so all three databases (PostgreSQL, Oracle, MongoDB) replicate into
@@ -4242,7 +2046,7 @@ Expected: all ADD/DROP changes from tests 7a–7d listed with ready-to-run comma
 
 ---
 
-## 11. Session Log
+## 10. Session Log
 
 > Append a new entry below each working session. Keep entries in reverse-chronological order
 > (newest first). Entries are immutable — do not edit past entries.
