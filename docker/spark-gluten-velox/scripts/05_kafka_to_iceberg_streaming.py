@@ -40,20 +40,6 @@ auto-creates the corresponding Iceberg table on the first batch using the schema
 inferred from that batch. The schema is then read from Iceberg (DESCRIBE TABLE)
 on all subsequent batches — batch inference is never re-run after first creation.
 
-star_transform integration
---------------------------
-A TRANSFORM_PIPELINE env-var (comma-separated step names) allows optional
-StarTransform steps to run on every micro-batch before the write-mode handler:
-
-  TRANSFORM_PIPELINE=deduplicate,add_processing_time,mask_pii
-
-Available built-in pipeline step names (see TRANSFORM_REGISTRY below):
-  deduplicate          — last-write-wins dedup per PK within the batch
-  add_processing_time  — inject proc_time TIMESTAMP
-  add_op_label         — inject human-readable op_label (INSERT/UPDATE/DELETE)
-  add_source_tag       — inject source_system STRING
-  mask_pii             — SHA-256 hash columns listed in PII_COLUMNS env-var
-
 Performance (peak-hour) tuning
 -------------------------------
 • MAX_OFFSETS_PER_TRIGGER   — cap Kafka offsets per micro-batch (back-pressure)
@@ -95,7 +81,6 @@ Usage
   SPARK_USER=dave WRITE_MODE=soft_delete SOURCE=postgres \\
       python3 05_kafka_to_iceberg_streaming.py
   SPARK_USER=dave WRITE_MODE=history_tracking \\
-      TRANSFORM_PIPELINE=deduplicate,add_processing_time \\
       python3 05_kafka_to_iceberg_streaming.py
   DRY_RUN=1 SPARK_USER=dave python3 05_kafka_to_iceberg_streaming.py
 """
@@ -125,7 +110,6 @@ from pyspark.sql.types import (
 
 from bao_spark_init import BaoSparkInit
 from spark_iceberg_utils import IcebergTableBuilder
-from star_transform import StarTransform as ST
 from importlib import import_module as _imod
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -203,16 +187,6 @@ MAX_EXECUTORS = int(os.environ.get("MAX_EXECUTORS", "3"))
 # How long (seconds) the scheduler backlog must be sustained before the dynamic
 # allocator requests an additional executor.
 BURST_BACKLOG_TIMEOUT_S = int(os.environ.get("BURST_BACKLOG_TIMEOUT_S", "60"))
-
-# ── StarTransform pipeline config ─────────────────────────────────────────────
-_TRANSFORM_PIPELINE_ENV = os.environ.get("TRANSFORM_PIPELINE", "").strip()
-_TRANSFORM_STEPS = [s.strip() for s in _TRANSFORM_PIPELINE_ENV.split(",") if s.strip()]
-
-_PII_COLUMNS = [
-    c.strip()
-    for c in os.environ.get("PII_COLUMNS", "email,phone,phone_number,ssn,credit_card").split(",")
-    if c.strip()
-]
 
 # ── Per-table Iceberg schema cache ────────────────────────────────────────────
 # Keyed by (source_key, table_name) → StructType.
@@ -372,36 +346,6 @@ def _topic_to_namespace(topic: str, source: _StreamingSource) -> str:
         return _TARGET_NAMESPACE
     parts = topic.split(".")
     return parts[1].lower() if len(parts) >= 3 else source.namespace
-
-
-# ── StarTransform built-in pipeline registry ──────────────────────────────────
-
-def _build_transform_pipeline(
-    source_key: str,
-    pk_col:     str,
-) -> list[tuple[Any, dict]]:
-    registry: dict[str, tuple[Any, dict]] = {
-        "deduplicate":         (ST.deduplicate,         {"pk": pk_col, "order_col": "kafka_ts"}),
-        "add_processing_time": (ST.add_processing_time, {}),
-        "add_op_label":        (ST.add_op_label,        {}),
-        "add_source_tag":      (ST.add_source_tag,      {"source_system": source_key}),
-        "mask_pii":            (ST.mask_columns,        {"columns": _PII_COLUMNS}),
-    }
-    steps = []
-    for step_name in _TRANSFORM_STEPS:
-        if step_name in registry:
-            steps.append(registry[step_name])
-        else:
-            logger.warning(
-                "[%s] Unknown TRANSFORM_PIPELINE step %r — skipped.",
-                source_key, step_name,
-            )
-    if steps:
-        logger.info(
-            "[%s] StarTransform pipeline: %s",
-            source_key, [s for s in _TRANSFORM_STEPS if s in registry],
-        )
-    return steps
 
 
 # ── Iceberg type helpers ───────────────────────────────────────────────────────
@@ -784,7 +728,6 @@ def _write_micro_batch(
     builder:      IcebergTableBuilder,
     source:       _StreamingSource,
     write_mode:   str,
-    transform_steps: list[tuple[Any, dict]],
 ) -> Any:
     """
     Return a foreachBatch function for the given source and write mode.
@@ -792,11 +735,10 @@ def _write_micro_batch(
     For each micro-batch:
       1. Route rows by topic.
       2. Decode Debezium envelope (before / after / op / ts_ms).
-      3. Apply optional StarTransform pipeline steps.
-      4. Auto-create Iceberg table if it does not exist (first batch only).
+      3. Auto-create Iceberg table if it does not exist (first batch only).
          Schema is read from Iceberg (DESCRIBE TABLE) and cached — never
          re-inferred from batch data.
-      5. Apply write-mode handler (standard / soft_delete / history_tracking).
+      4. Apply write-mode handler (standard / soft_delete / history_tracking).
 
     DDL handling
     ------------
@@ -816,7 +758,12 @@ def _write_micro_batch(
             )
             return
 
-        topic_map = ST.route_by_topic(batch_df)
+        try:
+            topics = [r[0] for r in batch_df.select("topic").distinct().collect()]
+        except Exception as exc:
+            logger.warning("[%s] Could not collect topics: %s", source.source_key, exc)
+            return
+        topic_map = {t: batch_df.filter(F.col("topic") == t) for t in topics}
         if not topic_map:
             return
 
@@ -1017,17 +964,6 @@ def _write_micro_batch(
                     "[%s/%s] JSON parse failed: %s", source.source_key, table_name, exc,
                 )
                 continue
-
-            # ── Apply StarTransform pipeline steps ────────────────────────────
-            if transform_steps:
-                try:
-                    row_df = ST.apply_pipeline(row_df, transform_steps)
-                except Exception as exc:
-                    logger.error(
-                        "[%s/%s] StarTransform pipeline failed: %s",
-                        source.source_key, table_name, exc,
-                    )
-                    continue
 
             # ── PK column — always lowercase for Oracle ───────────────────────
             if source.source_key == "oracle":
@@ -1238,6 +1174,7 @@ def _start_source_stream(
         "kafka.security.protocol":        "SASL_PLAINTEXT",
         "kafka.sasl.mechanism":           "SCRAM-SHA-512",
         "kafka.sasl.jaas.config":         jaas_cfg,
+        "kafka.group.id":                 f"cdc-iceberg-{source.source_key}-{write_mode}",
         "subscribePattern":               source.topic_pattern,
         "startingOffsets":                "earliest",
         "maxOffsetsPerTrigger":           str(MAX_OFFSETS_PER_TRIGGER),
@@ -1351,15 +1288,13 @@ def _start_source_stream(
         avro_udf(col("topic").cast(StringType()), col("value")),
     )
 
-    transform_steps = _build_transform_pipeline(source.source_key, source.pk_col)
-
     query = (
         decoded_stream
         .writeStream
         .queryName(f"cdc-{source.source_key}-{write_mode}")
         .foreachBatch(
             _write_micro_batch(
-                spark, builder, source, write_mode, transform_steps
+                spark, builder, source, write_mode
             )
         )
         .trigger(processingTime=TRIGGER_INTERVAL)
@@ -1526,12 +1461,11 @@ def main() -> None:
 
     logger.info(
         "=== Kafka→Iceberg | user=%s | mode=%s | sources=%s | "
-        "transform=%s | dry_run=%s | trigger=%s | max_offsets=%d "
+        "dry_run=%s | trigger=%s | max_offsets=%d "
         "| executors=0→1 core (burst up to %d after %ds backlog) "
         "| mem=%s off-heap=%s | max_restart_attempts=%s ===",
         SPARK_USER, WRITE_MODE,
         [s.source_key for s in _ALL_SOURCES],
-        _TRANSFORM_STEPS or "none",
         DRY_RUN, TRIGGER_INTERVAL, MAX_OFFSETS_PER_TRIGGER,
         MAX_EXECUTORS, BURST_BACKLOG_TIMEOUT_S,
         EXECUTOR_MEMORY, EXECUTOR_OFFHEAP,
