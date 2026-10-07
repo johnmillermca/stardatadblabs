@@ -37,33 +37,17 @@ COPY debezium-lowercase-topic-naming-2.7.4.jar \
 # kafka-avro-serializer and its transitive runtime deps from Maven Central.
 # Placed in a dedicated plugin directory so Kafka Connect picks them up via
 # plugin.path=/kafka/connect.
-ENV CONFLUENT_VERSION=7.6.0 \
-    AVRO_VERSION=1.11.3
+ENV CONFLUENT_VERSION=7.6.0
 
+# Download the Confluent Hub self-contained zip for kafka-connect-avro-converter.
+# The zip bundles every transitive dep in lib/ so no manual dep-chasing is needed.
 RUN mkdir -p /kafka/connect/confluent-avro-converter && \
-    cd /kafka/connect/confluent-avro-converter && \
-    # kafka-connect-avro-converter (the AvroConverter class itself)
-    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-converter/${CONFLUENT_VERSION}/kafka-connect-avro-converter-${CONFLUENT_VERSION}.jar" \
-         -o "kafka-connect-avro-converter-${CONFLUENT_VERSION}.jar" && \
-    # kafka-avro-serializer
-    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-avro-serializer/${CONFLUENT_VERSION}/kafka-avro-serializer-${CONFLUENT_VERSION}.jar" \
-         -o "kafka-avro-serializer-${CONFLUENT_VERSION}.jar" && \
-    # kafka-schema-registry-client
-    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-schema-registry-client/${CONFLUENT_VERSION}/kafka-schema-registry-client-${CONFLUENT_VERSION}.jar" \
-         -o "kafka-schema-registry-client-${CONFLUENT_VERSION}.jar" && \
-    # kafka-schema-serializer (contains AbstractKafkaSchemaSerDeConfig)
-    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-schema-serializer/${CONFLUENT_VERSION}/kafka-schema-serializer-${CONFLUENT_VERSION}.jar" \
-         -o "kafka-schema-serializer-${CONFLUENT_VERSION}.jar" && \
-    # kafka-connect-avro-data (AvroData helper used by AvroConverter)
-    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-data/${CONFLUENT_VERSION}/kafka-connect-avro-data-${CONFLUENT_VERSION}.jar" \
-         -o "kafka-connect-avro-data-${CONFLUENT_VERSION}.jar" && \
-    # Apache Avro runtime
-    curl -fsSL "https://repo1.maven.org/maven2/org/apache/avro/avro/${AVRO_VERSION}/avro-${AVRO_VERSION}.jar" \
-         -o "avro-${AVRO_VERSION}.jar" && \
-    # jackson-databind (Avro JSON encoder dep — already in base image but pin to be safe)
-    curl -fsSL "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.15.3/jackson-databind-2.15.3.jar" \
-         -o "jackson-databind-2.15.3.jar" && \
-    # guava (CachedSchemaRegistryClient uses Ticker from com.google.common.base)
-    curl -fsSL "https://repo1.maven.org/maven2/com/google/guava/guava/32.1.3-jre/guava-32.1.3-jre.jar" \
-         -o "guava-32.1.3-jre.jar" && \
-    echo "Confluent Avro converter JARs installed:" && ls -lh .
+    cd /tmp && \
+    curl -fsSL \
+      "https://d2p6pa21dvn84.cloudfront.net/api/plugins/confluentinc/kafka-connect-avro-converter/versions/${CONFLUENT_VERSION}/confluentinc-kafka-connect-avro-converter-${CONFLUENT_VERSION}.zip" \
+      -o avro-converter.zip && \
+    unzip -q avro-converter.zip -d /tmp/avro-converter-unpacked && \
+    cp /tmp/avro-converter-unpacked/confluentinc-kafka-connect-avro-converter-${CONFLUENT_VERSION}/lib/*.jar \
+       /kafka/connect/confluent-avro-converter/ && \
+    rm -rf /tmp/avro-converter.zip /tmp/avro-converter-unpacked && \
+    echo "Confluent Avro converter JARs installed:" && ls -lh /kafka/connect/confluent-avro-converter/
