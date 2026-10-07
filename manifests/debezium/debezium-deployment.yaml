@@ -43,11 +43,11 @@ data:
     rest.host.name=0.0.0.0
     rest.port=8083
 
-    # Converters
-    key.converter=org.apache.kafka.connect.json.JsonConverter
-    value.converter=org.apache.kafka.connect.json.JsonConverter
-    key.converter.schemas.enable=false
-    value.converter.schemas.enable=false
+    # Converters — Avro via Confluent Schema Registry
+    key.converter=io.confluent.connect.avro.AvroConverter
+    key.converter.schema.registry.url=http://schema-registry.prod.svc.cluster.local:8081
+    value.converter=io.confluent.connect.avro.AvroConverter
+    value.converter.schema.registry.url=http://schema-registry.prod.svc.cluster.local:8081
 
     # Plugin path — Debezium connector JARs are bundled in the image
     plugin.path=/kafka/connect
@@ -125,15 +125,15 @@ spec:
               value: "debezium-offsets"
             - name: STATUS_STORAGE_TOPIC
               value: "debezium-statuses"
-            # Converters
+            # Converters — Avro via Confluent Schema Registry
             - name: KEY_CONVERTER
-              value: "org.apache.kafka.connect.json.JsonConverter"
+              value: "io.confluent.connect.avro.AvroConverter"
+            - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
+              value: "http://schema-registry.prod.svc.cluster.local:8081"
             - name: VALUE_CONVERTER
-              value: "org.apache.kafka.connect.json.JsonConverter"
-            - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
-              value: "false"
-            - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
-              value: "false"
+              value: "io.confluent.connect.avro.AvroConverter"
+            - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
+              value: "http://schema-registry.prod.svc.cluster.local:8081"
             # DB credentials for connectors
             - name: PG_PASSWORD
               valueFrom:
