@@ -42,15 +42,21 @@ ENV CONFLUENT_VERSION=7.6.0 \
 
 RUN mkdir -p /kafka/connect/confluent-avro-converter && \
     cd /kafka/connect/confluent-avro-converter && \
-    # kafka-avro-serializer (includes AvroConverter)
+    # kafka-connect-avro-converter (the AvroConverter class itself)
+    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-converter/${CONFLUENT_VERSION}/kafka-connect-avro-converter-${CONFLUENT_VERSION}.jar" \
+         -o "kafka-connect-avro-converter-${CONFLUENT_VERSION}.jar" && \
+    # kafka-avro-serializer
     curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-avro-serializer/${CONFLUENT_VERSION}/kafka-avro-serializer-${CONFLUENT_VERSION}.jar" \
          -o "kafka-avro-serializer-${CONFLUENT_VERSION}.jar" && \
     # kafka-schema-registry-client
     curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-schema-registry-client/${CONFLUENT_VERSION}/kafka-schema-registry-client-${CONFLUENT_VERSION}.jar" \
          -o "kafka-schema-registry-client-${CONFLUENT_VERSION}.jar" && \
-    # kafka-connect-avro-converter
-    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-converter/${CONFLUENT_VERSION}/kafka-connect-avro-converter-${CONFLUENT_VERSION}.jar" \
-         -o "kafka-connect-avro-converter-${CONFLUENT_VERSION}.jar" && \
+    # kafka-schema-serializer (contains AbstractKafkaSchemaSerDeConfig)
+    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-schema-serializer/${CONFLUENT_VERSION}/kafka-schema-serializer-${CONFLUENT_VERSION}.jar" \
+         -o "kafka-schema-serializer-${CONFLUENT_VERSION}.jar" && \
+    # kafka-connect-avro-data (AvroData helper used by AvroConverter)
+    curl -fsSL "https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-data/${CONFLUENT_VERSION}/kafka-connect-avro-data-${CONFLUENT_VERSION}.jar" \
+         -o "kafka-connect-avro-data-${CONFLUENT_VERSION}.jar" && \
     # Apache Avro runtime
     curl -fsSL "https://repo1.maven.org/maven2/org/apache/avro/avro/${AVRO_VERSION}/avro-${AVRO_VERSION}.jar" \
          -o "avro-${AVRO_VERSION}.jar" && \
