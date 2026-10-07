@@ -1443,8 +1443,20 @@ def _run_once(bao: BaoSparkInit) -> None:
             time.sleep(1)
             for q in list(queries):
                 if not q.isActive:
+                    # Surface the real Spark exception before raising
+                    spark_exc = None
+                    try:
+                        spark_exc = q.exception()
+                    except Exception:
+                        pass
+                    if spark_exc:
+                        logger.error(
+                            "Streaming query '%s' terminated — Spark exception: %s",
+                            q.name, spark_exc,
+                        )
                     raise RuntimeError(
                         f"Streaming query '{q.name}' terminated unexpectedly."
+                        + (f" Cause: {spark_exc}" if spark_exc else "")
                     )
     except KeyboardInterrupt:
         logger.info("Interrupted — stopping all queries.")
@@ -1511,8 +1523,16 @@ def main() -> None:
 
     bao = BaoSparkInit()
     attempt = 0
+    # Track consecutive fast failures (< 30 s) to detect a stuck JVM/Gluten crash.
+    # After _FAST_FAIL_LIMIT fast failures we exit the process so Kubernetes restarts
+    # the container and gets a completely fresh JVM — much safer than retrying in-process
+    # against a dead native library.
+    _FAST_FAIL_LIMIT = 3
+    fast_fail_count = 0
+
     while True:
         _HEALTH_STATE["healthy"] = True
+        t_start = time.monotonic()
         try:
             _run_once(bao)
             break
@@ -1520,14 +1540,35 @@ def main() -> None:
             logger.info("Streaming job stopped by user.")
             sys.exit(0)
         except Exception as exc:
+            elapsed = time.monotonic() - t_start
             attempt += 1
+            _HEALTH_STATE["healthy"] = False  # mark unhealthy immediately
+
+            # Detect fast failures (Velox/JVM crash before first batch completes)
+            if elapsed < 30:
+                fast_fail_count += 1
+            else:
+                fast_fail_count = 0  # reset on a run that lasted a while
+
+            # If Gluten is on and we keep crashing fast, disable it and restart fresh
+            if fast_fail_count >= _FAST_FAIL_LIMIT and not os.environ.get("DISABLE_GLUTEN"):
+                logger.error(
+                    "Streaming job crashed %d times in < 30 s (attempt %d) — "
+                    "Gluten/Velox JVM crash suspected. Exiting so Kubernetes restarts "
+                    "the container with a fresh JVM. "
+                    "Set DISABLE_GLUTEN=1 in the pod env to run without Velox. "
+                    "Last error: %s",
+                    fast_fail_count, attempt, exc, exc_info=True,
+                )
+                sys.exit(1)
+
             if MAX_RESTART_ATTEMPTS > 0 and attempt >= MAX_RESTART_ATTEMPTS:
                 logger.error(
                     "Streaming job failed after %d attempt(s). Giving up: %s",
-                    attempt, exc,
+                    attempt, exc, exc_info=True,
                 )
-                _HEALTH_STATE["healthy"] = False
                 sys.exit(1)
+
             backoff = min(
                 RESTART_BACKOFF_BASE_S * (2 ** min(attempt - 1, 10)),
                 RESTART_BACKOFF_MAX_S,
@@ -1538,10 +1579,9 @@ def main() -> None:
                 else f"{attempt}/∞"
             )
             logger.warning(
-                "Streaming job failed (attempt %s): %s — retrying in %.0f s …",
-                cap_info, exc, backoff,
+                "Streaming job failed (attempt %s, elapsed=%.1fs): %s — retrying in %.0f s …",
+                cap_info, elapsed, exc, backoff, exc_info=True,
             )
-            _HEALTH_STATE["healthy"] = False
             time.sleep(backoff)
 
 
