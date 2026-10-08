@@ -289,6 +289,12 @@ def _build_avro_deserialize_udf(_sr_url: str) -> Any:
     Build a Python UDF that deserialises a Confluent Avro-encoded byte array
     (5-byte magic header: 0x00 + 4-byte schema ID + avro payload) to a JSON string.
     Falls back to UTF-8 decode if the magic byte is absent (plain JSON mode).
+
+    Schema-ID fallback: if the embedded schema ID is no longer present in the
+    Schema Registry (e.g. after a hard-delete during connector reconfiguration),
+    the UDF falls back to the latest registered schema for the topic's -value
+    subject.  This lets historic messages still be decoded correctly as long as
+    the table structure has not changed.
     """
     import io as _io
     import struct as _struct
@@ -299,6 +305,30 @@ def _build_avro_deserialize_udf(_sr_url: str) -> Any:
         _avro_available = True
     except ImportError:
         _avro_available = False
+
+    def _resolve_schema(sr: Any, schema_id: int, topic: str) -> Any:
+        """Return an avro DatumReader for schema_id, falling back to the
+        latest subject schema if the specific ID has been hard-deleted."""
+        if schema_id in _SR_READER_CACHE:
+            return _SR_READER_CACHE[schema_id]
+        try:
+            registered = sr.get_schema(schema_id)
+        except Exception:
+            # Schema ID gone (hard-deleted).  Fall back to the latest version
+            # registered for this topic's value subject.
+            subject = f"{topic}-value"
+            if subject not in _SR_SCHEMA_CACHE:
+                from confluent_kafka.schema_registry import SchemaRegistryClient
+                versions = sr.get_versions(subject)
+                latest_id = sr.get_schema_id_by_subject(subject)
+                registered = sr.get_schema(latest_id)
+                _SR_SCHEMA_CACHE[subject] = registered
+            else:
+                registered = _SR_SCHEMA_CACHE[subject]
+        schema_def = _aschema.parse(registered.schema_str)
+        reader = _aio.DatumReader(schema_def)
+        _SR_READER_CACHE[schema_id] = reader
+        return reader
 
     def avro_to_json(topic: str, raw_bytes: bytes) -> str | None:
         if raw_bytes is None:
@@ -317,13 +347,7 @@ def _build_avro_deserialize_udf(_sr_url: str) -> Any:
                 _SR_CLIENT_CACHE[_sr_url] = SchemaRegistryClient({"url": _sr_url})
             sr = _SR_CLIENT_CACHE[_sr_url]
 
-            if schema_id not in _SR_READER_CACHE:
-                registered  = sr.get_schema(schema_id)
-                schema_def  = _aschema.parse(registered.schema_str)
-                _SR_SCHEMA_CACHE[schema_id] = schema_def
-                _SR_READER_CACHE[schema_id] = _aio.DatumReader(schema_def)
-
-            reader  = _SR_READER_CACHE[schema_id]
+            reader  = _resolve_schema(sr, schema_id, topic)
             decoder = _aio.BinaryDecoder(_io.BytesIO(raw_bytes[5:]))
             record  = reader.read(decoder)
             # Debezium envelope: before/after are nested Avro records (dicts).
