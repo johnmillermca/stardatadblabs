@@ -326,7 +326,14 @@ def _build_avro_deserialize_udf(_sr_url: str) -> Any:
             reader  = _SR_READER_CACHE[schema_id]
             decoder = _aio.BinaryDecoder(_io.BytesIO(raw_bytes[5:]))
             record  = reader.read(decoder)
-            return json.dumps(record)
+            # Debezium envelope: before/after are nested Avro records (dicts).
+            # from_json(..., StringType()) expects a JSON string, not a nested
+            # object, so stringify any dict values before the outer json.dumps.
+            normalised = {
+                k: (json.dumps(v) if isinstance(v, dict) else v)
+                for k, v in record.items()
+            }
+            return json.dumps(normalised)
 
         except Exception as exc:
             logger.warning("avro_to_json failed: %s", exc)
