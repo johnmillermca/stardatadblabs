@@ -242,6 +242,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
         - name: JAVA_TOOL_OPTIONS
           valueFrom:
             configMapKeyRef:
@@ -391,6 +396,11 @@ spec:
               key: EXECUTOR_MEMORY
               name: kafka-to-iceberg-config
         - name: EXECUTOR_OFFHEAP
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
@@ -548,6 +558,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
         - name: JAVA_TOOL_OPTIONS
           valueFrom:
             configMapKeyRef:
@@ -697,6 +712,11 @@ spec:
               key: EXECUTOR_MEMORY
               name: kafka-to-iceberg-config
         - name: EXECUTOR_OFFHEAP
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
@@ -854,6 +874,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
         - name: JAVA_TOOL_OPTIONS
           valueFrom:
             configMapKeyRef:
@@ -1003,6 +1028,11 @@ spec:
               key: EXECUTOR_MEMORY
               name: kafka-to-iceberg-config
         - name: EXECUTOR_OFFHEAP
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
@@ -1160,6 +1190,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
         - name: JAVA_TOOL_OPTIONS
           valueFrom:
             configMapKeyRef:
@@ -1313,6 +1348,11 @@ spec:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
               name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
         - name: JAVA_TOOL_OPTIONS
           valueFrom:
             configMapKeyRef:
@@ -1462,6 +1502,11 @@ spec:
               key: EXECUTOR_MEMORY
               name: kafka-to-iceberg-config
         - name: EXECUTOR_OFFHEAP
+          valueFrom:
+            configMapKeyRef:
+              key: EXECUTOR_OFFHEAP
+              name: kafka-to-iceberg-config
+        - name: OFFHEAP_SIZE
           valueFrom:
             configMapKeyRef:
               key: EXECUTOR_OFFHEAP
