@@ -266,6 +266,12 @@ spec:
               mountPath: /vault-env
             - name: fetch-secrets-script
               mountPath: /scripts
+        - name: init-config
+          image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
+          command: [bash, -c, "cp -r /kafka/config/. /kafka-config/"]
+          volumeMounts:
+            - name: kafka-config
+              mountPath: /kafka-config
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
@@ -320,6 +326,8 @@ spec:
             - name: vault-env
               mountPath: /vault-env
               readOnly: true
+            - name: kafka-config
+              mountPath: /kafka/config
 
           resources:
             requests:
@@ -345,6 +353,8 @@ spec:
           persistentVolumeClaim:
             claimName: debezium-data-postgres
         - name: vault-env
+          emptyDir: {}
+        - name: kafka-config
           emptyDir: {}
         - name: fetch-secrets-script
           configMap:
@@ -421,6 +431,12 @@ spec:
               mountPath: /vault-env
             - name: fetch-secrets-script
               mountPath: /scripts
+        - name: init-config
+          image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
+          command: [bash, -c, "cp -r /kafka/config/. /kafka-config/"]
+          volumeMounts:
+            - name: kafka-config
+              mountPath: /kafka-config
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
@@ -475,6 +491,8 @@ spec:
             - name: vault-env
               mountPath: /vault-env
               readOnly: true
+            - name: kafka-config
+              mountPath: /kafka/config
 
           resources:
             requests:
@@ -500,6 +518,8 @@ spec:
           persistentVolumeClaim:
             claimName: debezium-data-oracle
         - name: vault-env
+          emptyDir: {}
+        - name: kafka-config
           emptyDir: {}
         - name: fetch-secrets-script
           configMap:
@@ -576,6 +596,12 @@ spec:
               mountPath: /vault-env
             - name: fetch-secrets-script
               mountPath: /scripts
+        - name: init-config
+          image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
+          command: [bash, -c, "cp -r /kafka/config/. /kafka-config/"]
+          volumeMounts:
+            - name: kafka-config
+              mountPath: /kafka-config
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
@@ -630,6 +656,8 @@ spec:
             - name: vault-env
               mountPath: /vault-env
               readOnly: true
+            - name: kafka-config
+              mountPath: /kafka/config
 
           resources:
             requests:
@@ -655,6 +683,8 @@ spec:
           persistentVolumeClaim:
             claimName: debezium-data-mongodb
         - name: vault-env
+          emptyDir: {}
+        - name: kafka-config
           emptyDir: {}
         - name: fetch-secrets-script
           configMap:
