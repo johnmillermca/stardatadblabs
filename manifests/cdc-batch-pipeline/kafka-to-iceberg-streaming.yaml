@@ -71,13 +71,13 @@ data:
   EXECUTOR_INSTANCES:           "1"
   EXECUTOR_CORES:               "1"
   EXECUTOR_MEMORY:              "2g"
-  # 1500m matches the Gluten/Velox off-heap requirement set by bao_spark_init.
-  # The streaming script guards against overwriting this with a lower value when
-  # Gluten is active — raise above 1500m only if Velox needs more headroom.
-  EXECUTOR_OFFHEAP:             "1500m"
-  # MAX_EXECUTORS: ceiling for dynamic allocation burst (default 3).
-  # At idle = 0 executors; normal CDC = 1; sustained backlog >60s = up to 3.
-  MAX_EXECUTORS:                "3"
+  # 512m is sufficient for CDC micro-batches — Velox 1500m is only needed for large
+  # vectorised scans. Keeping at 512m prevents executor OOM on 4GB worker containers
+  # (2g heap + 512m off-heap + ~308m JVM overhead = ~2.8GB per executor, fits in 4GB).
+  EXECUTOR_OFFHEAP:             "512m"
+  # MAX_EXECUTORS: cap at 1 for CDC streaming — micro-batches are 1-1000 rows and
+  # never need burst executors. Burst to 3 was causing OOM on worker containers.
+  MAX_EXECUTORS:                "1"
   # BURST_BACKLOG_TIMEOUT_S: seconds of sustained task backlog before adding a
   # 2nd (then 3rd) executor. Default 60 — waits 1 minute before bursting.
   BURST_BACKLOG_TIMEOUT_S:      "60"
