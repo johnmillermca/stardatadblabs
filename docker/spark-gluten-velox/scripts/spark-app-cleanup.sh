@@ -175,8 +175,15 @@ echo "$ACTIVE" | while IFS=' ' read -r APP_ID STATE CORES START_MS DRIVER_URL NA
     # Only probe after ORPHAN_RUNNING_SECONDS (120 s) — a brand-new session's
     # driver UI takes a few seconds to start; probing too early gives a false
     # "unreachable" and kills a healthy starting job.
+    #
+    # Guard: skip when DRIVER_URL is empty (master registered appuiurl=None).
+    # This happens when spark.ui.enabled=false or when the driver binds to a
+    # hostname that the master cannot resolve — the URL is simply absent.
+    # An empty URL is NOT evidence the driver is dead; it only means the UI
+    # was never advertised.  Rules B/C/D still apply to these apps.
     if [ "$STATE" = "RUNNING" ] && [ "$CORES" -gt 0 ] \
-       && [ "$AGE_S" -gt "$ORPHAN_RUNNING_SECONDS" ]; then
+       && [ "$AGE_S" -gt "$ORPHAN_RUNNING_SECONDS" ] \
+       && [ -n "$DRIVER_URL" ]; then
         REACH=$(curl -sf --max-time 5 "${DRIVER_URL}" -o /dev/null -w "%{http_code}" 2>/dev/null) || REACH="0"
         if [ "$REACH" = "0" ] || [ "$REACH" = "000" ]; then
             KILL_REASON="dead-driver (UI unreachable at ${DRIVER_URL}) age=${AGE_S}s"
