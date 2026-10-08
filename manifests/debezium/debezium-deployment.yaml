@@ -320,9 +320,7 @@ spec:
             - name: vault-env
               mountPath: /vault-env
               readOnly: true
-            - name: connect-config
-              mountPath: /kafka/config/connect-distributed.properties
-              subPath: connect-distributed.properties
+
           resources:
             requests:
               memory: 512Mi
@@ -351,9 +349,7 @@ spec:
         - name: fetch-secrets-script
           configMap:
             name: debezium-fetch-secrets-script
-        - name: connect-config
-          configMap:
-            name: debezium-connect-config-postgres
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -479,9 +475,7 @@ spec:
             - name: vault-env
               mountPath: /vault-env
               readOnly: true
-            - name: connect-config
-              mountPath: /kafka/config/connect-distributed.properties
-              subPath: connect-distributed.properties
+
           resources:
             requests:
               memory: 512Mi
@@ -510,9 +504,7 @@ spec:
         - name: fetch-secrets-script
           configMap:
             name: debezium-fetch-secrets-script
-        - name: connect-config
-          configMap:
-            name: debezium-connect-config-oracle
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -638,9 +630,7 @@ spec:
             - name: vault-env
               mountPath: /vault-env
               readOnly: true
-            - name: connect-config
-              mountPath: /kafka/config/connect-distributed.properties
-              subPath: connect-distributed.properties
+
           resources:
             requests:
               memory: 512Mi
@@ -669,9 +659,7 @@ spec:
         - name: fetch-secrets-script
           configMap:
             name: debezium-fetch-secrets-script
-        - name: connect-config
-          configMap:
-            name: debezium-connect-config-mongodb
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
