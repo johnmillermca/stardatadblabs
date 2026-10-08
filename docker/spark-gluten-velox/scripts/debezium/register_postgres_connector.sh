@@ -102,9 +102,7 @@ for tbl in "${CDC_TABLES[@]}"; do
   fi
 done
 if [ ${#MISSING[@]} -gt 0 ]; then
-  echo "[ERROR] Missing watermarks for: ${MISSING[*]}"
-  echo "[ERROR] Run starpump postgres first."
-  exit 1
+  echo "  [INFO] No watermarks for: ${MISSING[*]} — starting CDC from current WAL position (snapshot.mode=never)."
 fi
 
 # ── 6. Ensure replication slot and publication exist ──────────────────────────
