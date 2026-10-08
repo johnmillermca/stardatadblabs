@@ -1,0 +1,303 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>MongoDB → Kafka → Iceberg: History Tracking Perf Report</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; font-size: 14px; line-height: 1.6; background: #fff; color: #1f2328; padding: 32px 16px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: #57606a; font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 14px; font-weight: 600; color: #1f2328; margin: 28px 0 10px; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px; }
+  .badge { display: inline-block; background: #e8f5e9; color: #1b5e20; border: 1px solid #a5d6a7; border-radius: 4px; padding: 1px 7px; font-size: 12px; font-weight: 600; margin-left: 6px; vertical-align: middle; }
+  .badge.warn { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
+
+  /* KPI grid */
+  .kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+  .kpi { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 14px 16px; }
+  .kpi .label { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+  .kpi .value { font-size: 22px; font-weight: 700; color: #1f2328; }
+  .kpi .sub   { font-size: 11px; color: #57606a; margin-top: 2px; }
+
+  /* Phase table */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 16px; }
+  th { background: #f7f8fa; border: 1px solid #e5e7eb; padding: 7px 10px; text-align: left; font-weight: 600; font-size: 12px; color: #57606a; }
+  td { border: 1px solid #e5e7eb; padding: 7px 10px; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+  .right { text-align: right; }
+  .green { color: #1b7a34; font-weight: 600; }
+  .blue  { color: #3b82d4; font-weight: 600; }
+
+  /* Pipeline flow */
+  .flow { display: flex; align-items: center; gap: 0; margin: 14px 0 20px; }
+  .flow-step { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 5px; padding: 8px 14px; font-size: 12px; font-weight: 600; text-align: center; min-width: 100px; }
+  .flow-arrow { color: #57606a; font-size: 16px; padding: 0 6px; }
+  .flow-step.src  { border-color: #a5d6a7; background: #e8f5e9; }
+  .flow-step.proc { border-color: #90caf9; background: #e3f2fd; }
+  .flow-step.dst  { border-color: #ce93d8; background: #f3e5f5; }
+
+  /* Timeline */
+  .timeline { position: relative; margin: 8px 0 20px 16px; padding-left: 18px; border-left: 2px solid #e5e7eb; }
+  .tl-item { position: relative; margin-bottom: 10px; }
+  .tl-item::before { content: ""; position: absolute; left: -24px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: #3b82d4; border: 2px solid #fff; box-shadow: 0 0 0 1px #3b82d4; }
+  .tl-item .tl-time { font-size: 11px; font-family: "SFMono-Regular", monospace; color: #57606a; }
+  .tl-item .tl-label { font-size: 13px; font-weight: 500; }
+  .tl-item .tl-delta { font-size: 11px; color: #1b7a34; font-weight: 600; }
+
+  /* Integrity checks */
+  .check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .check { border: 1px solid #e5e7eb; border-radius: 5px; padding: 10px 13px; font-size: 13px; }
+  .check .check-title { font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #57606a; text-transform: uppercase; letter-spacing: .03em; }
+  .check-pass { border-left: 3px solid #43a047; }
+  .check-pass .result { color: #1b7a34; font-weight: 700; }
+
+  /* Sample rows */
+  .sample-section { margin-bottom: 20px; }
+  .sample-label { font-size: 12px; font-weight: 600; color: #57606a; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+  .scroll-x { overflow-x: auto; }
+
+  hr { border: none; border-top: 1px solid #e5e7eb; margin: 28px 0; }
+  footer { font-size: 11px; color: #57606a; text-align: center; padding-top: 20px; border-top: 1px solid #e5e7eb; margin-top: 32px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>MongoDB → Kafka → Iceberg <span style="color:#57606a;font-weight:400">|</span> History Tracking Performance Report</h1>
+  <div class="subtitle">Table: <span class="mono">mongodb.cache_testing.customers_hist</span>  ·  Run: 2026-09-22 01:57 UTC  ·  Batch 6</div>
+
+  
+  <div class="flow">
+    <div class="flow-step src">MongoDB<br /><span style="font-size:11px;font-weight:400">cache_testing.customers</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step proc">Debezium<br /><span style="font-size:11px;font-weight:400">Change Streams</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step proc">Kafka<br /><span style="font-size:11px;font-weight:400">Strimzi SASL</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step proc">Spark<br /><span style="font-size:11px;font-weight:400">history_tracking</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step dst">Iceberg<br /><span style="font-size:11px;font-weight:400">Polaris / S3</span></div>
+  </div>
+
+  
+  <div class="kpi-grid">
+    <div class="kpi">
+      <div class="label">Total CDC Events</div>
+      <div class="value">16,000</div>
+      <div class="sub">10,000 INS · 1,000 UPD · 5,000 DEL</div>
+    </div>
+    <div class="kpi">
+      <div class="label">End-to-End Latency</div>
+      <div class="value">27.4 s</div>
+      <div class="sub">First MongoDB INSERT → Iceberg commit</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Spark Micro-batches</div>
+      <div class="value">1</div>
+      <div class="sub">All 16,000 events in a single batch</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Iceberg Rows Written</div>
+      <div class="value">16,000</div>
+      <div class="sub">Append-only — 0 rows modified/deleted</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Tail-Commit Lag</div>
+      <div class="value">26.8 s</div>
+      <div class="sub">Last DELETE → Iceberg committed</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Throughput</div>
+      <div class="value">583 r/s</div>
+      <div class="sub">16,000 rows ÷ 27.4 s end-to-end</div>
+    </div>
+  </div>
+
+  
+  <h2>Load Generator — MongoDB Write Phases</h2>
+  <table>
+    <thead>
+      <tr><th>Phase</th><th>Operation</th><th class="right">Count</th><th class="right">Elapsed (s)</th><th class="right">Rate (docs/s)</th><th>ID Range</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>INSERT</td><td class="right">10,000</td><td class="right mono">0.306</td><td class="right mono">32,720</td><td class="mono">98000001 – 98010000</td></tr>
+      <tr><td>2</td><td>UPDATE (tier→PLATINUM, credit→99999.99)</td><td class="right">1,000</td><td class="right mono">0.131</td><td class="right mono">7,630</td><td class="mono">98000001 – 98001000</td></tr>
+      <tr><td>3</td><td>DELETE</td><td class="right">5,000</td><td class="right mono">0.094</td><td class="right mono">53,262</td><td class="mono">98000001 – 98005000</td></tr>
+      <tr style="font-weight:600"><td colspan="2">Total</td><td class="right">16,000</td><td class="right mono">0.531</td><td class="right mono">30,154 avg</td><td></td></tr>
+    </tbody>
+  </table>
+
+  
+  <h2>Pipeline Timeline</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-time">2026-09-22 01:57:08.641Z</div>
+      <div class="tl-label">First INSERT entered MongoDB change stream</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">2026-09-22 01:57:09.172Z  <span style="color:#57606a">(+0.531s)</span></div>
+      <div class="tl-label">Last DELETE entered MongoDB change stream — all 16,000 events fired</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">2026-09-22 01:57:32.615Z  <span style="color:#57606a">(+24.0s)</span></div>
+      <div class="tl-label">Spark <span class="mono">_change_ts</span> stamped — schema inferred, before/after expanded</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">2026-09-22 01:57:36.363Z  <span style="color:#57606a">(+27.4s)</span></div>
+      <div class="tl-label"><strong>All 16,000 rows committed to Iceberg</strong> <span class="badge">snap_timestamp</span></div>
+      <div class="tl-delta">⮕ 27.4s end-to-end  ·  single Spark micro-batch  ·  1 Iceberg partition hour</div>
+    </div>
+  </div>
+
+  
+  <h2>Iceberg Row Counts by Change Type</h2>
+  <table>
+    <thead>
+      <tr><th>_change_type</th><th class="right">Rows</th><th class="right">Unique customers</th><th>Earliest snap</th><th>Latest snap</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>INSERT</td><td class="right green">10,000</td><td class="right">10,000</td><td class="mono" colspan="2">2026-09-22 01:57:36.363</td></tr>
+      <tr><td>UPDATE</td><td class="right green">1,000</td><td class="right">1,000</td><td class="mono" colspan="2">2026-09-22 01:57:36.363</td></tr>
+      <tr><td>DELETE</td><td class="right green">5,000</td><td class="right">5,000</td><td class="mono" colspan="2">2026-09-22 01:57:36.363</td></tr>
+      <tr style="font-weight:600"><td>TOTAL</td><td class="right">16,000</td><td class="right">10,000</td><td colspan="2"></td></tr>
+    </tbody>
+  </table>
+
+  
+  <h2>Integrity &amp; Completeness Checks</h2>
+  <div class="check-grid">
+    <div class="check check-pass">
+      <div class="check-title">Append-only — no snap_id duplicates</div>
+      <div class="result">✓ PASS — 0 duplicate snap_ids</div>
+    </div>
+    <div class="check check-pass">
+      <div class="check-title">UPDATE — before + after images present</div>
+      <div class="result">✓ PASS — 1,000 / 1,000 rows have both</div>
+      <div style="font-size:12px;color:#57606a;margin-top:3px">750 tier changes · 1,000 credit_limit changes</div>
+    </div>
+    <div class="check check-pass">
+      <div class="check-title">DELETE — before image (last known state)</div>
+      <div class="result">✓ PASS — 5,000 / 5,000 before_* present</div>
+      <div style="font-size:12px;color:#57606a;margin-top:3px">after_customer_id = NULL on all DELETE rows</div>
+    </div>
+    <div class="check check-pass">
+      <div class="check-title">INSERT — after image, no before</div>
+      <div class="result">✓ PASS — 10,000 / 10,000 after_* present</div>
+      <div style="font-size:12px;color:#57606a;margin-top:3px">before_* all NULL as expected</div>
+    </div>
+  </div>
+
+  
+  <h2>Batch Throughput (Spark micro-batches in test range)</h2>
+  <table>
+    <thead>
+      <tr><th>snap_timestamp</th><th class="right">INSERTs</th><th class="right">UPDATEs</th><th class="right">DELETEs</th><th class="right">Total rows</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono">2026-09-22 01:57:36.363491</td>
+        <td class="right">10,000</td>
+        <td class="right">1,000</td>
+        <td class="right">5,000</td>
+        <td class="right blue">16,000</td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="font-size:12px;color:#57606a;margin-top:-8px">All 16,000 events absorbed by a single Spark micro-batch — zero batch splits.</p>
+
+  
+  <h2>Sample Rows — 5 INSERTs</h2>
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr><th>snap_id</th><th>snap_timestamp</th><th>_change_type</th><th>customer_id</th><th>after_first_name</th><th>after_city</th><th>after_tier</th><th>after_credit_limit</th><th>after_created_at</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono">60000000</td><td class="mono">01:57:36.363</td><td>INSERT</td><td>98000001</td><td>HistPerf98000001</td><td>Melbourne</td><td>SILVER</td><td>500.75</td><td class="mono">01:57:08.641</td></tr>
+      <tr><td class="mono">60000001</td><td class="mono">01:57:36.363</td><td>INSERT</td><td>98000007</td><td>HistPerf98000007</td><td>Brisbane</td><td>PLATINUM</td><td>505.25</td><td class="mono">01:57:08.641</td></tr>
+      <tr><td class="mono">60000002</td><td class="mono">01:57:36.363</td><td>INSERT</td><td>98000010</td><td>HistPerf98000010</td><td>Sydney</td><td>GOLD</td><td>507.50</td><td class="mono">01:57:08.641</td></tr>
+      <tr><td class="mono">60000003</td><td class="mono">01:57:36.363</td><td>INSERT</td><td>98000011</td><td>HistPerf98000011</td><td>Melbourne</td><td>PLATINUM</td><td>508.25</td><td class="mono">01:57:08.641</td></tr>
+      <tr><td class="mono">60000004</td><td class="mono">01:57:36.363</td><td>INSERT</td><td>98000012</td><td>HistPerf98000012</td><td>Brisbane</td><td>BRONZE</td><td>509.00</td><td class="mono">01:57:08.641</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Sample Rows — 5 UPDATEs (before → after changes)</h2>
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr><th>snap_id</th><th>snap_timestamp</th><th>customer_id</th><th>before_tier</th><th>after_tier</th><th>before_credit</th><th>after_credit</th><th>before_city</th><th>after_city</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono">60003300</td><td class="mono">01:57:36.363</td><td>98000001</td><td>SILVER</td><td class="green">PLATINUM</td><td>500.75</td><td class="green">99,999.99</td><td>Melbourne</td><td>Melbourne</td></tr>
+      <tr><td class="mono">60003301</td><td class="mono">01:57:36.363</td><td>98000007</td><td>PLATINUM</td><td class="green">PLATINUM</td><td>505.25</td><td class="green">99,999.99</td><td>Brisbane</td><td>Melbourne</td></tr>
+      <tr><td class="mono">60003302</td><td class="mono">01:57:36.363</td><td>98000010</td><td>GOLD</td><td class="green">PLATINUM</td><td>507.50</td><td class="green">99,999.99</td><td>Sydney</td><td>Melbourne</td></tr>
+      <tr><td class="mono">60003303</td><td class="mono">01:57:36.363</td><td>98000011</td><td>PLATINUM</td><td class="green">PLATINUM</td><td>508.25</td><td class="green">99,999.99</td><td>Melbourne</td><td>Melbourne</td></tr>
+      <tr><td class="mono">60003304</td><td class="mono">01:57:36.363</td><td>98000012</td><td>BRONZE</td><td class="green">PLATINUM</td><td>509.00</td><td class="green">99,999.99</td><td>Brisbane</td><td>Melbourne</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Sample Rows — 5 DELETEs (before image = last known state)</h2>
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr><th>snap_id</th><th>snap_timestamp</th><th>customer_id</th><th>before_first_name</th><th>before_city</th><th>before_tier</th><th>before_credit</th><th>after_customer_id</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono">60003618</td><td class="mono">01:57:36.363</td><td>98000001</td><td>HistPerf98000001</td><td>Melbourne</td><td>PLATINUM</td><td>99,999.99</td><td style="color:#57606a">NULL</td></tr>
+      <tr><td class="mono">60003619</td><td class="mono">01:57:36.363</td><td>98000007</td><td>HistPerf98000007</td><td>Melbourne</td><td>PLATINUM</td><td>99,999.99</td><td style="color:#57606a">NULL</td></tr>
+      <tr><td class="mono">60003620</td><td class="mono">01:57:36.363</td><td>98000010</td><td>HistPerf98000010</td><td>Melbourne</td><td>PLATINUM</td><td>99,999.99</td><td style="color:#57606a">NULL</td></tr>
+      <tr><td class="mono">60003621</td><td class="mono">01:57:36.363</td><td>98000011</td><td>HistPerf98000011</td><td>Melbourne</td><td>PLATINUM</td><td>99,999.99</td><td style="color:#57606a">NULL</td></tr>
+      <tr><td class="mono">60003622</td><td class="mono">01:57:36.363</td><td>98000012</td><td>HistPerf98000012</td><td>Melbourne</td><td>PLATINUM</td><td>99,999.99</td><td style="color:#57606a">NULL</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Full Audit Trail — customer_id = 98000001 (INSERT → UPDATE → DELETE)</h2>
+  <div class="scroll-x">
+  <table>
+    <thead>
+      <tr><th>snap_id</th><th>snap_timestamp</th><th>_change_type</th><th>after_tier</th><th>after_credit</th><th>before_tier</th><th>before_credit</th></tr>
+    </thead>
+    <tbody>
+      <tr style="background:#e8f5e9">
+        <td class="mono">60000000</td><td class="mono">01:57:36.363</td><td><strong>INSERT</strong></td><td>SILVER</td><td>500.75</td><td style="color:#57606a">NULL</td><td style="color:#57606a">NULL</td>
+      </tr>
+      <tr style="background:#e3f2fd">
+        <td class="mono">60003300</td><td class="mono">01:57:36.363</td><td><strong>UPDATE</strong></td><td class="green">PLATINUM</td><td class="green">99,999.99</td><td>SILVER</td><td>500.75</td>
+      </tr>
+      <tr style="background:#fce4ec">
+        <td class="mono">60003618</td><td class="mono">01:57:36.363</td><td><strong>DELETE</strong></td><td style="color:#57606a">NULL</td><td style="color:#57606a">NULL</td><td>PLATINUM</td><td>99,999.99</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:12px;color:#57606a;margin-top:6px">3-row immutable history. The DELETE row's <span class="mono">before_*</span> carries the post-UPDATE state — confirming capture.mode=change_streams_update_full preserved the full document image.</p>
+
+  <hr />
+
+  <h2>Performance Summary</h2>
+  <table>
+    <thead><tr><th>Metric</th><th>Value</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>CDC events fired (total)</td><td class="green">16,000</td><td>10k INS · 1k UPD · 5k DEL</td></tr>
+      <tr><td>MongoDB write time</td><td class="mono">0.531 s</td><td>30,154 events/s average</td></tr>
+      <tr><td>Spark micro-batches consumed</td><td>1</td><td>All 16,000 in a single batch (maxOffsetsPerTrigger=50,000)</td></tr>
+      <tr><td>End-to-end latency (first row)</td><td class="green">27.4 s</td><td>MongoDB INSERT → Iceberg snap_timestamp</td></tr>
+      <tr><td>Tail-commit lag (last row)</td><td class="green">26.8 s</td><td>Last DELETE → Iceberg committed</td></tr>
+      <tr><td>Rows written to Iceberg</td><td class="green">16,000 / 16,000</td><td>0 missing — 100% delivery</td></tr>
+      <tr><td>Duplicate snap_ids</td><td class="green">0</td><td>Append-only integrity verified</td></tr>
+      <tr><td>UPDATE rows with both images</td><td class="green">1,000 / 1,000</td><td>before_* and after_* fully populated</td></tr>
+      <tr><td>DELETE rows with before image</td><td class="green">5,000 / 5,000</td><td>Last-known state preserved</td></tr>
+      <tr><td>Iceberg partition hours</td><td>1</td><td>hours(snap_timestamp) — all in 01:00 UTC hour</td></tr>
+      <tr><td>S3 location</td><td class="mono" colspan="2">s3://xdatatoiceberg1/iceberg/mgo_lakehouse/cache_testing/customers_hist</td></tr>
+    </tbody>
+  </table>
+
+  <footer>Made with IBM Bob</footer>
+</div>
+</body>
+</html>

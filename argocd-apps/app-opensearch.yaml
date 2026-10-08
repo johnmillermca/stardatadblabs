@@ -51,10 +51,12 @@ spec:
         - /spec/template/spec/volumes/0/configMap/defaultMode
         - /spec/volumeClaimTemplates/0/apiVersion
         - /spec/volumeClaimTemplates/0/kind
+  # Automated sync SUSPENDED 2026-10-06 — resume 2026-10-13.
+  # To resume: restore the `automated` block below and remove this comment.
   syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
+    # automated:
+    #   prune: true
+    #   selfHeal: true
     syncOptions:
       - CreateNamespace=true
       - RespectIgnoreDifferences=true

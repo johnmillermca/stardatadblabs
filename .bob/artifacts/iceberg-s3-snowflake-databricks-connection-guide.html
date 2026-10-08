@@ -1,0 +1,802 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Iceberg (S3) → Snowflake &amp; Databricks Connection Guide</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #1f2328;
+    background: #ffffff;
+    padding: 32px 16px 48px;
+  }
+  .page { max-width: 760px; margin: 0 auto; }
+
+  /* Header */
+  .page-header { border-bottom: 2px solid #e5e7eb; padding-bottom: 20px; margin-bottom: 28px; }
+  .page-header h1 { font-size: 22px; font-weight: 700; color: #1f2328; margin-bottom: 6px; }
+  .page-header .subtitle { color: #57606a; font-size: 13px; }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 4px; margin-right: 6px; margin-top: 4px;
+  }
+  .badge-blue  { background: #dbeafe; color: #1d4ed8; }
+  .badge-purple{ background: #ede9fe; color: #6d28d9; }
+  .badge-green { background: #dcfce7; color: #166534; }
+
+  /* Section */
+  .section { margin-bottom: 36px; }
+  .section-title {
+    font-size: 16px; font-weight: 700; color: #1f2328;
+    border-left: 4px solid #3b82d4; padding-left: 10px;
+    margin-bottom: 14px; margin-top: 8px;
+  }
+  .section-sub {
+    font-size: 13px; font-weight: 700; color: #1f2328;
+    margin: 16px 0 8px;
+  }
+
+  /* Arch diagram */
+  .arch-box {
+    background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 6px;
+    padding: 16px 18px; font-family: "Courier New", monospace; font-size: 12px;
+    color: #1f2328; white-space: pre; overflow-x: auto; line-height: 1.5;
+    margin-bottom: 14px;
+  }
+
+  /* Steps */
+  .steps { counter-reset: step-counter; }
+  .step {
+    display: flex; gap: 14px; margin-bottom: 18px;
+  }
+  .step-num {
+    flex-shrink: 0;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #3b82d4; color: #ffffff;
+    font-size: 13px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-body { flex: 1; }
+  .step-body strong { display: block; margin-bottom: 4px; font-size: 13px; }
+  .step-body p { color: #1f2328; font-size: 13px; margin-bottom: 6px; }
+
+  /* Code blocks */
+  .code-block {
+    background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 5px;
+    padding: 12px 14px; font-family: "Courier New", monospace; font-size: 12px;
+    color: #1f2328; overflow-x: auto; white-space: pre; line-height: 1.6;
+    margin: 6px 0 10px;
+  }
+  .redact {
+    background: #fef3c7; border: 1px solid #f59e0b; border-radius: 3px;
+    padding: 1px 6px; font-size: 11px; font-weight: 600; color: #92400e;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    white-space: nowrap;
+  }
+
+  /* Callout boxes */
+  .callout {
+    border-radius: 5px; padding: 10px 14px; font-size: 13px; margin: 10px 0;
+    border-left: 4px solid;
+  }
+  .callout-blue  { background: #eff6ff; border-color: #3b82d4; color: #1e3a5f; }
+  .callout-amber { background: #fffbeb; border-color: #f59e0b; color: #78350f; }
+  .callout-red   { background: #fef2f2; border-color: #ef4444; color: #7f1d1d; }
+  .callout-green { background: #f0fdf4; border-color: #22c55e; color: #14532d; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0 14px; }
+  th { background: #f7f8fa; text-align: left; padding: 7px 10px; font-weight: 600; border: 1px solid #e5e7eb; }
+  td { padding: 6px 10px; border: 1px solid #e5e7eb; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafafa; }
+
+  /* Security notice */
+  .security-banner {
+    background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px;
+    padding: 12px 16px; font-size: 13px; color: #78350f;
+    margin-bottom: 24px; display: flex; gap: 10px; align-items: flex-start;
+  }
+  .security-banner .icon { font-size: 18px; line-height: 1; flex-shrink: 0; margin-top: 1px; }
+
+  /* TOC */
+  .toc { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 14px 18px; margin-bottom: 28px; }
+  .toc h3 { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+  .toc ol { padding-left: 18px; font-size: 13px; color: #57606a; }
+  .toc li { margin-bottom: 3px; }
+  .toc a { color: #3b82d4; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid #e5e7eb; margin: 28px 0; }
+
+  /* Footer */
+  .footer { text-align: center; font-size: 12px; color: #57606a; margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 14px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  
+  <div class="page-header">
+    <h1>Connecting Iceberg Tables (S3) to Snowflake &amp; Databricks</h1>
+    <div class="subtitle">Step-by-step integration guide — shareable version</div>
+    <div style="margin-top:8px">
+      <span class="badge badge-blue">Apache Iceberg v2</span>
+      <span class="badge badge-blue">Amazon S3</span>
+      <span class="badge badge-purple">Snowflake</span>
+      <span class="badge badge-purple">Databricks</span>
+      <span class="badge badge-green">Apache Polaris REST Catalog</span>
+    </div>
+  </div>
+
+  
+  <div class="security-banner">
+    <div class="icon">⚠</div>
+    <div>
+      <strong>Sensitive details are redacted in this document.</strong>
+      IAM ARNs, AWS account IDs, external IDs, internal hostnames, S3 bucket names, API credentials, tokens, and passwords are replaced with <span class="redact">REDACTED</span> placeholders. Obtain the actual values from your secrets manager before executing any steps.
+    </div>
+  </div>
+
+  
+  <div class="toc">
+    <h3>Contents</h3>
+    <ol>
+      <li><a href="#arch">Architecture Overview</a></li>
+      <li><a href="#prereqs">Prerequisites</a></li>
+      <li><a href="#spark-table">Part A — Create the Iceberg Table with Spark</a></li>
+      <li><a href="#snowflake">Part B — Connect to Snowflake</a></li>
+      <li><a href="#databricks">Part C — Connect to Databricks</a></li>
+      <li><a href="#refresh">Part D — Keeping Data in Sync</a></li>
+      <li><a href="#troubleshoot">Troubleshooting</a></li>
+    </ol>
+  </div>
+
+  
+  <div id="arch" class="section">
+    <div class="section-title">1. Architecture Overview</div>
+    <p style="font-size:13px;margin-bottom:10px">
+      All three engines — Spark, Snowflake, and Databricks — read the <strong>same Parquet files on S3</strong>.
+      Spark is the primary write engine. Snowflake reads via an IAM-authenticated External Volume.
+      Databricks reads via PyIceberg's S3 FileSystem catalog, then materialises to Delta for SQL access.
+    </p>
+    <div class="arch-box">Spark (write)          Snowflake (read)        Databricks (read)
+   │                       │                          │
+   │ Iceberg REST catalog  │ EXTERNAL VOLUME          │ PyIceberg SqlCatalog
+   │ (Apache Polaris)      │ (IAM role → S3)          │ (S3 filesystem scan)
+   ▼                       ▼                          ▼
+┌───────────────────────────────────────────────────────────┐
+│                    Amazon S3  (us-east-2)                  │
+│   s3://&lt;YOUR-BUCKET&gt;/warehouse/&lt;namespace&gt;/&lt;table&gt;/       │
+│   · data/  Parquet files (Snappy, ~2.56 MB each)          │
+│   · metadata/  *.metadata.json  *.avro (manifests)        │
+└───────────────────────────────────────────────────────────┘
+    </div>
+    <table>
+      <tr><th>Engine</th><th>Catalog type</th><th>Refresh mechanism</th><th>Writes supported</th></tr>
+      <tr><td>Spark (JupyterHub)</td><td>Polaris REST</td><td>Live — always latest snapshot</td><td>Yes (primary)</td></tr>
+      <tr><td>Snowflake</td><td>OBJECT_STORE (S3 direct)</td><td>Hourly task or manual <code>REFRESH</code></td><td>No (read-only)</td></tr>
+      <tr><td>Databricks</td><td>PyIceberg FileSystem (SQLite)</td><td>Re-run notebook / scheduled job</td><td>Via PyIceberg overwrite</td></tr>
+    </table>
+  </div>
+
+  <hr />
+
+  
+  <div id="prereqs" class="section">
+    <div class="section-title">2. Prerequisites</div>
+    <table>
+      <tr><th>Requirement</th><th>Details</th></tr>
+      <tr><td>S3 bucket &amp; prefix</td><td>A dedicated S3 bucket for the Iceberg warehouse, e.g. <code>s3://&lt;YOUR-BUCKET&gt;/warehouse/</code></td></tr>
+      <tr><td>AWS IAM credentials</td><td>Access key + secret key with <code>s3:GetObject</code>, <code>s3:PutObject</code>, <code>s3:ListBucket</code>, <code>s3:DeleteObject</code>, <code>s3:GetBucketLocation</code> on the warehouse bucket</td></tr>
+      <tr><td>Apache Polaris (or other REST catalog)</td><td>Used by Spark to manage Iceberg metadata. Requires a service-account client ID + secret.</td></tr>
+      <tr><td>Snowflake account</td><td><code>ACCOUNTADMIN</code> role. Pre-existing External Volume and Catalog Integration (one-time setup).</td></tr>
+      <tr><td>Databricks workspace</td><td>Any tier. A running cluster (DBR 14+ recommended). Compute → Single Node is sufficient for reads.</td></tr>
+      <tr><td>Iceberg table</td><td>At least one committed Iceberg snapshot must exist on S3 before registering in Snowflake or Databricks.</td></tr>
+    </table>
+    <div class="callout callout-blue">
+      <strong>Credentials source:</strong> All AWS and catalog credentials should be retrieved from your secrets manager (e.g., HashiCorp Vault / OpenBao) at runtime. Never hardcode them in notebooks or scripts that will be shared.
+    </div>
+  </div>
+
+  <hr />
+
+  
+  <div id="spark-table" class="section">
+    <div class="section-title">Part A — Create the Iceberg Table with Spark</div>
+    <p style="font-size:13px;margin-bottom:12px">
+      This part covers creating the Iceberg table via a PySpark session (e.g., JupyterHub). <em>Skip to Part B if your table already exists.</em>
+    </p>
+
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Fetch credentials from secrets manager</strong>
+          <p>Retrieve the Polaris service-account credentials and S3 keys from your secrets store. In this platform, a helper reads them from OpenBao:</p>
+          <div class="code-block">import urllib.request, json
+
+OPENBAO_ADDR  = "http://&lt;OPENBAO-HOST&gt;:&lt;PORT&gt;"
+OPENBAO_TOKEN = <span class="redact">REDACTED — get from secrets manager</span>
+
+def _bao(path):
+    req = urllib.request.Request(
+        f"{OPENBAO_ADDR}/v1/{path}",
+        headers={"X-Vault-Token": OPENBAO_TOKEN}
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())["data"]["data"]
+
+pol = _bao("secret/data/platform/polaris")
+s3  = _bao("secret/data/platform/s3")
+print("Credentials loaded")</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Start Spark session with Polaris REST catalog</strong>
+          <p>Configure the Iceberg Spark extensions and point <code>spark.sql.catalog.polaris</code> at the REST catalog endpoint:</p>
+          <div class="code-block">from pyspark.sql import SparkSession
+import os, socket
+
+DRIVER_IP   = os.environ.get("SPARK_LOCAL_IP", socket.gethostbyname(socket.gethostname()))
+POLARIS_URI = "http://&lt;POLARIS-HOST&gt;/api/catalog"
+
+spark = (
+    SparkSession.builder
+    .master("spark://&lt;SPARK-MASTER&gt;:&lt;PORT&gt;")
+    .appName("iceberg-table-setup")
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+    # ── Iceberg REST catalog ──────────────────────────────────────────────
+    .config("spark.sql.catalog.polaris",        "org.apache.iceberg.spark.SparkCatalog")
+    .config("spark.sql.catalog.polaris.type",   "rest")
+    .config("spark.sql.catalog.polaris.uri",    POLARIS_URI)
+    .config("spark.sql.catalog.polaris.credential",
+            <span class="redact">REDACTED — pol['spark_svc_id'] + ':' + pol['spark_svc_secret']</span>)
+    .config("spark.sql.catalog.polaris.scope",      "PRINCIPAL_ROLE:ALL")
+    .config("spark.sql.catalog.polaris.warehouse",  "&lt;CATALOG-NAME&gt;")
+    # ── S3A filesystem ────────────────────────────────────────────────────
+    .config("spark.hadoop.fs.s3a.impl",            "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.hadoop.fs.s3a.access.key",      <span class="redact">REDACTED — s3['access_key']</span>)
+    .config("spark.hadoop.fs.s3a.secret.key",      <span class="redact">REDACTED — s3['secret_key']</span>)
+    .config("spark.hadoop.fs.s3a.endpoint",        "https://s3.&lt;REGION&gt;.amazonaws.com")
+    .config("spark.hadoop.fs.s3a.path.style.access","true")
+    .getOrCreate()
+)
+spark.sparkContext.setLogLevel("WARN")
+print("Spark", spark.version, "connected")</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>Create the Iceberg table</strong>
+          <p>Run DDL via Spark SQL. Replace <code>&lt;namespace&gt;</code>, <code>&lt;table&gt;</code>, and columns with your values:</p>
+          <div class="code-block">CATALOG   = "polaris"
+NAMESPACE = "&lt;namespace&gt;"   # e.g. "lakehouse"
+TABLE     = "&lt;table&gt;"       # e.g. "orders"
+BUCKET    = "&lt;YOUR-BUCKET&gt;"
+
+spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{NAMESPACE}")
+
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {CATALOG}.{NAMESPACE}.{TABLE} (
+        id         BIGINT,
+        event_type STRING,
+        ts         TIMESTAMP
+        -- add your columns here
+    )
+    USING iceberg
+    PARTITIONED BY (hours(ts))
+    TBLPROPERTIES (
+        'write.format.default'            = 'parquet',
+        'write.parquet.compression-codec' = 'snappy',
+        'write.target-file-size-bytes'    = '2684354'
+    )
+    LOCATION 's3a://{BUCKET}/warehouse/{NAMESPACE}/{TABLE}'
+""")
+
+spark.sql(f"DESCRIBE EXTENDED {CATALOG}.{NAMESPACE}.{TABLE}").show(truncate=False)</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <strong>Write initial data</strong>
+          <p>Snowflake requires at least one committed Iceberg snapshot before registration. Load data now:</p>
+          <div class="code-block"># Append from a DataFrame
+df.writeTo(f"{CATALOG}.{NAMESPACE}.{TABLE}") \
+  .option("write.target-file-size-bytes", "2684354") \
+  .append()
+
+spark.sql(f"SELECT COUNT(*) FROM {CATALOG}.{NAMESPACE}.{TABLE}").show()
+spark.stop()   # ← always stop to release cluster resources</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <hr />
+
+  
+  <div id="snowflake" class="section">
+    <div class="section-title">Part B — Connect to Snowflake</div>
+    <p style="font-size:13px;margin-bottom:12px">
+      Snowflake reads Iceberg metadata <strong>directly from S3</strong> using an IAM role (<code>CATALOG = 'OBJECT_STORE'</code>). No Polaris connectivity is required. All steps run in the Snowflake SQL Worksheet as <code>ACCOUNTADMIN</code>.
+    </p>
+
+    <div class="callout callout-red" style="margin-bottom:14px">
+      <strong>Do NOT recreate the External Volume</strong> if one already exists. Each <code>CREATE OR REPLACE EXTERNAL VOLUME</code> generates a new <code>ExternalId</code>, which requires updating the AWS IAM role trust policy again.
+    </div>
+
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>One-time: Create AWS IAM Role for Snowflake (AWS Console)</strong>
+          <p>This is done once per Snowflake account. Create an IAM role and trust it for Snowflake's AWS account:</p>
+          <table>
+            <tr><th>Field</th><th>Value</th></tr>
+            <tr><td>Role name</td><td><span class="redact">REDACTED — your-snowflake-iceberg-role</span></td></tr>
+            <tr><td>Trust principal (AWS account)</td><td><span class="redact">REDACTED — Snowflake's AWS IAM user ARN (from DESCRIBE EXTERNAL VOLUME)</span></td></tr>
+            <tr><td>Trust ExternalId</td><td><span class="redact">REDACTED — from DESCRIBE EXTERNAL VOLUME after creation</span></td></tr>
+            <tr><td>Inline policy permissions</td><td><code>s3:GetObject</code>, <code>s3:GetObjectVersion</code>, <code>s3:PutObject</code>, <code>s3:DeleteObject</code>, <code>s3:DeleteObjectVersion</code>, <code>s3:ListBucket</code>, <code>s3:GetBucketLocation</code> on your S3 bucket + prefix</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>One-time: Create External Volume in Snowflake</strong>
+          <div class="code-block">USE ROLE ACCOUNTADMIN;
+
+CREATE OR REPLACE EXTERNAL VOLUME iceberg_s3_vol
+  STORAGE_LOCATIONS = (
+    (
+      NAME                 = 'iceberg-s3-&lt;REGION&gt;'
+      STORAGE_PROVIDER     = 'S3'
+      STORAGE_BASE_URL     = 's3://&lt;YOUR-BUCKET&gt;/warehouse/'
+      STORAGE_AWS_ROLE_ARN = <span class="redact">REDACTED — arn:aws:iam::&lt;AWS-ACCOUNT-ID&gt;:role/&lt;ROLE-NAME&gt;</span>
+    )
+  )
+  ALLOW_WRITES = TRUE;
+
+-- After creation, retrieve the auto-generated trust values:
+DESCRIBE EXTERNAL VOLUME iceberg_s3_vol;
+-- Copy STORAGE_AWS_IAM_USER_ARN and STORAGE_AWS_EXTERNAL_ID
+-- → Update the IAM role trust policy in AWS Console with these values</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>One-time: Create Catalog Integration</strong>
+          <div class="code-block">CREATE OR REPLACE CATALOG INTEGRATION iceberg_object_store
+    CATALOG_SOURCE = OBJECT_STORE
+    TABLE_FORMAT   = ICEBERG
+    ENABLED        = TRUE;</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <strong>Find the latest Iceberg metadata file on S3</strong>
+          <p>Before registering, locate the most recent <code>metadata.json</code> snapshot:</p>
+          <div class="code-block"># From a shell with AWS CLI configured:
+aws s3 ls s3://&lt;YOUR-BUCKET&gt;/warehouse/&lt;namespace&gt;/&lt;table&gt;/metadata/ \
+  --region &lt;REGION&gt; | sort | tail -1
+# Copy the filename, e.g.: 00011-abc123.metadata.json</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <strong>Register the Iceberg table in Snowflake</strong>
+          <p>Create the database/schema if they don't exist, then register the table pointing at the metadata file from Step 4:</p>
+          <div class="code-block">USE ROLE ACCOUNTADMIN;
+
+CREATE DATABASE IF NOT EXISTS &lt;DATABASE_NAME&gt;;
+USE DATABASE &lt;DATABASE_NAME&gt;;
+CREATE SCHEMA IF NOT EXISTS &lt;SCHEMA_NAME&gt;;
+USE SCHEMA &lt;SCHEMA_NAME&gt;;
+
+-- BASE_LOCATION is relative to the External Volume STORAGE_BASE_URL
+-- i.e.  s3://&lt;YOUR-BUCKET&gt;/warehouse/  +  &lt;namespace&gt;/&lt;table&gt;/
+CREATE OR REPLACE ICEBERG TABLE &lt;table_name&gt;
+    CATALOG           = 'iceberg_object_store'
+    EXTERNAL_VOLUME   = 'iceberg_s3_vol'
+    BASE_LOCATION     = '&lt;namespace&gt;/&lt;table&gt;/'
+    METADATA_FILE_PATH = 'metadata/&lt;filename-from-step-4&gt;.metadata.json';
+
+-- Verify row count
+SELECT COUNT(*) FROM &lt;table_name&gt;;</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">6</div>
+        <div class="step-body">
+          <strong>Schedule automatic hourly metadata refresh</strong>
+          <p>When Spark writes new data, the metadata pointer on S3 advances. This Snowflake Task re-reads it every hour:</p>
+          <div class="code-block">CREATE OR REPLACE TASK refresh_&lt;table_name&gt;
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE  = 'USING CRON 0 * * * * UTC'
+    COMMENT   = 'Hourly Iceberg metadata refresh via S3 OBJECT_STORE'
+AS
+    ALTER ICEBERG TABLE &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;.&lt;table_name&gt; REFRESH;
+
+-- Tasks are created SUSPENDED — explicitly resume:
+ALTER TASK refresh_&lt;table_name&gt; RESUME;
+
+-- Confirm state = started
+SHOW TASKS LIKE 'refresh_&lt;table_name&gt;';</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">7</div>
+        <div class="step-body">
+          <strong>Grant RBAC access</strong>
+          <div class="code-block">-- Grant read access to your roles
+GRANT USAGE  ON DATABASE &lt;DATABASE_NAME&gt;               TO ROLE &lt;engineer_role&gt;;
+GRANT USAGE  ON SCHEMA   &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;  TO ROLE &lt;engineer_role&gt;;
+GRANT SELECT ON TABLE    &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;.&lt;table_name&gt; TO ROLE &lt;engineer_role&gt;;
+
+GRANT USAGE  ON DATABASE &lt;DATABASE_NAME&gt;               TO ROLE &lt;analyst_role&gt;;
+GRANT USAGE  ON SCHEMA   &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;  TO ROLE &lt;analyst_role&gt;;
+GRANT SELECT ON TABLE    &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;.&lt;table_name&gt; TO ROLE &lt;analyst_role&gt;;</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">8</div>
+        <div class="step-body">
+          <strong>Verify end-to-end</strong>
+          <div class="code-block">-- Match row count against Spark
+SELECT COUNT(*) FROM &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;.&lt;table_name&gt;;
+
+-- Force an immediate out-of-schedule refresh if needed
+ALTER ICEBERG TABLE &lt;DATABASE_NAME&gt;.&lt;SCHEMA_NAME&gt;.&lt;table_name&gt; REFRESH;
+
+-- Check last 5 task runs
+SELECT name, state, scheduled_time, completed_time, error_code, error_message
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START =&gt; DATEADD('hour', -24, CURRENT_TIMESTAMP),
+    TASK_NAME =&gt; 'refresh_&lt;table_name&gt;'
+))
+ORDER BY scheduled_time DESC LIMIT 5;</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="callout callout-amber" style="margin-top:8px">
+      <strong>Re-registration after many snapshots:</strong> If the registered metadata snapshot drifts too far, the hourly refresh may fail. Fix by re-running Step 5 with the latest metadata file path, then resume the task.
+    </div>
+  </div>
+
+  <hr />
+
+  
+  <div id="databricks" class="section">
+    <div class="section-title">Part C — Connect to Databricks</div>
+    <p style="font-size:13px;margin-bottom:12px">
+      Databricks reads Iceberg data using <strong>PyIceberg's S3 FileSystem catalog</strong> — no REST catalog or Polaris needed.
+      Data is materialised into a <strong>Delta table</strong> and exposed as a SQL view for use in the SQL console or notebooks.
+    </p>
+    <div class="callout callout-blue" style="margin-bottom:14px">
+      <strong>Works on Databricks Free / Community Edition.</strong> The Secrets API (<code>dbutils.secrets</code>) is not available on the free tier — use notebook widgets to supply credentials instead.
+    </div>
+
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Create a cluster</strong>
+          <p>Compute → Create cluster → Single Node → DBR 14+ LTS (or 16.x). A single-node cluster is sufficient for reads.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Cell 1 — Install PyIceberg (run first, wait for restart)</strong>
+          <div class="code-block">%pip install \
+    "pyiceberg[s3fs,pyarrow,sql-sqlite]&gt;=0.7.0" \
+    "sqlalchemy&gt;=1.4.0,&lt;3.0.0" \
+    "botocore&gt;=1.40.45,&lt;1.41.0" \
+    "boto3&gt;=1.40.45,&lt;1.41.0" \
+    --quiet
+
+dbutils.library.restartPython()   # restart kernel so packages are importable</div>
+          <div class="callout callout-amber" style="margin-top:6px">
+            Pin <code>botocore</code> to <code>&gt;=1.40.45,&lt;1.41.0</code> — without the pin, PyIceberg pulls a newer botocore that conflicts with the boto3 version bundled in Databricks Free Edition.
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>Cell 2 — Credential widgets (free-tier alternative to dbutils.secrets)</strong>
+          <div class="code-block">dbutils.widgets.text("s3_access_key", "", "S3 Access Key (AKIA...)")
+dbutils.widgets.text("s3_secret_key", "", "S3 Secret Key")
+
+print("Fill in the widgets above, then run Cell 3.")</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <strong>Cell 3 — Configuration</strong>
+          <div class="code-block">import os
+
+WAREHOUSE_ROOT  = "s3://&lt;YOUR-DATABRICKS-BUCKET&gt;/iceberg/warehouse/"
+S3_REGION       = "&lt;REGION&gt;"           # e.g. us-east-2
+S3_ENDPOINT     = f"https://s3.{S3_REGION}.amazonaws.com"
+CATALOG_DB_PATH = "/tmp/iceberg_catalog.db"   # rebuilt each run
+
+# Read from widgets (values never appear in logs)
+S3_ACCESS_KEY = dbutils.widgets.get("s3_access_key")
+S3_SECRET_KEY = dbutils.widgets.get("s3_secret_key")
+
+os.environ["AWS_ACCESS_KEY_ID"]     = S3_ACCESS_KEY
+os.environ["AWS_SECRET_ACCESS_KEY"] = S3_SECRET_KEY
+os.environ["AWS_DEFAULT_REGION"]    = S3_REGION
+
+print(f"Warehouse : {WAREHOUSE_ROOT}")
+print(f"Region    : {S3_REGION}")
+print(f"Key       : {S3_ACCESS_KEY[:6]}...{S3_ACCESS_KEY[-4:]}  ✅")</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <strong>Cell 4 — Build the PyIceberg SqlCatalog</strong>
+          <div class="code-block">from pyiceberg.catalog.sql import SqlCatalog
+
+if os.path.exists(CATALOG_DB_PATH):
+    os.remove(CATALOG_DB_PATH)
+
+catalog = SqlCatalog(
+    "my_catalog",
+    **{
+        "uri":                  f"sqlite:///{CATALOG_DB_PATH}",
+        "warehouse":            WAREHOUSE_ROOT,
+        "s3.access-key-id":     S3_ACCESS_KEY,
+        "s3.secret-access-key": S3_SECRET_KEY,
+        "s3.region":            S3_REGION,
+        "s3.endpoint":          S3_ENDPOINT,
+        "s3fs.key":             S3_ACCESS_KEY,
+        "s3fs.secret":          S3_SECRET_KEY,
+        "s3fs.endpoint_url":    S3_ENDPOINT,
+    },
+)
+
+print("PyIceberg SqlCatalog ready")</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">6</div>
+        <div class="step-body">
+          <strong>Cell 5 — Auto-discover and register all Iceberg tables from S3</strong>
+          <p>Walks the warehouse path and registers every table found under <code>&lt;db&gt;/&lt;table&gt;/metadata/</code>:</p>
+          <div class="code-block">import s3fs
+
+fs = s3fs.S3FileSystem(
+    key=S3_ACCESS_KEY, secret=S3_SECRET_KEY,
+    endpoint_url=S3_ENDPOINT, client_kwargs={"region_name": S3_REGION},
+)
+
+warehouse_bare = WAREHOUSE_ROOT.replace("s3://", "", 1).rstrip("/")
+registered = []
+
+for db_path in fs.ls(warehouse_bare, detail=False):
+    db_name = db_path.rstrip("/").split("/")[-1]
+    try: catalog.create_namespace((db_name,))
+    except: pass
+
+    for tbl_path in fs.ls(db_path, detail=False):
+        tbl_name    = tbl_path.rstrip("/").split("/")[-1]
+        meta_prefix = tbl_path.rstrip("/") + "/metadata"
+        identifier  = (db_name, tbl_name)
+        try:
+            meta_files = sorted(
+                [f for f in fs.ls(meta_prefix, detail=True) if f["name"].endswith(".metadata.json")],
+                key=lambda f: f.get("LastModified", 0), reverse=True
+            )
+            if not meta_files: continue
+            latest = "s3://" + meta_files[0]["name"]
+            try: catalog.drop_table(identifier)
+            except: pass
+            catalog.register_table(identifier, latest)
+            registered.append(f"{db_name}.{tbl_name}")
+        except: pass
+
+print(f"Registered {len(registered)} table(s):")
+for t in registered: print(f"  {t}")</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">7</div>
+        <div class="step-body">
+          <strong>Cell 6 — Read a table as a Pandas DataFrame or Spark SQL view</strong>
+          <div class="code-block">READ_NAMESPACE = "&lt;namespace&gt;"   # e.g. "lakehouse_db"
+READ_TABLE     = "&lt;table&gt;"       # e.g. "customers"
+ROW_LIMIT      = 1000           # set None to read all
+
+tbl        = catalog.load_table((READ_NAMESPACE, READ_TABLE))
+arrow_tbl  = tbl.scan(limit=ROW_LIMIT).to_arrow()
+df         = arrow_tbl.to_pandas()
+
+print(f"Rows: {len(df):,}  Columns: {list(df.columns)}")
+display(df)</div>
+          <p style="margin-top:8px;font-size:13px">To expose as a <strong>queryable SQL view</strong> in the Databricks SQL console:</p>
+          <div class="code-block">DELTA_PATH  = f"dbfs:/snapshots/{READ_NAMESPACE}/{READ_TABLE}"
+VIEW_NAME   = f"{READ_NAMESPACE}__{READ_TABLE}__live"
+
+(spark.createDataFrame(df).write
+    .format("delta").mode("overwrite")
+    .option("overwriteSchema", "true")
+    .save(DELTA_PATH))
+
+spark.read.format("delta").load(DELTA_PATH) \
+     .createOrReplaceTempView(VIEW_NAME)
+
+print(f"SQL view ready: SELECT * FROM {VIEW_NAME}")
+spark.sql(f"SELECT * FROM {VIEW_NAME}").display()</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">8</div>
+        <div class="step-body">
+          <strong>Cell 7 — Snapshot history &amp; time travel</strong>
+          <div class="code-block">import datetime as dt
+
+tbl = catalog.load_table((READ_NAMESPACE, READ_TABLE))
+print(f"Snapshot history — {READ_NAMESPACE}.{READ_TABLE}")
+
+for entry in tbl.history():
+    snap = tbl.snapshot_by_id(entry.snapshot_id)
+    if snap is None: continue
+    ts      = dt.datetime.utcfromtimestamp(snap.timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S UTC")
+    summary = snap.summary.additional_properties if snap.summary else {}
+    print(f"  id={snap.snapshot_id}  committed={ts}  op={summary.get('operation','?')}  "
+          f"total-records={summary.get('total-records','?')}")
+
+# Time-travel to a specific snapshot:
+# df = catalog.load_table((ns, tbl)).scan(snapshot_id=&lt;id&gt;).to_arrow().to_pandas()</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <hr />
+
+  
+  <div id="refresh" class="section">
+    <div class="section-title">Part D — Keeping Data in Sync</div>
+    <p style="font-size:13px;margin-bottom:10px">After each Spark write, both Snowflake and Databricks need to be refreshed to see new data.</p>
+
+    <div class="section-sub">Snowflake</div>
+    <table>
+      <tr><th>Action</th><th>SQL command</th></tr>
+      <tr><td>Manual one-shot refresh</td><td><code>ALTER ICEBERG TABLE &lt;DB&gt;.&lt;SCHEMA&gt;.&lt;table&gt; REFRESH;</code></td></tr>
+      <tr><td>Trigger scheduled task immediately</td><td><code>EXECUTE TASK refresh_&lt;table&gt;;</code></td></tr>
+      <tr><td>Check task status</td><td><code>SHOW TASKS LIKE 'refresh_&lt;table&gt;';</code> — state should be <code>started</code></td></tr>
+      <tr><td>Resume a suspended task</td><td><code>ALTER TASK refresh_&lt;table&gt; RESUME;</code></td></tr>
+      <tr><td>Suspend without dropping</td><td><code>ALTER TASK refresh_&lt;table&gt; SUSPEND;</code></td></tr>
+    </table>
+
+    <div class="section-sub">Databricks</div>
+    <p style="font-size:13px;margin-bottom:8px">Re-run the refresh cell (Cell 5 → Cell 6 → Cell 7) or set up a scheduled Databricks Job to run the notebook automatically:</p>
+    <div class="code-block"># In Databricks: Workflows → Jobs → Create Job → select notebook → set schedule
+# Recommended: run every hour, or after each Spark CDC pipeline write window</div>
+
+    <div class="section-sub">Monitoring — check Snowflake task execution history</div>
+    <div class="code-block">SELECT name, state, scheduled_time, completed_time, error_code, error_message
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START =&gt; DATEADD('hour', -24, CURRENT_TIMESTAMP),
+    TASK_NAME =&gt; 'refresh_&lt;table&gt;'
+))
+ORDER BY scheduled_time DESC LIMIT 20;</div>
+  </div>
+
+  <hr />
+
+  
+  <div id="troubleshoot" class="section">
+    <div class="section-title">Troubleshooting</div>
+
+    <div class="section-sub">Snowflake returns 0 rows after Spark writes new data</div>
+    <ol style="font-size:13px;padding-left:20px;margin-bottom:14px">
+      <li>Run a manual refresh: <code>ALTER ICEBERG TABLE &lt;DB&gt;.&lt;SCHEMA&gt;.&lt;table&gt; REFRESH;</code></li>
+      <li>Check the task state: <code>SHOW TASKS LIKE 'refresh_&lt;table&gt;';</code> — must be <code>started</code></li>
+      <li>If <code>suspended</code>: <code>ALTER TASK refresh_&lt;table&gt; RESUME;</code></li>
+    </ol>
+
+    <div class="section-sub">Snowflake EXTERNAL VOLUME — STS AssumeRole denied</div>
+    <ol style="font-size:13px;padding-left:20px;margin-bottom:14px">
+      <li>Run <code>DESCRIBE EXTERNAL VOLUME iceberg_s3_vol;</code> — copy <code>STORAGE_AWS_IAM_USER_ARN</code> and <code>STORAGE_AWS_EXTERNAL_ID</code>.</li>
+      <li>Go to AWS IAM → your Snowflake IAM role → Trust relationships.</li>
+      <li>Verify the principal ARN and ExternalId match exactly what Snowflake generated. Update if they differ.</li>
+      <li><strong>Never recreate the External Volume</strong> — each <code>CREATE OR REPLACE</code> generates a new ExternalId.</li>
+    </ol>
+
+    <div class="section-sub">PyIceberg cannot list S3 path / credential error on Databricks</div>
+    <ol style="font-size:13px;padding-left:20px;margin-bottom:14px">
+      <li>Ensure the credential widgets in Cell 2 are filled in before running Cell 3+.</li>
+      <li>Confirm S3 bucket and prefix are correct — check <code>WAREHOUSE_ROOT</code> includes the trailing slash.</li>
+      <li>Verify the IAM user/key has <code>s3:ListBucket</code> and <code>s3:GetObject</code> on the bucket.</li>
+      <li>Re-run Cell 1 (<code>%pip install</code>) if you attached to a new cluster — packages must be reinstalled per session.</li>
+    </ol>
+
+    <div class="section-sub">Snowflake metadata drift — refresh fails after many Spark snapshots</div>
+    <p style="font-size:13px;margin-bottom:8px">Re-register the table pointing at the latest metadata file:</p>
+    <div class="code-block"># 1. Find latest metadata file (from a machine with AWS CLI):
+aws s3 ls s3://&lt;YOUR-BUCKET&gt;/warehouse/&lt;namespace&gt;/&lt;table&gt;/metadata/ \
+  --region &lt;REGION&gt; | sort | tail -1
+
+# 2. Re-register in Snowflake:
+USE ROLE ACCOUNTADMIN;
+USE DATABASE &lt;DATABASE_NAME&gt;;
+USE SCHEMA &lt;SCHEMA_NAME&gt;;
+CREATE OR REPLACE ICEBERG TABLE &lt;table_name&gt;
+    CATALOG           = 'iceberg_object_store'
+    EXTERNAL_VOLUME   = 'iceberg_s3_vol'
+    BASE_LOCATION     = '&lt;namespace&gt;/&lt;table&gt;/'
+    METADATA_FILE_PATH = 'metadata/&lt;latest-file&gt;.metadata.json';
+
+ALTER TASK refresh_&lt;table_name&gt; RESUME;</div>
+
+    <div class="section-sub">botocore / boto3 version conflict on Databricks</div>
+    <p style="font-size:13px;margin-bottom:8px">
+      Without pinning, PyIceberg pulls <code>botocore&gt;=1.43</code> which conflicts with the DBR-bundled boto3. Always use:
+    </p>
+    <div class="code-block">%pip install "botocore&gt;=1.40.45,&lt;1.41.0" "boto3&gt;=1.40.45,&lt;1.41.0" --quiet</div>
+  </div>
+
+  <hr />
+
+  
+  <div class="section">
+    <div class="section-title">Quick Reference</div>
+    <table>
+      <tr><th>Task</th><th>Tool</th><th>Key command / API</th></tr>
+      <tr><td>Create Iceberg table</td><td>Spark (JupyterHub)</td><td><code>CREATE TABLE … USING iceberg</code></td></tr>
+      <tr><td>Write / update data</td><td>Spark</td><td><code>df.writeTo(…).append()</code></td></tr>
+      <tr><td>Register table in Snowflake</td><td>Snowflake SQL</td><td><code>CREATE OR REPLACE ICEBERG TABLE … METADATA_FILE_PATH=…</code></td></tr>
+      <tr><td>Manual Snowflake refresh</td><td>Snowflake SQL</td><td><code>ALTER ICEBERG TABLE … REFRESH</code></td></tr>
+      <tr><td>Scheduled Snowflake refresh</td><td>Snowflake Task</td><td><code>CREATE TASK … SCHEDULE = 'USING CRON 0 * * * * UTC'</code></td></tr>
+      <tr><td>Read table in Databricks</td><td>PyIceberg + Spark</td><td><code>catalog.load_table(…).scan().to_arrow()</code></td></tr>
+      <tr><td>SQL view in Databricks</td><td>Spark Delta</td><td><code>df.write.format("delta").save(…)</code> + <code>createOrReplaceTempView(…)</code></td></tr>
+      <tr><td>Time travel (Databricks)</td><td>PyIceberg</td><td><code>tbl.scan(snapshot_id=&lt;id&gt;)</code></td></tr>
+    </table>
+  </div>
+
+  <div class="footer">Made with IBM Bob</div>
+</div>
+</body>
+</html>

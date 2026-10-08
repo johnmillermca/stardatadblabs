@@ -11,7 +11,8 @@
 # =============================================================================
 
 singleNode: true
-replicas: 1
+# Scaled down 2026-10-06 — resume 2026-10-13. Set back to 1 to bring OpenSearch back up.
+replicas: 0
 
 image:
   repository: "192.168.1.50:30500/opensearch/opensearch"

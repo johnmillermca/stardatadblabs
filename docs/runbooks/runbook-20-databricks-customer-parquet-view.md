@@ -1731,30 +1731,36 @@ Discovers and refreshes **all** Iceberg tables under `s3://stardata-databricks/i
 
 ---
 
-### 11.5 Scheduled job — `stardata-iceberg-auto-refresh`
+### 11.5 On-demand refresh — `stardata-iceberg-on-demand-refresh`
 
-The auto-reader runs automatically every **15 minutes** via a Databricks Job on Serverless compute.
+> ⚠️ **The old `stardata-iceberg-auto-refresh` scheduled job (every 15 min) has been removed** to eliminate unnecessary Databricks DBU charges. Refresh is now triggered manually when you need current data.
+
+The auto-reader runs **on-demand only** via a Databricks Job on Serverless compute. There is no cron schedule — the job fires exactly once per script invocation.
 
 | Property | Value |
 |---|---|
-| Job name | `stardata-iceberg-auto-refresh` |
-| Job ID | `142367685690178` |
-| Schedule | `0 0/15 * * * ?` (every 15 min, UTC) |
+| Job name | `stardata-iceberg-on-demand-refresh` |
+| Schedule | **None** — on-demand only |
 | Compute | Serverless (no cluster spin-up) |
 | Notebook | `/Shared/stardata/nb_multi_table_auto_reader` |
 
-**View job in Databricks:**
-```
-https://dbc-6851a86f-f5f1.cloud.databricks.com/#job/142367685690178
-```
+**When to run:**
+- After a new Iceberg write (Spark INSERT / UPDATE / DELETE)
+- Before querying the Databricks views when you need the latest data
+- When investigating data freshness
 
-**Trigger a manual run + re-upload notebook:**
+**Trigger a refresh:**
 ```bash
-# Upload latest notebook + reset job + trigger immediate run
+# Upload latest notebook + trigger one run (reads creds from OpenBao):
+bash scripts/databricks/create_databricks_job.sh
+
+# Override creds directly (skips OpenBao):
 DB_HOST=dbc-6851a86f-f5f1.cloud.databricks.com \
 DB_TOKEN=<DATABRICKS_PAT> \
-  bash scripts/databricks/create_databricks_job.sh --run-now
+  bash scripts/databricks/create_databricks_job.sh
 ```
+
+The script prints a direct Run URL on completion so you can monitor progress in the Databricks UI.
 
 **Script location:** [`scripts/databricks/create_databricks_job.sh`](../../scripts/databricks/create_databricks_job.sh)
 
@@ -1769,9 +1775,9 @@ All objects currently live under **`workspace`** (the built-in Unity Catalog cat
 2. Run: `spark.sql("CREATE CATALOG IF NOT EXISTS lakehouse")`
 3. In [`nb_multi_table_auto_reader.py`](../../docker/databricks-notebooks/nb_multi_table_auto_reader.py) Cell 2, change: `DATABRICKS_CATALOG = "lakehouse"`
 4. In [`nb_customer_test_refresh.py`](../../docker/databricks-notebooks/nb_customer_test_refresh.py), change: `UC_CATALOG = "lakehouse"`
-5. Re-upload both notebooks and reset the job:
+5. Re-upload both notebooks and trigger a refresh:
    ```bash
-   bash scripts/databricks/create_databricks_job.sh --run-now
+   bash scripts/databricks/create_databricks_job.sh
    ```
 
 ---

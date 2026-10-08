@@ -19,11 +19,11 @@ Each source has its own copy of every table, so the same Kafka topic can fan-out
 into three independent Iceberg tables simultaneously when all three write-mode
 deployments are active.
 
-Test & StarTransform tables  (namespace: e2e_testing — single namespace per catalog)
---------------------------------------------------------------------------------------
-All E2E test tables and StarTransform function test tables share ONE namespace
-so they are easy to browse and reset without touching production data.
-Write mode and transform function are encoded in the table name suffix.
+Test tables  (namespace: e2e_testing — single namespace per catalog)
+----------------------------------------------------------------------
+All E2E test tables share ONE namespace so they are easy to browse and
+reset without touching production data.
+Write mode is encoded in the table name suffix.
 
   Write-mode test tables (fed from same source tables):
     <catalog>.e2e_testing.customers_std         — standard mode (SCD Type 0)
@@ -33,35 +33,11 @@ Write mode and transform function are encoded in the table name suffix.
     <catalog>.e2e_testing.orders_sd             — soft_delete mode
     <catalog>.e2e_testing.orders_hist           — history_tracking mode
 
-  StarTransform test tables (PostgreSQL only, fed from customers/products/orders):
-    postgres.e2e_testing.customers_dedup        — deduplicate() test
-    postgres.e2e_testing.customers_masked       — mask_columns() (PII hashed) test
-    postgres.e2e_testing.customers_proc_time    — add_processing_time() test
-    postgres.e2e_testing.customers_op_label     — add_op_label() test
-    postgres.e2e_testing.customers_source_tag   — add_source_tag() test
-    postgres.e2e_testing.customers_filter_ins   — filter_op(["c","u"]) inserts/updates only
-    postgres.e2e_testing.customers_filter_del   — filter_op(["d"]) deletes only
-    postgres.e2e_testing.orders_enriched        — enrich_from_broadcast() join products
-    postgres.e2e_testing.customers_before_after — pivot_before_after() before/after cols
-    postgres.e2e_testing.customers_nullcoal     — null_coalesce() test
-    postgres.e2e_testing.event_counts           — aggregate_counts() test
-
 Naming convention
 -----------------
   _std              = standard write mode
   _sd               = soft_delete write mode
   _hist             = history_tracking write mode (always append)
-  _dedup            = deduplicate() transform
-  _masked           = mask_columns() transform
-  _proc_time        = add_processing_time() transform
-  _op_label         = add_op_label() transform
-  _source_tag       = add_source_tag() transform
-  _filter_ins       = filter_op(["c","u"]) transform
-  _filter_del       = filter_op(["d"]) transform
-  _enriched         = enrich_from_broadcast() transform
-  _before_after     = pivot_before_after() transform
-  _nullcoal         = null_coalesce() transform
-  event_counts      = aggregate_counts() transform
 
 Partitioning (all tables)
 --------------------------
@@ -84,11 +60,8 @@ Usage
   # Only production tables for one source:
   SPARK_USER=dave TABLE_GROUP=prod SOURCE=postgres python3 06_create_iceberg_tables.py
 
-  # Only test/transform tables:
+  # Only test tables:
   SPARK_USER=dave TABLE_GROUP=test python3 06_create_iceberg_tables.py
-
-  # Only StarTransform test tables:
-  SPARK_USER=dave TABLE_GROUP=transforms python3 06_create_iceberg_tables.py
 """
 
 from __future__ import annotations
@@ -116,11 +89,11 @@ logger = logging.getLogger("create-iceberg-tables")
 SPARK_USER    = os.environ.get("SPARK_USER", "dave")
 DRY_RUN       = os.environ.get("DRY_RUN", "0") == "1"
 SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
-# TABLE_GROUP: all | prod | test | transforms
+# TABLE_GROUP: all | prod | test
 TABLE_GROUP   = os.environ.get("TABLE_GROUP", "all").lower()
 S3_BUCKET     = "xdatatoiceberg1"
 
-# Single namespace for all E2E test and StarTransform tables
+# Single namespace for all E2E test tables
 E2E_NS = "e2e_testing"
 
 _S = StructField  # brevity alias
@@ -502,142 +475,6 @@ def _build_registry() -> list[dict]:
             write_mode="history_tracking",
             purpose=f"[E2E] history_tracking mode — {src}.{base_tbl}",
         ))
-
-    # ── StarTransform test tables — also in postgres.e2e_testing ───────────────
-    # One table per StarTransform function.  All fed from postgres source tables.
-    # Suffix encodes the transform being tested (see naming convention at top).
-
-    # customers_dedup — deduplicate(pk="id", order_col="kafka_ts")
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_dedup", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_dedup",
-        schema=_PG_CUSTOMERS,
-        write_mode="standard",
-        purpose="[TRANSFORM] deduplicate() — last-write-wins per customer id",
-    ))
-
-    # customers_masked — mask_columns(["email","phone"])
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_masked", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_masked",
-        schema=_PG_CUSTOMERS,
-        write_mode="standard",
-        purpose="[TRANSFORM] mask_columns() — email + phone SHA-256 hashed",
-    ))
-
-    # customers_proc_time — add_processing_time(col_name="proc_time")
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_proc_time", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_proc_time",
-        schema=_with_extra(_PG_CUSTOMERS, [_S("proc_time", TimestampType(), True)]),
-        write_mode="standard",
-        purpose="[TRANSFORM] add_processing_time() — proc_time TIMESTAMP injected",
-    ))
-
-    # customers_op_label — add_op_label()
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_op_label", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_op_label",
-        schema=_with_extra(_PG_CUSTOMERS, [_S("op_label", StringType(), True)]),
-        write_mode="standard",
-        purpose="[TRANSFORM] add_op_label() — INSERT/UPDATE/DELETE string column",
-    ))
-
-    # customers_source_tag — add_source_tag(source_system="postgres")
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_source_tag", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_source_tag",
-        schema=_with_extra(_PG_CUSTOMERS, [_S("source_system", StringType(), True)]),
-        write_mode="standard",
-        purpose="[TRANSFORM] add_source_tag() — source_system STRING literal",
-    ))
-
-    # customers_filter_ins — filter_op(ops=["c","u"])  inserts + updates only
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_filter_ins", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_filter_ins",
-        schema=_PG_CUSTOMERS,
-        write_mode="standard",
-        purpose="[TRANSFORM] filter_op(['c','u']) — only inserts/updates land here",
-    ))
-
-    # customers_filter_del — filter_op(ops=["d"])  deletes only
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_filter_del", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_filter_del",
-        schema=_PG_CUSTOMERS,
-        write_mode="standard",
-        purpose="[TRANSFORM] filter_op(['d']) — only delete events land here",
-    ))
-
-    # orders_enriched — enrich_from_broadcast(products_dim, join_col="product_id")
-    _ORDERS_ENRICHED = _with_extra(_PG_ORDERS, [
-        _S("product_id",       LongType(),   True),   # join key
-        _S("product_name",     StringType(), True),   # from products broadcast
-        _S("product_category", StringType(), True),   # from products broadcast
-    ])
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="orders_enriched", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/orders_enriched",
-        schema=_ORDERS_ENRICHED,
-        write_mode="standard",
-        purpose="[TRANSFORM] enrich_from_broadcast() — orders joined with products dim",
-    ))
-
-    # customers_before_after — pivot_before_after() on history_tracking stream
-    _BEFORE_AFTER = StructType([
-        _S("_change_type",  StringType(),    True),
-        _S("_change_ts",    TimestampType(), True),
-        _S("before_id",     LongType(),      True),
-        _S("before_name",   StringType(),    True),
-        _S("before_email",  StringType(),    True),
-        _S("before_status", StringType(),    True),
-        _S("after_id",      LongType(),      True),
-        _S("after_name",    StringType(),    True),
-        _S("after_email",   StringType(),    True),
-        _S("after_status",  StringType(),    True),
-    ])
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_before_after", pk_col="after_id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_before_after",
-        schema=_BEFORE_AFTER,
-        write_mode="history_tracking",
-        purpose="[TRANSFORM] pivot_before_after() — before_* + after_* side by side",
-    ))
-
-    # customers_nullcoal — null_coalesce({"country": "N/A", "phone": "UNKNOWN"})
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="customers_nullcoal", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/customers_nullcoal",
-        schema=_PG_CUSTOMERS,
-        write_mode="standard",
-        purpose="[TRANSFORM] null_coalesce() — NULL country/phone replaced with defaults",
-    ))
-
-    # event_counts — aggregate_counts(pk_col="id", op_col="_op", out_col="event_count")
-    _EVENT_COUNTS = StructType([
-        _S("id",          LongType(),   False),
-        _S("_op",         StringType(), True),
-        _S("event_count", LongType(),   True),
-    ])
-    reg.append(dict(
-        group="transforms", source_key="postgres", catalog="postgres",
-        namespace=E2E_NS, table="event_counts", pk_col="id",
-        s3_prefix=f"iceberg/pg_e2e/{E2E_NS}/event_counts",
-        schema=_EVENT_COUNTS,
-        write_mode="standard",
-        purpose="[TRANSFORM] aggregate_counts() — events per (customer_id, op)",
-    ))
 
     return reg
 

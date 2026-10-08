@@ -4,35 +4,22 @@
 #
 # PURPOSE
 # ───────
-# Creates (or idempotently updates) a Databricks Job that runs
-# nb_multi_table_auto_reader on a cron schedule.
+# Uploads nb_multi_table_auto_reader to the Databricks Workspace and
+# triggers a SINGLE on-demand run.  No scheduled job is created.
 #
-# The job:
-#   • Runs nb_multi_table_auto_reader every 15 minutes (configurable)
-#   • Uses the Serverless Starter Warehouse for SQL (no cluster spin-up cost)
-#   • Runs as a Notebook task on a new-cluster (single-node, DBR 16.4 LTS)
-#   • Sends an email alert on failure
+# Run this manually whenever you want to refresh the Iceberg → Delta views.
 #
 # WHAT IT DOES
 # ─────────────
 #   1. Reads host + PAT from OpenBao  secret/data/platform/databricks
 #   2. Uploads nb_multi_table_auto_reader.py to /Shared/stardata/
-#   3. Checks if a job named JOB_NAME already exists
-#      — if yes: resets (updates) it in-place
-#      — if no : creates a new job
-#   4. Optionally triggers one immediate run (--run-now flag)
-#   5. Prints the Job URL
+#   3. Creates a one-time job (no schedule / cron) and immediately triggers it
+#   4. Prints the Run URL so you can monitor progress
 #
 # USAGE
 # ─────
-#   # Create/update the job (15-min default):
+#   # Upload notebook + trigger one run:
 #   bash scripts/databricks/create_databricks_job.sh
-#
-#   # Create + trigger one run immediately:
-#   bash scripts/databricks/create_databricks_job.sh --run-now
-#
-#   # Override schedule (any valid Quartz cron):
-#   CRON="0 0 * * * ?"  bash scripts/databricks/create_databricks_job.sh
 #
 #   # Override Databricks creds directly (skips OpenBao):
 #   DB_HOST=dbc-xxx.cloud.databricks.com \
@@ -44,12 +31,6 @@
 # =============================================================================
 set -euo pipefail
 
-# ── Flags ─────────────────────────────────────────────────────────────────────
-RUN_NOW=false
-for arg in "$@"; do
-    [[ "${arg}" == "--run-now" ]] && RUN_NOW=true
-done
-
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -57,11 +38,7 @@ NOTEBOOK_SRC="${REPO_ROOT}/docker/databricks-notebooks/nb_multi_table_auto_reade
 NOTEBOOK_WORKSPACE_PATH="/Shared/stardata/nb_multi_table_auto_reader"
 
 # ── Job config ─────────────────────────────────────────────────────────────────
-JOB_NAME="stardata-iceberg-auto-refresh"
-# Quartz cron: "0 0/15 * * * ?" = every 15 minutes
-# Override via env: CRON="0 0 * * * ?" for hourly, etc.
-CRON="${CRON:-0 0/15 * * * ?}"
-TIMEZONE="UTC"
+JOB_NAME="stardata-iceberg-on-demand-refresh"
 # Notification email — leave blank to skip
 NOTIFY_EMAIL="${NOTIFY_EMAIL:-}"
 
@@ -164,22 +141,15 @@ else
     EMAIL_BLOCK='{"on_failure":[],"on_start":[],"on_success":[]}'
 fi
 
-# ── Step 4: Build job definition JSON ─────────────────────────────────────────
-log "=== Step 3: Building job definition ==="
+# ── Step 4: Build job definition (no schedule) ────────────────────────────────
+log "=== Step 3: Building on-demand job definition ==="
 
 JOB_JSON=$(jq -n \
     --arg name       "${JOB_NAME}" \
-    --arg cron       "${CRON}" \
-    --arg tz         "${TIMEZONE}" \
     --arg nb_path    "${NOTEBOOK_WORKSPACE_PATH}" \
     --argjson emails "${EMAIL_BLOCK}" \
 '{
   "name": $name,
-  "schedule": {
-    "quartz_cron_expression": $cron,
-    "timezone_id": $tz,
-    "pause_status": "UNPAUSED"
-  },
   "tasks": [
     {
       "task_key": "auto_refresh",
@@ -207,12 +177,36 @@ JOB_JSON=$(jq -n \
   "format": "MULTI_TASK"
 }')
 
-ok "Job definition built: name=${JOB_NAME}, cron=${CRON}, compute=serverless"
+ok "Job definition built: name=${JOB_NAME}, compute=serverless, no schedule"
 
-# ── Step 5: Create or update the job ──────────────────────────────────────────
-log "=== Step 4: Creating / updating Databricks Job ==="
+# ── Step 5: Delete old scheduled job if it still exists ───────────────────────
+log "=== Step 4: Cleaning up old scheduled job (if present) ==="
 
-# Check if job with this name already exists
+OLD_JOB_NAME="stardata-iceberg-auto-refresh"
+OLD_NAME_ENC=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "${OLD_JOB_NAME}")
+OLD_LIST=$(curl -sf \
+    -H "Authorization: Bearer ${DB_TOKEN}" \
+    "${DB_API}/2.1/jobs/list?name=${OLD_NAME_ENC}") || OLD_LIST="{}"
+OLD_JOB_ID=$(echo "${OLD_LIST}" | jq -r '.jobs // [] | .[0].job_id // empty')
+
+if [[ -n "${OLD_JOB_ID}" ]]; then
+    log "  Found old scheduled job '${OLD_JOB_NAME}' (id=${OLD_JOB_ID}) — deleting..."
+    DEL_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Authorization: Bearer ${DB_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"job_id\": ${OLD_JOB_ID}}" \
+        "${DB_API}/2.1/jobs/delete")
+    DEL_STATUS=$(echo "${DEL_RESP}" | tail -1)
+    [[ "${DEL_STATUS}" == "200" ]] || \
+        log "  Warning: delete returned HTTP ${DEL_STATUS} (may already be gone)"
+    ok "Old scheduled job deleted"
+else
+    ok "No old scheduled job found — nothing to clean up"
+fi
+
+# ── Step 6: Create or update the on-demand job ────────────────────────────────
+log "=== Step 5: Creating / updating on-demand job ==="
+
 JOB_NAME_ENC=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "${JOB_NAME}")
 LIST_RESP=$(curl -sf \
     -H "Authorization: Bearer ${DB_TOKEN}" \
@@ -221,7 +215,7 @@ LIST_RESP=$(curl -sf \
 EXISTING_JOB_ID=$(echo "${LIST_RESP}" | jq -r '.jobs // [] | .[0].job_id // empty')
 
 if [[ -n "${EXISTING_JOB_ID}" ]]; then
-    log "  Job '${JOB_NAME}' already exists (id=${EXISTING_JOB_ID}) - resetting in-place..."
+    log "  Job '${JOB_NAME}' already exists (id=${EXISTING_JOB_ID}) — resetting in-place..."
     RESET_PAYLOAD=$(jq -n --argjson jid "${EXISTING_JOB_ID}" --argjson spec "${JOB_JSON}" \
         '{"job_id": $jid, "new_settings": $spec}')
     RESET_RESP=$(curl -s -w "\n%{http_code}" -X POST \
@@ -235,7 +229,7 @@ if [[ -n "${EXISTING_JOB_ID}" ]]; then
     JOB_ID="${EXISTING_JOB_ID}"
     ok "Job reset (updated) - job_id=${JOB_ID}"
 else
-    log "  Creating new job '${JOB_NAME}'..."
+    log "  Creating new on-demand job '${JOB_NAME}'..."
     CREATE_RESP=$(curl -s -w "\n%{http_code}" -X POST \
         -H "Authorization: Bearer ${DB_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -249,40 +243,38 @@ else
     ok "Job created — job_id=${JOB_ID}"
 fi
 
-# ── Step 6: Optional immediate run ────────────────────────────────────────────
-if [[ "${RUN_NOW}" == "true" ]]; then
-    log "=== Step 5: Triggering immediate run ==="
-    RUN_RESP=$(curl -s -w "\n%{http_code}" -X POST \
-        -H "Authorization: Bearer ${DB_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "{\"job_id\": ${JOB_ID}}" \
-        "${DB_API}/2.1/jobs/run-now")
-    RUN_BODY=$(echo "${RUN_RESP}"   | head -n -1)
-    RUN_STATUS=$(echo "${RUN_RESP}" | tail -1)
-    [[ "${RUN_STATUS}" == "200" ]] || \
-        die "run-now failed (HTTP ${RUN_STATUS}): ${RUN_BODY}"
-    RUN_ID=$(echo "${RUN_BODY}" | jq -r '.run_id')
-    ok "Run triggered — run_id=${RUN_ID}"
-    ok "Run URL: https://${DB_HOST}/#job/${JOB_ID}/run/${RUN_ID}"
-fi
+# ── Step 7: Trigger immediate run ─────────────────────────────────────────────
+log "=== Step 6: Triggering on-demand run ==="
+RUN_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+    -H "Authorization: Bearer ${DB_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"job_id\": ${JOB_ID}}" \
+    "${DB_API}/2.1/jobs/run-now")
+RUN_BODY=$(echo "${RUN_RESP}"   | head -n -1)
+RUN_STATUS=$(echo "${RUN_RESP}" | tail -1)
+[[ "${RUN_STATUS}" == "200" ]] || \
+    die "run-now failed (HTTP ${RUN_STATUS}): ${RUN_BODY}"
+RUN_ID=$(echo "${RUN_BODY}" | jq -r '.run_id')
+ok "Run triggered — run_id=${RUN_ID}"
 
 # ── Final summary ─────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  ✅  DATABRICKS JOB READY"
+echo "  ✅  ON-DEMAND REFRESH TRIGGERED"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  Job name  : ${JOB_NAME}"
 echo "  Job ID    : ${JOB_ID}"
-echo "  Schedule  : ${CRON}  (${TIMEZONE}) - every 15 min by default"
+echo "  Run ID    : ${RUN_ID}"
+echo "  Schedule  : none (on-demand only)"
 echo "  Notebook  : ${NOTEBOOK_WORKSPACE_PATH}"
 echo "  Compute   : Serverless (no cluster spin-up cost)"
 echo ""
-echo "  📎 View job:"
-echo "     https://${DB_HOST}/#job/${JOB_ID}"
+echo "  📎 Monitor this run:"
+echo "     https://${DB_HOST}/#job/${JOB_ID}/run/${RUN_ID}"
 echo ""
-echo "  ▶ Trigger a manual run now:"
-echo "     bash scripts/databricks/create_databricks_job.sh --run-now"
+echo "  ▶ To trigger another refresh:"
+echo "     bash scripts/databricks/create_databricks_job.sh"
 echo ""
 echo "  ℹ️  On each run the job will:"
 echo "     1. Auto-discover all Iceberg tables under s3://stardata-databricks/iceberg/warehouse/"

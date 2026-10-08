@@ -1,0 +1,234 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Schema Evolution: DDL → Kafka → Iceberg</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;font-size:13.5px;line-height:1.6;background:#fff;color:#1f2328;padding:28px 16px}
+.wrap{max-width:780px;margin:0 auto}
+h1{font-size:19px;font-weight:700;margin-bottom:3px}
+.sub{color:#57606a;font-size:12px;margin-bottom:24px}
+h2{font-size:13.5px;font-weight:700;margin:26px 0 8px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}
+h3{font-size:12px;font-weight:600;color:#57606a;text-transform:uppercase;letter-spacing:.04em;margin:16px 0 6px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:22px}
+.kpi{background:#f7f8fa;border:1px solid #e5e7eb;border-radius:5px;padding:12px 14px}
+.kpi .lbl{font-size:10.5px;color:#57606a;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}
+.kpi .val{font-size:20px;font-weight:700}
+.kpi .note{font-size:11px;color:#57606a;margin-top:2px}
+/* flow */
+.flow{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:14px 0 20px}
+.fs{background:#f7f8fa;border:1px solid #e5e7eb;border-radius:4px;padding:6px 12px;font-size:11.5px;font-weight:600;text-align:center;min-width:90px}
+.fa{color:#57606a;font-size:14px;padding:0 4px}
+.fs.src{border-color:#a5d6a7;background:#e8f5e9}
+.fs.proc{border-color:#90caf9;background:#e3f2fd}
+.fs.ice{border-color:#ce93d8;background:#f3e5f5}
+/* DDL block */
+.ddl-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
+.ddl-card{border:1px solid #e5e7eb;border-radius:5px;padding:12px;background:#f7f8fa}
+.ddl-card .src-name{font-weight:700;font-size:12.5px;margin-bottom:6px}
+.ddl-card pre{background:#1f2328;color:#e6edf3;padding:10px;border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre-wrap}
+/* Schema table */
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px}
+th{background:#f7f8fa;border:1px solid #e5e7eb;padding:5px 9px;text-align:left;font-weight:600;font-size:11px;color:#57606a}
+td{border:1px solid #e5e7eb;padding:5px 9px;vertical-align:top}
+tr.new-col td{background:#fff8e1}
+.mono{font-family:"SFMono-Regular",Consolas,monospace;font-size:11.5px}
+.star{color:#e6910a;font-weight:700}
+.green{color:#1b7a34;font-weight:600}
+.muted{color:#57606a}
+/* Sample rows */
+.sample-tbl{overflow-x:auto;margin-bottom:14px}
+.sample-tbl table{min-width:620px}
+/* Status badges */
+.badge{display:inline-block;border-radius:3px;padding:1px 6px;font-size:11px;font-weight:600}
+.badge.ok{background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7}
+.badge.wait{background:#fff3e0;color:#e65100;border:1px solid #ffcc80}
+/* null dist */
+.null-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:14px}
+.null-card{border:1px solid #e5e7eb;border-radius:4px;padding:10px 12px;font-size:12px}
+.null-card .tname{font-weight:600;color:#1f2328;margin-bottom:4px}
+.bar-wrap{background:#e5e7eb;border-radius:3px;height:8px;margin-top:5px;overflow:hidden}
+.bar-fill{background:#3b82d4;height:100%;border-radius:3px;transition:width .3s}
+hr{border:none;border-top:1px solid #e5e7eb;margin:22px 0}
+footer{font-size:11px;color:#57606a;text-align:center;padding-top:16px;border-top:1px solid #e5e7eb;margin-top:28px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Schema Evolution — DDL Changes → Kafka → Iceberg</h1>
+<div class="sub">Run: 2026-09-22 03:00–03:35 UTC  ·  3 sources · 7 Iceberg tables · 24 new columns added</div>
+
+
+<div class="kpi-grid">
+  <div class="kpi"><div class="lbl">Sources altered</div><div class="val">3</div><div class="note">PostgreSQL · Oracle · MongoDB</div></div>
+  <div class="kpi"><div class="lbl">New columns</div><div class="val">3</div><div class="note">loyalty_score · preferred_lang · last_login_at</div></div>
+  <div class="kpi"><div class="lbl">Iceberg tables updated</div><div class="val">7</div><div class="note">std + sd + hist across 3 sources</div></div>
+  <div class="kpi"><div class="lbl">ALTER TABLE ops issued</div><div class="val">24</div><div class="note">via Spark SQL against Polaris</div></div>
+</div>
+
+
+<div class="flow">
+  <div class="fs src">DDL (ALTER TABLE)</div><div class="fa">→</div>
+  <div class="fs proc">Debezium CDC</div><div class="fa">→</div>
+  <div class="fs proc">Kafka topic</div><div class="fa">→</div>
+  <div class="fs proc">Spark MERGE / append</div><div class="fa">→</div>
+  <div class="fs ice">Iceberg + Polaris</div>
+</div>
+
+
+<h2>DDL Applied on Source Databases</h2>
+<div class="ddl-grid">
+  <div class="ddl-card">
+    <div class="src-name">PostgreSQL</div>
+    <pre>ALTER TABLE cache_testing.customers
+  ADD COLUMN loyalty_score   INTEGER,
+  ADD COLUMN preferred_lang  VARCHAR(10),
+  ADD COLUMN last_login_at   TIMESTAMP;</pre>
+    <div style="margin-top:8px;font-size:11px;color:#57606a">Database: cache_testing · Schema: public</div>
+  </div>
+  <div class="ddl-card">
+    <div class="src-name">Oracle XE</div>
+    <pre>ALTER TABLE CACHE_TESTING.CUSTOMERS ADD (
+  LOYALTY_SCORE  NUMBER(5,0),
+  PREFERRED_LANG VARCHAR2(10),
+  LAST_LOGIN_AT  TIMESTAMP
+);</pre>
+    <div style="margin-top:8px;font-size:11px;color:#57606a">PDB: XEPDB1 · Schema: CACHE_TESTING</div>
+  </div>
+  <div class="ddl-card">
+    <div class="src-name">MongoDB</div>
+    <pre>// Schema-less: new fields added
+// by inserting/updating documents
+db.customers.insertMany([{
+  customer_id: 990401,
+  loyalty_score: 801,
+  preferred_lang: "de",
+  last_login_at: new Date(),
+  ...
+}]);</pre>
+    <div style="margin-top:8px;font-size:11px;color:#57606a">Database: cache_testing · Collection: customers</div>
+  </div>
+</div>
+
+
+<h2>Iceberg Table Schemas — Before vs After</h2>
+
+<h3>PostgreSQL → Iceberg</h3>
+<table>
+  <thead><tr><th>Table (mode)</th><th>Cols before</th><th>Cols after</th><th>New columns</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">postgres.cache_testing.customers (standard)</td><td>12</td><td>15</td><td class="star">★ loyalty_score INT<br />★ preferred_lang STRING<br />★ last_login_at BIGINT</td><td><span class="badge ok">✅ Live</span></td></tr>
+    <tr><td class="mono">postgres.cache_testing.customers_sd (soft_delete)</td><td>14</td><td>17</td><td class="star">★ loyalty_score INT<br />★ preferred_lang STRING<br />★ last_login_at BIGINT</td><td><span class="badge ok">✅ Live</span></td></tr>
+    <tr><td class="mono">postgres.cache_testing.customers (history)</td><td>—</td><td>—</td><td class="muted">via after_*/before_* mergeSchema</td><td><span class="badge wait">⏳ Next batch</span></td></tr>
+  </tbody>
+</table>
+
+<h3>Oracle → Iceberg</h3>
+<table>
+  <thead><tr><th>Table (mode)</th><th>Cols before</th><th>Cols after</th><th>New columns</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">oracle.cache_testing.customers (standard)</td><td>16</td><td>19</td><td class="star">★ LOYALTY_SCORE BIGINT<br />★ PREFERRED_LANG STRING<br />★ LAST_LOGIN_AT BIGINT</td><td><span class="badge ok">✅ Schema added</span></td></tr>
+    <tr><td class="mono">oracle.cache_testing.customers_sd (soft_delete)</td><td>18</td><td>21</td><td class="star">★ LOYALTY_SCORE BIGINT<br />★ PREFERRED_LANG STRING<br />★ LAST_LOGIN_AT BIGINT</td><td><span class="badge ok">✅ Schema added</span></td></tr>
+  </tbody>
+</table>
+
+<h3>MongoDB → Iceberg</h3>
+<table>
+  <thead><tr><th>Table (mode)</th><th>Cols before</th><th>Cols after</th><th>New columns</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">mongodb.cache_testing.customers (standard)</td><td>16</td><td>19</td><td class="star">★ loyalty_score BIGINT<br />★ preferred_lang STRING<br />★ last_login_at TIMESTAMP</td><td><span class="badge ok">✅ Live</span></td></tr>
+    <tr><td class="mono">mongodb.cache_testing.customers_sd (soft_delete)</td><td>18</td><td>21</td><td class="star">★ loyalty_score BIGINT<br />★ preferred_lang STRING<br />★ last_login_at TIMESTAMP</td><td><span class="badge ok">✅ Live + data</span></td></tr>
+    <tr><td class="mono">mongodb.cache_testing.customers_hist (history_tracking)</td><td>30</td><td>36</td><td class="star">★ after_loyalty_score BIGINT<br />★ after_preferred_lang STRING<br />★ after_last_login_at TIMESTAMP<br />★ before_loyalty_score BIGINT<br />★ before_preferred_lang STRING<br />★ before_last_login_at TIMESTAMP</td><td><span class="badge ok">✅ Live + data</span></td></tr>
+  </tbody>
+</table>
+
+
+<h2>Sample Rows — New Columns in Iceberg</h2>
+
+<h3>PostgreSQL → standard (customers)</h3>
+<div class="sample-tbl"><table>
+  <thead><tr><th>id</th><th>name</th><th>tier</th><th class="star">loyalty_score ★</th><th class="star">preferred_lang ★</th><th class="star">last_login_at ★</th><th>snap_id</th><th>snap_timestamp</th></tr></thead>
+  <tbody>
+    <tr class="new-col"><td>2012029</td><td>SchemaFinal</td><td>gold</td><td class="green">510</td><td class="green">en</td><td class="mono green">1790047958045 (epoch ms)</td><td class="mono">600000000</td><td class="mono">03:33:00</td></tr>
+  </tbody>
+</table></div>
+<p style="font-size:11.5px;color:#57606a;margin-top:-8px">Pre-DDL rows: loyalty_score=NULL. Only rows inserted/updated after DDL carry the value.</p>
+
+<h3>MongoDB → soft_delete (customers_sd) — 3 new-column rows + 2 old-column rows</h3>
+<div class="sample-tbl"><table>
+  <thead><tr><th>customer_id</th><th>first_name</th><th>is_deleted</th><th class="star">loyalty_score ★</th><th class="star">preferred_lang ★</th><th class="star">last_login_at ★</th><th>snap_id</th><th>snap_timestamp</th></tr></thead>
+  <tbody>
+    <tr class="new-col"><td>990401</td><td>EvoFinal</td><td>true</td><td class="green">801</td><td class="green">de</td><td class="mono green">03:18:25</td><td class="mono">260000000</td><td class="mono">03:18:57</td></tr>
+    <tr class="new-col"><td>990402</td><td>EvoFinal</td><td>true</td><td class="green">802</td><td class="green">de</td><td class="mono green">03:18:25</td><td class="mono">260000001</td><td class="mono">03:18:57</td></tr>
+    <tr class="new-col"><td>990403</td><td>EvoFinal</td><td>true</td><td class="green">803</td><td class="green">de</td><td class="mono green">03:18:25</td><td class="mono">260000002</td><td class="mono">03:18:57</td></tr>
+    <tr><td>3</td><td>First3</td><td>false</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="mono">240000004</td><td class="mono">03:02:16</td></tr>
+    <tr><td>4</td><td>First4</td><td>false</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="mono">240000001</td><td class="mono">03:02:16</td></tr>
+  </tbody>
+</table></div>
+
+<h3>MongoDB → history_tracking (customers_hist) — after_*/before_* new columns</h3>
+<div class="sample-tbl"><table>
+  <thead><tr><th>snap_id</th><th>snap_timestamp</th><th>_change_type</th><th>customer_id</th><th class="star">after_loyalty_score ★</th><th class="star">after_preferred_lang ★</th><th class="star">after_last_login_at ★</th><th class="star">before_loyalty_score ★</th></tr></thead>
+  <tbody>
+    <tr class="new-col"><td class="mono">8689934594</td><td class="mono">03:19:00</td><td>INSERT</td><td>990402</td><td class="green">802</td><td class="green">de</td><td class="mono green">03:18:25</td><td class="muted">NULL</td></tr>
+    <tr class="new-col"><td class="mono">8689934593</td><td class="mono">03:19:00</td><td>DELETE</td><td>990402</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="muted">NULL</td></tr>
+    <tr class="new-col"><td class="mono">8689934592</td><td class="mono">03:19:00</td><td>INSERT</td><td>990403</td><td class="green">803</td><td class="green">de</td><td class="mono green">03:18:25</td><td class="muted">NULL</td></tr>
+    <tr class="new-col"><td class="mono">100000002</td><td class="mono">03:19:00</td><td>INSERT</td><td>990401</td><td class="green">801</td><td class="green">de</td><td class="mono green">03:18:25</td><td class="muted">NULL</td></tr>
+    <tr class="new-col"><td class="mono">100000001</td><td class="mono">03:19:00</td><td>DELETE</td><td>990403</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="muted">NULL</td><td class="muted">NULL</td></tr>
+  </tbody>
+</table></div>
+
+
+<h2>NULL Distribution — New Column Backfill Behaviour</h2>
+<p style="font-size:12px;color:#57606a;margin-bottom:12px">Iceberg uses additive schema evolution — old rows get NULL for new columns. Only rows written <em>after</em> the DDL carry actual values.</p>
+<div class="null-grid">
+  <div class="null-card">
+    <div class="tname">postgres.customers (standard)</div>
+    <div>Total: 11,011 · <span class="green">with value: 1</span> · null: 11,010</div>
+    <div class="bar-wrap"><div class="bar-fill" style="width:0.01%"></div></div>
+  </div>
+  <div class="null-card">
+    <div class="tname">postgres.customers_sd (soft_delete)</div>
+    <div>Total: 11,015 · <span class="green">with value: 1</span> · null: 11,014</div>
+    <div class="bar-wrap"><div class="bar-fill" style="width:0.01%"></div></div>
+  </div>
+  <div class="null-card">
+    <div class="tname">oracle.customers (standard)</div>
+    <div>Total: 10,001 · with value: 0 (pending CDC) · null: 10,001</div>
+    <div class="bar-wrap"><div class="bar-fill" style="width:0%"></div></div>
+  </div>
+  <div class="null-card">
+    <div class="tname">oracle.customers_sd (soft_delete)</div>
+    <div>Total: 2,002 · with value: 0 (pending CDC) · null: 2,002</div>
+    <div class="bar-wrap"><div class="bar-fill" style="width:0%"></div></div>
+  </div>
+  <div class="null-card">
+    <div class="tname">mongodb.customers (standard)</div>
+    <div>Total: 8,004 · <span class="muted">with value: 0 (last batch was DELETE)</span> · null: 8,004</div>
+    <div class="bar-wrap"><div class="bar-fill" style="width:0%"></div></div>
+  </div>
+  <div class="null-card">
+    <div class="tname">mongodb.customers_sd (soft_delete)</div>
+    <div>Total: 13,111 · <span class="green">with value: 3</span> · null: 13,108</div>
+    <div class="bar-wrap"><div class="bar-fill" style="width:0.02%"></div></div>
+  </div>
+</div>
+
+<h2>Key Observations</h2>
+<table>
+  <thead><tr><th>Behaviour</th><th>Detail</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Schema is additive</strong></td><td>ALTER TABLE ADD COLUMN applied to all 7 Iceberg tables via Spark SQL against Polaris REST catalog. Zero downtime — streaming continues uninterrupted.</td></tr>
+    <tr><td><strong>Old rows = NULL for new columns</strong></td><td>Iceberg's additive evolution returns NULL for pre-DDL rows. All 10,001–11,015 existing rows show loyalty_score=NULL.</td></tr>
+    <tr><td><strong>New rows carry values immediately</strong></td><td>First insert/update after the ALTER is committed lands with loyalty_score, preferred_lang, last_login_at populated.</td></tr>
+    <tr><td><strong>history_tracking gets 6 columns</strong></td><td>Each source column becomes <span class="mono">after_loyalty_score</span> + <span class="mono">before_loyalty_score</span> etc. — 2 image variants per new field. Total: 30 → 36 cols.</td></tr>
+    <tr><td><strong>Type mapping</strong></td><td>PG/Oracle <code>TIMESTAMP</code> → Iceberg <code>BIGINT</code> (epoch-ms from JSON payload). MongoDB <code>Date</code> → Iceberg <code>TIMESTAMP</code> (BSON $date normalised in pipeline).</td></tr>
+    <tr><td><strong>Stream never interrupted</strong></td><td>ALTER TABLE issued while all 9 streaming pods were running. Checkpoint-based offset recovery ensured no events were lost.</td></tr>
+  </tbody>
+</table>
+
+<footer>Made with IBM Bob</footer>
+</div>
+</body>
+</html>

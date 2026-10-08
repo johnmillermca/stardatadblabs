@@ -14,10 +14,9 @@
 4. [Topic Mapping](#4-topic-mapping)
 5. [Write Modes Comparison](#5-write-modes-comparison)
 6. [Iceberg Table Design](#6-iceberg-table-design)
-7. [StarTransform](#7-startransform)
-8. [Performance Tuning](#8-performance-tuning)
-9. [Security](#9-security)
-10. [Operational Commands](#10-operational-commands)
+7. [Performance Tuning](#7-performance-tuning)
+8. [Security](#8-security)
+9. [Operational Commands](#9-operational-commands)
 
 ---
 
@@ -75,8 +74,7 @@
 │  │                                                                          │        │
 │  │  1. Avro deserialise (Schema Registry UDF)                               │        │
 │  │  2. Parse Debezium envelope  (before / after / op / source / ts_ms)      │        │
-│  │  3. StarTransform pipeline   (deduplicate, mask_pii, add_op_label, ...)  │        │
-│  │  4. foreachBatch → Iceberg MERGE / append                                │        │
+│  │  3. foreachBatch → Iceberg MERGE / append                                │        │
 │  └─────────────────────────────────────────────────────────────────────────┘        │
 │                                                                                     │
 │  Active deployment (replicas=1):  kafka-to-iceberg-standard                        │
@@ -119,8 +117,6 @@
 | Polaris REST Catalog | Iceberg metastore & REST API | Internal cluster service | OAuth2; catalogs: `postgres`, `oracle`, `mongodb` |
 | S3 Object Storage | Parquet data files & metadata | `s3://xdatatoiceberg1/iceberg/` | Iceberg format-version 2 |
 | OpenBao | Secrets management (credentials) | `http://openbao.prod.svc.cluster.local:8200` | Kafka SCRAM, DB passwords, S3 keys |
-| StarTransform (`star_transform.py`) | Reusable DataFrame transform functions | Bundled in Spark image | See Section 7 |
-
 ---
 
 ## 3. Data Flow
@@ -169,17 +165,10 @@ Step 6  AVRO DESERIALISATION
 
 Step 7  ENVELOPE PARSING
         The streaming job extracts before, after, op, and ts_ms from each envelope.
-        For before/after (JSON strings): ST.flatten_json_col() or inline fromJson().
+        The streaming job extracts before, after, op, and ts_ms from each envelope,
+        using inline fromJson() or from_json() for nested JSON strings.
 
-Step 8  STARTRANSFORM PIPELINE
-        Configurable steps (TRANSFORM_PIPELINE env var) are applied in sequence:
-          deduplicate      → last-write-wins per PK within the micro-batch
-          mask_pii         → SHA-256 hash PII_COLUMNS (email, phone, ssn, …)
-          add_processing_time → inject proc_time TIMESTAMP
-          add_op_label     → human-readable INSERT/UPDATE/DELETE label
-          add_source_tag   → inject source_system STRING
-
-Step 9  foreachBatch — WRITE MODE DISPATCH
+Step 8  foreachBatch — WRITE MODE DISPATCH
         The active WRITE_MODE determines the Iceberg operation:
           standard         → MERGE upsert + hard DELETE
           soft_delete      → MERGE upsert + logical DELETE (is_deleted flag)
@@ -316,61 +305,7 @@ Every row in every Iceberg table written by this pipeline carries two system col
 
 ---
 
-## 7. StarTransform
-
-### What It Is
-
-`star_transform.py` is a library of reusable PySpark DataFrame transformation functions bundled inside the Spark image. Import it as:
-
-```python
-import star_transform as ST
-```
-
-All functions accept a Spark DataFrame as their first argument and return a transformed DataFrame, making them composable.
-
-### Available Functions
-
-| Function | Signature | Description |
-|---|---|---|
-| `filter_op` | `(df, ops=["c","u"])` | Keep rows matching Debezium op codes (`c`=INSERT, `u`=UPDATE, `d`=DELETE, `r`=snapshot) |
-| `deduplicate` | `(pk, order_col="kafka_ts")` | Last-write-wins deduplication per PK within a micro-batch |
-| `add_processing_time` | `(col_name="proc_time")` | Inject current TIMESTAMP as a new column |
-| `rename_columns` | `(mapping)` | Rename columns; `mapping` = `{old_name: new_name, …}` |
-| `cast_columns` | `(casts)` | Cast columns; `casts` = `{col_name: "target_type", …}` |
-| `drop_columns` | `(columns)` | Drop a list of column names |
-| `mask_columns` | `(columns, algorithm="sha256")` | Replace PII columns with SHA-256 hex digest |
-| `add_source_tag` | `(source_system, col_name="source_system")` | Inject a literal STRING column with the source system name |
-| `add_op_label` | `(op_col="_op", label_col="op_label")` | Map op codes to `"INSERT"` / `"UPDATE"` / `"DELETE"` |
-| `flatten_json_col` | `(json_col, schema, prefix="")` | Parse a JSON string column into typed columns using the provided schema |
-| `enrich_from_broadcast` | `(dim_df, join_col, select_cols, how="left")` | Broadcast-join a small dimension DataFrame onto the stream |
-| `aggregate_counts` | `(pk_col, op_col, out_col)` | Count operations per (pk, op) — useful for metrics |
-| `pivot_before_after` | `(before_col, after_col, schema)` | Expand Debezium `before` / `after` JSON strings to `before_<col>` and `after_<col>` pairs |
-| `filter_columns` | `(keep)` | Project — keep only listed columns |
-| `null_coalesce` | `(defaults)` | `coalesce(col, default)` for each entry in `defaults` dict |
-| `route_by_topic` | `(df)` | Split a multi-topic DataFrame into a `{topic_name: DataFrame}` dict |
-| `apply_pipeline` | `(df, [(fn, kwargs), …])` | Chain a list of `(function_reference, kwargs_dict)` steps |
-
-### Example Pipeline
-
-```python
-import star_transform as ST
-
-def transform(df):
-    return ST.apply_pipeline(df, [
-        (ST.filter_op,           {"ops": ["c", "u", "d"]}),
-        (ST.deduplicate,         {"pk": "customer_id", "order_col": "kafka_ts"}),
-        (ST.mask_columns,        {"columns": ["email", "phone"], "algorithm": "sha256"}),
-        (ST.add_processing_time, {"col_name": "proc_time"}),
-        (ST.add_op_label,        {"op_col": "op", "label_col": "op_label"}),
-        (ST.add_source_tag,      {"source_system": "postgres", "col_name": "source_system"}),
-    ])
-```
-
-The `TRANSFORM_PIPELINE` environment variable selects named steps; custom pipelines can be coded directly as shown above.
-
----
-
-## 8. Performance Tuning
+## 7. Performance Tuning
 
 ### Normal-Operation Settings
 
@@ -423,7 +358,7 @@ SET spark.sql.adaptive.skewJoin.enabled = true;
 
 ---
 
-## 9. Security
+## 8. Security
 
 ### Kafka — SASL/SCRAM-SHA-512
 
@@ -493,7 +428,7 @@ curl -H "X-Vault-Token: <token>" \
 
 ---
 
-## 10. Operational Commands
+## 9. Operational Commands
 
 ### Start / Stop / Switch Write Modes
 

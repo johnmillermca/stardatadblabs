@@ -1,0 +1,364 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Oracle → Kafka → Iceberg: 10,000-Row Bulk Load</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.6;
+    background: #ffffff; color: #1f2328;
+    padding: 32px 16px;
+  }
+  .page { max-width: 760px; margin: 0 auto; }
+
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: #57606a; font-size: 13px; margin-bottom: 28px; }
+
+  h2 { font-size: 14px; font-weight: 600; text-transform: uppercase;
+       letter-spacing: .04em; color: #57606a; margin: 28px 0 10px; }
+
+  /* Metric cards */
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 8px; }
+  .metric { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 6px;
+            padding: 14px 16px; }
+  .metric .label { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: .04em; }
+  .metric .value { font-size: 22px; font-weight: 700; color: #1f2328; margin: 2px 0; }
+  .metric .note  { font-size: 11px; color: #57606a; }
+  .metric.accent .value { color: #3b82d4; }
+
+  /* Pipeline timeline */
+  .timeline { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 6px;
+              padding: 16px 20px; margin-bottom: 8px; }
+  .tl-row { display: flex; align-items: center; gap: 12px; padding: 6px 0;
+            border-bottom: 1px solid #e5e7eb; }
+  .tl-row:last-child { border-bottom: none; }
+  .tl-time { font-size: 12px; color: #57606a; width: 190px; flex-shrink: 0; font-family: monospace; }
+  .tl-event { flex: 1; font-size: 13px; }
+  .tl-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 3px;
+              white-space: nowrap; }
+  .badge-oracle  { background: #fff3cd; color: #856404; }
+  .badge-kafka   { background: #d1ecf1; color: #0c5460; }
+  .badge-iceberg { background: #d4edda; color: #155724; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th { background: #f7f8fa; border: 1px solid #e5e7eb;
+             padding: 6px 10px; text-align: left; font-weight: 600; }
+  tbody td { border: 1px solid #e5e7eb; padding: 5px 10px; }
+  tbody tr:nth-child(even) td { background: #fafafa; }
+  .num { text-align: right; font-family: monospace; }
+  .mono { font-family: monospace; font-size: 11.5px; }
+
+  /* Bar chart (SVG-free, CSS only) */
+  .bar-section { margin-bottom: 8px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .bar-label { width: 90px; font-size: 12px; text-align: right; color: #57606a; flex-shrink: 0; }
+  .bar-track { flex: 1; background: #e5e7eb; border-radius: 3px; height: 16px; }
+  .bar-fill  { height: 16px; border-radius: 3px; background: #3b82d4; }
+  .bar-val   { font-size: 12px; width: 80px; color: #1f2328; font-family: monospace; }
+
+  /* Snapshot table */
+  .snap-ok  { color: #155724; font-weight: 600; }
+  .snap-del { color: #721c24; }
+
+  .section-box { border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; margin-bottom: 8px; }
+
+  footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid #e5e7eb;
+           text-align: center; font-size: 12px; color: #57606a; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Oracle → Kafka → Iceberg</h1>
+  <p class="subtitle">10,000-row bulk load · Standard write mode · 2026-09-20 05:28 UTC · oracle.cache_testing.customers</p>
+
+  
+  <h2>End-to-End Performance</h2>
+  <div class="metrics">
+    <div class="metric accent">
+      <div class="label">Oracle INSERT</div>
+      <div class="value">217 ms</div>
+      <div class="note">10,000 rows · 20 × FORALL(500)</div>
+    </div>
+    <div class="metric accent">
+      <div class="label">Kafka → Iceberg</div>
+      <div class="value">~29 s</div>
+      <div class="note">2 streaming batches · 2-s trigger</div>
+    </div>
+    <div class="metric accent">
+      <div class="label">Total E2E Latency</div>
+      <div class="value">~30 s</div>
+      <div class="note">Oracle COMMIT → Iceberg visible</div>
+    </div>
+  </div>
+
+  <div class="metrics" style="margin-top:0">
+    <div class="metric">
+      <div class="label">Rows in Iceberg</div>
+      <div class="value">10,001</div>
+      <div class="note">incl. seed row 9000001</div>
+    </div>
+    <div class="metric">
+      <div class="label">Throughput (ingest)</div>
+      <div class="value">~345/s</div>
+      <div class="note">rows / Kafka→Iceberg seconds</div>
+    </div>
+    <div class="metric">
+      <div class="label">Snapshots Created</div>
+      <div class="value">5</div>
+      <div class="note">2 appends for this bulk load</div>
+    </div>
+  </div>
+
+  
+  <h2>Pipeline Timeline</h2>
+  <div class="timeline">
+    <div class="tl-row">
+      <span class="tl-time">05:28:34.398 UTC</span>
+      <span class="tl-event">PL/SQL FORALL loop begins — 10,000 rows, 20 batches × 500</span>
+      <span class="tl-badge badge-oracle">Oracle</span>
+    </div>
+    <div class="tl-row">
+      <span class="tl-time">05:28:34.615 UTC</span>
+      <span class="tl-event">COMMIT — all 10,000 rows flushed · elapsed: <strong>217 ms</strong></span>
+      <span class="tl-badge badge-oracle">Oracle</span>
+    </div>
+    <div class="tl-row">
+      <span class="tl-time">05:28:34 – 05:28:44</span>
+      <span class="tl-event">Debezium LogMiner captures redo log · publishes to <code>oracle.cache_testing.customers</code> topic</span>
+      <span class="tl-badge badge-kafka">Kafka</span>
+    </div>
+    <div class="tl-row">
+      <span class="tl-time">05:28:47.663 UTC</span>
+      <span class="tl-event">Batch 11 committed — <strong>8,192 rows</strong> upserted · Iceberg snapshot appended</span>
+      <span class="tl-badge badge-iceberg">Iceberg</span>
+    </div>
+    <div class="tl-row">
+      <span class="tl-time">05:29:03.327 UTC</span>
+      <span class="tl-event">Batch 12 committed — <strong>1,808 rows</strong> upserted · Iceberg snapshot appended</span>
+      <span class="tl-badge badge-iceberg">Iceberg</span>
+    </div>
+    <div class="tl-row">
+      <span class="tl-time">05:29:03 UTC</span>
+      <span class="tl-event">All 10,001 rows visible in <code>oracle.cache_testing.customers</code> — query confirmed</span>
+      <span class="tl-badge badge-iceberg">Iceberg</span>
+    </div>
+  </div>
+
+  
+  <h2>Tier Distribution (10,001 rows)</h2>
+  <div class="bar-section">
+    <div class="bar-row">
+      <span class="bar-label">STANDARD</span>
+      <div class="bar-track"><div class="bar-fill" style="width:39.9%"></div></div>
+      <span class="bar-val">3,994 (39.9%)</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">SILVER</span>
+      <div class="bar-track"><div class="bar-fill" style="width:30.0%"></div></div>
+      <span class="bar-val">3,003 (30.0%)</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">GOLD</span>
+      <div class="bar-track"><div class="bar-fill" style="width:20.0%;background:#7c5cd8"></div></div>
+      <span class="bar-val">2,003 (20.0%)</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">PLATINUM</span>
+      <div class="bar-track"><div class="bar-fill" style="width:10.0%;background:#57606a"></div></div>
+      <span class="bar-val">1,001 (10.0%)</span>
+    </div>
+  </div>
+
+  
+  <h2>Top Countries</h2>
+  <div class="bar-section">
+    <div class="bar-row">
+      <span class="bar-label">AU</span>
+      <div class="bar-track"><div class="bar-fill" style="width:41.7%"></div></div>
+      <span class="bar-val">2,084</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">GB</span>
+      <div class="bar-track"><div class="bar-fill" style="width:33.4%"></div></div>
+      <span class="bar-val">1,668</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">US</span>
+      <div class="bar-track"><div class="bar-fill" style="width:33.4%"></div></div>
+      <span class="bar-val">1,668</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">CA</span>
+      <div class="bar-track"><div class="bar-fill" style="width:25.0%;background:#7c5cd8"></div></div>
+      <span class="bar-val">1,251</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">NZ</span>
+      <div class="bar-track"><div class="bar-fill" style="width:25.0%;background:#7c5cd8"></div></div>
+      <span class="bar-val">1,251</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">KR / SG / JP</span>
+      <div class="bar-track"><div class="bar-fill" style="width:8.3%;background:#57606a"></div></div>
+      <span class="bar-val">417 each</span>
+    </div>
+  </div>
+
+  
+  <h2>Numeric &amp; Boolean Stats</h2>
+  <div class="metrics" style="grid-template-columns:repeat(4,1fr)">
+    <div class="metric">
+      <div class="label">Min Credit</div>
+      <div class="value" style="font-size:18px">$500</div>
+    </div>
+    <div class="metric">
+      <div class="label">Max Credit</div>
+      <div class="value" style="font-size:18px">$10,000</div>
+    </div>
+    <div class="metric">
+      <div class="label">Avg Credit</div>
+      <div class="value" style="font-size:18px">$2,750</div>
+    </div>
+    <div class="metric">
+      <div class="label">Active / Inactive</div>
+      <div class="value" style="font-size:18px">9,501 / 500</div>
+      <div class="note">95% active (IS_ACTIVE='Y')</div>
+    </div>
+  </div>
+
+  
+  <h2>Sample Rows (first 10 by CUSTOMER_ID)</h2>
+  <div class="section-box">
+    <table>
+      <thead>
+        <tr>
+          <th>CUSTOMER_ID</th>
+          <th>FIRST_NAME</th>
+          <th>LAST_NAME</th>
+          <th>CITY</th>
+          <th>CC</th>
+          <th>TIER</th>
+          <th class="num">CREDIT</th>
+          <th>ACT</th>
+          <th>CREATED_AT</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">9000001</td><td>E2E</td><td>OracleStd</td><td>Melbourne</td><td>AU</td><td>GOLD</td><td class="num">2,500</td><td>Y</td><td class="mono">2026-09-20 05:16:24</td></tr>
+        <tr><td class="mono">9000002</td><td>Carol</td><td>Taylor</td><td>Sydney</td><td>AU</td><td>STANDARD</td><td class="num">3,000</td><td>Y</td><td class="mono">2026-03-07 05:28:34</td></tr>
+        <tr><td class="mono">9000003</td><td>David</td><td>Taylor</td><td>Melbourne</td><td>AU</td><td>STANDARD</td><td class="num">3,000</td><td>Y</td><td class="mono">2026-03-06 05:28:34</td></tr>
+        <tr><td class="mono">9000004</td><td>Emma</td><td>Taylor</td><td>Melbourne</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-03-05 05:28:34</td></tr>
+        <tr><td class="mono">9000005</td><td>Frank</td><td>Davies</td><td>Melbourne</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-03-04 05:28:34</td></tr>
+        <tr><td class="mono">9000006</td><td>Grace</td><td>Davies</td><td>Brisbane</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-03-03 05:28:34</td></tr>
+        <tr><td class="mono">9000007</td><td>Henry</td><td>Davies</td><td>Brisbane</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-03-02 05:28:34</td></tr>
+        <tr><td class="mono">9000008</td><td>Isla</td><td>Davies</td><td>Brisbane</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-03-01 05:28:34</td></tr>
+        <tr><td class="mono">9000009</td><td>James</td><td>Davies</td><td>Perth</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-02-28 05:28:34</td></tr>
+        <tr><td class="mono">9000010</td><td>Karen</td><td>Davies</td><td>Perth</td><td>AU</td><td>STANDARD</td><td class="num">5,000</td><td>Y</td><td class="mono">2026-02-27 05:28:34</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  
+  <h2>Iceberg Snapshot History</h2>
+  <div class="section-box">
+    <table>
+      <thead>
+        <tr>
+          <th>Snapshot ID</th>
+          <th>Committed At (UTC)</th>
+          <th>Operation</th>
+          <th class="num">Added</th>
+          <th class="num">Total</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">6356459661…</td>
+          <td class="mono">05:11:04.237</td>
+          <td>append</td>
+          <td class="num">1</td>
+          <td class="num">1</td>
+          <td class="snap-del">early test row (batch=9 first try)</td>
+        </tr>
+        <tr>
+          <td class="mono">12853765…</td>
+          <td class="mono">05:11:10.647</td>
+          <td>delete</td>
+          <td class="num">—</td>
+          <td class="num">0</td>
+          <td class="snap-del">replayed DELETE from prior cleanup</td>
+        </tr>
+        <tr>
+          <td class="mono">4596075243…</td>
+          <td class="mono">05:16:49.460</td>
+          <td>append</td>
+          <td class="num">1</td>
+          <td class="num">1</td>
+          <td class="snap-del">seed row 9000001 (batch=9, del followed)</td>
+        </tr>
+        <tr>
+          <td class="mono">4881137531…</td>
+          <td class="mono">05:16:55.553</td>
+          <td>delete</td>
+          <td class="num">—</td>
+          <td class="num">0</td>
+          <td class="snap-del">replayed DELETE from same batch window</td>
+        </tr>
+        <tr>
+          <td class="mono">2357789379…</td>
+          <td class="mono">05:24:20.181</td>
+          <td>append</td>
+          <td class="num">1</td>
+          <td class="num">1</td>
+          <td class="snap-ok">UPDATE event → row 9000001 landed ✓</td>
+        </tr>
+        <tr style="background:#f0fdf4">
+          <td class="mono">1854456503…</td>
+          <td class="mono">05:28:47.663</td>
+          <td>append</td>
+          <td class="num"><strong>8,192</strong></td>
+          <td class="num"><strong>8,193</strong></td>
+          <td class="snap-ok">Bulk load batch 11 ✓ (13s after COMMIT)</td>
+        </tr>
+        <tr style="background:#f0fdf4">
+          <td class="mono">5862817258…</td>
+          <td class="mono">05:29:03.327</td>
+          <td>append</td>
+          <td class="num"><strong>1,808</strong></td>
+          <td class="num"><strong>10,001</strong></td>
+          <td class="snap-ok">Bulk load batch 12 ✓ (29s after COMMIT)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  
+  <h2>Type Fidelity (Oracle → Iceberg)</h2>
+  <div class="section-box">
+    <table>
+      <thead>
+        <tr><th>Oracle Column</th><th>Oracle Type</th><th>Debezium JSON</th><th>Iceberg Type</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CUSTOMER_ID</td><td>NUMBER(12)</td><td>float (9000001.0)</td><td>bigint</td><td class="snap-ok">✓ cast LongType</td></tr>
+        <tr><td>FIRST_NAME / LAST_NAME</td><td>VARCHAR2(50)</td><td>string</td><td>string</td><td class="snap-ok">✓ direct</td></tr>
+        <tr><td>EMAIL</td><td>VARCHAR2(120)</td><td>string</td><td>string</td><td class="snap-ok">✓ direct</td></tr>
+        <tr><td>CREDIT_LIMIT</td><td>NUMBER(12,2)</td><td>float (2500.0)</td><td>bigint</td><td class="snap-ok">✓ cast LongType</td></tr>
+        <tr><td>TIER / CITY / etc.</td><td>VARCHAR2 / CHAR</td><td>string</td><td>string</td><td class="snap-ok">✓ direct</td></tr>
+        <tr><td>CREATED_AT / UPDATED_AT</td><td>TIMESTAMP(6)</td><td>epoch-ms (LongType)</td><td>timestamp</td><td class="snap-ok">✓ ms÷1000 → TimestampType</td></tr>
+        <tr><td>snap_id</td><td>—</td><td>—</td><td>bigint</td><td class="snap-ok">✓ injected by pipeline</td></tr>
+        <tr><td>snap_timestamp</td><td>—</td><td>—</td><td>timestamp</td><td class="snap-ok">✓ injected by pipeline</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>Made with IBM Bob</footer>
+</div>
+</body>
+</html>

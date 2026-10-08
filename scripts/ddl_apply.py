@@ -20,6 +20,10 @@ Run this script AFTER applying the DDL on the source to:
   4. Verify      — DESCRIBE TABLE confirms the column change is committed in Iceberg.
   5. Scale up    — restore each Deployment to its original replica count.
                    Pipeline resumes from the exact Kafka offset where it stopped.
+  6. Backfill    — (optional, --backfill) find rows in Iceberg where the new column
+                   is NULL because they were processed before this script ran, then
+                   trigger a no-op UPDATE on those rows at the source DB so Debezium
+                   re-replicates them with the correct value.
 
 No data is lost: offsets are committed only after a successful batch write.
 Messages that arrived during the pause accumulate in Kafka and are consumed
@@ -104,6 +108,42 @@ Environment variables
   SPARK_POD     Override the pod used for spark-sql execution
   BAO_TOKEN     OpenBao root token (auto-fetched from K8s secret if unset)
 
+Backfill (--backfill)
+---------------------
+When rows were written to the source DB after the source DDL fired but BEFORE
+this script ran, those rows were processed by the streaming pipeline with a
+stale schema — the new column was silently dropped and the rows landed in
+Iceberg with NULL for that column.
+
+--backfill recovers those rows directly from Kafka — no source DB touch needed:
+
+  The Kafka topic already holds the correct data. Every Debezium message's
+  `after` field contains the full row as it was in the source DB at that moment,
+  including the new column's value. The streaming pod threw that value away
+  because it parsed with a stale schema. We replay those exact messages.
+
+  Step 6a  Read the S3 checkpoint to find the last committed Kafka offset
+           (the point where the streaming pod stopped consuming).
+  Step 6b  Scan backwards through the Kafka topic from that offset to find
+           the earliest message where the new column appears in the `after`
+           payload — that is the start of the stale window.
+  Step 6c  Batch-read the Kafka topic from that start offset to the checkpoint
+           offset using Spark (static DataFrame, not streaming).
+  Step 6d  Parse each message's `after` JSON, extract rows where the new
+           column is NOT NULL (rows written after the source DDL fired).
+  Step 6e  MERGE those rows into Iceberg — overwrites the NULLs with the
+           correct values from Kafka.
+
+  This is a pure Kafka → Iceberg operation. No source DB connection, no
+  new WAL/redo/oplog writes, no Debezium involvement.
+
+Requirements for --backfill:
+  • --op add (backfill only makes sense when a column was added)
+  • --pk     the primary key column name (e.g. id, customer_id)
+  • The Kafka topic must still retain the messages from the stale window
+    (within its retention period — default is days to weeks)
+  • S3 credentials are read from OpenBao (same path as the streaming pipeline)
+
 What this script does NOT do
 -----------------------------
   • Does not run DDL on the source database — apply source DDL FIRST.
@@ -123,6 +163,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime config (overridable via env vars)
@@ -492,6 +533,415 @@ def _iceberg_col_type(pod: str, conf_flags: str, fqn: str, col: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Backfill helpers  (Kafka replay — no source DB touch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Source → Kafka topic prefix (matches the topic.prefix set in connector config)
+_SOURCE_TOPIC_PREFIX: dict[str, str] = {
+    "postgres": "postgres.cache_testing",
+    "oracle":   "oracle.cache_testing",
+    "mongodb":  "mongodb.cache_testing",
+}
+
+# Kafka bootstrap (matches the streaming pipeline)
+_KAFKA_BOOTSTRAP = "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+
+# S3 bucket where Spark checkpoints live (matches streaming pipeline)
+_S3_BUCKET = "xdatatoiceberg1"
+
+# checkpoint path template — matches streaming pipeline
+# s3://xdatatoiceberg1/checkpoints/streaming/<source>/standard
+_CKPT_TEMPLATE = "checkpoints/streaming/{source}/standard"
+
+
+def _bao_read_secret(path: str) -> dict[str, Any]:
+    """Read a KV-v2 secret from OpenBao and return the data dict."""
+    import urllib.request
+    url = f"{BAO_ADDR}/v1/{path}"
+    req = urllib.request.Request(url, headers={"X-Vault-Token": _bao_token()})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())["data"]["data"]
+
+
+def _read_checkpoint_offsets(source: str) -> dict[str, dict[int, int]]:
+    """
+    Read the latest committed Kafka offsets from the S3 Spark checkpoint.
+
+    Returns a dict: { topic: { partition: offset } }
+    e.g. {"postgres.cache_testing.customers": {0: 502}}
+
+    The checkpoint offset file format (Spark internal) is 3 lines:
+      line 0: version (int)
+      line 1: metadata JSON
+      line 2: offsets JSON  → {"topic": {"partition": offset}}
+    """
+    try:
+        s3_secret = _bao_read_secret("secret/data/platform/s3")
+        import boto3
+        s3 = boto3.client(
+            "s3",
+            endpoint_url          = s3_secret["endpoint"],
+            aws_access_key_id     = s3_secret["access_key"],
+            aws_secret_access_key = s3_secret["secret_key"],
+            region_name           = s3_secret.get("region", "us-east-1"),
+        )
+        prefix    = _CKPT_TEMPLATE.format(source=source) + "/offsets/"
+        paginator = s3.get_paginator("list_objects_v2")
+        files     = sorted(
+            [o["Key"] for p in paginator.paginate(Bucket=_S3_BUCKET, Prefix=prefix)
+             for o in p.get("Contents", [])],
+            reverse=True,
+        )
+        if not files:
+            return {}
+        body  = s3.get_object(Bucket=_S3_BUCKET, Key=files[0])["Body"].read().decode()
+        lines = body.strip().splitlines()
+        if len(lines) < 3:
+            return {}
+        offsets_raw = json.loads(lines[2])
+        # Normalise: Spark stores partition keys as strings
+        return {
+            topic: {int(p): int(o) for p, o in partitions.items()}
+            for topic, partitions in offsets_raw.items()
+        }
+    except Exception as exc:
+        raise RuntimeError(f"Could not read S3 checkpoint: {exc}")
+
+
+def _find_stale_window_start(
+    spark_pod:  str,
+    conf_flags: str,
+    topic:      str,
+    col:        str,
+    end_offsets: dict[int, int],
+    kafka_secret: dict,
+) -> dict[int, int] | None:
+    """
+    Scan backwards through the Kafka topic to find the earliest offset where
+    the new column first appears in the `after` payload.
+
+    Strategy: batch-read the topic up to end_offsets using spark-sql, parse
+    the `after` JSON, and find the minimum offset where `col` is NOT NULL.
+    Everything from offset 0 up to (min_offset - 1) is the stale window start.
+
+    Returns startingOffsets dict {partition: offset} for the stale window,
+    or None if no stale messages are found (column was never in Kafka).
+    """
+    jaas = (
+        "org.apache.kafka.common.security.scram.ScramLoginModule required "
+        f"username=\\\"{kafka_secret['debezium_user']}\\\" "
+        f"password=\\\"{kafka_secret['debezium_password']}\\\";"
+    )
+    end_json   = json.dumps({topic: end_offsets})
+    start_json = json.dumps({topic: {str(p): 0 for p in end_offsets}})
+
+    # Read the full topic up to the checkpoint offset, parse after JSON,
+    # find the minimum offset where `col` is present and not null.
+    find_sql = f"""
+SELECT MIN(offset) as first_col_offset
+FROM (
+  SELECT offset,
+         get_json_object(
+           get_json_object(CAST(value AS STRING), '$.after'), '$.{col}'
+         ) as col_val
+  FROM   kafka.`{_KAFKA_BOOTSTRAP}`
+)
+WHERE col_val IS NOT NULL
+"""
+    # We run this via a PySpark script inside the pod (spark-sql can't read Kafka directly
+    # without additional options; we use a small inline Python driver instead)
+    _FINDER_SCRIPT = f"""
+import json, sys
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, get_json_object
+
+spark = SparkSession.builder.getOrCreate()
+
+kafka_df = (
+    spark.read
+    .format("kafka")
+    .option("kafka.bootstrap.servers",       "{_KAFKA_BOOTSTRAP}")
+    .option("kafka.security.protocol",       "SASL_PLAINTEXT")
+    .option("kafka.sasl.mechanism",          "SCRAM-SHA-512")
+    .option("kafka.sasl.jaas.config",        "{jaas}")
+    .option("subscribe",                     "{topic}")
+    .option("startingOffsets",               '{start_json}')
+    .option("endingOffsets",                 '{end_json}')
+    .option("failOnDataLoss",                "false")
+    .load()
+)
+
+parsed = kafka_df.select(
+    col("partition"),
+    col("offset"),
+    get_json_object(
+        get_json_object(col("value").cast("string"), "$.after"),
+        "$.{col}"
+    ).alias("col_val"),
+).filter(col("col_val").isNotNull())
+
+if parsed.rdd.isEmpty():
+    print("STALE_START=NONE")
+else:
+    from pyspark.sql.functions import min as spark_min
+    row = parsed.groupBy("partition").agg(spark_min("offset").alias("min_off")).collect()
+    result = {{str(r["partition"]): r["min_off"] for r in row}}
+    print("STALE_START=" + json.dumps(result))
+"""
+    r = subprocess.run(
+        ["kubectl", "-n", K8S_NS, "exec", spark_pod, "--",
+         "python3", "-c", _FINDER_SCRIPT],
+        capture_output=True, text=True, timeout=180,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"Stale-window scan failed:\n{r.stderr.strip()}")
+
+    for line in r.stdout.splitlines():
+        if line.startswith("STALE_START="):
+            val = line[len("STALE_START="):]
+            if val == "NONE":
+                return None
+            raw = json.loads(val)
+            return {int(p): int(o) for p, o in raw.items()}
+
+    raise RuntimeError(f"Unexpected output from stale-window scan:\n{r.stdout}")
+
+
+def run_backfill(
+    source:     str,
+    table:      str,
+    col:        str,
+    pk_col:     str,
+    spark_pod:  str,
+    conf_flags: str,
+    namespace:  str,
+    catalog:    str,
+) -> bool:
+    """
+    Step 6 — Kafka replay backfill for a newly added column.
+
+    Reads the stale Kafka messages directly (no source DB touch) and
+    MERGEs the correct column values into Iceberg.
+
+    Flow:
+      6a  Read S3 checkpoint → last committed offset per topic/partition
+      6b  Scan Kafka backwards → find the earliest offset where `col` appears
+          (start of the stale window)
+      6c  Batch-read Kafka [stale_start, checkpoint_offset) via Spark
+      6d  Parse `after` JSON, filter rows where `col` IS NOT NULL
+      6e  MERGE into Iceberg standard table — overwrites NULLs with correct values
+
+    Returns True on success, False on any error.
+    """
+    _step(6, 6, f"Kafka replay backfill — recovering `{col}` values from topic (pk={pk_col})")
+
+    topic_prefix = _SOURCE_TOPIC_PREFIX.get(source)
+    if not topic_prefix:
+        _fail(f"No topic prefix known for source {source!r}")
+        return False
+
+    # The table-specific topic (e.g. postgres.cache_testing.customers)
+    topic = f"{topic_prefix}.{table}"
+    fqn   = f"`{catalog}`.`{namespace}`.`{table}`"
+
+    # ── 6a: Read checkpoint offsets from S3 ───────────────────────────────────
+    _info(f"  Reading S3 checkpoint for source={source} …")
+    try:
+        all_offsets = _read_checkpoint_offsets(source)
+    except Exception as exc:
+        _fail(f"Cannot read checkpoint: {exc}")
+        return False
+
+    end_offsets = all_offsets.get(topic)
+    if not end_offsets:
+        _warn(
+            f"  Topic {topic!r} not found in checkpoint. "
+            "This means the streaming pod has never consumed this topic — nothing to backfill."
+        )
+        return True
+
+    _ok(f"  Checkpoint offsets for {topic}: {end_offsets}")
+
+    # ── 6b: Find stale window start ────────────────────────────────────────────
+    _info(f"  Scanning Kafka topic for first message with `{col}` in `after` payload …")
+    try:
+        kafka_secret = _bao_read_secret("secret/data/platform/kafka")
+        stale_start  = _find_stale_window_start(
+            spark_pod, conf_flags, topic, col, end_offsets, kafka_secret,
+        )
+    except Exception as exc:
+        _fail(f"Stale-window scan failed: {exc}")
+        return False
+
+    if stale_start is None:
+        _ok(
+            f"  No messages with `{col}` found in Kafka topic up to checkpoint offset. "
+            "This means the source DDL fired after the last committed batch — "
+            "all future messages will carry the correct value. Nothing to backfill."
+        )
+        return True
+
+    _ok(f"  Stale window start offsets: {stale_start}")
+    _info(
+        f"  Will replay Kafka [{stale_start} → {end_offsets}] "
+        f"and MERGE rows where `{col}` IS NOT NULL into Iceberg."
+    )
+
+    # ── 6c–6e: Batch-read Kafka and MERGE into Iceberg ────────────────────────
+    jaas = (
+        "org.apache.kafka.common.security.scram.ScramLoginModule required "
+        f"username=\\\"{kafka_secret['debezium_user']}\\\" "
+        f"password=\\\"{kafka_secret['debezium_password']}\\\";"
+    )
+    start_json = json.dumps({topic: {str(p): o for p, o in stale_start.items()}})
+    end_json   = json.dumps({topic: {str(p): o for p, o in end_offsets.items()}})
+
+    # Build a self-contained PySpark backfill script that runs inside the pod.
+    # It reads the Kafka batch, extracts after-payload rows where col IS NOT NULL,
+    # and MERGEs them into the Iceberg standard table using the PK.
+    #
+    # Uses str.format() (not f-string) so that Python braces inside the script
+    # body ({{}}) remain as literal braces in the generated code, while named
+    # placeholders like {catalog_v} are substituted by .format() here.
+    wh_map = {"postgres": "pg_lakehouse", "oracle": "ora_lakehouse", "mongodb": "mgo_lakehouse"}
+    warehouse = wh_map.get(source, f"{source}_lakehouse")
+
+    _BACKFILL_SCRIPT = (
+        "import json, sys\n"
+        "sys.path.insert(0, '/opt/spark/work-dir')\n"
+        "from pyspark.sql import SparkSession\n"
+        "from pyspark.sql.functions import col, get_json_object, from_json, lit\n"
+        "from pyspark.sql.types import StringType\n"
+        "from bao_spark_init import BaoSparkInit\n"
+        "\n"
+        "bao  = BaoSparkInit()\n"
+        "pol  = bao.polaris_creds()\n"
+        "s3   = bao.s3_creds()\n"
+        "uri  = pol.get('url') or 'http://polaris-rest.prod.svc.cluster.local:8181/api/catalog'\n"
+        "cred = pol['spark_svc_id'] + ':' + pol['spark_svc_secret']\n"
+        "\n"
+        "spark = (\n"
+        "    SparkSession.builder\n"
+        "    .config('spark.sql.extensions',\n"
+        "            'org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions')\n"
+        f"    .config('spark.sql.catalog.{catalog}',            'org.apache.iceberg.spark.SparkCatalog')\n"
+        f"    .config('spark.sql.catalog.{catalog}.type',       'rest')\n"
+        f"    .config('spark.sql.catalog.{catalog}.uri',        uri)\n"
+        f"    .config('spark.sql.catalog.{catalog}.oauth2-server-uri', uri + '/v1/oauth/tokens')\n"
+        f"    .config('spark.sql.catalog.{catalog}.credential', cred)\n"
+        f"    .config('spark.sql.catalog.{catalog}.warehouse',  '{warehouse}')\n"
+        f"    .config('spark.sql.catalog.{catalog}.scope',      'PRINCIPAL_ROLE:ALL')\n"
+        f"    .config('spark.sql.catalog.{catalog}.rest.auth.type', 'oauth2')\n"
+        "    .config('spark.sql.catalog." + catalog + ".s3.access-key-id',     s3['access_key'])\n"
+        "    .config('spark.sql.catalog." + catalog + ".s3.secret-access-key', s3['secret_key'])\n"
+        "    .config('spark.sql.catalog." + catalog + ".s3.endpoint',          s3['endpoint'])\n"
+        "    .config('spark.sql.catalog." + catalog + ".s3.path-style-access', 'true')\n"
+        "    .config('spark.sql.catalog." + catalog + ".client.region',        s3.get('region','us-east-1'))\n"
+        "    .getOrCreate()\n"
+        ")\n"
+        "\n"
+        "# ── Step 6c: Batch-read Kafka stale window ────────────────────────\n"
+        "kafka_df = (\n"
+        "    spark.read\n"
+        "    .format('kafka')\n"
+        f"    .option('kafka.bootstrap.servers',  '{_KAFKA_BOOTSTRAP}')\n"
+        "    .option('kafka.security.protocol',  'SASL_PLAINTEXT')\n"
+        "    .option('kafka.sasl.mechanism',     'SCRAM-SHA-512')\n"
+        f"    .option('kafka.sasl.jaas.config',   '{jaas}')\n"
+        f"    .option('subscribe',                '{topic}')\n"
+        f"    .option('startingOffsets',          '{start_json}')\n"
+        f"    .option('endingOffsets',            '{end_json}')\n"
+        "    .option('failOnDataLoss',           'false')\n"
+        "    .load()\n"
+        ")\n"
+        "\n"
+        "# ── Step 6d: Parse after payload, keep rows where col IS NOT NULL ─\n"
+        "after_df = kafka_df.select(\n"
+        "    get_json_object(col('value').cast('string'), '$.after').alias('after_json')\n"
+        ").filter(col('after_json').isNotNull())\n"
+        "\n"
+        "inferred = spark.read.json(after_df.rdd.map(lambda r: r[0])).schema\n"
+        "\n"
+        "parsed_df = after_df.select(\n"
+        "    from_json(col('after_json'), inferred).alias('d')\n"
+        ").select('d.*')\n"
+        "\n"
+        f"if '{col}' not in [f.name.lower() for f in parsed_df.schema.fields]:\n"
+        "    print('BACKFILL_RESULT=NO_COL_IN_BATCH')\n"
+        "    sys.exit(0)\n"
+        "\n"
+        f"parsed_df = parsed_df.filter(col('`{col}`').isNotNull())\n"
+        "\n"
+        "if parsed_df.rdd.isEmpty():\n"
+        "    print('BACKFILL_RESULT=NO_ROWS')\n"
+        "    sys.exit(0)\n"
+        "\n"
+        "# Lowercase column names (Oracle sends uppercase)\n"
+        "parsed_df = parsed_df.toDF(*[c.lower() for c in parsed_df.columns])\n"
+        "\n"
+        "# ── Step 6e: MERGE into Iceberg standard table ───────────────────\n"
+        "parsed_df.createOrReplaceTempView('_backfill_batch')\n"
+        "\n"
+        "set_clauses = ', '.join(\n"
+        "    f't.`{c}` = s.`{c}`'\n"
+        "    for c in parsed_df.columns\n"
+        f"    if c.lower() != '{pk_col}'.lower()\n"
+        ")\n"
+        "\n"
+        f"merge_sql = (\n"
+        f"    'MERGE INTO {fqn} AS t '\n"
+        f"    'USING _backfill_batch AS s '\n"
+        f"    'ON t.`{pk_col}` = s.`{pk_col}` '\n"
+        f"    'WHEN MATCHED THEN UPDATE SET ' + set_clauses\n"
+        f")\n"
+        "\n"
+        "spark.sql(merge_sql)\n"
+        "count = parsed_df.count()\n"
+        "print('BACKFILL_RESULT=OK rows=' + str(count))\n"
+    )
+
+    _info(f"  Running Kafka→Iceberg replay MERGE in pod {spark_pod} …")
+    r = subprocess.run(
+        ["kubectl", "-n", K8S_NS, "exec", spark_pod, "--",
+         "python3", "-c", _BACKFILL_SCRIPT],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    # Parse result line from script output
+    result_line = next(
+        (l for l in r.stdout.splitlines() if l.startswith("BACKFILL_RESULT=")),
+        None,
+    )
+
+    if r.returncode != 0:
+        _fail(f"Backfill script failed:\n{r.stderr.strip() or r.stdout.strip()}")
+        return False
+
+    if result_line == "BACKFILL_RESULT=NO_COL_IN_BATCH":
+        _ok(
+            f"  No messages in the stale window contained `{col}` — "
+            "source DDL may have fired after the last consumed offset. Nothing to merge."
+        )
+        return True
+
+    if result_line == "BACKFILL_RESULT=NO_ROWS":
+        _ok(f"  No non-NULL rows for `{col}` found in the Kafka stale window. Nothing to merge.")
+        return True
+
+    if result_line and result_line.startswith("BACKFILL_RESULT=OK"):
+        rows = result_line.split("rows=")[-1] if "rows=" in result_line else "?"
+        _ok(
+            f"  Kafka replay complete — {rows} row(s) MERGEd into {fqn}. "
+            f"`{col}` values recovered directly from Kafka topic."
+        )
+        _info("  No source DB was touched. No new WAL/redo/oplog entries were written.")
+        return True
+
+    _fail(f"Backfill script returned unexpected output:\n{r.stdout.strip()}")
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Core apply logic
 # ─────────────────────────────────────────────────────────────────────────────
 def apply_ddl(
@@ -504,15 +954,20 @@ def apply_ddl(
     modes:     list[str],
     namespace: str | None = None,
     catalog:   str | None = None,
+    backfill:  bool = False,
+    pk_col:    str | None = None,
 ) -> bool:
     """
-    Full DDL apply cycle — 5 steps:
+    Full DDL apply cycle — 5 steps (6 with --backfill):
 
     Step 1  Scale down all target Deployments (source × modes).
     Step 2  Wait (with hard confirmation) until every pod is 0/0.
     Step 3  Execute ALTER TABLE on each Iceberg table via spark-sql.
     Step 4  Verify the DDL is committed in Iceberg (DESCRIBE TABLE).
     Step 5  Scale Deployments back to their original replica counts.
+    Step 6  (backfill=True, op=add only) Find Iceberg rows where the new
+            column is NULL and trigger a no-op UPDATE at the source so
+            Debezium re-replicates them with the correct value.
 
     Returns True if ALL steps succeeded, False if any DDL or verification failed.
     Deployments are ALWAYS scaled back up in Step 5, even on DDL failure.
@@ -662,7 +1117,8 @@ def apply_ddl(
         _warn("  Verification skipped — no execution pod was available.")
 
     # ── Step 5: Scale back up ─────────────────────────────────────────────────
-    _step(5, 5, "Resuming DML replication — scaling Deployments back up")
+    total_steps = 6 if (backfill and op == "add") else 5
+    _step(5, total_steps, "Resuming DML replication — scaling Deployments back up")
     for deploy, orig_replicas in target_deploys.items():
         _scale(deploy, orig_replicas)
 
@@ -677,6 +1133,27 @@ def apply_ddl(
             _ok("All pods are running. DML replication resumed from last committed Kafka offset.")
         else:
             _warn("Some pods may not be ready — check pod logs.")
+
+    # ── Step 6: Backfill stale NULL rows (optional) ───────────────────────────
+    if backfill and op == "add" and not DRY_RUN:
+        if not spark_pod or not conf_flags:
+            _warn("Backfill skipped — no Spark pod was available for DDL execution.")
+        elif not pk_col:
+            _warn("Backfill skipped — --pk (primary key column) is required for backfill.")
+        else:
+            cat = catalog or _SOURCE_REGISTRY[source]["catalog"]
+            ns  = namespace or _SOURCE_REGISTRY[source]["default_namespace"]
+            bf_ok = run_backfill(
+                source=source, table=table, col=col, pk_col=pk_col,
+                spark_pod=spark_pod, conf_flags=conf_flags,
+                namespace=ns, catalog=cat,
+            )
+            if not bf_ok:
+                all_ok = False
+    elif backfill and op != "add":
+        _warn("--backfill is only applicable for --op add. Skipping.")
+    elif backfill and DRY_RUN:
+        _dry("Backfill step would query Iceberg for NULL rows and trigger source UPDATEs.")
 
     return all_ok
 
@@ -748,6 +1225,23 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--backfill", action="store_true", default=False,
+        help=(
+            "After the DDL is applied and pods are back up, find rows in Iceberg "
+            "where the new column is NULL (written during the stale-cache window) "
+            "and trigger a no-op UPDATE at the source DB so Debezium re-replicates "
+            "them with the correct value. Only valid with --op add. Requires --pk."
+        ),
+    )
+    p.add_argument(
+        "--pk", dest="pk_col", default=None,
+        help=(
+            "Primary key column name for --backfill. "
+            "Used to identify and re-trigger stale rows at the source. "
+            "Examples: id, customer_id, _id"
+        ),
+    )
+    p.add_argument(
         "--dry-run", action="store_true", default=False,
         help=(
             "Print all steps and SQL that would be executed "
@@ -784,6 +1278,12 @@ def main() -> None:
         sys.exit(1)
     if args.op == "rename" and not args.new_col:
         _fail("--new-col is required for --op rename")
+        sys.exit(1)
+    if args.backfill and args.op != "add":
+        _fail("--backfill is only valid with --op add")
+        sys.exit(1)
+    if args.backfill and not args.pk_col:
+        _fail("--pk is required when --backfill is set")
         sys.exit(1)
 
     smeta = _SOURCE_REGISTRY[args.source]
@@ -830,6 +1330,10 @@ def main() -> None:
         exists = _deployment_exists(deploy) if not DRY_RUN else True
         status = "" if exists else "  ⚠ NOT FOUND"
         print(f"    [{mode:>17s}]  {deploy}{status}")
+    if args.backfill:
+        print()
+        print(f"  Backfill       : ENABLED — will recover NULL rows for `{args.col}` using pk={args.pk_col}")
+        print(f"                   No-op UPDATE triggered at source → Debezium re-replicates correct values")
     print()
     print("=" * 72)
 
@@ -865,6 +1369,8 @@ def main() -> None:
         modes     = modes,
         namespace = args.namespace,
         catalog   = args.catalog,
+        backfill  = args.backfill,
+        pk_col    = args.pk_col,
     )
 
     # ── Final summary ──────────────────────────────────────────────────────────
@@ -876,12 +1382,18 @@ def main() -> None:
             print()
             print("  Next steps:")
             print("  1. Watch pod logs for the first few batches to confirm rows flow.")
-            print("  2. If source rows with the new column were written BEFORE this")
-            print("     script ran, those rows landed in Iceberg with NULL for that")
-            print("     column. Trigger an UPDATE on those rows at the source to")
-            print("     re-replicate them with the correct value.")
-            print("  3. For RENAME: existing Iceberg rows retain the old column name.")
-            print("     New DML rows populate the renamed column going forward.")
+            if args.op == "add" and not args.backfill:
+                print("  2. If source rows with the new column were written BEFORE this")
+                print("     script ran, those rows landed in Iceberg with NULL for that")
+                print(f"     column. Re-run with --backfill --pk <pk_col> to recover them")
+                print("     automatically, or trigger an UPDATE at the source manually.")
+            elif args.op == "add" and args.backfill:
+                print("  2. Backfill was run — stale NULL rows have been re-triggered at")
+                print(f"     the source. Verify `{args.col}` is now populated in Iceberg")
+                print(f"     after the next 1–2 pipeline batches complete.")
+            if args.op == "rename":
+                print("  3. For RENAME: existing Iceberg rows retain the old column name.")
+                print("     New DML rows populate the renamed column going forward.")
     else:
         print("  ✗  DDL apply completed with errors — see output above.")
         print("     The streaming pipeline has been restarted regardless.")

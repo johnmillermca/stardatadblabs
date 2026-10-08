@@ -97,6 +97,7 @@ data:
     CPU_THRESHOLD = float(os.environ.get("CPU_THRESHOLD", 75))
     MEM_THRESHOLD = float(os.environ.get("MEM_THRESHOLD", 75))
     POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL",   60))
+    PAUSED_UNTIL  = os.environ.get("PAUSED_UNTIL", "")   # ISO-8601 UTC, e.g. 2026-10-13T23:37:13Z
 
     logging.basicConfig(
         level=logging.INFO,
@@ -178,13 +179,31 @@ data:
             except ApiException as e:
                 log.error("Failed to patch node %s: %s", name, e)
 
+    def is_paused():
+        if not PAUSED_UNTIL:
+            return False
+        from datetime import datetime, timezone
+        try:
+            until = datetime.fromisoformat(PAUSED_UNTIL.replace("Z", "+00:00"))
+            remaining = until - datetime.now(timezone.utc)
+            if remaining.total_seconds() > 0:
+                log.info("PAUSED — monitoring suspended until %s (%.1fh remaining)",
+                         PAUSED_UNTIL, remaining.total_seconds() / 3600)
+                return True
+        except ValueError:
+            log.warning("Invalid PAUSED_UNTIL value %r — ignoring pause", PAUSED_UNTIL)
+        return False
+
     def main():
         log.info("node-pressure-monitor started  CPU=%.0f%%  MEM=%.0f%%  interval=%ds",
                  CPU_THRESHOLD, MEM_THRESHOLD, POLL_INTERVAL)
+        if PAUSED_UNTIL:
+            log.warning("Monitoring PAUSED until %s", PAUSED_UNTIL)
         api = init_k8s()
         while True:
             try:
-                poll(api)
+                if not is_paused():
+                    poll(api)
             except Exception as e:
                 log.error("Poll error: %s", e)
             time.sleep(POLL_INTERVAL)
@@ -242,6 +261,10 @@ spec:
             # ── How often to poll (seconds) ───────────────────────────────
             - name: POLL_INTERVAL
               value: "60"
+            # ── Pause all cordon/uncordon actions until this UTC timestamp ─
+            # ── Remove or blank this value to resume immediately ───────────
+            - name: PAUSED_UNTIL
+              value: "2026-10-13T23:37:13Z"
           volumeMounts:
             - name: script
               mountPath: /scripts

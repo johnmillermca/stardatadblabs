@@ -8,23 +8,17 @@ metadata:
     - resources-finalizer.argocd.io
 spec:
   project: default
-  source:
-    repoURL: https://openbao.github.io/openbao-helm
-    chart: openbao
-    targetRevision: "*"
-    helm:
-      valueFiles:
-        - values.yaml
-      values: |
-        # Override values inline here, or use valueFiles pointing to your Git repo.
-        global:
-          tlsDisable: true
-        server:
-          standalone:
-            enabled: true
-          service:
-            type: NodePort
-            nodePort: 30820
+  sources:
+    - repoURL: https://openbao.github.io/openbao-helm
+      chart: openbao
+      targetRevision: "0.28.5"
+      helm:
+        releaseName: openbao
+        valueFiles:
+          - $values/helm/openbao/values.yaml
+    - repoURL: https://github.com/johnmillermca/stardatadblabs
+      targetRevision: HEAD
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
@@ -34,3 +28,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - Replace=true
