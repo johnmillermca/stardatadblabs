@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Lakehouse Realtime Streaming</title>
+<style>
+/* ── Reset & Base ── */
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh;display:flex;flex-direction:column}
+a{text-decoration:none;color:inherit}
+button{cursor:pointer;font-family:inherit}
+input,select,textarea{font-family:inherit}
+
+/* ── Layout ── */
+#app{display:flex;height:100vh;overflow:hidden}
+
+/* ── Sidebar ── */
+#sidebar{
+  width:220px;min-width:220px;
+  background:linear-gradient(180deg,#06090f 0%,#0d1a2e 100%);
+  border-right:1px solid #1c2a3a;
+  display:flex;flex-direction:column;
+  overflow-y:auto;
+}
+.sidebar-logo{
+  padding:20px 16px 16px;
+  border-bottom:1px solid #1c2a3a;
+  display:flex;align-items:center;gap:10px;
+}
+.logo-icon{
+  width:36px;height:36px;
+  background:linear-gradient(135deg,#4fc3f7 0%,#0288d1 100%);
+  border-radius:8px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;flex-shrink:0;
+  box-shadow:0 0 12px rgba(79,195,247,0.3);
+}
+.logo-text{font-size:13px;font-weight:700;color:#e6edf3;line-height:1.3}
+.logo-sub{font-size:10px;color:#4fc3f7;letter-spacing:.5px;text-transform:uppercase}
+
+.nav-section{padding:12px 0}
+.nav-label{font-size:10px;color:#586374;text-transform:uppercase;letter-spacing:.8px;padding:6px 16px;font-weight:600}
+.nav-item{
+  display:flex;align-items:center;gap:10px;
+  padding:9px 16px;font-size:13px;color:#8b949e;
+  cursor:pointer;border-left:3px solid transparent;
+  transition:all .15s;
+}
+.nav-item:hover{background:rgba(79,195,247,.07);color:#e6edf3}
+.nav-item.active{background:rgba(79,195,247,.12);color:#4fc3f7;border-left-color:#4fc3f7}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.nav-badge{
+  margin-left:auto;background:#1a2e42;color:#4fc3f7;
+  font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;
+}
+
+/* ── Main content ── */
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Topbar ── */
+#topbar{
+  height:52px;background:#0d1117;border-bottom:1px solid #1c2a3a;
+  display:flex;align-items:center;padding:0 24px;gap:16px;flex-shrink:0;
+}
+#topbar h1{font-size:16px;font-weight:600;color:#e6edf3;flex:1}
+.status-pill{
+  display:flex;align-items:center;gap:6px;
+  background:#0d1f30;border:1px solid #1c3a55;
+  padding:4px 10px;border-radius:20px;font-size:12px;color:#8b949e;
+}
+.status-dot{width:7px;height:7px;border-radius:50%}
+.dot-green{background:#2ea043;box-shadow:0 0 6px #2ea043}
+.dot-red{background:#da3633;box-shadow:0 0 6px #da3633}
+.dot-yellow{background:#d29922;box-shadow:0 0 6px #d29922}
+.dot-gray{background:#444}
+
+/* ── Page content ── */
+#content{flex:1;overflow-y:auto;padding:24px}
+
+/* ── Cards ── */
+.card{
+  background:#0d1f30;border:1px solid #1c2a3a;
+  border-radius:10px;padding:20px;margin-bottom:20px;
+}
+.card-header{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:16px;
+}
+.card-title{font-size:14px;font-weight:600;color:#e6edf3;display:flex;align-items:center;gap:8px}
+.card-subtitle{font-size:12px;color:#586374;margin-top:2px}
+
+/* ── Source tabs ── */
+.source-tabs{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+.src-tab{
+  padding:7px 16px;border-radius:6px;font-size:13px;font-weight:500;
+  border:1px solid #1c2a3a;background:#0d1f30;color:#8b949e;cursor:pointer;
+  transition:all .15s;display:flex;align-items:center;gap:6px;
+}
+.src-tab:hover{border-color:#4fc3f7;color:#4fc3f7}
+.src-tab.active{background:rgba(79,195,247,.15);border-color:#4fc3f7;color:#4fc3f7}
+.src-badge{
+  width:8px;height:8px;border-radius:50%;
+}
+.badge-pg{background:#336791}
+.badge-ora{background:#f80000}
+.badge-mg{background:#4db33d}
+
+/* ── Table ── */
+.data-table{width:100%;border-collapse:collapse;font-size:13px}
+.data-table th{
+  text-align:left;padding:9px 12px;
+  border-bottom:1px solid #1c2a3a;
+  color:#586374;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;
+}
+.data-table td{padding:9px 12px;border-bottom:1px solid #0d1a2e;color:#c9d1d9;vertical-align:middle}
+.data-table tr:hover td{background:rgba(79,195,247,.04)}
+.data-table tr:last-child td{border-bottom:none}
+
+/* ── Status badge ── */
+.s-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600;
+}
+.s-running{background:#0f2a1a;color:#2ea043;border:1px solid #1a4429}
+.s-paused{background:#2a2200;color:#d29922;border:1px solid #4a3a00}
+.s-failed{background:#2a0f0f;color:#da3633;border:1px solid #4a1f1f}
+.s-stopped{background:#1a1f2a;color:#586374;border:1px solid #2a3040}
+
+/* ── Buttons ── */
+.btn{
+  padding:6px 14px;border-radius:6px;font-size:12px;font-weight:500;
+  border:1px solid;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:5px;
+}
+.btn-primary{background:#0969da;border-color:#1f6feb;color:#fff}
+.btn-primary:hover{background:#1473e6}
+.btn-secondary{background:transparent;border-color:#30363d;color:#c9d1d9}
+.btn-secondary:hover{border-color:#8b949e;color:#e6edf3}
+.btn-danger{background:transparent;border-color:#da3633;color:#da3633}
+.btn-danger:hover{background:#2a0f0f}
+.btn-success{background:transparent;border-color:#2ea043;color:#2ea043}
+.btn-success:hover{background:#0f2a1a}
+.btn-warn{background:transparent;border-color:#d29922;color:#d29922}
+.btn-warn:hover{background:#2a2200}
+.btn-sm{padding:4px 10px;font-size:11px}
+.btn-group{display:flex;gap:6px;flex-wrap:wrap}
+
+/* ── Form ── */
+.form-row{display:grid;grid-template-columns:1fr 2fr;gap:12px;margin-bottom:12px;align-items:start}
+.form-label{font-size:12px;color:#8b949e;padding-top:8px;font-weight:500}
+.form-input{
+  width:100%;padding:7px 10px;background:#06090f;border:1px solid #30363d;
+  border-radius:6px;color:#e6edf3;font-size:13px;outline:none;
+  transition:border-color .15s;
+}
+.form-input:focus{border-color:#4fc3f7}
+.form-textarea{
+  width:100%;padding:8px 10px;background:#06090f;border:1px solid #30363d;
+  border-radius:6px;color:#e6edf3;font-size:12px;font-family:'Fira Code','Courier New',monospace;
+  outline:none;resize:vertical;min-height:120px;
+}
+.form-textarea:focus{border-color:#4fc3f7}
+.form-select{
+  width:100%;padding:7px 10px;background:#06090f;border:1px solid #30363d;
+  border-radius:6px;color:#e6edf3;font-size:13px;outline:none;
+}
+
+/* ── Modal ── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.7);
+  display:flex;align-items:center;justify-content:center;z-index:1000;
+  backdrop-filter:blur(3px);
+}
+.modal{
+  background:#0d1f30;border:1px solid #1c2a3a;border-radius:12px;
+  width:680px;max-width:95vw;max-height:90vh;overflow-y:auto;
+  padding:24px;
+}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.modal-title{font-size:15px;font-weight:600;color:#e6edf3}
+.modal-close{
+  background:none;border:none;color:#586374;font-size:20px;cursor:pointer;line-height:1;
+}
+.modal-close:hover{color:#e6edf3}
+.modal-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid #1c2a3a}
+
+/* ── Kafka query ── */
+.query-bar{display:flex;gap:10px;margin-bottom:16px;align-items:flex-end;flex-wrap:wrap}
+.query-field{display:flex;flex-direction:column;gap:4px}
+.query-label{font-size:11px;color:#586374;font-weight:500}
+.query-input{
+  padding:7px 10px;background:#06090f;border:1px solid #30363d;
+  border-radius:6px;color:#e6edf3;font-size:13px;outline:none;min-width:200px;
+}
+.query-input:focus{border-color:#4fc3f7}
+.msg-container{
+  background:#06090f;border:1px solid #1c2a3a;border-radius:8px;
+  overflow:auto;max-height:500px;
+}
+.msg-row{
+  border-bottom:1px solid #0d1a2e;padding:10px 14px;
+  font-family:'Fira Code','Courier New',monospace;font-size:12px;
+  cursor:pointer;
+}
+.msg-row:hover{background:rgba(79,195,247,.05)}
+.msg-row:last-child{border-bottom:none}
+.msg-offset{color:#4fc3f7;margin-right:12px;font-size:11px}
+.msg-op{
+  display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;margin-right:8px;
+}
+.op-c{background:#0f2a1a;color:#2ea043}
+.op-u{background:#0d2a40;color:#4fc3f7}
+.op-d{background:#2a0f0f;color:#da3633}
+.op-r{background:#1a2040;color:#8b949e}
+.msg-body{color:#c9d1d9;white-space:pre-wrap;word-break:break-all;margin-top:6px;display:none}
+.msg-row.expanded .msg-body{display:block}
+.msg-summary{color:#8b949e;font-size:12px}
+
+/* ── Dashboard stats ── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:16px;margin-bottom:20px}
+.stat-card{
+  background:#06090f;border:1px solid #1c2a3a;border-radius:8px;
+  padding:16px;text-align:center;
+}
+.stat-value{font-size:28px;font-weight:700;color:#4fc3f7;line-height:1}
+.stat-label{font-size:11px;color:#586374;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
+
+/* ── Connector config editor ── */
+.kv-editor{width:100%}
+.kv-row{display:grid;grid-template-columns:1fr 1.5fr auto;gap:8px;margin-bottom:6px;align-items:center}
+.kv-input{
+  padding:6px 9px;background:#06090f;border:1px solid #30363d;
+  border-radius:5px;color:#e6edf3;font-size:12px;outline:none;width:100%;
+}
+.kv-input:focus{border-color:#4fc3f7}
+.kv-del{
+  background:none;border:none;color:#586374;cursor:pointer;font-size:14px;padding:4px;
+}
+.kv-del:hover{color:#da3633}
+.kv-add{
+  background:none;border:1px dashed #30363d;color:#586374;
+  padding:6px 12px;border-radius:5px;font-size:12px;cursor:pointer;
+  width:100%;margin-top:4px;
+}
+.kv-add:hover{border-color:#4fc3f7;color:#4fc3f7}
+
+/* ── Toast ── */
+#toast-area{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+.toast{
+  background:#0d1f30;border:1px solid #1c2a3a;border-radius:8px;
+  padding:12px 16px;font-size:13px;color:#e6edf3;min-width:260px;
+  display:flex;align-items:center;gap:10px;
+  animation:slideIn .2s ease;
+}
+.toast-success{border-left:3px solid #2ea043}
+.toast-error{border-left:3px solid #da3633}
+.toast-info{border-left:3px solid #4fc3f7}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+
+/* ── Code highlight ── */
+.json-key{color:#79c0ff}
+.json-str{color:#a5d6ff}
+.json-num{color:#ff7b72}
+.json-bool{color:#56d364}
+.json-null{color:#8b949e}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#06090f}
+::-webkit-scrollbar-thumb{background:#1c2a3a;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#30363d}
+
+/* ── Responsive ── */
+@media(max-width:768px){
+  #sidebar{width:0;min-width:0;overflow:hidden}
+  #sidebar.open{width:220px;min-width:220px;position:fixed;z-index:100;height:100vh}
+}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ═══ SIDEBAR ═══ -->
+<nav id="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-icon">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+        <polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"
+          fill="#4fc3f7" stroke="#0288d1" stroke-width="1"/>
+      </svg>
+    </div>
+    <div>
+      <div class="logo-text">Lakehouse</div>
+      <div class="logo-sub">Realtime Streaming</div>
+    </div>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Overview</div>
+    <div class="nav-item active" onclick="navigate('dashboard')" id="nav-dashboard">
+      <span class="nav-icon">🏠</span> Dashboard
+    </div>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Debezium CDC</div>
+    <div class="nav-item" onclick="navigate('connectors')" id="nav-connectors">
+      <span class="nav-icon">🔌</span> Connectors
+    </div>
+    <div class="nav-item" onclick="navigate('connector-new')" id="nav-connector-new">
+      <span class="nav-icon">➕</span> New Connector
+    </div>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Kafka</div>
+    <div class="nav-item" onclick="navigate('topics')" id="nav-topics">
+      <span class="nav-icon">📨</span> Topics
+    </div>
+    <div class="nav-item" onclick="navigate('ksql')" id="nav-ksql">
+      <span class="nav-icon">🔍</span> Query (KSQL-style)
+    </div>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Streaming Jobs</div>
+    <div class="nav-item" onclick="navigate('streaming')" id="nav-streaming">
+      <span class="nav-icon">🌊</span> Kafka → Iceberg
+    </div>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Configuration</div>
+    <div class="nav-item" onclick="navigate('iceberg-config')" id="nav-iceberg-config">
+      <span class="nav-icon">🧊</span> Iceberg Settings
+    </div>
+  </div>
+</nav>
+
+<!-- ═══ MAIN ═══ -->
+<div id="main">
+  <!-- Topbar -->
+  <div id="topbar">
+    <h1 id="page-title">Dashboard</h1>
+    <div class="status-pill" id="cluster-status">
+      <div class="status-dot dot-gray"></div>
+      <span>Connecting…</span>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div id="content"></div>
+</div>
+
+</div><!-- #app -->
+
+<!-- Toast area -->
+<div id="toast-area"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  GLOBALS
+// ═══════════════════════════════════════════════════════════════════════════
+const SOURCES = ['postgres','oracle','mongodb'];
+const SOURCE_LABELS = { postgres:'PostgreSQL', oracle:'Oracle', mongodb:'MongoDB' };
+const SOURCE_BADGE  = { postgres:'badge-pg', oracle:'badge-ora', mongodb:'badge-mg' };
+const SOURCE_ICON   = { postgres:'🐘', oracle:'🔶', mongodb:'🍃' };
+
+let currentPage = 'dashboard';
+let currentSource = 'postgres';
+let allConnectors = {};   // { source: [{name,status},...] }
+let allStreamings = [];
+let kafkaTopics = [];
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  TOAST
+// ═══════════════════════════════════════════════════════════════════════════
+function toast(msg, type='info') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-area').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  API HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  let json;
+  try { json = await r.json(); } catch { json = {}; }
+  return { ok: r.ok, status: r.status, data: json };
+}
+const apiGet  = p      => api('GET',    p);
+const apiPost = (p, b) => api('POST',   p, b);
+const apiPut  = (p, b) => api('PUT',    p, b);
+const apiDel  = p      => api('DELETE', p);
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  NAVIGATION
+// ═══════════════════════════════════════════════════════════════════════════
+function navigate(page) {
+  currentPage = page;
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const navEl = document.getElementById('nav-' + page);
+  if (navEl) navEl.classList.add('active');
+
+  const titles = {
+    dashboard: 'Dashboard',
+    connectors: 'Debezium Connectors',
+    'connector-new': 'New Connector',
+    topics: 'Kafka Topics',
+    ksql: 'Kafka Query (KSQL-style)',
+    streaming: 'Kafka → Iceberg Streaming Jobs',
+    'iceberg-config': 'Iceberg Configuration',
+  };
+  document.getElementById('page-title').textContent = titles[page] || page;
+  renderPage(page);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RENDER ROUTER
+// ═══════════════════════════════════════════════════════════════════════════
+function renderPage(page) {
+  const c = document.getElementById('content');
+  c.innerHTML = '<div style="color:#586374;padding:40px;text-align:center">Loading…</div>';
+  if (page === 'dashboard')       renderDashboard();
+  else if (page === 'connectors') renderConnectors();
+  else if (page === 'connector-new') renderConnectorNew();
+  else if (page === 'topics')     renderTopics();
+  else if (page === 'ksql')       renderKSQL();
+  else if (page === 'streaming')  renderStreaming();
+  else if (page === 'iceberg-config') renderIcebergConfig();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderDashboard() {
+  const c = document.getElementById('content');
+
+  // fetch all connector statuses in parallel
+  const results = await Promise.all(SOURCES.map(s =>
+    apiGet(`/api/connectors/${s}`).then(r => ({ source: s, data: r.data }))
+  ));
+
+  let totalConn = 0, runningConn = 0, failedConn = 0;
+  const connSummary = [];
+  for (const { source, data } of results) {
+    if (typeof data === 'object' && !Array.isArray(data)) {
+      for (const [name, info] of Object.entries(data)) {
+        totalConn++;
+        const st = info?.status?.connector?.state || 'UNKNOWN';
+        if (st === 'RUNNING') runningConn++;
+        else if (st === 'FAILED') failedConn++;
+        connSummary.push({ source, name, state: st });
+      }
+    }
+  }
+
+  // streaming deployments
+  const streamR = await apiGet('/api/streaming/deployments');
+  const deploys = streamR.data?.items || [];
+  const streamRunning = deploys.filter(d => (d.status?.readyReplicas || 0) > 0).length;
+
+  c.innerHTML = `
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-value">${totalConn}</div>
+      <div class="stat-label">CDC Connectors</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" style="color:#2ea043">${runningConn}</div>
+      <div class="stat-label">Running</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" style="color:#da3633">${failedConn}</div>
+      <div class="stat-label">Failed</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">${deploys.length}</div>
+      <div class="stat-label">Streaming Jobs</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" style="color:#2ea043">${streamRunning}</div>
+      <div class="stat-label">Jobs Running</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🔌 CDC Connector Status</div>
+      <button class="btn btn-secondary btn-sm" onclick="renderDashboard()">↻ Refresh</button>
+    </div>
+    <table class="data-table">
+      <thead><tr>
+        <th>Source</th><th>Connector Name</th><th>Status</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        ${connSummary.map(c => `
+          <tr>
+            <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
+            <td><code style="color:#4fc3f7;font-size:12px">${c.name}</code></td>
+            <td>${stateBadge(c.state)}</td>
+            <td>
+              <div class="btn-group">
+                <button class="btn btn-secondary btn-sm" onclick="navigate('connectors');currentSource='${c.source}'">Config</button>
+                <button class="btn btn-warn btn-sm" onclick="restartConnector('${c.source}','${c.name}')">Restart</button>
+              </div>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🌊 Streaming Jobs</div>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>Job Name</th><th>Ready</th><th>Desired</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>
+        ${deploys.map(d => {
+          const name = d.metadata.name;
+          const ready = d.status?.readyReplicas || 0;
+          const desired = d.spec?.replicas || 0;
+          const st = desired === 0 ? 'STOPPED' : ready > 0 ? 'RUNNING' : 'STARTING';
+          return `<tr>
+            <td><code style="font-size:12px;color:#c9d1d9">${name}</code></td>
+            <td>${ready}</td><td>${desired}</td>
+            <td>${stateBadge(st)}</td>
+            <td>
+              <div class="btn-group">
+                ${desired === 0
+                  ? `<button class="btn btn-success btn-sm" onclick="scaleJob('${name}',1)">▶ Start</button>`
+                  : `<button class="btn btn-danger btn-sm" onclick="scaleJob('${name}',0)">⏹ Stop</button>`}
+                <button class="btn btn-secondary btn-sm" onclick="restartJob('${name}')">↻</button>
+              </div>
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+  </div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONNECTORS PAGE
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderConnectors() {
+  const c = document.getElementById('content');
+  c.innerHTML = `
+    <div class="source-tabs" id="src-tabs">
+      ${SOURCES.map(s => `
+        <div class="src-tab ${s===currentSource?'active':''}" onclick="switchSource('${s}')">
+          <span class="src-badge ${SOURCE_BADGE[s]}"></span>
+          ${SOURCE_ICON[s]} ${SOURCE_LABELS[s]}
+        </div>`).join('')}
+    </div>
+    <div id="connector-list"><div style="color:#586374;padding:20px">Loading…</div></div>
+  `;
+  loadConnectorList(currentSource);
+}
+
+function switchSource(src) {
+  currentSource = src;
+  document.querySelectorAll('.src-tab').forEach((t,i) => t.classList.toggle('active', SOURCES[i]===src));
+  loadConnectorList(src);
+}
+
+async function loadConnectorList(src) {
+  const el = document.getElementById('connector-list');
+  const r = await apiGet(`/api/connectors/${src}`);
+  const data = r.data;
+
+  if (!r.ok || !data || Object.keys(data).length === 0) {
+    el.innerHTML = `<div class="card" style="text-align:center;color:#586374;padding:32px">
+      No connectors found for ${SOURCE_LABELS[src]}.
+      <br><br><button class="btn btn-primary" onclick="navigate('connector-new')">+ Create Connector</button>
+    </div>`;
+    return;
+  }
+
+  const rows = Object.entries(data).map(([name, info]) => {
+    const state = info?.status?.connector?.state || 'UNKNOWN';
+    const taskState = info?.status?.tasks?.[0]?.state || '–';
+    const tasks = info?.status?.tasks?.length || 0;
+    return `<tr>
+      <td><code style="color:#4fc3f7;font-size:12px">${name}</code></td>
+      <td>${stateBadge(state)}</td>
+      <td>${stateBadge(taskState)} <span style="color:#586374;font-size:11px">(${tasks} task)</span></td>
+      <td>
+        <div class="btn-group">
+          <button class="btn btn-secondary btn-sm" onclick="editConnector('${src}','${name}')">✎ Edit</button>
+          <button class="btn btn-success btn-sm" onclick="resumeConnector('${src}','${name}')">▶ Resume</button>
+          <button class="btn btn-warn btn-sm" onclick="pauseConnector('${src}','${name}')">⏸ Pause</button>
+          <button class="btn btn-secondary btn-sm" onclick="restartConnector('${src}','${name}')">↻ Restart</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteConnector('${src}','${name}')">🗑</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">${SOURCE_ICON[src]} ${SOURCE_LABELS[src]} Connectors</div>
+      <div class="btn-group">
+        <button class="btn btn-secondary btn-sm" onclick="loadConnectorList('${src}')">↻ Refresh</button>
+        <button class="btn btn-primary btn-sm" onclick="navigate('connector-new')">+ New</button>
+      </div>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>Name</th><th>Connector State</th><th>Task State</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+async function editConnector(src, name) {
+  const r = await apiGet(`/api/connectors/${src}/${name}/config`);
+  if (!r.ok) return toast('Failed to load config', 'error');
+  showConnectorModal(src, name, r.data, false);
+}
+
+async function pauseConnector(src, name) {
+  const r = await apiPost(`/api/connectors/${src}/${name}/pause`);
+  toast(r.ok ? `${name} paused` : 'Pause failed', r.ok ? 'success' : 'error');
+  loadConnectorList(src);
+}
+async function resumeConnector(src, name) {
+  const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
+  toast(r.ok ? `${name} resumed` : 'Resume failed', r.ok ? 'success' : 'error');
+  loadConnectorList(src);
+}
+async function restartConnector(src, name) {
+  const r = await apiPost(`/api/connectors/${src}/${name}/restart`);
+  toast(r.ok ? `${name} restarted` : 'Restart failed', r.ok ? 'success' : 'error');
+  setTimeout(() => loadConnectorList(src), 2000);
+}
+async function deleteConnector(src, name) {
+  if (!confirm(`Delete connector "${name}"?`)) return;
+  const r = await apiDel(`/api/connectors/${src}/${name}`);
+  toast(r.ok ? `${name} deleted` : 'Delete failed', r.ok ? 'success' : 'error');
+  loadConnectorList(src);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONNECTOR MODAL (edit/create)
+// ═══════════════════════════════════════════════════════════════════════════
+function showConnectorModal(src, name, config, isNew) {
+  // build key-value pairs excluding 'name'
+  const pairs = Object.entries(config || {}).filter(([k]) => k !== 'name');
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.id = 'conn-modal';
+  modal.innerHTML = `
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">${isNew ? '➕ New Connector' : `✎ Edit: ${name}`}</div>
+      <button class="modal-close" onclick="closeModal('conn-modal')">✕</button>
+    </div>
+
+    ${isNew ? `
+    <div class="form-row">
+      <div class="form-label">Source</div>
+      <select class="form-select" id="modal-src" onchange="prefillConnectorTemplate(this.value)">
+        ${SOURCES.map(s=>`<option value="${s}" ${s===src?'selected':''}>${SOURCE_LABELS[s]}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-label">Connector Name</div>
+      <input class="form-input" id="modal-name" placeholder="e.g. my-oracle-cdc" value="${name||''}"/>
+    </div>` : ''}
+
+    <div style="font-size:12px;color:#586374;margin-bottom:10px">
+      Configuration key/value pairs:
+    </div>
+    <div class="kv-editor" id="kv-editor">
+      ${pairs.map(([k,v]) => kvRow(k, v)).join('')}
+    </div>
+    <button class="kv-add" onclick="addKvRow()">+ Add property</button>
+
+    <div style="margin-top:16px">
+      <div style="font-size:12px;color:#586374;margin-bottom:6px">Or paste full JSON config:</div>
+      <textarea class="form-textarea" id="modal-json" rows="8" placeholder='{"connector.class":"...","database.hostname":"...",...}'></textarea>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('conn-modal')">Cancel</button>
+      <button class="btn btn-secondary" onclick="loadJsonToKv()">📋 Apply JSON</button>
+      <button class="btn btn-primary" onclick="saveConnector('${src}','${name}',${isNew})">
+        ${isNew ? '✓ Create' : '✓ Save'}
+      </button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+function kvRow(k='', v='') {
+  return `<div class="kv-row">
+    <input class="kv-input" placeholder="property.key" value="${escHtml(String(k))}"/>
+    <input class="kv-input" placeholder="value" value="${escHtml(String(v))}"/>
+    <button class="kv-del" onclick="this.parentElement.remove()">✕</button>
+  </div>`;
+}
+function addKvRow() {
+  const ed = document.getElementById('kv-editor');
+  ed.insertAdjacentHTML('beforeend', kvRow());
+}
+function loadJsonToKv() {
+  const raw = document.getElementById('modal-json').value.trim();
+  if (!raw) return;
+  try {
+    const obj = JSON.parse(raw);
+    const ed = document.getElementById('kv-editor');
+    ed.innerHTML = Object.entries(obj).filter(([k])=>k!=='name').map(([k,v])=>kvRow(k,v)).join('');
+    toast('JSON applied to editor', 'info');
+  } catch { toast('Invalid JSON', 'error'); }
+}
+function getKvConfig() {
+  const rows = document.querySelectorAll('#kv-editor .kv-row');
+  const cfg = {};
+  rows.forEach(r => {
+    const inputs = r.querySelectorAll('.kv-input');
+    const k = inputs[0].value.trim();
+    const v = inputs[1].value.trim();
+    if (k) cfg[k] = v;
+  });
+  return cfg;
+}
+async function saveConnector(src, oldName, isNew) {
+  const actualSrc = isNew ? (document.getElementById('modal-src')?.value || src) : src;
+  const name = isNew ? document.getElementById('modal-name')?.value?.trim() : oldName;
+  if (!name) return toast('Connector name required', 'error');
+
+  let cfg = getKvConfig();
+  // if JSON field has content, prefer it
+  const jsonRaw = document.getElementById('modal-json')?.value?.trim();
+  if (jsonRaw) {
+    try { cfg = JSON.parse(jsonRaw); } catch { return toast('Invalid JSON', 'error'); }
+  }
+
+  if (isNew) {
+    const body = { name, config: cfg };
+    const r = await apiPost(`/api/connectors/${actualSrc}`, body);
+    if (r.ok) {
+      toast(`Connector "${name}" created`, 'success');
+      closeModal('conn-modal');
+      currentSource = actualSrc;
+      navigate('connectors');
+    } else {
+      toast(`Error: ${JSON.stringify(r.data).slice(0,120)}`, 'error');
+    }
+  } else {
+    const r = await apiPut(`/api/connectors/${src}/${name}`, cfg);
+    if (r.ok) {
+      toast(`Connector "${name}" updated`, 'success');
+      closeModal('conn-modal');
+      loadConnectorList(src);
+    } else {
+      toast(`Error: ${JSON.stringify(r.data).slice(0,120)}`, 'error');
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  NEW CONNECTOR PAGE  — template presets
+// ═══════════════════════════════════════════════════════════════════════════
+const TEMPLATES = {
+  postgres: {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "topic.prefix": "postgres",
+    "database.hostname": "postgresql.prod.svc.cluster.local",
+    "database.port": "5432",
+    "database.user": "debezium",
+    "database.password": "",
+    "database.dbname": "mydb",
+    "database.server.name": "postgres",
+    "schema.include.list": "public",
+    "table.include.list": "public.customers,public.orders",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_slot",
+    "publication.name": "debezium_pub",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  },
+  oracle: {
+    "connector.class": "io.debezium.connector.oracle.OracleConnector",
+    "tasks.max": "1",
+    "topic.prefix": "oracle",
+    "database.hostname": "oracle-xe.prod.svc.cluster.local",
+    "database.port": "1521",
+    "database.user": "c##dbzcdc",
+    "database.password": "",
+    "database.dbname": "XE",
+    "database.pdb.name": "XEPDB1",
+    "schema.include.list": "MYSCHEMA",
+    "table.include.list": "MYSCHEMA.CUSTOMERS",
+    "snapshot.mode": "schema_only",
+    "log.mining.strategy": "online_catalog",
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "connect",
+    "tombstones.on.delete": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "schema.history.internal.kafka.bootstrap.servers": "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092",
+    "schema.history.internal.kafka.topic": "schema-changes.oracle"
+  },
+  mongodb: {
+    "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
+    "tasks.max": "1",
+    "topic.prefix": "mongodb",
+    "mongodb.connection.string": "mongodb://root:password@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0",
+    "database.include.list": "mydb",
+    "collection.include.list": "mydb.customers,mydb.orders",
+    "snapshot.mode": "never",
+    "decimal.handling.mode": "double",
+    "tombstones.on.delete": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+};
+
+function renderConnectorNew() {
+  const c = document.getElementById('content');
+  c.innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">➕ New Connector</div>
+    </div>
+    <div class="form-row">
+      <div class="form-label">Source Type</div>
+      <select class="form-select" id="new-src" onchange="loadTemplate()">
+        ${SOURCES.map(s=>`<option value="${s}">${SOURCE_ICON[s]} ${SOURCE_LABELS[s]}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-label">Connector Name</div>
+      <input class="form-input" id="new-name" placeholder="e.g. my-oracle-cdc"/>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px">
+      <div>
+        <div style="font-size:12px;color:#586374;margin-bottom:8px;font-weight:600">⌨ Key/Value Editor</div>
+        <div class="kv-editor" id="kv-editor-new"></div>
+        <button class="kv-add" onclick="addKvRowNew()">+ Add property</button>
+      </div>
+      <div>
+        <div style="font-size:12px;color:#586374;margin-bottom:8px;font-weight:600">{ } JSON Editor</div>
+        <textarea class="form-textarea" id="new-json" rows="20" style="min-height:300px"></textarea>
+        <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="applyNewJson()">📋 Apply JSON → KV</button>
+      </div>
+    </div>
+
+    <div style="margin-top:20px;display:flex;justify-content:flex-end;gap:10px">
+      <button class="btn btn-secondary" onclick="navigate('connectors')">Cancel</button>
+      <button class="btn btn-primary" onclick="createConnectorFromPage()">✓ Create Connector</button>
+    </div>
+  </div>`;
+  loadTemplate();
+}
+
+function loadTemplate() {
+  const src = document.getElementById('new-src').value;
+  const tmpl = TEMPLATES[src] || {};
+  // fill kv editor
+  const ed = document.getElementById('kv-editor-new');
+  ed.innerHTML = Object.entries(tmpl).map(([k,v])=>kvRowNew(k,v)).join('');
+  // fill json
+  document.getElementById('new-json').value = JSON.stringify(tmpl, null, 2);
+}
+function kvRowNew(k='',v='') {
+  return `<div class="kv-row">
+    <input class="kv-input" placeholder="property.key" value="${escHtml(String(k))}"/>
+    <input class="kv-input" placeholder="value" value="${escHtml(String(v))}"/>
+    <button class="kv-del" onclick="this.parentElement.remove()">✕</button>
+  </div>`;
+}
+function addKvRowNew() {
+  document.getElementById('kv-editor-new').insertAdjacentHTML('beforeend', kvRowNew());
+}
+function applyNewJson() {
+  const raw = document.getElementById('new-json').value.trim();
+  try {
+    const obj = JSON.parse(raw);
+    const ed = document.getElementById('kv-editor-new');
+    ed.innerHTML = Object.entries(obj).filter(([k])=>k!=='name').map(([k,v])=>kvRowNew(k,v)).join('');
+    toast('JSON applied', 'info');
+  } catch { toast('Invalid JSON', 'error'); }
+}
+async function createConnectorFromPage() {
+  const src  = document.getElementById('new-src').value;
+  const name = document.getElementById('new-name').value.trim();
+  if (!name) return toast('Connector name required', 'error');
+
+  // prefer JSON editor if it differs from template
+  let cfg;
+  const jsonRaw = document.getElementById('new-json').value.trim();
+  try { cfg = JSON.parse(jsonRaw); } catch { cfg = null; }
+  if (!cfg) {
+    cfg = {};
+    document.querySelectorAll('#kv-editor-new .kv-row').forEach(r => {
+      const inputs = r.querySelectorAll('.kv-input');
+      const k = inputs[0].value.trim(); const v = inputs[1].value.trim();
+      if (k) cfg[k] = v;
+    });
+  }
+
+  const body = { name, config: cfg };
+  const r = await apiPost(`/api/connectors/${src}`, body);
+  if (r.ok) {
+    toast(`Connector "${name}" created ✓`, 'success');
+    currentSource = src;
+    navigate('connectors');
+  } else {
+    toast(`Error: ${JSON.stringify(r.data).slice(0,200)}`, 'error');
+  }
+}
+
+// template prefill for modal
+function prefillConnectorTemplate(src) {
+  const tmpl = TEMPLATES[src] || {};
+  const ed = document.getElementById('kv-editor');
+  if (ed) ed.innerHTML = Object.entries(tmpl).map(([k,v])=>kvRow(k,v)).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  KAFKA TOPICS
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderTopics() {
+  const c = document.getElementById('content');
+  c.innerHTML = `<div class="card"><div style="color:#586374;padding:20px">Loading topics…</div></div>`;
+  const r = await apiGet('/api/kafka/topics');
+  const topics = r.data?.topics || [];
+  kafkaTopics = topics;
+
+  const groups = {};
+  for (const t of topics) {
+    const prefix = t.split('.')[0] || 'other';
+    if (!groups[prefix]) groups[prefix] = [];
+    groups[prefix].push(t);
+  }
+
+  c.innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">📨 Kafka Topics <span style="color:#586374;font-weight:400;font-size:12px">(${topics.length} total)</span></div>
+      <div class="btn-group">
+        <input class="form-input" id="topic-search" placeholder="Filter topics…" style="width:200px"
+          oninput="filterTopics(this.value)"/>
+        <button class="btn btn-secondary btn-sm" onclick="renderTopics()">↻</button>
+      </div>
+    </div>
+    <div id="topic-table-wrap">
+      ${Object.entries(groups).map(([pfx, tlist]) => `
+        <div style="margin-bottom:16px">
+          <div style="font-size:11px;color:#4fc3f7;font-weight:600;text-transform:uppercase;
+            letter-spacing:.5px;padding:6px 0;border-bottom:1px solid #1c2a3a;margin-bottom:8px">
+            ${pfx} <span style="color:#586374">(${tlist.length})</span>
+          </div>
+          ${tlist.map(t => `
+            <div class="msg-row topic-row" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px" data-topic="${t}">
+              <code style="color:#c9d1d9;font-size:13px">${t}</code>
+              <div class="btn-group">
+                <button class="btn btn-secondary btn-sm" onclick="showTopicOffsets('${t}')">📊 Offsets</button>
+                <button class="btn btn-primary btn-sm" onclick="queryTopic('${t}')">🔍 Query</button>
+              </div>
+            </div>`).join('')}
+        </div>`).join('')}
+    </div>
+  </div>
+  <div id="offset-panel"></div>`;
+}
+
+function filterTopics(q) {
+  document.querySelectorAll('.topic-row').forEach(r => {
+    r.style.display = r.dataset.topic.includes(q) ? '' : 'none';
+  });
+}
+
+async function showTopicOffsets(topic) {
+  const r = await apiGet(`/api/kafka/topics/${encodeURIComponent(topic)}/offsets`);
+  const parts = r.data?.partitions || [];
+  const total = parts.reduce((s,p) => s + p.offset, 0);
+  document.getElementById('offset-panel').innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">📊 Offsets: <code style="color:#4fc3f7">${topic}</code></div>
+      <span style="color:#586374;font-size:12px">Total messages: ~${total.toLocaleString()}</span>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>Topic</th><th>Partition</th><th>Latest Offset</th></tr></thead>
+      <tbody>
+        ${parts.map(p => `<tr>
+          <td><code style="font-size:12px">${p.topic}</code></td>
+          <td>${p.partition}</td>
+          <td style="color:#4fc3f7;font-weight:600">${p.offset.toLocaleString()}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    <div style="margin-top:12px">
+      <button class="btn btn-primary btn-sm" onclick="queryTopic('${topic}')">🔍 Query Messages</button>
+    </div>
+  </div>`;
+}
+
+function queryTopic(topic) {
+  currentPage = 'ksql';
+  navigate('ksql');
+  setTimeout(() => {
+    const ti = document.getElementById('q-topic');
+    if (ti) { ti.value = topic; }
+  }, 300);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  KSQL-STYLE QUERY
+// ═══════════════════════════════════════════════════════════════════════════
+function renderKSQL() {
+  const c = document.getElementById('content');
+  c.innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🔍 Kafka Message Query</div>
+      <div style="font-size:12px;color:#586374">Read and inspect messages from any Kafka topic</div>
+    </div>
+
+    <div class="query-bar">
+      <div class="query-field">
+        <div class="query-label">Topic</div>
+        <input class="query-input" id="q-topic" list="topic-list" placeholder="select or type topic…" style="min-width:280px"/>
+        <datalist id="topic-list">
+          ${kafkaTopics.map(t=>`<option value="${t}">`).join('')}
+        </datalist>
+      </div>
+      <div class="query-field">
+        <div class="query-label">Partition</div>
+        <input class="query-input" id="q-partition" type="number" value="0" style="width:80px"/>
+      </div>
+      <div class="query-field">
+        <div class="query-label">Start Offset</div>
+        <select class="query-input" id="q-offset-mode" style="width:110px">
+          <option value="latest">Latest</option>
+          <option value="0">Earliest (0)</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </div>
+      <div class="query-field" id="q-custom-wrap" style="display:none">
+        <div class="query-label">Custom Offset</div>
+        <input class="query-input" id="q-custom-offset" type="number" value="0" style="width:100px"/>
+      </div>
+      <div class="query-field">
+        <div class="query-label">Limit</div>
+        <input class="query-input" id="q-limit" type="number" value="20" min="1" max="200" style="width:80px"/>
+      </div>
+      <div class="query-field" style="justify-content:flex-end">
+        <div class="query-label">&nbsp;</div>
+        <button class="btn btn-primary" onclick="runKafkaQuery()">▶ Run Query</button>
+      </div>
+    </div>
+
+    <div id="q-status" style="font-size:12px;color:#586374;margin-bottom:10px"></div>
+    <div id="q-results"></div>
+  </div>`;
+
+  document.getElementById('q-offset-mode').addEventListener('change', function() {
+    document.getElementById('q-custom-wrap').style.display = this.value==='custom' ? '' : 'none';
+  });
+
+  // Load topic list if empty
+  if (kafkaTopics.length === 0) {
+    apiGet('/api/kafka/topics').then(r => {
+      kafkaTopics = r.data?.topics || [];
+      const dl = document.getElementById('topic-list');
+      if (dl) dl.innerHTML = kafkaTopics.map(t=>`<option value="${t}">`).join('');
+    });
+  }
+}
+
+async function runKafkaQuery() {
+  const topic = document.getElementById('q-topic').value.trim();
+  if (!topic) return toast('Select a topic', 'error');
+  const partition = Number(document.getElementById('q-partition').value) || 0;
+  const limit = Number(document.getElementById('q-limit').value) || 20;
+  const offsetMode = document.getElementById('q-offset-mode').value;
+  let offset = offsetMode === 'custom'
+    ? Number(document.getElementById('q-custom-offset').value)
+    : offsetMode === '0' ? 0 : 'latest';
+
+  document.getElementById('q-status').textContent = `⏳ Querying ${topic} partition=${partition} …`;
+  document.getElementById('q-results').innerHTML = '';
+
+  const r = await apiPost('/api/kafka/query', { topic, partition, offset, limit });
+  const msgs = r.data?.messages || [];
+  const err = r.data?.error;
+
+  document.getElementById('q-status').textContent =
+    err ? `⚠ ${err}` : `✓ ${msgs.length} message(s) returned`;
+
+  if (!msgs.length) {
+    document.getElementById('q-results').innerHTML = `<div style="color:#586374;padding:20px;text-align:center">No messages found in this range.</div>`;
+    return;
+  }
+
+  const rows = msgs.map((m, i) => {
+    const p = m.parsed;
+    const op = p?.op;
+    const opCls = op==='c'?'op-c':op==='u'?'op-u':op==='d'?'op-d':'op-r';
+    const opLabel = op==='c'?'INSERT':op==='u'?'UPDATE':op==='d'?'DELETE':op?op.toUpperCase():'MSG';
+    const source = p?.source ? `${p.source.db || ''}.${p.source.table||p.source.collection||''}` : '';
+    const summary = p
+      ? `${source ? `<span style="color:#586374">${source}</span> ` : ''}`
+        + (p.after ? `after: ${JSON.stringify(p.after).slice(0,80)}` :
+           p.before ? `before: ${JSON.stringify(p.before).slice(0,80)}` :
+           JSON.stringify(p).slice(0,80))
+      : m.raw.slice(0, 120);
+
+    return `<div class="msg-row" onclick="toggleMsg(this)">
+      <div>
+        ${op ? `<span class="msg-op ${opCls}">${opLabel}</span>` : ''}
+        <span class="msg-summary">${summary}</span>
+      </div>
+      <div class="msg-body">${syntaxHighlight(JSON.stringify(m.parsed || m.raw, null, 2))}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('q-results').innerHTML = `
+  <div class="msg-container">${rows}</div>
+  <div style="font-size:11px;color:#586374;margin-top:8px;text-align:right">
+    Click a row to expand • ${msgs.length} messages
+  </div>`;
+}
+
+function toggleMsg(el) { el.classList.toggle('expanded'); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STREAMING JOBS
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderStreaming() {
+  const c = document.getElementById('content');
+  c.innerHTML = `<div style="color:#586374;padding:40px;text-align:center">Loading…</div>`;
+
+  const r = await apiGet('/api/streaming/deployments');
+  const deploys = r.data?.items || [];
+
+  if (!deploys.length) {
+    c.innerHTML = `<div class="card" style="text-align:center;color:#586374;padding:32px">No streaming deployments found with label component=kafka-to-iceberg</div>`;
+    return;
+  }
+
+  const rows = deploys.map(d => {
+    const name = d.metadata.name;
+    const ready = d.status?.readyReplicas || 0;
+    const desired = d.spec?.replicas || 0;
+    const restartedAt = d.spec?.template?.metadata?.annotations?.['kubectl.kubernetes.io/restartedAt'] || '–';
+    const st = desired === 0 ? 'STOPPED' : ready > 0 ? 'RUNNING' : 'STARTING';
+
+    // parse source/mode from name  e.g. kafka-to-iceberg-oracle-standard
+    const parts = name.split('-');
+    const mode = parts[parts.length-1] || '';
+    const srcRaw = parts[parts.length-2] || '';
+    const src = SOURCE_LABELS[srcRaw] || srcRaw;
+
+    return `<tr id="row-${name}">
+      <td><code style="font-size:12px;color:#c9d1d9">${name}</code></td>
+      <td>${SOURCE_ICON[srcRaw] || '🔵'} ${src}</td>
+      <td><span style="color:#8b949e;font-size:12px">${mode}</span></td>
+      <td>${stateBadge(st)}</td>
+      <td style="color:#586374;font-size:11px">${ready}/${desired}</td>
+      <td>
+        <div class="btn-group">
+          ${desired === 0
+            ? `<button class="btn btn-success btn-sm" onclick="scaleJob('${name}',1)">▶ Start</button>`
+            : `<button class="btn btn-danger btn-sm" onclick="scaleJob('${name}',0)">⏹ Stop</button>`}
+          <button class="btn btn-warn btn-sm" onclick="restartJob('${name}')">↻ Restart</button>
+          <button class="btn btn-secondary btn-sm" onclick="showJobLogs('${name}')">📋 Logs</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  c.innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🌊 Kafka → Iceberg Streaming Jobs</div>
+      <div class="btn-group">
+        <button class="btn btn-secondary btn-sm" onclick="renderStreaming()">↻ Refresh</button>
+        <button class="btn btn-success btn-sm" onclick="scaleAll(1)">▶ Start All</button>
+        <button class="btn btn-danger btn-sm" onclick="scaleAll(0)">⏹ Stop All</button>
+      </div>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>Deployment</th><th>Source</th><th>Mode</th><th>Status</th><th>Pods</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+  <div id="log-panel"></div>`;
+}
+
+async function scaleJob(name, replicas) {
+  const r = await apiPost(`/api/streaming/${name}/scale`, { replicas });
+  toast(r.ok ? `${name} scaled to ${replicas}` : `Scale failed: ${JSON.stringify(r.data).slice(0,80)}`,
+        r.ok ? 'success' : 'error');
+  setTimeout(renderStreaming, 1500);
+}
+async function restartJob(name) {
+  const r = await apiPost(`/api/streaming/${name}/restart`);
+  toast(r.ok ? `${name} restarted` : `Restart failed`, r.ok ? 'success' : 'error');
+  setTimeout(renderStreaming, 1500);
+}
+async function scaleAll(replicas) {
+  const r = await apiGet('/api/streaming/deployments');
+  const deploys = r.data?.items || [];
+  await Promise.all(deploys.map(d => apiPost(`/api/streaming/${d.metadata.name}/scale`, { replicas })));
+  toast(`All jobs scaled to ${replicas}`, 'success');
+  setTimeout(renderStreaming, 2000);
+}
+async function showJobLogs(name) {
+  document.getElementById('log-panel').innerHTML = `<div class="card"><div style="color:#586374;padding:12px">Loading logs…</div></div>`;
+  const r = await apiGet(`/api/streaming/${name}/logs`);
+  const logs = r.data?.logs || 'No logs';
+  const lines = logs.split('\n').slice(-80).join('\n');
+  document.getElementById('log-panel').innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">📋 Logs: ${name}</div>
+      <button class="btn btn-secondary btn-sm" onclick="document.getElementById('log-panel').innerHTML=''">✕ Close</button>
+    </div>
+    <pre style="background:#06090f;border:1px solid #1c2a3a;border-radius:6px;padding:14px;
+      font-size:11px;color:#8b949e;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">${escHtml(lines)}</pre>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ICEBERG CONFIG
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderIcebergConfig() {
+  const c = document.getElementById('content');
+  c.innerHTML = `<div style="color:#586374;padding:20px">Loading…</div>`;
+  const r = await apiGet('/api/iceberg/config');
+  const cfg = r.data?.config || {};
+
+  c.innerHTML = `
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🧊 Iceberg Streaming Configuration</div>
+      <div class="card-subtitle">Stored as ConfigMap "lakehouse-ui-iceberg-config" in prod namespace</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-size:12px;color:#586374;margin-bottom:8px;font-weight:600">⌨ Key/Value Editor</div>
+        <div class="kv-editor" id="ice-kv-editor">
+          ${Object.entries(cfg).length
+            ? Object.entries(cfg).map(([k,v])=>`<div class="kv-row">
+                <input class="kv-input" value="${escHtml(k)}"/>
+                <input class="kv-input" value="${escHtml(v)}"/>
+                <button class="kv-del" onclick="this.parentElement.remove()">✕</button>
+              </div>`).join('')
+            : `<div class="kv-row">
+                <input class="kv-input" placeholder="key" value="catalog.type"/>
+                <input class="kv-input" placeholder="value" value="rest"/>
+                <button class="kv-del" onclick="this.parentElement.remove()">✕</button>
+              </div>
+              <div class="kv-row">
+                <input class="kv-input" placeholder="key" value="catalog.uri"/>
+                <input class="kv-input" placeholder="value" value="http://polaris.prod.svc.cluster.local:8181"/>
+                <button class="kv-del" onclick="this.parentElement.remove()">✕</button>
+              </div>
+              <div class="kv-row">
+                <input class="kv-input" placeholder="key" value="s3.endpoint"/>
+                <input class="kv-input" placeholder="value" value="http://minio.prod.svc.cluster.local:9000"/>
+                <button class="kv-del" onclick="this.parentElement.remove()">✕</button>
+              </div>`}
+        </div>
+        <button class="kv-add" onclick="document.getElementById('ice-kv-editor').insertAdjacentHTML('beforeend','<div class=kv-row><input class=kv-input placeholder=key/><input class=kv-input placeholder=value/><button class=kv-del onclick=this.parentElement.remove()>✕</button></div>')">+ Add</button>
+      </div>
+      <div>
+        <div style="font-size:12px;color:#586374;margin-bottom:8px;font-weight:600">{ } Current Config JSON</div>
+        <pre style="background:#06090f;border:1px solid #1c2a3a;border-radius:6px;padding:14px;
+          font-size:12px;color:#8b949e;overflow:auto;max-height:320px;white-space:pre-wrap">${syntaxHighlight(JSON.stringify(cfg, null, 2))}</pre>
+      </div>
+    </div>
+
+    <div style="margin-top:20px;display:flex;justify-content:flex-end">
+      <button class="btn btn-primary" onclick="saveIcebergConfig()">✓ Save Configuration</button>
+    </div>
+  </div>`;
+}
+
+async function saveIcebergConfig() {
+  const rows = document.querySelectorAll('#ice-kv-editor .kv-row');
+  const cfg = {};
+  rows.forEach(r => {
+    const ins = r.querySelectorAll('.kv-input');
+    const k = ins[0].value.trim(); const v = ins[1].value.trim();
+    if (k) cfg[k] = v;
+  });
+  const r = await apiPut('/api/iceberg/config', cfg);
+  toast(r.ok ? 'Iceberg config saved ✓' : `Error: ${JSON.stringify(r.data).slice(0,80)}`,
+        r.ok ? 'success' : 'error');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+function stateBadge(state) {
+  const s = (state||'').toUpperCase();
+  if (s==='RUNNING')  return `<span class="s-badge s-running"><span class="status-dot dot-green"></span>${s}</span>`;
+  if (s==='PAUSED')   return `<span class="s-badge s-paused"><span class="status-dot dot-yellow"></span>${s}</span>`;
+  if (s==='FAILED')   return `<span class="s-badge s-failed"><span class="status-dot dot-red"></span>${s}</span>`;
+  if (s==='STOPPED')  return `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>${s}</span>`;
+  if (s==='STARTING') return `<span class="s-badge s-paused"><span class="status-dot dot-yellow"></span>${s}</span>`;
+  return `<span class="s-badge s-stopped">${s||'–'}</span>`;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function syntaxHighlight(json) {
+  if (typeof json !== 'string') json = JSON.stringify(json, null, 2);
+  return escHtml(json)
+    .replace(/"([^"]+)":/g, '<span class="json-key">"$1"</span>:')
+    .replace(/: "([^"]*)"/g, ': <span class="json-str">"$1"</span>')
+    .replace(/: (-?\d+\.?\d*)/g, ': <span class="json-num">$1</span>')
+    .replace(/: (true|false)/g, ': <span class="json-bool">$1</span>')
+    .replace(/: null/g, ': <span class="json-null">null</span>');
+}
+
+function closeModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CLUSTER STATUS  (poll every 10s)
+// ═══════════════════════════════════════════════════════════════════════════
+async function refreshClusterStatus() {
+  const el = document.getElementById('cluster-status');
+  try {
+    const r = await apiGet('/api/connectors/postgres');
+    const ok = r.ok && typeof r.data === 'object';
+    const count = ok ? Object.keys(r.data).length : 0;
+    el.innerHTML = `<div class="status-dot ${ok?'dot-green':'dot-red'}"></div>
+      <span>${ok ? `Cluster OK • ${count} connector(s)` : 'Cluster unreachable'}</span>`;
+  } catch {
+    el.innerHTML = `<div class="status-dot dot-red"></div><span>Error</span>`;
+  }
+}
+
+// ─── Init ───────────────────────────────────────────────────────────────────
+refreshClusterStatus();
+setInterval(refreshClusterStatus, 10000);
+navigate('dashboard');
+</script>
+</body>
+</html>
