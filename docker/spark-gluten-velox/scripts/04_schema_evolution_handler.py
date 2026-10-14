@@ -194,6 +194,7 @@ def _source_type_to_iceberg(source_key: str, type_str: str) -> str:
     return "string"
 
 
+
 # ── Avro type → Iceberg type ──────────────────────────────────────────────────
 
 def _avro_type_to_iceberg(avro_type: Any) -> str:

@@ -158,7 +158,6 @@ RESTART_BACKOFF_MAX_S  = float(os.environ.get("RESTART_BACKOFF_MAX_S", "120"))
 HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8080"))
 
 KAFKA_BOOTSTRAP = "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
-SR_URL          = "http://schema-registry.prod.svc.cluster.local:8081"
 S3_BUCKET       = "xdatatoiceberg1"
 
 # Streaming micro-batch trigger interval.
@@ -278,92 +277,9 @@ _DEBEZIUM_ENVELOPE_SCHEMA = StructType([
 ])
 
 
-# ── Schema Registry Avro helper ───────────────────────────────────────────────
-_SR_CLIENT_CACHE: dict = {}
-_SR_SCHEMA_CACHE: dict = {}
-_SR_READER_CACHE: dict = {}
-
-
-def _build_avro_deserialize_udf(_sr_url: str) -> Any:
-    """
-    Build a Python UDF that deserialises a Confluent Avro-encoded byte array
-    (5-byte magic header: 0x00 + 4-byte schema ID + avro payload) to a JSON string.
-    Falls back to UTF-8 decode if the magic byte is absent (plain JSON mode).
-
-    Schema-ID fallback: if the embedded schema ID is no longer present in the
-    Schema Registry (e.g. after a hard-delete during connector reconfiguration),
-    the UDF falls back to the latest registered schema for the topic's -value
-    subject.  This lets historic messages still be decoded correctly as long as
-    the table structure has not changed.
-    """
-    import io as _io
-    import struct as _struct
-
-    try:
-        import avro.io as _aio
-        import avro.schema as _aschema
-        _avro_available = True
-    except ImportError:
-        _avro_available = False
-
-    def _resolve_schema(sr: Any, schema_id: int, topic: str) -> Any:
-        """Return an avro DatumReader for schema_id, falling back to the
-        latest subject schema if the specific ID has been hard-deleted."""
-        if schema_id in _SR_READER_CACHE:
-            return _SR_READER_CACHE[schema_id]
-        try:
-            registered = sr.get_schema(schema_id)
-        except Exception:
-            # Schema ID gone (hard-deleted).  Fall back to the latest version
-            # registered for this topic's value subject.
-            subject = f"{topic}-value"
-            if subject not in _SR_SCHEMA_CACHE:
-                from confluent_kafka.schema_registry import SchemaRegistryClient
-                versions = sr.get_versions(subject)
-                latest_id = sr.get_schema_id_by_subject(subject)
-                registered = sr.get_schema(latest_id)
-                _SR_SCHEMA_CACHE[subject] = registered
-            else:
-                registered = _SR_SCHEMA_CACHE[subject]
-        schema_def = _aschema.parse(registered.schema_str)
-        reader = _aio.DatumReader(schema_def)
-        _SR_READER_CACHE[schema_id] = reader
-        return reader
-
-    def avro_to_json(topic: str, raw_bytes: bytes) -> str | None:
-        if raw_bytes is None:
-            return None
-        try:
-            if len(raw_bytes) < 5 or raw_bytes[0] != 0:
-                return raw_bytes.decode("utf-8", errors="replace")
-
-            if not _avro_available:
-                return raw_bytes[5:].decode("utf-8", errors="replace")
-
-            schema_id = _struct.unpack(">I", raw_bytes[1:5])[0]
-
-            if _sr_url not in _SR_CLIENT_CACHE:
-                from confluent_kafka.schema_registry import SchemaRegistryClient
-                _SR_CLIENT_CACHE[_sr_url] = SchemaRegistryClient({"url": _sr_url})
-            sr = _SR_CLIENT_CACHE[_sr_url]
-
-            reader  = _resolve_schema(sr, schema_id, topic)
-            decoder = _aio.BinaryDecoder(_io.BytesIO(raw_bytes[5:]))
-            record  = reader.read(decoder)
-            # Debezium envelope: before/after are nested Avro records (dicts).
-            # from_json(..., StringType()) expects a JSON string, not a nested
-            # object, so stringify any dict values before the outer json.dumps.
-            normalised = {
-                k: (json.dumps(v) if isinstance(v, dict) else v)
-                for k, v in record.items()
-            }
-            return json.dumps(normalised)
-
-        except Exception as exc:
-            logger.warning("avro_to_json failed: %s", exc)
-            return None
-
-    return udf(avro_to_json, StringType())
+# ── JSON decoder UDF ──────────────────────────────────────────────────────────
+# Debezium is configured with JsonConverter (schemas.enable=false).
+# Kafka value bytes are plain UTF-8 JSON — no Avro magic header, no Schema Registry.
 
 
 # ── Table routing ─────────────────────────────────────────────────────────────
@@ -1332,22 +1248,14 @@ def _start_source_stream(
         .load()
     )
 
-    try:
-        from confluent_kafka.schema_registry import SchemaRegistryClient  # noqa: F401
-        avro_udf = _build_avro_deserialize_udf(SR_URL)
-    except ImportError:
-        logger.warning(
-            "[%s] confluent-kafka not available; treating values as plain JSON.",
-            source.source_key,
-        )
-        avro_udf = udf(
-            lambda topic, b: b.decode("utf-8", errors="replace") if b else None,
-            StringType(),
-        )
+    json_udf = udf(
+        lambda b: b.decode("utf-8", errors="replace") if b else None,
+        StringType(),
+    )
 
     decoded_stream = raw_stream.withColumn(
         "value_json",
-        avro_udf(col("topic").cast(StringType()), col("value")),
+        json_udf(col("value")),
     )
 
     query = (

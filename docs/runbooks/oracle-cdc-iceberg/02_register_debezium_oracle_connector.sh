@@ -208,10 +208,10 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "database.history.producer.sasl.mechanism":     "SCRAM-SHA-512",
     "database.history.producer.sasl.jaas.config":   "org.apache.kafka.common.security.scram.ScramLoginModule required username=\\"${KAFKA_USER}\\" password=\\"${KAFKA_PASS}\\";",
 
-    "key.converter":                       "io.confluent.kafka.serializers.KafkaAvroSerializer",
-    "key.converter.schema.registry.url":   "${SR_URL}",
-    "value.converter":                     "io.confluent.kafka.serializers.KafkaAvroSerializer",
-    "value.converter.schema.registry.url": "${SR_URL}",
+    "key.converter":              "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter":            "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
 
     "decimal.handling.mode":  "double",
     "time.precision.mode":    "connect",

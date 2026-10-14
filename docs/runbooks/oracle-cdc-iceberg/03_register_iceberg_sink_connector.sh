@@ -121,11 +121,10 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
 
     "topics": "oracle-tpcds.TPCDS.INCOME_BAND,oracle-tpcds.TPCDS.SHIP_MODE,oracle-tpcds.TPCDS.WAREHOUSE,oracle-tpcds.TPCDS.REASON,oracle-tpcds.TPCDS.CALL_CENTER,oracle-tpcds.TPCDS.WEB_SITE,oracle-tpcds.TPCDS.WEB_PAGE,oracle-tpcds.TPCDS.HOUSEHOLD_DEMOGRAPHICS,oracle-tpcds.TPCDS.CATALOG_PAGE,oracle-tpcds.TPCDS.PROMOTION",
 
-    "key.converter":                        "io.confluent.kafka.serializers.KafkaAvroDeserializer",
-    "key.converter.schema.registry.url":    "${SR_URL}",
-    "value.converter":                      "io.confluent.kafka.serializers.KafkaAvroDeserializer",
-    "value.converter.schema.registry.url":  "${SR_URL}",
-    "value.converter.specific.avro.reader": "false",
+    "key.converter":              "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter":            "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
 
     "iceberg.catalog":                      "${POLARIS_CATALOG_NAME}",
     "iceberg.catalog.type":                 "rest",

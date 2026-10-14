@@ -207,10 +207,10 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "schema.history.internal.producer.sasl.mechanism":     "SCRAM-SHA-512",
     "schema.history.internal.producer.sasl.jaas.config":   "${JAAS_CFG_HISTORY}",
 
-    "key.converter":                       "io.confluent.connect.avro.AvroConverter",
-    "key.converter.schema.registry.url":   "${SR_URL}",
-    "value.converter":                     "io.confluent.connect.avro.AvroConverter",
-    "value.converter.schema.registry.url": "${SR_URL}",
+    "key.converter":              "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter":            "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
 
     "decimal.handling.mode": "double",
     "time.precision.mode":   "connect",
