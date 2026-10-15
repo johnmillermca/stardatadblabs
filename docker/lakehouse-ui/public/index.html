@@ -1195,40 +1195,52 @@ async function runKafkaQuery() {
   let msgs = r.data?.messages || [];
   const err = r.data?.error;
 
-  // Client-side filter
-  if (filterRaw && msgs.length) {
-    const [fk, fv] = filterRaw.split('=');
-    msgs = msgs.filter(m => {
-      const p = m.parsed || {};
-      const val = (p[fk] ?? p.after?.[fk] ?? p.before?.[fk] ?? '');
-      return String(val).toLowerCase().includes(fv?.toLowerCase() || '');
-    });
-  }
-
   if (err) {
     document.getElementById('q-status').innerHTML =
       `<span style="color:#da3633">⚠ ${escHtml(err.slice(0,200))}</span>`;
     return;
   }
 
+  // Drop unparseable messages (Avro binary or non-JSON legacy messages)
+  const rawSkipped = msgs.filter(m => !m.parsed).length;
+  msgs = msgs.filter(m => m.parsed !== null && m.parsed !== undefined);
+
+  // Client-side key=value filter
+  if (filterRaw && msgs.length) {
+    const eqIdx = filterRaw.indexOf('=');
+    const fk = filterRaw.slice(0, eqIdx).trim();
+    const fv = filterRaw.slice(eqIdx + 1).trim();
+    msgs = msgs.filter(m => {
+      const p = m.parsed || {};
+      const val = p[fk] ?? p.after?.[fk] ?? p.before?.[fk] ?? '';
+      return String(val).toLowerCase().includes(fv.toLowerCase());
+    });
+  }
+
+  const skippedNote = rawSkipped > 0
+    ? ` <span style="color:#d29922;font-size:11px">(${rawSkipped} binary/legacy msg${rawSkipped>1?'s':''} skipped)</span>`
+    : '';
+
   document.getElementById('q-status').innerHTML =
-    `<span style="color:#2ea043">✓ ${msgs.length} row(s) returned</span>` +
-    (filterRaw ? ` <span style="color:#586374">(filtered by <code>${escHtml(filterRaw)}</code>)</span>` : '') +
+    `<span style="color:#2ea043">✓ ${msgs.length} row(s) returned</span>${skippedNote}` +
+    (filterRaw ? ` <span style="color:#586374">(filtered: <code>${escHtml(filterRaw)}</code>)</span>` : '') +
     `<span style="color:#586374;margin-left:12px">topic: <code>${topic}</code>  partition: ${partition}  offset: ${offset}</span>`;
 
   if (!msgs.length) {
     document.getElementById('q-results').innerHTML =
-      `<div style="color:#586374;padding:20px;text-align:center">No messages found.</div>`;
+      `<div style="color:#586374;padding:20px;text-align:center">No decodable JSON messages found in this range.${rawSkipped > 0 ? '<br><span style="font-size:11px">'+rawSkipped+' binary (pre-JSON converter) message(s) were skipped.</span>' : ''}</div>`;
     return;
   }
 
-  // Build table columns from first parsed message
-  const firstParsed = msgs.find(m => m.parsed)?.parsed;
-  const allKeys = firstParsed
-    ? ['op', ...Object.keys(firstParsed.after || firstParsed.before || firstParsed).filter(k => k !== 'op')]
-    : [];
+  // Build column headers from the first message that has after/before payload
+  const firstWithData = msgs.find(m => m.parsed?.after || m.parsed?.before);
+  const refParsed = firstWithData?.parsed ?? msgs[0].parsed;
+  const dataKeys = Object.keys(refParsed?.after || refParsed?.before || refParsed || {}).filter(k => k !== 'op');
+  const allKeys = dataKeys.length ? ['op', ...dataKeys] : [];
 
-  const tableRows = msgs.map((m, idx) => {
+  let rowIdx = 0;
+  const tableRows = msgs.map(m => {
+    const idx = rowIdx++;
     const p = m.parsed;
     const op = p?.op;
     const opCls = op==='c'?'op-c':op==='u'?'op-u':op==='d'?'op-d':'op-r';
@@ -1236,13 +1248,12 @@ async function runKafkaQuery() {
     const data = p?.after || p?.before || p || {};
 
     if (allKeys.length > 1) {
-      // Tabular row
       const cells = allKeys.map(k => {
         if (k === 'op') return `<td>${op ? `<span class="msg-op ${opCls}">${opLabel}</span>` : '–'}</td>`;
         const v = data[k];
         const vs = v === null ? '<span style="color:#586374">null</span>'
-                 : v === undefined ? '–'
-                 : escHtml(String(v).slice(0,60)) + (String(v).length>60?'…':'');
+                 : v === undefined ? '<span style="color:#30363d">–</span>'
+                 : escHtml(String(v).slice(0, 60)) + (String(v).length > 60 ? '…' : '');
         return `<td style="font-size:12px">${vs}</td>`;
       }).join('');
       return `<tr class="msg-row" onclick="toggleMsgDetail(${idx})" style="cursor:pointer">${cells}</tr>
@@ -1253,9 +1264,8 @@ async function runKafkaQuery() {
           </td>
         </tr>`;
     } else {
-      // Raw message row
       return `<tr class="msg-row" onclick="toggleMsgDetail(${idx})" style="cursor:pointer">
-        <td style="font-size:12px;font-family:'Fira Code',monospace;color:#c9d1d9">${escHtml(m.raw.slice(0,200))}</td>
+        <td style="font-size:12px;font-family:'Fira Code',monospace;color:#c9d1d9">${escHtml(m.raw.slice(0, 200))}</td>
       </tr>
       <tr id="detail-${idx}" style="display:none">
         <td><pre style="background:#06090f;padding:12px;font-size:11px;color:#8b949e;
