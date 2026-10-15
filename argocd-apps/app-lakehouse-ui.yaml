@@ -1,0 +1,26 @@
+# ArgoCD Application — Lakehouse Realtime Streaming UI
+# Namespace : prod
+# Access    : http://192.168.1.50:30900
+# Provides  : Web UI for Debezium connectors, Kafka topics, Kafka→Iceberg streaming jobs
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: lakehouse-ui
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/lakehouse-ui
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
