@@ -1022,129 +1022,267 @@ async function showTopicOffsets(topic) {
 
 function queryTopic(topic) {
   currentPage = 'ksql';
-  navigate('ksql');
-  setTimeout(() => {
-    const ti = document.getElementById('q-topic');
-    if (ti) { ti.value = topic; }
-  }, 300);
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const navEl = document.getElementById('nav-ksql');
+  if (navEl) navEl.classList.add('active');
+  document.getElementById('page-title').textContent = 'Kafka Query (KSQL-style)';
+  renderKSQL(topic);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  KSQL-STYLE QUERY
+//  KSQL-STYLE QUERY  — SQL editor + results table
 // ═══════════════════════════════════════════════════════════════════════════
-function renderKSQL() {
+function renderKSQL(presetTopic) {
   const c = document.getElementById('content');
+
+  // Build topic datalist options
+  const topicOpts = kafkaTopics.map(t => `<option value="${t}">`).join('');
+
   c.innerHTML = `
   <div class="card">
     <div class="card-header">
-      <div class="card-title">🔍 Kafka Message Query</div>
-      <div style="font-size:12px;color:#586374">Read and inspect messages from any Kafka topic</div>
+      <div>
+        <div class="card-title">🔍 Kafka Topic Query</div>
+        <div class="card-subtitle">Write a SELECT-style query to read messages from any topic</div>
+      </div>
     </div>
 
-    <div class="query-bar">
+    <!-- SQL Editor -->
+    <div style="background:#06090f;border:1px solid #30363d;border-radius:8px;margin-bottom:16px;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;
+        padding:8px 14px;background:#0d1a2e;border-bottom:1px solid #1c2a3a">
+        <span style="font-size:11px;color:#4fc3f7;font-weight:600;letter-spacing:.5px">SQL EDITOR</span>
+        <div class="btn-group">
+          <button class="btn btn-secondary btn-sm" onclick="clearQuery()">✕ Clear</button>
+          <button class="btn btn-primary btn-sm" onclick="runKafkaQuery()" id="run-btn">▶ Run (Ctrl+Enter)</button>
+        </div>
+      </div>
+      <textarea id="ksql-editor"
+        style="width:100%;background:#06090f;border:none;outline:none;resize:none;
+          color:#e6edf3;font-family:'Fira Code','Courier New',monospace;font-size:13px;
+          padding:14px 16px;min-height:120px;line-height:1.6"
+        placeholder="-- Examples:
+SELECT * FROM &lt;topic&gt; LIMIT 20
+SELECT * FROM &lt;topic&gt; PARTITION 0 OFFSET LATEST LIMIT 50
+SELECT * FROM &lt;topic&gt; PARTITION 1 OFFSET 1000 LIMIT 20"
+        spellcheck="false"
+        onkeydown="if((e=event).ctrlKey&&e.key==='Enter'){e.preventDefault();runKafkaQuery()}"
+      ></textarea>
+    </div>
+
+    <!-- Options bar -->
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;
+      padding:12px 14px;background:#06090f;border:1px solid #1c2a3a;border-radius:8px">
       <div class="query-field">
         <div class="query-label">Topic</div>
-        <input class="query-input" id="q-topic" list="topic-list" placeholder="select or type topic…" style="min-width:280px"/>
-        <datalist id="topic-list">
-          ${kafkaTopics.map(t=>`<option value="${t}">`).join('')}
-        </datalist>
+        <input class="query-input" id="q-topic" list="ksql-topic-list"
+          placeholder="or type/paste topic name" style="min-width:260px"/>
+        <datalist id="ksql-topic-list">${topicOpts}</datalist>
       </div>
       <div class="query-field">
         <div class="query-label">Partition</div>
-        <input class="query-input" id="q-partition" type="number" value="0" style="width:80px"/>
+        <input class="query-input" id="q-partition" type="number" value="0" style="width:72px"/>
       </div>
       <div class="query-field">
-        <div class="query-label">Start Offset</div>
-        <select class="query-input" id="q-offset-mode" style="width:110px">
+        <div class="query-label">Offset</div>
+        <select class="query-input" id="q-offset-mode" style="width:110px"
+          onchange="document.getElementById('q-custom-wrap').style.display=this.value==='custom'?'':'none'">
           <option value="latest">Latest</option>
-          <option value="0">Earliest (0)</option>
+          <option value="0">Earliest</option>
           <option value="custom">Custom…</option>
         </select>
       </div>
       <div class="query-field" id="q-custom-wrap" style="display:none">
-        <div class="query-label">Custom Offset</div>
-        <input class="query-input" id="q-custom-offset" type="number" value="0" style="width:100px"/>
+        <div class="query-label">From offset</div>
+        <input class="query-input" id="q-custom-offset" type="number" value="0" style="width:90px"/>
       </div>
       <div class="query-field">
         <div class="query-label">Limit</div>
-        <input class="query-input" id="q-limit" type="number" value="20" min="1" max="200" style="width:80px"/>
+        <input class="query-input" id="q-limit" type="number" value="20" min="1" max="200" style="width:72px"/>
       </div>
-      <div class="query-field" style="justify-content:flex-end">
-        <div class="query-label">&nbsp;</div>
-        <button class="btn btn-primary" onclick="runKafkaQuery()">▶ Run Query</button>
+      <div class="query-field">
+        <div class="query-label">Filter (JSON key=value)</div>
+        <input class="query-input" id="q-filter" placeholder='e.g. op=u or email=alice'
+          style="min-width:180px" title="Filter returned rows by a top-level JSON key=value"/>
       </div>
     </div>
 
-    <div id="q-status" style="font-size:12px;color:#586374;margin-bottom:10px"></div>
+    <div id="q-status" style="font-size:12px;color:#586374;margin-bottom:12px;min-height:18px"></div>
     <div id="q-results"></div>
   </div>`;
 
-  document.getElementById('q-offset-mode').addEventListener('change', function() {
-    document.getElementById('q-custom-wrap').style.display = this.value==='custom' ? '' : 'none';
-  });
+  // Preset topic from Topics page click-through
+  if (presetTopic) {
+    document.getElementById('q-topic').value = presetTopic;
+    _ksqlSetEditorFromControls();
+    runKafkaQuery();
+  }
 
-  // Load topic list if empty
+  // Load topics if not yet loaded
   if (kafkaTopics.length === 0) {
     apiGet('/api/kafka/topics').then(r => {
       kafkaTopics = r.data?.topics || [];
-      const dl = document.getElementById('topic-list');
+      const dl = document.getElementById('ksql-topic-list');
       if (dl) dl.innerHTML = kafkaTopics.map(t=>`<option value="${t}">`).join('');
     });
   }
+
+  // Sync controls → editor on change
+  ['q-topic','q-partition','q-offset-mode','q-custom-offset','q-limit'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', _ksqlSetEditorFromControls);
+  });
+}
+
+function _ksqlSetEditorFromControls() {
+  const topic   = document.getElementById('q-topic')?.value?.trim();
+  if (!topic) return;
+  const part    = document.getElementById('q-partition')?.value || '0';
+  const offMode = document.getElementById('q-offset-mode')?.value || 'latest';
+  const offVal  = offMode === 'custom'
+    ? document.getElementById('q-custom-offset')?.value || '0'
+    : offMode === '0' ? '0' : 'LATEST';
+  const limit   = document.getElementById('q-limit')?.value || '20';
+  const offsetStr = String(offVal).toUpperCase() === 'LATEST' ? 'LATEST' : offVal;
+  const ed = document.getElementById('ksql-editor');
+  if (ed) ed.value = `SELECT * FROM ${topic} PARTITION ${part} OFFSET ${offsetStr} LIMIT ${limit}`;
+}
+
+function clearQuery() {
+  const ed = document.getElementById('ksql-editor');
+  if (ed) ed.value = '';
+  document.getElementById('q-status').textContent = '';
+  document.getElementById('q-results').innerHTML = '';
+}
+
+// Parse simple SQL: SELECT * FROM <topic> [PARTITION n] [OFFSET n|LATEST|EARLIEST] [LIMIT n]
+function _parseKSQL(sql) {
+  const s = sql.replace(/\s+/g,' ').trim().toUpperCase();
+  const topic   = sql.match(/FROM\s+(\S+)/i)?.[1] || document.getElementById('q-topic')?.value?.trim();
+  const partM   = s.match(/PARTITION\s+(\d+)/);
+  const offM    = s.match(/OFFSET\s+(\S+)/);
+  const limM    = s.match(/LIMIT\s+(\d+)/);
+  const partition = partM  ? Number(partM[1])  : Number(document.getElementById('q-partition')?.value||0);
+  const limit     = limM   ? Number(limM[1])   : Number(document.getElementById('q-limit')?.value||20);
+  let offset = 'latest';
+  if (offM) {
+    const ov = offM[1].toUpperCase();
+    offset = (ov === 'LATEST') ? 'latest' : (ov === 'EARLIEST' || ov === '0') ? 0 : Number(ov);
+  } else {
+    const om = document.getElementById('q-offset-mode')?.value;
+    if (om === '0') offset = 0;
+    else if (om === 'custom') offset = Number(document.getElementById('q-custom-offset')?.value||0);
+  }
+  return { topic, partition, limit, offset };
 }
 
 async function runKafkaQuery() {
-  const topic = document.getElementById('q-topic').value.trim();
-  if (!topic) return toast('Select a topic', 'error');
-  const partition = Number(document.getElementById('q-partition').value) || 0;
-  const limit = Number(document.getElementById('q-limit').value) || 20;
-  const offsetMode = document.getElementById('q-offset-mode').value;
-  let offset = offsetMode === 'custom'
-    ? Number(document.getElementById('q-custom-offset').value)
-    : offsetMode === '0' ? 0 : 'latest';
+  const sql = document.getElementById('ksql-editor')?.value?.trim();
+  const { topic, partition, limit, offset } = _parseKSQL(sql || '');
+  const filterRaw = document.getElementById('q-filter')?.value?.trim() || '';
 
-  document.getElementById('q-status').textContent = `⏳ Querying ${topic} partition=${partition} …`;
+  if (!topic) return toast('Specify a topic — e.g. SELECT * FROM oracle.CACHE_TESTING.CUSTOMERS LIMIT 20', 'error');
+
+  // Sync controls to match parsed SQL
+  const topicEl = document.getElementById('q-topic');
+  if (topicEl && !topicEl.value) topicEl.value = topic;
+
+  document.getElementById('q-status').innerHTML =
+    `⏳ <code>${topic}</code>  partition=${partition}  offset=${offset}  limit=${limit} …`;
   document.getElementById('q-results').innerHTML = '';
 
   const r = await apiPost('/api/kafka/query', { topic, partition, offset, limit });
-  const msgs = r.data?.messages || [];
+  let msgs = r.data?.messages || [];
   const err = r.data?.error;
 
-  document.getElementById('q-status').textContent =
-    err ? `⚠ ${err}` : `✓ ${msgs.length} message(s) returned`;
+  // Client-side filter
+  if (filterRaw && msgs.length) {
+    const [fk, fv] = filterRaw.split('=');
+    msgs = msgs.filter(m => {
+      const p = m.parsed || {};
+      const val = (p[fk] ?? p.after?.[fk] ?? p.before?.[fk] ?? '');
+      return String(val).toLowerCase().includes(fv?.toLowerCase() || '');
+    });
+  }
 
-  if (!msgs.length) {
-    document.getElementById('q-results').innerHTML = `<div style="color:#586374;padding:20px;text-align:center">No messages found in this range.</div>`;
+  if (err) {
+    document.getElementById('q-status').innerHTML =
+      `<span style="color:#da3633">⚠ ${escHtml(err.slice(0,200))}</span>`;
     return;
   }
 
-  const rows = msgs.map((m, i) => {
+  document.getElementById('q-status').innerHTML =
+    `<span style="color:#2ea043">✓ ${msgs.length} row(s) returned</span>` +
+    (filterRaw ? ` <span style="color:#586374">(filtered by <code>${escHtml(filterRaw)}</code>)</span>` : '') +
+    `<span style="color:#586374;margin-left:12px">topic: <code>${topic}</code>  partition: ${partition}  offset: ${offset}</span>`;
+
+  if (!msgs.length) {
+    document.getElementById('q-results').innerHTML =
+      `<div style="color:#586374;padding:20px;text-align:center">No messages found.</div>`;
+    return;
+  }
+
+  // Build table columns from first parsed message
+  const firstParsed = msgs.find(m => m.parsed)?.parsed;
+  const allKeys = firstParsed
+    ? ['op', ...Object.keys(firstParsed.after || firstParsed.before || firstParsed).filter(k => k !== 'op')]
+    : [];
+
+  const tableRows = msgs.map((m, idx) => {
     const p = m.parsed;
     const op = p?.op;
     const opCls = op==='c'?'op-c':op==='u'?'op-u':op==='d'?'op-d':'op-r';
     const opLabel = op==='c'?'INSERT':op==='u'?'UPDATE':op==='d'?'DELETE':op?op.toUpperCase():'MSG';
-    const source = p?.source ? `${p.source.db || ''}.${p.source.table||p.source.collection||''}` : '';
-    const summary = p
-      ? `${source ? `<span style="color:#586374">${source}</span> ` : ''}`
-        + (p.after ? `after: ${JSON.stringify(p.after).slice(0,80)}` :
-           p.before ? `before: ${JSON.stringify(p.before).slice(0,80)}` :
-           JSON.stringify(p).slice(0,80))
-      : m.raw.slice(0, 120);
+    const data = p?.after || p?.before || p || {};
 
-    return `<div class="msg-row" onclick="toggleMsg(this)">
-      <div>
-        ${op ? `<span class="msg-op ${opCls}">${opLabel}</span>` : ''}
-        <span class="msg-summary">${summary}</span>
-      </div>
-      <div class="msg-body">${syntaxHighlight(JSON.stringify(m.parsed || m.raw, null, 2))}</div>
-    </div>`;
+    if (allKeys.length > 1) {
+      // Tabular row
+      const cells = allKeys.map(k => {
+        if (k === 'op') return `<td>${op ? `<span class="msg-op ${opCls}">${opLabel}</span>` : '–'}</td>`;
+        const v = data[k];
+        const vs = v === null ? '<span style="color:#586374">null</span>'
+                 : v === undefined ? '–'
+                 : escHtml(String(v).slice(0,60)) + (String(v).length>60?'…':'');
+        return `<td style="font-size:12px">${vs}</td>`;
+      }).join('');
+      return `<tr class="msg-row" onclick="toggleMsgDetail(${idx})" style="cursor:pointer">${cells}</tr>
+        <tr id="detail-${idx}" style="display:none">
+          <td colspan="${allKeys.length}" style="padding:0">
+            <pre style="background:#06090f;padding:12px 16px;margin:0;font-size:11px;
+              color:#8b949e;white-space:pre-wrap;word-break:break-all">${syntaxHighlight(JSON.stringify(p, null, 2))}</pre>
+          </td>
+        </tr>`;
+    } else {
+      // Raw message row
+      return `<tr class="msg-row" onclick="toggleMsgDetail(${idx})" style="cursor:pointer">
+        <td style="font-size:12px;font-family:'Fira Code',monospace;color:#c9d1d9">${escHtml(m.raw.slice(0,200))}</td>
+      </tr>
+      <tr id="detail-${idx}" style="display:none">
+        <td><pre style="background:#06090f;padding:12px;font-size:11px;color:#8b949e;
+          white-space:pre-wrap;word-break:break-all">${syntaxHighlight(JSON.stringify(p || m.raw, null, 2))}</pre></td>
+      </tr>`;
+    }
   }).join('');
 
+  const thead = allKeys.length > 1
+    ? `<thead><tr>${allKeys.map(k => `<th>${escHtml(k)}</th>`).join('')}</tr></thead>`
+    : `<thead><tr><th>Raw Message</th></tr></thead>`;
+
   document.getElementById('q-results').innerHTML = `
-  <div class="msg-container">${rows}</div>
+  <div style="overflow-x:auto">
+    <table class="data-table" style="min-width:100%">
+      ${thead}
+      <tbody>${tableRows}</tbody>
+    </table>
+  </div>
   <div style="font-size:11px;color:#586374;margin-top:8px;text-align:right">
-    Click a row to expand • ${msgs.length} messages
+    ${msgs.length} row(s) • Click a row to expand full JSON
   </div>`;
+}
+
+function toggleMsgDetail(idx) {
+  const row = document.getElementById(`detail-${idx}`);
+  if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
 }
 
 function toggleMsg(el) { el.classList.toggle('expanded'); }
@@ -1160,27 +1298,32 @@ async function renderStreaming() {
   const deploys = r.data?.items || [];
 
   if (!deploys.length) {
-    c.innerHTML = `<div class="card" style="text-align:center;color:#586374;padding:32px">No streaming deployments found with label component=kafka-to-iceberg</div>`;
+    c.innerHTML = `<div class="card" style="text-align:center;color:#586374;padding:32px">No streaming deployments found.</div>`;
     return;
   }
 
   const rows = deploys.map(d => {
-    const name = d.metadata.name;
-    const ready = d.status?.readyReplicas || 0;
+    const name   = d.metadata.name;
+    const labels = d.metadata.labels || {};
+    const ready   = d.status?.readyReplicas || 0;
     const desired = d.spec?.replicas || 0;
-    const restartedAt = d.spec?.template?.metadata?.annotations?.['kubectl.kubernetes.io/restartedAt'] || '–';
     const st = desired === 0 ? 'STOPPED' : ready > 0 ? 'RUNNING' : 'STARTING';
 
-    // parse source/mode from name  e.g. kafka-to-iceberg-oracle-standard
-    const parts = name.split('-');
-    const mode = parts[parts.length-1] || '';
-    const srcRaw = parts[parts.length-2] || '';
-    const src = SOURCE_LABELS[srcRaw] || srcRaw;
+    // Read source + write-mode from actual K8s labels (not the deployment name)
+    const srcRaw  = labels['pipeline.source']     || '';
+    const modeRaw = labels['pipeline.write-mode'] || '';
+    // Title-case the mode words: "soft-delete" → "Soft Delete"
+    const modeLabel = modeRaw
+      .split('-')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ') || '–';
+    const srcLabel = SOURCE_LABELS[srcRaw] || srcRaw || '–';
+    const srcIcon  = SOURCE_ICON[srcRaw]   || '🔵';
 
     return `<tr id="row-${name}">
       <td><code style="font-size:12px;color:#c9d1d9">${name}</code></td>
-      <td>${SOURCE_ICON[srcRaw] || '🔵'} ${src}</td>
-      <td><span style="color:#8b949e;font-size:12px">${mode}</span></td>
+      <td>${srcIcon} ${srcLabel}</td>
+      <td><span style="color:#4fc3f7;font-size:12px;font-weight:500">${modeLabel}</span></td>
       <td>${stateBadge(st)}</td>
       <td style="color:#586374;font-size:11px">${ready}/${desired}</td>
       <td>
@@ -1232,19 +1375,44 @@ async function scaleAll(replicas) {
   setTimeout(renderStreaming, 2000);
 }
 async function showJobLogs(name) {
-  document.getElementById('log-panel').innerHTML = `<div class="card"><div style="color:#586374;padding:12px">Loading logs…</div></div>`;
+  document.getElementById('log-panel').innerHTML = `<div class="card"><div style="color:#586374;padding:12px">⏳ Loading logs for <code>${name}</code>…</div></div>`;
   const r = await apiGet(`/api/streaming/${name}/logs`);
+  if (!r.ok || r.data?.error) {
+    document.getElementById('log-panel').innerHTML = `<div class="card">
+      <div style="color:#da3633;padding:12px">Error: ${r.data?.error || 'Failed to load logs'}</div></div>`;
+    return;
+  }
   const logs = r.data?.logs || 'No logs';
-  const lines = logs.split('\n').slice(-80).join('\n');
+  const podName = r.data?.podName || '';
+  // colour-code log lines by level
+  const lines = logs.split('\n').slice(-150).map(l => {
+    if (!l.trim()) return '';
+    const cls = /ERROR|EXCEPTION|Exception/i.test(l) ? 'color:#da3633' :
+                /WARN/i.test(l)  ? 'color:#d29922' :
+                /INFO.*batch=.*written|upsert|delete/i.test(l) ? 'color:#2ea043' :
+                /INFO/i.test(l)  ? 'color:#8b949e' : 'color:#c9d1d9';
+    return `<span style="${cls}">${escHtml(l)}</span>`;
+  }).filter(Boolean).join('\n');
+
   document.getElementById('log-panel').innerHTML = `
-  <div class="card">
+  <div class="card" style="margin-top:16px">
     <div class="card-header">
-      <div class="card-title">📋 Logs: ${name}</div>
-      <button class="btn btn-secondary btn-sm" onclick="document.getElementById('log-panel').innerHTML=''">✕ Close</button>
+      <div>
+        <div class="card-title">📋 Logs: <code style="color:#4fc3f7;font-size:13px">${name}</code></div>
+        ${podName ? `<div class="card-subtitle">Pod: ${podName}</div>` : ''}
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-secondary btn-sm" onclick="showJobLogs('${name}')">↻ Refresh</button>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('log-panel').innerHTML=''">✕ Close</button>
+      </div>
     </div>
     <pre style="background:#06090f;border:1px solid #1c2a3a;border-radius:6px;padding:14px;
-      font-size:11px;color:#8b949e;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all">${escHtml(lines)}</pre>
+      font-size:11px;font-family:'Fira Code','Courier New',monospace;
+      overflow:auto;max-height:480px;white-space:pre-wrap;word-break:break-all;line-height:1.5">${lines}</pre>
   </div>`;
+  // scroll to bottom of log
+  const pre = document.querySelector('#log-panel pre');
+  if (pre) pre.scrollTop = pre.scrollHeight;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

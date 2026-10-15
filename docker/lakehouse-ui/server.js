@@ -183,19 +183,26 @@ app.post('/api/streaming/:name/restart', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Get streaming pod logs
+// Get streaming pod logs — find pod via the deployment's own pod-template labels
 app.get('/api/streaming/:name/logs', async (req, res) => {
   try {
     const { name } = req.params;
-    // find pod for deployment
-    const r = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods?labelSelector=app%3D${name}`);
+    // Fetch the deployment to get its matchLabels selector
+    const dr = await k8sFetch(`/apis/apps/v1/namespaces/${K8S_NAMESPACE}/deployments/${name}`);
+    const dep = await dr.json();
+    const matchLabels = dep?.spec?.selector?.matchLabels || {};
+    // Build labelSelector string from all matchLabels
+    const selector = Object.entries(matchLabels)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join(',');
+    const r = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods?labelSelector=${selector}`);
     const body = await r.json();
     const pod = body.items && body.items[0];
-    if (!pod) return res.json({ logs: 'No pod found' });
+    if (!pod) return res.json({ logs: 'No pod found for deployment ' + name });
     const podName = pod.metadata.name;
-    const lr = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods/${podName}/log?tailLines=100&timestamps=true`);
+    const lr = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods/${podName}/log?tailLines=150&timestamps=true`);
     const logs = await lr.text();
-    res.json({ logs });
+    res.json({ logs, podName });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
