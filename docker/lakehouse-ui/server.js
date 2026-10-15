@@ -148,7 +148,7 @@ app.post('/api/connectors/:source/:name/restart', async (req, res) => {
 // List kafka-to-iceberg deployments
 app.get('/api/streaming/deployments', async (req, res) => {
   try {
-    const r = await k8sFetch(`/apis/apps/v1/namespaces/${K8S_NAMESPACE}/deployments?labelSelector=component%3Dkafka-to-iceberg`);
+    const r = await k8sFetch(`/apis/apps/v1/namespaces/${K8S_NAMESPACE}/deployments?labelSelector=app%3Dkafka-to-iceberg`);
     const body = await r.json();
     res.status(r.status).json(body);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -206,21 +206,63 @@ const { exec } = require('child_process');
 const util = require('util');
 const execAsync = util.promisify(exec);
 
-const KAFKA_CMD_BASE = [
-  `--bootstrap-server ${KAFKA_BOOTSTRAP}`,
-  `--consumer-property security.protocol=SASL_PLAINTEXT`,
-  `--consumer-property sasl.mechanism=SCRAM-SHA-512`,
-  `--consumer-property "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\\"debezium-user\\" password=\\"i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H\\";"`,
-].join(' ');
+const SASL_CFG_FILE = '/tmp/kafka-sasl.properties';
+
+// Resolve the debezium-connect-postgres pod name (cached 30s)
+let _dbzPodName = null;
+let _dbzPodExpiry = 0;
+async function getDbzPod() {
+  if (_dbzPodName && Date.now() < _dbzPodExpiry) return _dbzPodName;
+  const { stdout } = await execAsync(
+    `kubectl get pod -n ${K8S_NAMESPACE} -l app=debezium-connect-postgres -o jsonpath='{.items[0].metadata.name}'`,
+    { shell: '/bin/bash' }
+  );
+  _dbzPodName = stdout.trim();
+  _dbzPodExpiry = Date.now() + 30000;
+  return _dbzPodName;
+}
+
+// Kafka exec helper — uses spawnSync to pipe the SASL config via stdin into
+// `tee` inside the Debezium pod (requires pods/exec RBAC), then runs the
+// kafka CLI command. All arg passing uses array form to avoid shell quoting.
+const { execFile, spawnSync } = require('child_process');
+const execFileAsync = util.promisify(execFile);
+
+const SASL_PROPS =
+  'security.protocol=SASL_PLAINTEXT\n' +
+  'sasl.mechanism=SCRAM-SHA-512\n' +
+  'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required ' +
+  'username="debezium-user" password="i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H";\n';
+
+let _saslFileWritten = false;
+
+function ensureSaslFileSync(pod) {
+  if (_saslFileWritten) return;
+  const r = spawnSync('kubectl', [
+    'exec', '-i', '-n', K8S_NAMESPACE, pod, '--', 'tee', SASL_CFG_FILE
+  ], { input: SASL_PROPS, encoding: 'utf8', timeout: 10000 });
+  if (r.status !== 0) throw new Error(`SASL file write failed: ${r.stderr}`);
+  _saslFileWritten = true;
+}
+
+async function kafkaExec(argsStr, timeoutMs = 20000) {
+  const pod = await getDbzPod();
+  ensureSaslFileSync(pod);
+  const args = argsStr.trim().split(/\s+/);
+  const { stdout } = await execFileAsync('kubectl',
+    ['exec', '-n', K8S_NAMESPACE, pod, '--', ...args],
+    { timeout: timeoutMs }
+  );
+  return stdout;
+}
 
 // List topics
 app.get('/api/kafka/topics', async (req, res) => {
   try {
-    const { stdout } = await execAsync(
-      `kubectl exec -n ${K8S_NAMESPACE} $(kubectl get pod -n ${K8S_NAMESPACE} -l app=debezium-connect-postgres -o jsonpath='{.items[0].metadata.name}') -- /kafka/bin/kafka-topics.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --list --command-config <(echo -e 'security.protocol=SASL_PLAINTEXT\\nsasl.mechanism=SCRAM-SHA-512\\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium-user" password="i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H";') 2>/dev/null`,
-      { shell: '/bin/bash' }
+    const stdout = await kafkaExec(
+      `/kafka/bin/kafka-topics.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --list --command-config ${SASL_CFG_FILE}`
     );
-    const topics = stdout.split('\n').filter(t => t.trim() && !t.startsWith('__')).sort();
+    const topics = stdout.split('\n').filter(t => t.trim() && !t.startsWith('__') && !t.startsWith('SLF4J')).sort();
     res.json({ topics });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -229,14 +271,15 @@ app.get('/api/kafka/topics', async (req, res) => {
 app.get('/api/kafka/topics/:topic/offsets', async (req, res) => {
   try {
     const { topic } = req.params;
-    const { stdout } = await execAsync(
-      `kubectl exec -n ${K8S_NAMESPACE} $(kubectl get pod -n ${K8S_NAMESPACE} -l app=debezium-connect-postgres -o jsonpath='{.items[0].metadata.name}') -- /kafka/bin/kafka-get-offsets.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --topic ${topic} --time latest --command-config <(echo -e 'security.protocol=SASL_PLAINTEXT\\nsasl.mechanism=SCRAM-SHA-512\\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium-user" password="i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H";') 2>/dev/null`,
-      { shell: '/bin/bash' }
+    const stdout = await kafkaExec(
+      `/kafka/bin/kafka-get-offsets.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --topic ${topic} --time latest --command-config ${SASL_CFG_FILE}`
     );
-    const partitions = stdout.trim().split('\n').map(l => {
-      const parts = l.split(':');
-      return { topic: parts[0], partition: Number(parts[1]), offset: Number(parts[2]) };
-    }).filter(p => p.topic);
+    const partitions = stdout.trim().split('\n')
+      .filter(l => l.includes(':'))
+      .map(l => {
+        const parts = l.split(':');
+        return { topic: parts[0], partition: Number(parts[1]), offset: Number(parts[2]) };
+      }).filter(p => p.topic);
     res.json({ partitions });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -248,22 +291,23 @@ app.post('/api/kafka/query', async (req, res) => {
 
     let offsetArg = offset;
     if (offset === 'latest') {
-      // get latest - limit
-      const { stdout: offOut } = await execAsync(
-        `kubectl exec -n ${K8S_NAMESPACE} $(kubectl get pod -n ${K8S_NAMESPACE} -l app=debezium-connect-postgres -o jsonpath='{.items[0].metadata.name}') -- /kafka/bin/kafka-get-offsets.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --topic ${topic} --time latest --command-config <(echo -e 'security.protocol=SASL_PLAINTEXT\\nsasl.mechanism=SCRAM-SHA-512\\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium-user" password="i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H";') 2>/dev/null`,
-        { shell: '/bin/bash' }
+      const offOut = await kafkaExec(
+        `/kafka/bin/kafka-get-offsets.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --topic ${topic} --time latest --command-config ${SASL_CFG_FILE}`
       );
       const matched = offOut.match(new RegExp(`:${partition}:(\\d+)`));
       const latestOff = matched ? Number(matched[1]) : 0;
       offsetArg = Math.max(0, latestOff - Number(limit));
     }
 
-    const { stdout } = await execAsync(
-      `kubectl exec -n ${K8S_NAMESPACE} $(kubectl get pod -n ${K8S_NAMESPACE} -l app=debezium-connect-postgres -o jsonpath='{.items[0].metadata.name}') -- /kafka/bin/kafka-console-consumer.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --topic ${topic} --partition ${partition} --offset ${offsetArg} --max-messages ${limit} --timeout-ms 12000 --consumer-property security.protocol=SASL_PLAINTEXT --consumer-property sasl.mechanism=SCRAM-SHA-512 --consumer-property 'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium-user" password="i3uqKrPOaoqWo6JfOZrmSMhtdp7LiN3H";' 2>/dev/null`,
-      { shell: '/bin/bash', timeout: 20000 }
+    const stdout = await kafkaExec(
+      `/kafka/bin/kafka-console-consumer.sh --bootstrap-server ${KAFKA_BOOTSTRAP}` +
+      ` --topic ${topic} --partition ${partition} --offset ${offsetArg}` +
+      ` --max-messages ${limit} --timeout-ms 12000` +
+      ` --consumer.config ${SASL_CFG_FILE}`,
+      25000
     );
 
-    const messages = stdout.split('\n').filter(l => l.trim()).map(l => {
+    const messages = stdout.split('\n').filter(l => l.trim() && !l.startsWith('SLF4J') && !l.startsWith('[')).map(l => {
       try { return { raw: l, parsed: JSON.parse(l) }; }
       catch { return { raw: l, parsed: null }; }
     });
