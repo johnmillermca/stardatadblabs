@@ -61,6 +61,8 @@ spec:
       labels:
         app: lakehouse-ui
     spec:
+      nodeSelector:
+        workload: general
       serviceAccountName: lakehouse-ui
       containers:
         - name: lakehouse-ui
