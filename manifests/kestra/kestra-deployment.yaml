@@ -82,7 +82,7 @@ spec:
         app: kestra
     spec:
       nodeSelector:
-        workload: general
+        workload: spark-opensearch
       terminationGracePeriodSeconds: 60
       containers:
         - name: kestra

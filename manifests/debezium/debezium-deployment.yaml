@@ -248,7 +248,7 @@ spec:
     spec:
       serviceAccountName: default
       nodeSelector:
-        kubernetes.io/hostname: worker5.local
+        workload: spark-opensearch
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
@@ -413,7 +413,7 @@ spec:
     spec:
       serviceAccountName: default
       nodeSelector:
-        kubernetes.io/hostname: worker5.local
+        workload: spark-opensearch
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
@@ -578,7 +578,7 @@ spec:
     spec:
       serviceAccountName: default
       nodeSelector:
-        kubernetes.io/hostname: worker5.local
+        workload: spark-opensearch
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
