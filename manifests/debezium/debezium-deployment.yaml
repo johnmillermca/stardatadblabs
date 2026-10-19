@@ -247,6 +247,11 @@ spec:
         app: debezium-connect-postgres
     spec:
       serviceAccountName: default
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       nodeSelector:
         workload: spark-opensearch
       terminationGracePeriodSeconds: 60
@@ -412,6 +417,11 @@ spec:
         app: debezium-connect-oracle
     spec:
       serviceAccountName: default
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       nodeSelector:
         workload: spark-opensearch
       terminationGracePeriodSeconds: 60
@@ -577,6 +587,11 @@ spec:
         app: debezium-connect-mongodb
     spec:
       serviceAccountName: default
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       nodeSelector:
         workload: spark-opensearch
       terminationGracePeriodSeconds: 60

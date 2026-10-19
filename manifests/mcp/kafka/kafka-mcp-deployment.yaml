@@ -27,6 +27,11 @@ spec:
         app: mcp-kafka
         component: mcp-server
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "kafka"
+          effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/hostname: worker5.local
       containers:

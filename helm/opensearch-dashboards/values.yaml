@@ -47,6 +47,12 @@ affinity:
               values:
                 - spark-opensearch
 
+tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "spark-opensearch"
+    effect: "NoSchedule"
+
 podDisruptionBudget:
   enabled: false
 

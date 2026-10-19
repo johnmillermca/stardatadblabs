@@ -93,6 +93,11 @@ spec:
         app: doris-be
         component: be
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "doris"
+          effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/hostname: worker1.local
       terminationGracePeriodSeconds: 120

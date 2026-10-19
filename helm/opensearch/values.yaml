@@ -115,6 +115,11 @@ resources:
 antiAffinity: soft
 nodeSelector:
   workload: spark-opensearch
+tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "spark-opensearch"
+    effect: "NoSchedule"
 
 podDisruptionBudget:
   enable: false

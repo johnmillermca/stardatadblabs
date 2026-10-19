@@ -113,6 +113,11 @@ spec:
     # to throw "field not declared in schema" → ComparisonError → Unknown sync status.
     # The kafka-init CRB is instead ignored via ignoreDifferences in app-strimzi-kafka.yaml.
     pod:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "kafka"
+          effect: "NoSchedule"
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

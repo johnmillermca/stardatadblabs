@@ -47,5 +47,9 @@ affinity:
               values:
                 - kafka
 
-tolerations: []
+tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "kafka"
+    effect: "NoSchedule"
 createGlobalResources: true

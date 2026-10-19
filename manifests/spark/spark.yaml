@@ -131,6 +131,11 @@ spec:
         app: spark
         component: master
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -270,6 +275,11 @@ spec:
         app: spark
         component: worker
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -348,6 +358,11 @@ spec:
         app: spark
         component: worker-large
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

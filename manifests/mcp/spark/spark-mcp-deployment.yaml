@@ -26,6 +26,11 @@ spec:
         app: mcp-spark
         component: mcp-server
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "spark-opensearch"
+          effect: "NoSchedule"
       nodeSelector:
         workload: spark-opensearch
       containers:

@@ -27,6 +27,11 @@ spec:
         app: mcp-doris
         component: mcp-server
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "doris"
+          effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/hostname: worker1.local
       containers:
