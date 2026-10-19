@@ -1,13 +1,13 @@
 # =============================================================================
 # OpenSearch — single node (opensearch-project/helm-charts 3.7.0)
 # Namespace   : prod
-# Node        : worker3.local
+# Node        : workers 2/3/4 (workload=spark-opensearch)
 # Image       : 192.168.1.50:30500/opensearch/opensearch:3.7.0 (private registry)
 # Access      : http://192.168.1.53:30920 (NodePort)
 #               opensearch-cluster-master.prod.svc.cluster.local:9200 (internal)
 # HA          : single node
 # Secret      : opensearch-credentials
-# PVC         : 50Gi on /home (worker3.local)
+# PVC         : 50Gi on /home (worker3.local — existing PVC, node-bound)
 # =============================================================================
 
 singleNode: true
@@ -114,7 +114,7 @@ resources:
 
 antiAffinity: soft
 nodeSelector:
-  kubernetes.io/hostname: worker3.local
+  workload: spark-opensearch
 
 podDisruptionBudget:
   enable: false

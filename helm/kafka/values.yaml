@@ -33,14 +33,16 @@ controller:
   # KRaft — Kafka 4.0 removed ZooKeeper; use 3.9 for bitnami chart compat
   extraConfig: |
     process.roles=broker,controller
-  # Spread across workers — never on master
+  # Kafka pool only (worker5)
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
           - matchExpressions:
-              - key: node-role.kubernetes.io/control-plane
-                operator: DoesNotExist
+              - key: workload
+                operator: In
+                values:
+                  - kafka
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:

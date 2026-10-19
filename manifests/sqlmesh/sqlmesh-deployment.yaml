@@ -89,7 +89,7 @@ spec:
         app: sqlmesh
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker2.local
+        workload: general
       containers:
         - name: sqlmesh
           image: 192.168.1.50:30500/sqlmesh:0.99.0

@@ -42,11 +42,13 @@ resources:
     memory: 2Gi
     cpu: "1"
 
-# Workers only
+# General pool (workers 6-10)
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+            - key: workload
+              operator: In
+              values:
+                - general

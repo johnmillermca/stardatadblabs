@@ -82,7 +82,7 @@ spec:
         app: kestra
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker2.local
+        workload: general
       terminationGracePeriodSeconds: 60
       containers:
         - name: kestra

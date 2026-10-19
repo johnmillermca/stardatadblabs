@@ -36,10 +36,9 @@ hub:
     02-no-cloud-metadata: |
       c.KubeSpawner.extra_container_config = {}
       c.KubeSpawner.init_containers = []
-  # Pin hub to worker4 — hub-db-dir PVC has node affinity to worker4.local.
-  # worker4 must remain uncordoned for the hub pod to schedule.
+  # Pin hub to spark-opensearch pool — worker2/3/4.
   nodeSelector:
-    kubernetes.io/hostname: worker4.local
+    workload: spark-opensearch
 
 proxy:
   service:
@@ -98,10 +97,10 @@ singleuser:
     name: 192.168.1.50:30500/jupyter-spark
     tag: latest
     pullPolicy: Always
-  # Pin singleuser pods to worker2 — low resource pressure, no PVC affinity conflict.
+  # Pin singleuser pods to general pool — workers 6-10.
   # Change to {} to let the scheduler decide freely.
   nodeSelector:
-    kubernetes.io/hostname: worker2.local
+    workload: general
   # Inject pod IP as SPARK_LOCAL_IP so the Spark driver binds to and advertises
   # the pod's routable IP — executors can then connect back without DNS.
   # status.podIP is available via the Downward API at pod start.

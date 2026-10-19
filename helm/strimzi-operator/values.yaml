@@ -36,14 +36,16 @@ resources:
     memory: 512Mi
     cpu: 500m
 
-# Workers only
+# Kafka pool only
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+            - key: workload
+              operator: In
+              values:
+                - kafka
 
 tolerations: []
 createGlobalResources: true

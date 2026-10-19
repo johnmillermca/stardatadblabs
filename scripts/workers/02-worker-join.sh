@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 02-worker-join.sh
-# Run on each worker node (192.168.1.51-54) AFTER:
+# Run on each worker node (192.168.1.51-60) AFTER:
 #   1. 00-common-prereqs.sh has been run on this worker
 #   2. 01-kubeadm-init.sh has completed on the master
 #

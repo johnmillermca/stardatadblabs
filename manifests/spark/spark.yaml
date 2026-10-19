@@ -1,18 +1,13 @@
 # =============================================================================
-# Apache Spark 3.5.1 — 1 master + 3 standard workers + 1 large worker (worker5)
+# Apache Spark 3.5.1 — 1 master + 3 standard workers + 1 large worker
 # Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
 # Access   : http://192.168.1.5x:30707  (Master UI — no auth gate)
 #            spark://192.168.1.5x:30777 (RPC — via krb-spark-guard)
 #
 # Worker layout:
-#   spark-worker        (replicas=3) — worker1/worker2/worker3, 4 GB / 4 cores each
-#   spark-worker-large  (replicas=1) — worker5 only, 12 GB / 8 cores
-#                                      worker5 has 25 GB RAM / 12 CPUs and is
-#                                      currently only 4% memory-utilised.
-#
-#   worker4 (9.4 GB) is excluded: Kafka and JupyterHub Hub already consume
-#   ~8 GB of requests on that node, leaving less than 1.5 GB of headroom —
-#   insufficient for a safe Spark worker allocation.
+#   spark-worker        (replicas=3) — worker2/worker3/worker4 (workload=spark-opensearch)
+#   spark-worker-large  (replicas=1) — worker2/worker3/worker4 (workload=spark-opensearch)
+#                                      spread across spark-opensearch pool
 #
 # Pre-requisite: spark-gluten-velox:3.5.1 must be cached on worker5 before
 # spark-worker-large is scheduled.  Apply spark-image-pull.yaml first and wait
@@ -145,12 +140,10 @@ spec:
                     operator: DoesNotExist
                   # Restrict to workers that have the spark image cached.
                   # worker4/worker5 are unreachable by SSH and don't have the image.
-                  - key: kubernetes.io/hostname
+                  - key: workload
                     operator: In
                     values:
-                      - worker1.local
-                      - worker2.local
-                      - worker3.local
+                      - spark-opensearch
       containers:
         # ── krb-spark-guard sidecar ──────────────────────────────────────────
         # Port 7077: RPC proxy — validates X-Krb-Token before forwarding to :17077
@@ -251,7 +244,7 @@ spec:
           secret:
             secretName: spark-keytab
 ---
-# ── Standard workers — worker1 / worker2 / worker3 (9.5 GB RAM, 12 CPUs each) ─
+# ── Standard workers — worker2 / worker3 / worker4 (workload=spark-opensearch) ─
 # SPARK_WORKER_MEMORY=4g → 3 executor slots per worker at spark.executor.memory=1g
 # (4g worker − ~300 MB JVM overhead = ~3.7 GB usable; 3 × 1g = 3g fits safely).
 # Gluten off-heap (2g per executor) is allocated from outside JVM heap and does
@@ -282,14 +275,10 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
-                  - key: kubernetes.io/hostname
+                  - key: workload
                     operator: In
                     values:
-                      - worker1.local
-                      - worker2.local
-                      - worker3.local
+                      - spark-opensearch
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
@@ -335,14 +324,10 @@ spec:
               - key: krb5.conf
                 path: krb5.conf
 ---
-# ── Large worker — worker5 only (25 GB RAM / 12 CPUs) ─────────────────────────
-# worker5 is currently only 4% memory-utilised (1 GB requests out of 25 GB).
+# ── Large worker — spark-opensearch pool (worker2/3/4) ────────────────────────
 # SPARK_WORKER_MEMORY=12g → up to 12 executor slots at 1g each (or 4 at 3g each).
 # Container memory limit=14Gi covers: 12g Spark worker heap + 2g Gluten off-heap
 # headroom + ~300 MB JVM overhead.
-# Prerequisites:
-#   1. spark-image-pull.yaml applied and pod on worker5 shows STATUS=Completed.
-#   2. kubectl apply -f manifests/spark/spark.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -368,10 +353,10 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: kubernetes.io/hostname
+                  - key: workload
                     operator: In
                     values:
-                      - worker5.local
+                      - spark-opensearch
       containers:
         - name: spark-worker
           image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29

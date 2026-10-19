@@ -1,7 +1,7 @@
 # =============================================================================
 # OpenSearch Dashboards — single replica
 # Namespace   : prod
-# Node        : worker3.local (co-located with OpenSearch)
+# Node        : workers 2/3/4 (workload=spark-opensearch)
 # Image       : 192.168.1.50:30500/opensearch/opensearch-dashboards:3.7.0
 # Access      : http://192.168.1.53:30601 (NodePort)
 # =============================================================================
@@ -42,10 +42,10 @@ affinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: kubernetes.io/hostname
+            - key: workload
               operator: In
               values:
-                - worker3.local
+                - spark-opensearch
 
 podDisruptionBudget:
   enabled: false

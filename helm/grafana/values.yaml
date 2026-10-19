@@ -37,9 +37,9 @@ resources:
     cpu: "1"
     memory: 1Gi
 
-## ── Node placement — workers only ────────────────────────────────────────────
+## ── Node placement — general pool (workers 6-10) ─────────────────────────────
 nodeSelector:
-  kubernetes.io/hostname: worker4.local
+  workload: general
 
 ## ── HA ───────────────────────────────────────────────────────────────────────
 replicas: 2

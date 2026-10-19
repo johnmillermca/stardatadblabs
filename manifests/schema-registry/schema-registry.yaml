@@ -1,6 +1,6 @@
 # =============================================================================
 # Confluent Schema Registry 7.9.0 — single replica (no HA needed)
-# Node   : worker4.local (co-located with Kafka)
+# Node   : worker5.local (co-located with Kafka)
 # Image  : 192.168.1.50:30500/confluentinc/cp-schema-registry:7.9.0
 # Access : http://192.168.1.54:30810
 #          http://schema-registry.prod.svc.cluster.local:8081 (internal)
@@ -38,7 +38,7 @@ spec:
         app: schema-registry
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker4.local
+        kubernetes.io/hostname: worker5.local
       enableServiceLinks: false
       containers:
         - name: schema-registry

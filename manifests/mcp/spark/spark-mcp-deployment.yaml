@@ -1,7 +1,7 @@
 # =============================================================================
 # Spark MCP Server — Kubernetes Deployment
 # Namespace : prod
-# Node      : worker2.local (co-located with Spark)
+# Node      : workers 2/3/4 (workload=spark-opensearch)
 # Port      : 3103 (MCP SSE)
 # NodePort  : 30313
 # Image     : 192.168.1.50:30500/mcp-spark:1.0.0
@@ -27,7 +27,7 @@ spec:
         component: mcp-server
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker2.local
+        workload: spark-opensearch
       containers:
         - name: mcp-spark
           image: 192.168.1.50:30500/mcp-spark:1.0.0

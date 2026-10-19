@@ -53,14 +53,16 @@ resources:
     memory: 4Gi
     cpu: "2"
 
-# Workers only, spread 2 replicas across different workers
+# General pool (workers 6-10), spread 2 replicas across different workers
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+            - key: workload
+              operator: In
+              values:
+                - general
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100

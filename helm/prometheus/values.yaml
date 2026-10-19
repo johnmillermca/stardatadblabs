@@ -51,14 +51,16 @@ prometheus:
         cpu: "2"
         memory: 6Gi
 
-    # Workers only — avoid master
+    # General pool (workers 6-10)
     affinity:
       nodeAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
           nodeSelectorTerms:
             - matchExpressions:
-                - key: node-role.kubernetes.io/control-plane
-                  operator: DoesNotExist
+                - key: workload
+                  operator: In
+                  values:
+                    - general
 
   service:
     type: NodePort
@@ -83,14 +85,16 @@ alertmanager:
       limits:
         cpu: 500m
         memory: 512Mi
-    # Workers only
+    # General pool (workers 6-10)
     affinity:
       nodeAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
           nodeSelectorTerms:
             - matchExpressions:
-                - key: node-role.kubernetes.io/control-plane
-                  operator: DoesNotExist
+                - key: workload
+                  operator: In
+                  values:
+                    - general
   service:
     type: NodePort
     nodePort: 30993

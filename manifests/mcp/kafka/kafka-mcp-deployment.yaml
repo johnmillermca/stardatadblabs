@@ -28,7 +28,7 @@ spec:
         component: mcp-server
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker4.local
+        kubernetes.io/hostname: worker5.local
       containers:
         - name: mcp-kafka
           image: 192.168.1.50:30500/mcp-kafka:1.0.0

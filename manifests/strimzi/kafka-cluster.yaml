@@ -1,7 +1,7 @@
 # =============================================================================
 # Strimzi-managed Kafka cluster — prod namespace  (single-broker, no HA)
 # Namespace   : prod
-# Node        : worker4.local (pinned via pod affinity on KafkaNodePool)
+# Node        : worker5.local (pinned via pod affinity on KafkaNodePool)
 # Topology    : 1 combined controller+broker (KRaft) — single replica
 #
 # Listeners   :
@@ -19,7 +19,7 @@
 # Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (operators)
 #               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 (users/GSSAPI)
 # Kafka ver   : 4.2.0 (matches installed Strimzi operator)
-# PVC         : 250Gi on /home (worker4.local) — reclaimPolicy: Retain
+# PVC         : 250Gi on /home (worker5.local) — reclaimPolicy: Retain
 #               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
 #               hostPath: /home/local-path-provisioner/
 #                 pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
@@ -121,7 +121,7 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - worker4.local
+                      - worker5.local
       securityContext:
         fsGroup: 1000
         runAsUser: 1000

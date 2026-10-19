@@ -1,7 +1,7 @@
 # =============================================================================
 # Kestra MCP Server — Kubernetes Deployment
 # Namespace : prod
-# Node      : worker2.local (co-located with Kestra)
+# Node      : workers 6-10 (workload=general)
 # Port      : 3105 (MCP SSE)
 # NodePort  : 30315
 # Image     : 192.168.1.50:30500/mcp-kestra:1.0.0
@@ -28,7 +28,7 @@ spec:
         component: mcp-server
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker2.local
+        workload: general
       containers:
         - name: mcp-kestra
           image: 192.168.1.50:30500/mcp-kestra:1.0.0

@@ -46,14 +46,16 @@ resources:
     memory: 512Mi
     cpu: "1"
 
-# Workers only, spread across nodes
+# Kafka pool only (worker5)
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+            - key: workload
+              operator: In
+              values:
+                - kafka
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
