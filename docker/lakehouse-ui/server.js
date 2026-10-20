@@ -207,63 +207,136 @@ app.get('/api/connectors/:source/:name/offset-position', async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  TABLE / COLLECTION BROWSER
+//  POST /api/schema/:source  — body: connector config object from the UI
+//  Derives host/port/user/password/db dynamically from the connector config.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// GET /api/schema/postgres/:db  — list all tables in a Postgres database grouped by schema
-app.get('/api/schema/postgres/:db', async (req, res) => {
-  try {
-    const { db } = req.params;
-    const pod = await getSourcePod('postgresql', 'postgres');
-    const { stdout } = await execFileAsync('kubectl', [
-      'exec', '-n', K8S_NAMESPACE, pod, '--',
-      'psql', '-U', 'postgres', '-d', db, '-tAc',
-      `SELECT table_schema, table_name FROM information_schema.tables
-       WHERE table_schema NOT IN ('pg_catalog','information_schema')
-         AND table_type = 'BASE TABLE'
-       ORDER BY table_schema, table_name`,
-    ], { timeout: 10000 });
-    const tables = {};
-    stdout.trim().split('\n').filter(l => l.includes('|')).forEach(l => {
-      const [schema, table] = l.split('|');
-      if (!tables[schema]) tables[schema] = [];
-      tables[schema].push(table.trim());
-    });
-    res.json({ db, tables });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+app.post('/api/schema/:source', async (req, res) => {
+  const { source } = req.params;
+  const cfg = req.body || {};   // full connector config key/value object from the UI
 
-// GET /api/schema/mongodb/:db  — list all collections in a MongoDB database
-app.get('/api/schema/mongodb/:db', async (req, res) => {
   try {
-    const { db } = req.params;
-    const pod = await getSourcePod('mongodb', 'mongodb');
-    const { stdout } = await execFileAsync('kubectl', [
-      'exec', '-n', K8S_NAMESPACE, pod, '--',
-      'mongosh', '--quiet', db, '--eval',
-      `db.getCollectionNames().forEach(c => print(c))`,
-    ], { timeout: 10000 });
-    const collections = stdout.trim().split('\n')
-      .map(l => l.trim()).filter(l => l && !l.startsWith('['));
-    res.json({ db, collections });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+    if (source === 'postgres') {
+      const host = cfg['database.hostname'] || 'postgresql.prod.svc.cluster.local';
+      const port = cfg['database.port']     || '5432';
+      const user = cfg['database.user']     || 'postgres';
+      const pass = cfg['database.password'] || '';
+      const db   = cfg['database.dbname']   || 'postgres';
 
-// GET /api/schema/oracle/:schema  — list all tables in an Oracle schema
-app.get('/api/schema/oracle/:schema', async (req, res) => {
-  try {
-    const { schema } = req.params;
-    const pod = await getSourcePod('oracle-xe', 'oracle');
-    const { stdout } = await execFileAsync('kubectl', [
-      'exec', '-n', K8S_NAMESPACE, pod, '--',
-      'sqlplus', '-S', 'c##dbzcdc/dbzpassword@//localhost:1521/XEPDB1',
-    ], {
-      input: `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
-             `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = '${schema.toUpperCase()}' ORDER BY TABLE_NAME;\nEXIT;\n`,
-      timeout: 15000,
-    });
-    const tables = stdout.trim().split('\n')
-      .map(l => l.trim()).filter(l => l && !/^(SQL|ERROR|Connected)/.test(l));
-    res.json({ schema: schema.toUpperCase(), tables });
+      // List all databases first, then for each list tables
+      // We exec psql directly against the configured host (inside cluster)
+      const pod = await getSourcePod('postgresql', 'postgres');
+
+      // 1. List all databases (excluding system ones)
+      const { stdout: dbOut } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'env', `PGPASSWORD=${pass}`,
+        'psql', '-U', user, '-h', host, '-p', port, '-tAc',
+        `SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres','template0','template1') ORDER BY datname`,
+      ], { timeout: 10000 });
+
+      const databases = dbOut.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      // Also include the configured db if not in list
+      if (db && !databases.includes(db)) databases.unshift(db);
+
+      // 2. For each database list tables grouped by schema
+      const result = {};
+      for (const database of databases) {
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'env', `PGPASSWORD=${pass}`,
+          'psql', '-U', user, '-h', host, '-p', port, '-d', database, '-tAc',
+          `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_type = 'BASE TABLE' ORDER BY table_schema, table_name`,
+        ], { timeout: 10000 });
+
+        const schemas = {};
+        stdout.trim().split('\n').filter(l => l.includes('|')).forEach(l => {
+          const [schema, table] = l.split('|');
+          if (!schemas[schema.trim()]) schemas[schema.trim()] = [];
+          schemas[schema.trim()].push(table.trim());
+        });
+        if (Object.keys(schemas).length) result[database] = schemas;
+      }
+      res.json({ source: 'postgres', databases: result });
+
+    } else if (source === 'mongodb') {
+      const host  = cfg['mongodb.hosts'] || cfg['database.hostname'] || 'mongodb.prod.svc.cluster.local';
+      const user  = cfg['mongodb.user']  || cfg['database.user']     || '';
+      const pass  = cfg['mongodb.password'] || cfg['database.password'] || '';
+      const authDb = cfg['mongodb.authsource'] || 'admin';
+
+      const pod = await getSourcePod('mongodb', 'mongodb');
+
+      // Build connection string dynamically from connector config
+      const userPart = user ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : '';
+      const connStr  = `mongodb://${userPart}${host}/?authSource=${authDb}`;
+
+      // 1. List all databases
+      const { stdout: dbOut } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'mongosh', '--quiet', connStr, '--eval',
+        `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
+      ], { timeout: 10000 });
+
+      const databases = dbOut.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+
+      // 2. For each database list collections
+      const result = {};
+      for (const database of databases) {
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'mongosh', '--quiet', `${connStr.replace('/?', `/${database}?`)}`, '--eval',
+          `db.getCollectionNames().forEach(c=>print(c))`,
+        ], { timeout: 10000 });
+        const cols = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+        if (cols.length) result[database] = cols;
+      }
+      res.json({ source: 'mongodb', databases: result });
+
+    } else if (source === 'oracle') {
+      const host   = cfg['database.hostname'] || 'oracle-xe.prod.svc.cluster.local';
+      const port   = cfg['database.port']     || '1521';
+      const user   = cfg['database.user']     || 'c##dbzcdc';
+      const pass   = cfg['database.password'] || '';
+      const pdb    = cfg['database.pdb.name'] || 'XEPDB1';
+
+      const pod = await getSourcePod('oracle-xe', 'oracle');
+
+      // 1. List all accessible schemas (owners with tables)
+      const { stdout: schOut } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'sqlplus', '-S', `${user}/${pass}@//${host}:${port}/${pdb}`,
+      ], {
+        input: `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
+               `SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER;\nEXIT;\n`,
+        timeout: 15000,
+      });
+
+      const schemas = schOut.trim().split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
+
+      // 2. For each schema list tables
+      const result = {};
+      for (const schema of schemas) {
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'sqlplus', '-S', `${user}/${pass}@//${host}:${port}/${pdb}`,
+        ], {
+          input: `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
+                 `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME;\nEXIT;\n`,
+          timeout: 15000,
+        });
+        const tables = stdout.trim().split('\n')
+          .map(l => l.trim())
+          .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
+        if (tables.length) result[schema] = tables;
+      }
+      res.json({ source: 'oracle', databases: result });
+
+    } else {
+      res.status(400).json({ error: `Unknown source: ${source}` });
+    }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
