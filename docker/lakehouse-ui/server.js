@@ -205,6 +205,68 @@ app.get('/api/connectors/:source/:name/offset-position', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  TABLE / COLLECTION BROWSER
+// ═══════════════════════════════════════════════════════════════════════════
+
+// GET /api/schema/postgres/:db  — list all tables in a Postgres database grouped by schema
+app.get('/api/schema/postgres/:db', async (req, res) => {
+  try {
+    const { db } = req.params;
+    const pod = await getSourcePod('postgresql', 'postgres');
+    const { stdout } = await execFileAsync('kubectl', [
+      'exec', '-n', K8S_NAMESPACE, pod, '--',
+      'psql', '-U', 'postgres', '-d', db, '-tAc',
+      `SELECT table_schema, table_name FROM information_schema.tables
+       WHERE table_schema NOT IN ('pg_catalog','information_schema')
+         AND table_type = 'BASE TABLE'
+       ORDER BY table_schema, table_name`,
+    ], { timeout: 10000 });
+    const tables = {};
+    stdout.trim().split('\n').filter(l => l.includes('|')).forEach(l => {
+      const [schema, table] = l.split('|');
+      if (!tables[schema]) tables[schema] = [];
+      tables[schema].push(table.trim());
+    });
+    res.json({ db, tables });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/schema/mongodb/:db  — list all collections in a MongoDB database
+app.get('/api/schema/mongodb/:db', async (req, res) => {
+  try {
+    const { db } = req.params;
+    const pod = await getSourcePod('mongodb', 'mongodb');
+    const { stdout } = await execFileAsync('kubectl', [
+      'exec', '-n', K8S_NAMESPACE, pod, '--',
+      'mongosh', '--quiet', db, '--eval',
+      `db.getCollectionNames().forEach(c => print(c))`,
+    ], { timeout: 10000 });
+    const collections = stdout.trim().split('\n')
+      .map(l => l.trim()).filter(l => l && !l.startsWith('['));
+    res.json({ db, collections });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/schema/oracle/:schema  — list all tables in an Oracle schema
+app.get('/api/schema/oracle/:schema', async (req, res) => {
+  try {
+    const { schema } = req.params;
+    const pod = await getSourcePod('oracle-xe', 'oracle');
+    const { stdout } = await execFileAsync('kubectl', [
+      'exec', '-n', K8S_NAMESPACE, pod, '--',
+      'sqlplus', '-S', 'c##dbzcdc/dbzpassword@//localhost:1521/XEPDB1',
+    ], {
+      input: `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
+             `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = '${schema.toUpperCase()}' ORDER BY TABLE_NAME;\nEXIT;\n`,
+      timeout: 15000,
+    });
+    const tables = stdout.trim().split('\n')
+      .map(l => l.trim()).filter(l => l && !/^(SQL|ERROR|Connected)/.test(l));
+    res.json({ schema: schema.toUpperCase(), tables });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Cache of source pod names (30s)
 const _srcPodCache = {};
 async function getSourcePod(appLabel, source) {

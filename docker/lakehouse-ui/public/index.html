@@ -172,6 +172,21 @@ input,select,textarea{font-family:inherit}
 .act-item.danger:hover{background:#2d1a1a}
 .act-sep{border:none;border-top:1px solid #1c2a3a;margin:4px 0}
 
+/* ── Table picker ── */
+.tpick-wrap{background:#06090f;border:1px solid #1c2a3a;border-radius:8px;padding:14px;margin-bottom:14px}
+.tpick-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.tpick-title{font-size:12px;font-weight:600;color:#e6edf3}
+.tpick-toggle{display:flex;align-items:center;gap:8px;font-size:12px;color:#8b949e;cursor:pointer}
+.tpick-search{width:100%;background:#0d1117;border:1px solid #1c2a3a;border-radius:6px;padding:6px 10px;color:#e6edf3;font-size:12px;margin-bottom:8px}
+.tpick-search:focus{outline:none;border-color:#4fc3f7}
+.tpick-list{max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+.tpick-schema{font-size:10px;color:#586374;text-transform:uppercase;letter-spacing:.6px;padding:4px 0 2px;font-weight:600}
+.tpick-item{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:12px;color:#8b949e}
+.tpick-item:hover{background:#1c2a3a;color:#e6edf3}
+.tpick-item input{accent-color:#4fc3f7;cursor:pointer}
+.tpick-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
+.tpick-status{font-size:11px;color:#586374;flex:1}
+
 /* ── Form ── */
 .form-row{display:grid;grid-template-columns:1fr 2fr;gap:12px;margin-bottom:12px;align-items:start}
 .form-label{font-size:12px;color:#8b949e;padding-top:8px;font-weight:500}
@@ -961,6 +976,27 @@ function showConnectorModal(src, name, config, isNew) {
       <input class="form-input" id="modal-name" placeholder="e.g. my-oracle-cdc" value="${name||''}"/>
     </div>` : ''}
 
+    <!-- Table / Collection Picker -->
+    <div class="tpick-wrap" id="tpick-wrap">
+      <div class="tpick-header">
+        <div class="tpick-title">📋 Table / Collection Selection</div>
+        <label class="tpick-toggle">
+          <input type="checkbox" id="tpick-all" onchange="tpickToggleAll(this.checked)"/>
+          All tables (no filter)
+        </label>
+      </div>
+      <div id="tpick-body">
+        <div style="color:#586374;font-size:12px">
+          Click <b style="color:#4fc3f7">Load Tables</b> to browse available tables.
+        </div>
+      </div>
+      <div class="tpick-actions">
+        <button class="btn btn-secondary btn-sm" onclick="tpickLoad('${src}',${JSON.stringify(config)})">⟳ Load Tables</button>
+        <button class="btn btn-primary btn-sm" onclick="tpickApply('${src}')">✓ Apply Selection</button>
+        <span class="tpick-status" id="tpick-status"></span>
+      </div>
+    </div>
+
     <div style="font-size:12px;color:#586374;margin-bottom:10px">
       Configuration key/value pairs:
     </div>
@@ -983,6 +1019,176 @@ function showConnectorModal(src, name, config, isNew) {
     </div>
   </div>`;
   document.body.appendChild(modal);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  TABLE / COLLECTION PICKER
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Determine the include-list config key and API path for a given source+config
+function tpickMeta(src, config) {
+  const cls = (config['connector.class'] || '').toLowerCase();
+  if (src === 'postgres' || cls.includes('postgresql')) {
+    const db = config['database.dbname'] || 'cache_testing';
+    return { key: 'table.include.list', apiPath: `/api/schema/postgres/${db}`, type: 'postgres', db };
+  }
+  if (src === 'mongodb' || cls.includes('mongodb')) {
+    const db = config['database.include.list'] || config['database.dbname'] || 'cache_testing';
+    return { key: 'collection.include.list', apiPath: `/api/schema/mongodb/${db}`, type: 'mongodb', db };
+  }
+  if (src === 'oracle' || cls.includes('oracle')) {
+    const schema = config['database.pdb.name'] || config['schema.include.list'] || 'C##DBZCDC';
+    return { key: 'table.include.list', apiPath: `/api/schema/oracle/${schema}`, type: 'oracle', schema };
+  }
+  return null;
+}
+
+async function tpickLoad(src, config) {
+  const meta = tpickMeta(src, config);
+  const statusEl = document.getElementById('tpick-status');
+  const bodyEl   = document.getElementById('tpick-body');
+  if (!meta) {
+    statusEl.textContent = 'Unknown source type';
+    return;
+  }
+  statusEl.innerHTML = `<span style="color:#d29922">⏳ Loading…</span>`;
+  bodyEl.innerHTML = '';
+
+  const r = await apiGet(meta.apiPath);
+  if (!r.ok) {
+    statusEl.innerHTML = `<span style="color:#f85149">Failed: ${escHtml((r.data?.error||'').slice(0,120))}</span>`;
+    return;
+  }
+
+  // Read currently selected tables from kv-editor to pre-check them
+  const currentVal = tpickGetCurrentValue(meta.key);
+  const selected = new Set(currentVal ? currentVal.split(',').map(s => s.trim()) : []);
+
+  let html = `<input class="tpick-search" id="tpick-search" placeholder="Filter tables…" oninput="tpickFilter(this.value)"/>
+              <div class="tpick-list" id="tpick-list">`;
+
+  if (meta.type === 'postgres') {
+    const tables = r.data.tables || {};
+    Object.entries(tables).forEach(([schema, tbls]) => {
+      html += `<div class="tpick-schema">${escHtml(schema)}</div>`;
+      tbls.forEach(tbl => {
+        const full = `${schema}.${tbl}`;
+        const chk  = selected.has(full) ? 'checked' : '';
+        html += `<label class="tpick-item" data-table="${escHtml(full)}">
+                   <input type="checkbox" value="${escHtml(full)}" ${chk}/>${escHtml(tbl)}
+                   <span style="color:#586374;font-size:11px;margin-left:auto">${escHtml(schema)}</span>
+                 </label>`;
+      });
+    });
+  } else if (meta.type === 'mongodb') {
+    const cols = r.data.collections || [];
+    const db   = r.data.db;
+    cols.forEach(col => {
+      const full = `${db}.${col}`;
+      const chk  = selected.has(full) ? 'checked' : '';
+      html += `<label class="tpick-item" data-table="${escHtml(full)}">
+                 <input type="checkbox" value="${escHtml(full)}" ${chk}/>${escHtml(col)}
+               </label>`;
+    });
+  } else if (meta.type === 'oracle') {
+    const tbls   = r.data.tables || [];
+    const schema = r.data.schema;
+    tbls.forEach(tbl => {
+      const full = `${schema}.${tbl}`;
+      const chk  = selected.has(full) ? 'checked' : '';
+      html += `<label class="tpick-item" data-table="${escHtml(full)}">
+                 <input type="checkbox" value="${escHtml(full)}" ${chk}/>${escHtml(tbl)}
+                 <span style="color:#586374;font-size:11px;margin-left:auto">${escHtml(schema)}</span>
+               </label>`;
+    });
+  }
+
+  html += `</div>`;
+  bodyEl.innerHTML = html;
+
+  const total = bodyEl.querySelectorAll('.tpick-item input').length;
+  const selCount = bodyEl.querySelectorAll('.tpick-item input:checked').length;
+  statusEl.innerHTML = `<span style="color:#2ea043">✓ ${total} tables loaded</span>&nbsp;&nbsp;${selCount} selected`;
+
+  // Update count when checkboxes change
+  bodyEl.addEventListener('change', () => {
+    const n = bodyEl.querySelectorAll('.tpick-item input:checked').length;
+    statusEl.innerHTML = `<span style="color:#2ea043">✓ ${total} tables</span>&nbsp;&nbsp;${n} selected`;
+  });
+}
+
+function tpickFilter(q) {
+  const lq = q.toLowerCase();
+  document.querySelectorAll('#tpick-list .tpick-item').forEach(el => {
+    el.style.display = el.dataset.table.toLowerCase().includes(lq) ? '' : 'none';
+  });
+  document.querySelectorAll('#tpick-list .tpick-schema').forEach(el => {
+    el.style.display = '';  // always show schema labels
+  });
+}
+
+function tpickToggleAll(checked) {
+  const bodyEl = document.getElementById('tpick-body');
+  if (checked) {
+    // Hide the list, clear selection — "all tables" means no filter (empty include list)
+    bodyEl.style.opacity = '0.4';
+    bodyEl.style.pointerEvents = 'none';
+  } else {
+    bodyEl.style.opacity = '';
+    bodyEl.style.pointerEvents = '';
+  }
+}
+
+function tpickGetCurrentValue(key) {
+  // Find the kv-row whose key input matches
+  for (const row of document.querySelectorAll('#kv-editor .kv-row')) {
+    const inputs = row.querySelectorAll('.kv-input');
+    if (inputs[0] && inputs[0].value.trim() === key) return inputs[1]?.value || '';
+  }
+  return '';
+}
+
+function tpickApply(src) {
+  const allEl  = document.getElementById('tpick-all');
+  const config = {};
+  // Read current kv-editor state into a temp object to get connector class
+  document.querySelectorAll('#kv-editor .kv-row').forEach(r => {
+    const [k, v] = r.querySelectorAll('.kv-input');
+    if (k && v) config[k.value.trim()] = v.value.trim();
+  });
+  const meta = tpickMeta(src, config);
+  if (!meta) return toast('Cannot determine source type', 'error');
+
+  let value = '';
+  if (allEl?.checked) {
+    // All tables — remove the include filter entirely
+    value = '';
+  } else {
+    const checked = [...document.querySelectorAll('#tpick-list .tpick-item input:checked')];
+    if (!checked.length) return toast('Select at least one table, or check "All tables"', 'warn');
+    value = checked.map(c => c.value).join(',');
+  }
+
+  // Update or insert the include-list key in kv-editor
+  let found = false;
+  document.querySelectorAll('#kv-editor .kv-row').forEach(row => {
+    const inputs = row.querySelectorAll('.kv-input');
+    if (inputs[0] && inputs[0].value.trim() === meta.key) {
+      if (value === '') {
+        row.remove(); // remove the key entirely when "all tables"
+      } else {
+        inputs[1].value = value;
+      }
+      found = true;
+    }
+  });
+  if (!found && value !== '') {
+    const ed = document.getElementById('kv-editor');
+    ed.insertAdjacentHTML('beforeend', kvRow(meta.key, value));
+  }
+
+  const msg = value === '' ? 'Cleared (all tables)' : `Applied ${value.split(',').length} table(s)`;
+  document.getElementById('tpick-status').innerHTML = `<span style="color:#2ea043">✓ ${msg} — click Save to persist</span>`;
 }
 
 function kvRow(k='', v='') {
