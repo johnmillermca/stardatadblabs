@@ -54,6 +54,13 @@ proxy:
     image:
       name: 192.168.1.50:30500/jupyterhub/configurable-http-proxy
       tag: "4.6.2"
+    nodeSelector:
+      workload: spark-opensearch
+    tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "spark-opensearch"
+        effect: "NoSchedule"
 
 singleuser:
   # Allow the singleuser pod to use its K8s SA JWT to authenticate to OpenBao.
