@@ -250,10 +250,10 @@ spec:
       tolerations:
         - key: "dedicated"
           operator: "Equal"
-          value: "spark-opensearch"
+          value: "kafka"
           effect: "NoSchedule"
       nodeSelector:
-        workload: spark-opensearch
+        workload: kafka
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
@@ -273,10 +273,19 @@ spec:
               mountPath: /scripts
         - name: init-config
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
-          command: [bash, -c, "cp -r /kafka/config/. /kafka-config/"]
+          # Copy the image's base config first, then overwrite with our ConfigMap
+          # so the correct JsonConverter properties win over any image-baked defaults.
+          command:
+            - bash
+            - -c
+            - |
+              cp -r /kafka/config/. /kafka-config/
+              cp /configmap/connect-distributed.properties /kafka-config/connect-distributed.properties
           volumeMounts:
             - name: kafka-config
               mountPath: /kafka-config
+            - name: connect-config-postgres
+              mountPath: /configmap
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
@@ -314,13 +323,13 @@ spec:
             - name: STATUS_STORAGE_TOPIC
               value: "debezium-pg-statuses"
             - name: KEY_CONVERTER
-              value: "io.confluent.connect.avro.AvroConverter"
-            - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
-              value: "http://schema-registry.prod.svc.cluster.local:8081"
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
             - name: VALUE_CONVERTER
-              value: "io.confluent.connect.avro.AvroConverter"
-            - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
-              value: "http://schema-registry.prod.svc.cluster.local:8081"
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
             - name: CONNECT_CONFIG_PROVIDERS
               value: "env"
             - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
@@ -364,6 +373,9 @@ spec:
         - name: fetch-secrets-script
           configMap:
             name: debezium-fetch-secrets-script
+        - name: connect-config-postgres
+          configMap:
+            name: debezium-connect-config-postgres
 
 ---
 apiVersion: v1
@@ -420,10 +432,10 @@ spec:
       tolerations:
         - key: "dedicated"
           operator: "Equal"
-          value: "spark-opensearch"
+          value: "kafka"
           effect: "NoSchedule"
       nodeSelector:
-        workload: spark-opensearch
+        workload: kafka
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
@@ -443,10 +455,17 @@ spec:
               mountPath: /scripts
         - name: init-config
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
-          command: [bash, -c, "cp -r /kafka/config/. /kafka-config/"]
+          command:
+            - bash
+            - -c
+            - |
+              cp -r /kafka/config/. /kafka-config/
+              cp /configmap/connect-distributed.properties /kafka-config/connect-distributed.properties
           volumeMounts:
             - name: kafka-config
               mountPath: /kafka-config
+            - name: connect-config-oracle
+              mountPath: /configmap
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
@@ -484,13 +503,13 @@ spec:
             - name: STATUS_STORAGE_TOPIC
               value: "debezium-ora-statuses"
             - name: KEY_CONVERTER
-              value: "io.confluent.connect.avro.AvroConverter"
-            - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
-              value: "http://schema-registry.prod.svc.cluster.local:8081"
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
             - name: VALUE_CONVERTER
-              value: "io.confluent.connect.avro.AvroConverter"
-            - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
-              value: "http://schema-registry.prod.svc.cluster.local:8081"
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
             - name: CONNECT_CONFIG_PROVIDERS
               value: "env"
             - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
@@ -534,6 +553,9 @@ spec:
         - name: fetch-secrets-script
           configMap:
             name: debezium-fetch-secrets-script
+        - name: connect-config-oracle
+          configMap:
+            name: debezium-connect-config-oracle
 
 ---
 apiVersion: v1
@@ -590,10 +612,10 @@ spec:
       tolerations:
         - key: "dedicated"
           operator: "Equal"
-          value: "spark-opensearch"
+          value: "kafka"
           effect: "NoSchedule"
       nodeSelector:
-        workload: spark-opensearch
+        workload: kafka
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
@@ -613,10 +635,17 @@ spec:
               mountPath: /scripts
         - name: init-config
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
-          command: [bash, -c, "cp -r /kafka/config/. /kafka-config/"]
+          command:
+            - bash
+            - -c
+            - |
+              cp -r /kafka/config/. /kafka-config/
+              cp /configmap/connect-distributed.properties /kafka-config/connect-distributed.properties
           volumeMounts:
             - name: kafka-config
               mountPath: /kafka-config
+            - name: connect-config-mongodb
+              mountPath: /configmap
       containers:
         - name: debezium-connect
           image: 192.168.1.50:30500/debezium/connect:2.7.4-lc1
@@ -654,13 +683,13 @@ spec:
             - name: STATUS_STORAGE_TOPIC
               value: "debezium-mgo-statuses"
             - name: KEY_CONVERTER
-              value: "io.confluent.connect.avro.AvroConverter"
-            - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
-              value: "http://schema-registry.prod.svc.cluster.local:8081"
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
             - name: VALUE_CONVERTER
-              value: "io.confluent.connect.avro.AvroConverter"
-            - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
-              value: "http://schema-registry.prod.svc.cluster.local:8081"
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
             - name: CONNECT_CONFIG_PROVIDERS
               value: "env"
             - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
@@ -704,6 +733,9 @@ spec:
         - name: fetch-secrets-script
           configMap:
             name: debezium-fetch-secrets-script
+        - name: connect-config-mongodb
+          configMap:
+            name: debezium-connect-config-mongodb
 
 ---
 apiVersion: v1
