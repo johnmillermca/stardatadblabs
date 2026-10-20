@@ -706,15 +706,30 @@ function showStartCdcModal(src, name) {
 
     <div style="font-size:12px;color:#8b949e;margin-bottom:14px;padding:10px 12px;
       background:#06090f;border-radius:6px;border-left:3px solid #4fc3f7">
-      Choose where to start capturing changes. The connector will be deleted and recreated
-      with the selected starting position applied to its snapshot mode.
+      Choose how to start CDC. <b style="color:#e6edf3">Resume</b> continues from the last saved offset.
+      The other options delete and recreate the connector with a new starting position.
     </div>
 
     <div class="cdc-option-group" id="cdc-opts">
 
+      <!-- Option 0: Resume as-is (planned stop / normal restart) -->
+      <label class="cdc-option selected" id="cdc-opt-resume" onclick="selectCdcOption('resume')">
+        <input type="radio" name="cdc-mode" value="resume" checked/>
+        <div>
+          <div class="cdc-option-label">▶ Resume — Continue from Last Offset
+            <span class="cdc-pos-badge badge-ts" style="margin-left:8px">SAFE</span>
+          </div>
+          <div class="cdc-option-desc">
+            Use this after a <b style="color:#e6edf3">planned stop</b> or normal Debezium pause.<br>
+            Calls <code style="color:#4fc3f7">PUT /connectors/{name}/resume</code> — no config change,
+            no data loss. Picks up exactly where it left off using the stored Kafka offset.
+          </div>
+        </div>
+      </label>
+
       <!-- Option 1: Current time / Now -->
-      <label class="cdc-option selected" id="cdc-opt-now" onclick="selectCdcOption('now')">
-        <input type="radio" name="cdc-mode" value="now" checked/>
+      <label class="cdc-option" id="cdc-opt-now" onclick="selectCdcOption('now')">
+        <input type="radio" name="cdc-mode" value="now"/>
         <div>
           <div class="cdc-option-label">⏱ Current Time (Now)</div>
           <div class="cdc-option-desc">
@@ -780,7 +795,7 @@ function showStartCdcModal(src, name) {
 }
 
 function selectCdcOption(mode) {
-  ['now','live','manual'].forEach(m => {
+  ['resume','now','live','manual'].forEach(m => {
     const el = document.getElementById(`cdc-opt-${m}`);
     if (el) el.classList.toggle('selected', m === mode);
     const radio = el?.querySelector('input[type=radio]');
@@ -808,6 +823,23 @@ async function applyStartCdc(src, name) {
   const selectedRadio = document.querySelector('#start-cdc-modal input[type=radio]:checked');
   if (!selectedRadio) return toast('Select a start mode', 'error');
   const mode = selectedRadio.value;
+
+  // Resume: just PUT /resume — no delete/recreate needed
+  if (mode === 'resume') {
+    const btn = document.querySelector('#start-cdc-modal .btn-primary');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Resuming…'; }
+    const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
+    if (r.ok) {
+      toast(`Connector "${name}" resumed ✓`, 'success');
+      closeModal('start-cdc-modal');
+      if (currentPage === 'connectors') loadConnectorList(src);
+      else renderDashboard();
+    } else {
+      toast(`Resume failed: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
+    }
+    return;
+  }
 
   let position = null;
   if (mode === 'live') {
