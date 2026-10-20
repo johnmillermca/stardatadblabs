@@ -49,7 +49,18 @@ async function dbzRequest(source, method, path, body) {
   if (!base) throw new Error(`Unknown source: ${source}`);
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${base}${path}`, opts);
+  let res;
+  try {
+    res = await fetch(`${base}${path}`, opts);
+  } catch (e) {
+    // EPERM on connect() = kube-proxy iptables rules are stale or CNI dropped the
+    // ClusterIP SNAT rule. Fix: kubectl rollout restart -n kube-system daemonset/kube-proxy
+    // then verify: kubectl get svc debezium-connect-postgres -n prod
+    const hint = (e.message || '').includes('EPERM')
+      ? ' (EPERM = kube-proxy/CNI issue — run: kubectl rollout restart -n kube-system daemonset/kube-proxy)'
+      : '';
+    throw new Error(e.message + hint);
+  }
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { json = { raw: text }; }
@@ -225,15 +236,16 @@ app.post('/api/connectors/:source/:name/start-from', async (req, res) => {
 
     // 2. Patch config based on chosen mode
     if (mode === 'now') {
-      // snapshot.mode=never means: skip full snapshot, start streaming only
+      // snapshot.mode=no_data: skip full snapshot, stream only new changes.
+      // 'never' was renamed to 'no_data' in Debezium 2.x — use the current name.
       if (source === 'postgres') {
-        cfg['snapshot.mode'] = 'never';
+        cfg['snapshot.mode'] = 'no_data';
         delete cfg['slot.drop.on.stop'];
       } else if (source === 'oracle') {
         cfg['snapshot.mode'] = 'schema_only';
         cfg['log.mining.strategy'] = cfg['log.mining.strategy'] || 'online_catalog';
       } else if (source === 'mongodb') {
-        cfg['snapshot.mode'] = 'never';
+        cfg['snapshot.mode'] = 'no_data';
       }
     } else if (mode === 'live' || mode === 'manual') {
       // Pin to a specific SCN / LSN
@@ -241,11 +253,17 @@ app.post('/api/connectors/:source/:name/start-from', async (req, res) => {
         cfg['snapshot.mode'] = 'schema_only';
         cfg['log.mining.start.scn'] = String(position);
       } else if (source === 'postgres') {
-        cfg['snapshot.mode'] = 'never';
-        // Debezium Postgres: set the WAL LSN via offset override property
-        cfg['snapshot.lsn'] = String(position);
+        // Debezium Postgres does NOT support LSN pinning via connector config.
+        // The replication slot already tracks the correct WAL position; setting
+        // snapshot.mode=no_data is sufficient — the slot will stream from wherever
+        // it last left off, which is the safest recoverable starting point.
+        cfg['snapshot.mode'] = 'no_data';
+        delete cfg['slot.drop.on.stop'];
+        // Remove any stale snapshot.lsn key that may have been set by older versions
+        // of this code — it is not a real Debezium property and causes config validation errors.
+        delete cfg['snapshot.lsn'];
       } else if (source === 'mongodb') {
-        cfg['snapshot.mode'] = 'never';
+        cfg['snapshot.mode'] = 'no_data';
         // MongoDB: use the resume token / timestamp provided
         cfg['initial.sync.max.threads'] = cfg['initial.sync.max.threads'] || '1';
         cfg['snapshot.filter.query.mode'] = cfg['snapshot.filter.query.mode'] || 'none';

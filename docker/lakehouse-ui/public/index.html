@@ -480,6 +480,8 @@ async function renderDashboard() {
   for (const { source, data } of results) {
     if (typeof data === 'object' && !Array.isArray(data)) {
       for (const [name, info] of Object.entries(data)) {
+        // Skip top-level error/metadata keys that Debezium returns alongside connectors
+        if (!info || typeof info !== 'object' || !('status' in info)) continue;
         totalConn++;
         const st = info?.status?.connector?.state || 'UNKNOWN';
         if (st === 'RUNNING') runningConn++;
@@ -614,7 +616,10 @@ async function loadConnectorList(src) {
     return;
   }
 
-  const rows = Object.entries(data).map(([name, info]) => {
+  const rows = Object.entries(data)
+    // Skip top-level error/metadata keys Debezium returns alongside connectors
+    .filter(([, info]) => info && typeof info === 'object' && 'status' in info)
+    .map(([name, info]) => {
     const state = info?.status?.connector?.state || 'UNKNOWN';
     const taskState = info?.status?.tasks?.[0]?.state || '–';
     const tasks = info?.status?.tasks?.length || 0;
@@ -734,8 +739,8 @@ function showStartCdcModal(src, name) {
           <div class="cdc-option-label">⏱ Current Time (Now)</div>
           <div class="cdc-option-desc">
             Starts CDC from this moment — skips all historical data.<br>
-            Sets <code style="color:#4fc3f7">snapshot.mode=never</code> (or <code>no_data</code>) and
-            clears any stored offset so Debezium reads only new changes going forward.
+            Sets <code style="color:#4fc3f7">snapshot.mode=no_data</code> so Debezium
+            reads only new changes going forward.
           </div>
         </div>
       </label>
@@ -750,7 +755,10 @@ function showStartCdcModal(src, name) {
           </div>
           <div class="cdc-option-desc" style="margin-bottom:8px">
             ${pos.hint}<br>
-            Fetches the live position from the source database and pins CDC to start there.
+            ${src === 'postgres'
+              ? 'Fetches the current WAL LSN for reference. PostgreSQL CDC will resume from the replication slot\'s current position (<code style="color:#d29922">snapshot.mode=no_data</code>).'
+              : 'Fetches the live position from the source database and pins CDC to start there.'
+            }
           </div>
           <div class="cdc-pos-row" id="live-pos-row">
             <input class="form-input" id="live-pos-val" placeholder="${pos.placeholder}" readonly
@@ -772,7 +780,10 @@ function showStartCdcModal(src, name) {
             <span class="cdc-pos-badge ${pos.badge}" style="margin-left:8px">${pos.name}</span>
           </div>
           <div class="cdc-option-desc" style="margin-bottom:8px">
-            Provide a specific ${pos.name} to start from. Useful when replaying from a known checkpoint.
+            ${src === 'postgres'
+              ? 'Note: PostgreSQL CDC cannot pin to an arbitrary LSN via connector config — the replication slot position is used instead (<code style="color:#d29922">snapshot.mode=no_data</code>). The LSN entered here is stored for reference only.'
+              : `Provide a specific ${pos.name} to start from. Useful when replaying from a known checkpoint.`
+            }
           </div>
           <div class="cdc-pos-row">
             <input class="form-input" id="manual-pos-val" placeholder="${pos.placeholder}"

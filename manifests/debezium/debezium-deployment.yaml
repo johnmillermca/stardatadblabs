@@ -253,7 +253,7 @@ spec:
           value: "kafka"
           effect: "NoSchedule"
       nodeSelector:
-        workload: kafka
+        kubernetes.io/hostname: worker6.local
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: fetch-secrets
