@@ -727,8 +727,25 @@ async function editConnector(src, name) {
 }
 
 async function pauseConnector(src, name) {
-  const r = await apiPost(`/api/connectors/${src}/${name}/pause`);
-  toast(r.ok ? `${name} paused` : 'Pause failed', r.ok ? 'success' : 'error');
+  // Kafka Connect "pause" only stops the framework scheduler — the task thread
+  // keeps running and data keeps flowing into Kafka. To truly stop capture we
+  // must DELETE the connector so the task dies and the replication slot closes.
+  // The offset is persisted in the Kafka offsets topic, so Start CDC → Resume
+  // picks up exactly where it left off.
+  if (!confirm(`Stop CDC for "${name}"?\n\nThis will delete the connector and close the replication slot connection. Data capture will stop immediately.\n\nUse "Start CDC → Resume" to restart from the same position.`)) return;
+
+  // Save current config before deleting so Resume can recreate it
+  const cfgR = await apiGet(`/api/connectors/${src}/${name}/config`);
+  if (!cfgR.ok) return toast('Could not read connector config before stopping', 'error');
+
+  const r = await apiDel(`/api/connectors/${src}/${name}`);
+  if (r.ok) {
+    // Store config in sessionStorage so Start CDC → Resume can recreate it
+    sessionStorage.setItem(`connector_cfg_${src}_${name}`, JSON.stringify(cfgR.data));
+    toast(`${name} stopped — data capture halted. Use Start CDC to resume.`, 'success');
+  } else {
+    toast(`Stop failed: ${JSON.stringify(r.data).slice(0,120)}`, 'error');
+  }
   loadConnectorList(src);
 }
 async function resumeConnector(src, name) {
@@ -906,19 +923,47 @@ async function applyStartCdc(src, name) {
   if (!selectedRadio) return toast('Select a start mode', 'error');
   const mode = selectedRadio.value;
 
-  // Resume: just PUT /resume — no delete/recreate needed
+  // Resume — connector may have been deleted by Stop, so check if it exists first
   if (mode === 'resume') {
     const btn = document.querySelector('#start-cdc-modal .btn-primary');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Resuming…'; }
-    const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
-    if (r.ok) {
-      toast(`Connector "${name}" resumed ✓`, 'success');
-      closeModal('start-cdc-modal');
-      if (currentPage === 'connectors') loadConnectorList(src);
-      else renderDashboard();
+
+    // Check if connector still exists
+    const statusR = await apiGet(`/api/connectors/${src}/${name}/status`);
+
+    if (statusR.status === 404 || statusR.data?.error_code === 404) {
+      // Connector was deleted by Stop — recreate it from saved config
+      const savedCfg = sessionStorage.getItem(`connector_cfg_${src}_${name}`);
+      if (!savedCfg) {
+        toast(`Connector "${name}" no longer exists and no saved config found. Use "Edit Config" to recreate it.`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
+        return;
+      }
+      const cfg = { ...JSON.parse(savedCfg), 'snapshot.mode': 'no_data' };
+      delete cfg.name;
+      const createR = await apiPost(`/api/connectors/${src}`, { name, config: cfg });
+      if (createR.ok) {
+        sessionStorage.removeItem(`connector_cfg_${src}_${name}`);
+        toast(`Connector "${name}" restarted — resuming from last offset ✓`, 'success');
+        closeModal('start-cdc-modal');
+        if (currentPage === 'connectors') loadConnectorList(src);
+        else renderDashboard();
+      } else {
+        toast(`Recreate failed: ${JSON.stringify(createR.data).slice(0,160)}`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
+      }
     } else {
-      toast(`Resume failed: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
-      if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
+      // Connector exists (was paused, not deleted) — just resume it
+      const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
+      if (r.ok) {
+        toast(`Connector "${name}" resumed ✓`, 'success');
+        closeModal('start-cdc-modal');
+        if (currentPage === 'connectors') loadConnectorList(src);
+        else renderDashboard();
+      } else {
+        toast(`Resume failed: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
+      }
     }
     return;
   }
