@@ -124,6 +124,10 @@ spec:
             - key: node-role.kubernetes.io/master
               operator: Exists
               effect: NoSchedule
+            - key: workload
+              operator: Equal
+              value: master
+              effect: NoSchedule
 
           # ── Host filesystem access for PKI + local-path PV dirs ──────────
           volumes:
