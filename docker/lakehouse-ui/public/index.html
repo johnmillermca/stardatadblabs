@@ -630,6 +630,7 @@ async function loadConnectorList(src) {
     const state = info?.status?.connector?.state || 'UNKNOWN';
     const taskState = info?.status?.tasks?.[0]?.state || '–';
     const tasks = info?.status?.tasks?.length || 0;
+    const running = state === 'RUNNING';
     return `<tr>
       <td><code style="color:#4fc3f7;font-size:12px">${name}</code></td>
       <td>${stateBadge(state)}</td>
@@ -637,11 +638,11 @@ async function loadConnectorList(src) {
       <td>
         <div class="btn-group">
           <button class="btn btn-secondary btn-sm" onclick="editConnector('${src}','${name}')">✎ Edit</button>
-          <button class="btn btn-success btn-sm" onclick="showStartCdcModal('${src}','${name}')">▶ Start CDC</button>
-          <button class="btn btn-secondary btn-sm" onclick="resumeConnector('${src}','${name}')">▶ Resume</button>
-          <button class="btn btn-warn btn-sm" onclick="pauseConnector('${src}','${name}')">⏸ Pause</button>
-          <button class="btn btn-secondary btn-sm" onclick="restartConnector('${src}','${name}')">↻ Restart</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteConnector('${src}','${name}')">🗑</button>
+          ${running
+            ? `<button class="btn btn-danger btn-sm" onclick="pauseConnector('${src}','${name}')">⏹ Stop</button>`
+            : `<button class="btn btn-success btn-sm" onclick="showStartCdcModal('${src}','${name}')">▶ Start CDC</button>`
+          }
+          <button class="btn btn-danger btn-sm" onclick="deleteConnector('${src}','${name}')">🗑 Delete</button>
         </div>
       </td>
     </tr>`;
