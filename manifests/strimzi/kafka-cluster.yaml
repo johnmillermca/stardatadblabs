@@ -222,6 +222,27 @@ spec:
               principal="svc/kafka@STARDATADBLABS.LOCAL"
               isInitiator=false;
             sasl.kerberos.principal.to.local.rules: DEFAULT
+    # ── Broker readiness / liveness probes ────────────────────────────────────
+    # Strimzi 1.x does not expose startupProbe on spec.kafka — use a generous
+    # initialDelaySeconds on readinessProbe instead to give KRaft enough time
+    # to replay all topic partition logs on cold start before the probe fires.
+    #
+    # Without this, the default 15s initialDelay fires while the broker is still
+    # loading __consumer_offsets (50+ partitions), returns 503 → restart loop
+    # → bootstrap service has no endpoints → lakehouse-ui loads nothing.
+    #
+    #   safe window = initialDelaySeconds + failureThreshold × periodSeconds
+    #               = 120 + 3 × 20 = 180 s before pod is restarted
+    readinessProbe:
+      initialDelaySeconds: 120  # wait 2 min for KRaft log replay before probing
+      timeoutSeconds: 10
+      periodSeconds: 20
+      failureThreshold: 3
+    livenessProbe:
+      initialDelaySeconds: 120  # same — don't kill the broker while it's warming up
+      timeoutSeconds: 10
+      periodSeconds: 30
+      failureThreshold: 5       # allow up to 2.5 min of GC/compaction without restart
     config:
       allow.everyone.if.no.acl.found: "true"
       # ── Inter-broker protocol override — CRITICAL for GSSAPI listener ────
@@ -254,6 +275,14 @@ spec:
       # so compacted topics reclaim space promptly after restart.
       log.retention.hours: "168"
       log.retention.check.interval.ms: "60000"
+      # ── KRaft controller registration timeouts ────────────────────────────────
+      # Default controller.quorum.election.timeout.ms=1000ms is too short when
+      # the pod restarts — the JVM DNS cache is cold and the first lookup of
+      # strimzi-kafka-combined-0.strimzi-kafka-kafka-brokers.prod.svc can take
+      # >1s, causing "registrationTimeout" → fatal broker exit → crash loop.
+      # Raise to 10s to cover DNS cold-start and coredns round-trip latency.
+      controller.quorum.election.timeout.ms: "10000"
+      controller.quorum.fetch.timeout.ms: "10000"
   entityOperator:
     topicOperator:
       # Resources for the topic-operator JVM.

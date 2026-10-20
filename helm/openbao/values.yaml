@@ -94,6 +94,14 @@ server:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    # workload:master taint is set on master.local to prevent general workloads
+    # from landing there. OpenBao must tolerate it to stay pinned to master.
+    # Without this toleration ArgoCD sync resets the StatefulSet and the pod
+    # goes Pending indefinitely (FailedScheduling), breaking all secret fetches.
+    - key: "workload"
+      operator: "Equal"
+      value: "master"
+      effect: "NoSchedule"
 
 ui:
   enabled: true

@@ -43,11 +43,39 @@ fs.inotify.max_user_instances       = 512
 EOF
 sysctl --system
 
-# ── 4. Firewall tweaks (permissive for lab; tighten in prod) ─────────────────
+# ── 4. Firewall — open required Kubernetes + Calico ports ────────────────────
+# Sets explicit allow rules rather than switching to "trusted" (allow-all) zone.
+# This survives reboots and works whether the default zone is public or trusted.
+#
+# Required ports/protocols:
+#   10250/tcp   — kubelet API (kubectl logs, exec, port-forward)
+#   30000-32767 — NodePort services (TCP + UDP)
+#   179/tcp     — Calico BGP (even in IPIP mode, BGP peering uses this)
+#   ipip (proto 4) — Calico IPIP encapsulation for cross-node pod traffic
+#   FORWARD via tunl0 — allow encapsulated pod packets to traverse the tunnel
+#
+# Without these, pods on this node appear Running but are completely unreachable
+# from other nodes — NodePorts return HTTP 000, kubectl logs fails with
+# "no route to host", and cross-node pod networking silently drops all packets.
 if systemctl is-active --quiet firewalld 2>/dev/null; then
-  log "firewalld detected – setting to permissive"
-  firewall-cmd --set-default-zone=trusted --permanent || true
-  firewall-cmd --reload || true
+  log "firewalld detected – applying Kubernetes firewall rules..."
+
+  # Detect the default-route interface dynamically (enp1s0, eth0, ens3, etc.)
+  DEFAULT_IFACE=$(ip -4 route show default 2>/dev/null | awk '/^default/{print $5; exit}')
+  DEFAULT_IFACE="${DEFAULT_IFACE:-enp1s0}"
+  log "Using default network interface: ${DEFAULT_IFACE}"
+
+  # Move the physical NIC and Calico IPIP tunnel interface into the 'trusted' zone.
+  # This is the correct approach on RHEL/nftables-based firewalld — the 'public' zone
+  # has implicit reject-all rules at the end of its nftables chain that override any
+  # explicit port/protocol allow rules, including firewall-cmd --direct iptables rules
+  # (which are evaluated in a separate table and do NOT override nftables chains).
+  # 'trusted' zone = accept all, which is appropriate for internal cluster traffic.
+  firewall-cmd --permanent --zone=trusted --add-interface="${DEFAULT_IFACE}"
+  firewall-cmd --permanent --zone=trusted --add-interface=tunl0
+
+  firewall-cmd --reload
+  log "firewalld: interfaces '${DEFAULT_IFACE}' and 'tunl0' moved to trusted zone."
 fi
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
   log "ufw detected – disabling for Kubernetes"
