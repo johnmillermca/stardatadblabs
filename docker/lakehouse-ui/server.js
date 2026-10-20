@@ -217,35 +217,28 @@ app.post('/api/schema/:source', async (req, res) => {
 
   try {
     if (source === 'postgres') {
-      const host = cfg['database.hostname'] || 'postgresql.prod.svc.cluster.local';
-      const port = cfg['database.port']     || '5432';
-      const user = cfg['database.user']     || 'postgres';
-      const pass = cfg['database.password'] || '';
-      const db   = cfg['database.dbname']   || 'postgres';
-
-      // List all databases first, then for each list tables
-      // We exec psql directly against the configured host (inside cluster)
+      // Use local peer-auth as postgres superuser inside the pod — no password needed.
+      // The debezium user credentials in cfg are for the connector, not for schema browsing.
+      const db  = cfg['database.dbname'] || '';
       const pod = await getSourcePod('postgresql', 'postgres');
 
-      // 1. List all databases (excluding system ones)
+      // 1. List all non-system databases
       const { stdout: dbOut } = await execFileAsync('kubectl', [
         'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'env', `PGPASSWORD=${pass}`,
-        'psql', '-U', user, '-h', host, '-p', port, '-tAc',
-        `SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres','template0','template1') ORDER BY datname`,
+        'psql', '-U', 'postgres', '-tAc',
+        `SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('template0','template1') ORDER BY datname`,
       ], { timeout: 10000 });
 
-      const databases = dbOut.trim().split('\n').map(l => l.trim()).filter(Boolean);
-      // Also include the configured db if not in list
-      if (db && !databases.includes(db)) databases.unshift(db);
+      const allDbs = dbOut.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      // If a specific db is configured show it first; otherwise show all
+      const databases = db && allDbs.includes(db) ? [db, ...allDbs.filter(d => d !== db)] : allDbs;
 
       // 2. For each database list tables grouped by schema
       const result = {};
       for (const database of databases) {
         const { stdout } = await execFileAsync('kubectl', [
           'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'env', `PGPASSWORD=${pass}`,
-          'psql', '-U', user, '-h', host, '-p', port, '-d', database, '-tAc',
+          'psql', '-U', 'postgres', '-d', database, '-tAc',
           `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_type = 'BASE TABLE' ORDER BY table_schema, table_name`,
         ], { timeout: 10000 });
 
@@ -260,33 +253,33 @@ app.post('/api/schema/:source', async (req, res) => {
       res.json({ source: 'postgres', databases: result });
 
     } else if (source === 'mongodb') {
-      const host  = cfg['mongodb.hosts'] || cfg['database.hostname'] || 'mongodb.prod.svc.cluster.local';
-      const user  = cfg['mongodb.user']  || cfg['database.user']     || '';
-      const pass  = cfg['mongodb.password'] || cfg['database.password'] || '';
-      const authDb = cfg['mongodb.authsource'] || 'admin';
-
+      // Use root credentials from K8s secret — debezium user may not have listDatabases
       const pod = await getSourcePod('mongodb', 'mongodb');
 
-      // Build connection string dynamically from connector config
-      const userPart = user ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : '';
-      const connStr  = `mongodb://${userPart}${host}/?authSource=${authDb}`;
+      // Fetch root password from secret at runtime
+      const secretRes = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/mongodb-credentials`);
+      const secretJson = await secretRes.json();
+      const rootPass = Buffer.from(secretJson.data?.['mongodb-root-password'] || '', 'base64').toString();
 
-      // 1. List all databases
+      // 1. List all non-system databases
       const { stdout: dbOut } = await execFileAsync('kubectl', [
         'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'mongosh', '--quiet', connStr, '--eval',
+        'mongosh', '--quiet',
+        '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
+        '--eval',
         `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
       ], { timeout: 10000 });
 
-      const databases = dbOut.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+      const dbs = dbOut.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
 
       // 2. For each database list collections
       const result = {};
-      for (const database of databases) {
+      for (const database of dbs) {
         const { stdout } = await execFileAsync('kubectl', [
           'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'mongosh', '--quiet', `${connStr.replace('/?', `/${database}?`)}`, '--eval',
-          `db.getCollectionNames().forEach(c=>print(c))`,
+          'mongosh', '--quiet', database,
+          '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
+          '--eval', `db.getCollectionNames().forEach(c=>print(c))`,
         ], { timeout: 10000 });
         const cols = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
         if (cols.length) result[database] = cols;
@@ -294,42 +287,35 @@ app.post('/api/schema/:source', async (req, res) => {
       res.json({ source: 'mongodb', databases: result });
 
     } else if (source === 'oracle') {
-      const host   = cfg['database.hostname'] || 'oracle-xe.prod.svc.cluster.local';
-      const port   = cfg['database.port']     || '1521';
-      const user   = cfg['database.user']     || 'c##dbzcdc';
-      const pass   = cfg['database.password'] || '';
-      const pdb    = cfg['database.pdb.name'] || 'XEPDB1';
-
+      // Use OS auth (/ as sysdba) inside the pod — no password needed
       const pod = await getSourcePod('oracle-xe', 'oracle');
 
-      // 1. List all accessible schemas (owners with tables)
-      const { stdout: schOut } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'sqlplus', '-S', `${user}/${pass}@//${host}:${port}/${pdb}`,
-      ], {
-        input: `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
-               `SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER;\nEXIT;\n`,
-        timeout: 15000,
-      });
+      const runSqlplus = async (sql) => {
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
+          'bash', '-c', `echo "${sql}" | sqlplus -S / as sysdba`,
+        ], { timeout: 15000 });
+        return stdout.trim().split('\n')
+          .map(l => l.trim())
+          .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING|$)/.test(l));
+      };
 
-      const schemas = schOut.trim().split('\n')
-        .map(l => l.trim())
-        .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
+      // 1. List all schemas that own tables (exclude system schemas)
+      const systemSchemas = ['SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','DBSFWUSER','GGSYS','ANONYMOUS',
+        'CTXSYS','DVSYS','DVF','GSMADMIN_INTERNAL','MDSYS','OLAPSYS','XDB','WMSYS','OJVMSYS',
+        'ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','ORDDATA'];
+      const schemas = await runSqlplus(
+        'SET HEADING OFF\\nSET FEEDBACK OFF\\nSET PAGESIZE 0\\n' +
+        `SELECT DISTINCT OWNER FROM ALL_TABLES WHERE OWNER NOT IN (${systemSchemas.map(s=>`'${s}'`).join(',')}) ORDER BY OWNER;\\nEXIT;`
+      );
 
       // 2. For each schema list tables
       const result = {};
       for (const schema of schemas) {
-        const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'sqlplus', '-S', `${user}/${pass}@//${host}:${port}/${pdb}`,
-        ], {
-          input: `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
-                 `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME;\nEXIT;\n`,
-          timeout: 15000,
-        });
-        const tables = stdout.trim().split('\n')
-          .map(l => l.trim())
-          .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
+        const tables = await runSqlplus(
+          'SET HEADING OFF\\nSET FEEDBACK OFF\\nSET PAGESIZE 0\\n' +
+          `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME;\\nEXIT;`
+        );
         if (tables.length) result[schema] = tables;
       }
       res.json({ source: 'oracle', databases: result });
