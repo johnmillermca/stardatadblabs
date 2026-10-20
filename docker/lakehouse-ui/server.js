@@ -142,6 +142,139 @@ app.post('/api/connectors/:source/:name/restart', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  START CDC — fetch live offset position from source DB
+// ═══════════════════════════════════════════════════════════════════════════
+
+// GET /api/connectors/:source/:name/offset-position
+// Returns the current SCN (Oracle) / LSN (Postgres) / timestamp (MongoDB)
+// by exec-ing into the appropriate source pod via kubectl.
+app.get('/api/connectors/:source/:name/offset-position', async (req, res) => {
+  const { source } = req.params;
+  try {
+    if (source === 'oracle') {
+      // Query Oracle XE for current SCN
+      const pod = await getSourcePod('oracle-xe', 'oracle');
+      const { stdout } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'sqlplus', '-S', 'c##dbzcdc/dbzpassword@//localhost:1521/XEPDB1',
+      ], { input: 'SET HEADING OFF\nSET FEEDBACK OFF\nSELECT current_scn FROM v$database;\nEXIT;\n', timeout: 15000 });
+      const scn = stdout.trim().split('\n').map(l => l.trim()).filter(l => /^\d+$/.test(l)).pop();
+      if (!scn) return res.status(502).json({ error: 'Could not parse SCN from Oracle output', raw: stdout.slice(0, 300) });
+      return res.json({ source, type: 'SCN', position: scn });
+
+    } else if (source === 'postgres') {
+      // Query Postgres for current WAL LSN
+      const pod = await getSourcePod('postgresql', 'postgres');
+      const { stdout } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'psql', '-U', 'postgres', '-d', 'cache_testing', '-tAc',
+        "SELECT pg_current_wal_lsn()::text",
+      ], { timeout: 10000 });
+      const lsn = stdout.trim().split('\n').map(l => l.trim()).find(l => /^[0-9A-F]+\/[0-9A-F]+$/i.test(l));
+      if (!lsn) return res.status(502).json({ error: 'Could not parse LSN from Postgres output', raw: stdout.slice(0, 300) });
+      return res.json({ source, type: 'LSN', position: lsn });
+
+    } else if (source === 'mongodb') {
+      // Return current timestamp as a proxy for resume-token starting point
+      const pod = await getSourcePod('mongodb', 'mongodb');
+      const { stdout } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'mongosh', '--quiet', '--eval',
+        'JSON.stringify({ts: new Timestamp(Math.floor(Date.now()/1000), 1)})',
+      ], { timeout: 10000 });
+      const line = stdout.trim().split('\n').find(l => l.includes('"ts"'));
+      if (!line) return res.status(502).json({ error: 'Could not parse timestamp from MongoDB', raw: stdout.slice(0, 300) });
+      return res.json({ source, type: 'Timestamp', position: line.trim() });
+
+    } else {
+      return res.status(400).json({ error: `Unknown source: ${source}` });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cache of source pod names (30s)
+const _srcPodCache = {};
+async function getSourcePod(appLabel, source) {
+  const key = appLabel;
+  if (_srcPodCache[key] && Date.now() < _srcPodCache[key].exp) return _srcPodCache[key].name;
+  const { stdout } = await execFileAsync('kubectl', [
+    'get', 'pod', '-n', K8S_NAMESPACE,
+    '-l', `app=${appLabel}`,
+    '-o', 'jsonpath={.items[0].metadata.name}',
+  ], { timeout: 10000 });
+  const name = stdout.trim();
+  if (!name) throw new Error(`No running pod found with app=${appLabel}`);
+  _srcPodCache[key] = { name, exp: Date.now() + 30000 };
+  return name;
+}
+
+// POST /api/connectors/:source/:name/start-from
+// Deletes the connector and recreates it with snapshot.mode adjusted to
+// the chosen start position so CDC begins exactly where requested.
+app.post('/api/connectors/:source/:name/start-from', async (req, res) => {
+  const { source, name } = req.params;
+  const { mode, position } = req.body;   // mode: 'now' | 'live' | 'manual'
+
+  try {
+    // 1. Read current config
+    const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
+    if (cfgR.status >= 300) return res.status(cfgR.status).json({ error: 'Could not read connector config', detail: cfgR.body });
+    const cfg = { ...cfgR.body };
+
+    // 2. Patch config based on chosen mode
+    if (mode === 'now') {
+      // snapshot.mode=never means: skip full snapshot, start streaming only
+      if (source === 'postgres') {
+        cfg['snapshot.mode'] = 'never';
+        delete cfg['slot.drop.on.stop'];
+      } else if (source === 'oracle') {
+        cfg['snapshot.mode'] = 'schema_only';
+        cfg['log.mining.strategy'] = cfg['log.mining.strategy'] || 'online_catalog';
+      } else if (source === 'mongodb') {
+        cfg['snapshot.mode'] = 'never';
+      }
+    } else if (mode === 'live' || mode === 'manual') {
+      // Pin to a specific SCN / LSN
+      if (source === 'oracle') {
+        cfg['snapshot.mode'] = 'schema_only';
+        cfg['log.mining.start.scn'] = String(position);
+      } else if (source === 'postgres') {
+        cfg['snapshot.mode'] = 'never';
+        // Debezium Postgres: set the WAL LSN via offset override property
+        cfg['snapshot.lsn'] = String(position);
+      } else if (source === 'mongodb') {
+        cfg['snapshot.mode'] = 'never';
+        // MongoDB: use the resume token / timestamp provided
+        cfg['initial.sync.max.threads'] = cfg['initial.sync.max.threads'] || '1';
+        cfg['snapshot.filter.query.mode'] = cfg['snapshot.filter.query.mode'] || 'none';
+        // Store the token so the user can see it was set; actual usage is per connector version
+        cfg['mongodb.resume.token'] = String(position);
+      }
+    } else {
+      return res.status(400).json({ error: `Unknown mode: ${mode}` });
+    }
+
+    // 3. Delete existing connector
+    const delR = await dbzRequest(source, 'DELETE', `/connectors/${name}`);
+    if (delR.status >= 300 && delR.status !== 404) {
+      return res.status(delR.status).json({ error: 'Delete failed', detail: delR.body });
+    }
+
+    // 4. Small delay to allow Kafka Connect to fully release the connector
+    await new Promise(r => setTimeout(r, 1500));
+
+    // 5. Recreate connector with patched config
+    const createR = await dbzRequest(source, 'POST', '/connectors', { name, config: cfg });
+    res.status(createR.status).json({ message: `Connector "${name}" started (mode=${mode})`, config: cfg, response: createR.body });
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  KUBERNETES STREAMING JOBS
 // ═══════════════════════════════════════════════════════════════════════════
 

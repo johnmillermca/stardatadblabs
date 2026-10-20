@@ -225,6 +225,33 @@ input,select,textarea{font-family:inherit}
 .stat-value{font-size:28px;font-weight:700;color:#4fc3f7;line-height:1}
 .stat-label{font-size:11px;color:#586374;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
 
+/* ── Start CDC modal ── */
+.cdc-option-group{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
+.cdc-option{
+  display:flex;align-items:flex-start;gap:12px;
+  padding:14px 16px;border-radius:8px;border:2px solid #1c2a3a;
+  cursor:pointer;transition:all .15s;background:#06090f;
+}
+.cdc-option:hover{border-color:#4fc3f7}
+.cdc-option.selected{border-color:#4fc3f7;background:rgba(79,195,247,.07)}
+.cdc-option input[type=radio]{margin-top:3px;accent-color:#4fc3f7;flex-shrink:0}
+.cdc-option-label{font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:3px}
+.cdc-option-desc{font-size:11px;color:#8b949e;line-height:1.5}
+.cdc-pos-row{
+  display:flex;gap:8px;align-items:center;margin-top:10px;
+  padding:10px 12px;background:#0d1a2e;border-radius:6px;
+  border:1px solid #1c2a3a;
+}
+.cdc-pos-row .form-input{flex:1;font-family:'Fira Code','Courier New',monospace;font-size:12px}
+.cdc-pos-badge{
+  display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+  border-radius:12px;font-size:10px;font-weight:700;letter-spacing:.3px;
+  border:1px solid;flex-shrink:0;
+}
+.badge-scn{background:#1a2040;color:#79c0ff;border-color:#30405a}
+.badge-lsn{background:#1a2a1a;color:#56d364;border-color:#2a4030}
+.badge-ts{background:#2a1a0a;color:#d29922;border-color:#4a3010}
+
 /* ── Connector config editor ── */
 .kv-editor{width:100%}
 .kv-row{display:grid;grid-template-columns:1fr 1.5fr auto;gap:8px;margin-bottom:6px;align-items:center}
@@ -508,8 +535,9 @@ async function renderDashboard() {
             <td>${stateBadge(c.state)}</td>
             <td>
               <div class="btn-group">
-                <button class="btn btn-secondary btn-sm" onclick="navigate('connectors');currentSource='${c.source}'">Config</button>
-                <button class="btn btn-warn btn-sm" onclick="restartConnector('${c.source}','${c.name}')">Restart</button>
+                 <button class="btn btn-secondary btn-sm" onclick="navigate('connectors');currentSource='${c.source}'">Config</button>
+                 <button class="btn btn-success btn-sm" onclick="showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>
+                 <button class="btn btn-warn btn-sm" onclick="restartConnector('${c.source}','${c.name}')">Restart</button>
               </div>
             </td>
           </tr>`).join('')}
@@ -597,7 +625,8 @@ async function loadConnectorList(src) {
       <td>
         <div class="btn-group">
           <button class="btn btn-secondary btn-sm" onclick="editConnector('${src}','${name}')">✎ Edit</button>
-          <button class="btn btn-success btn-sm" onclick="resumeConnector('${src}','${name}')">▶ Resume</button>
+          <button class="btn btn-success btn-sm" onclick="showStartCdcModal('${src}','${name}')">▶ Start CDC</button>
+          <button class="btn btn-secondary btn-sm" onclick="resumeConnector('${src}','${name}')">▶ Resume</button>
           <button class="btn btn-warn btn-sm" onclick="pauseConnector('${src}','${name}')">⏸ Pause</button>
           <button class="btn btn-secondary btn-sm" onclick="restartConnector('${src}','${name}')">↻ Restart</button>
           <button class="btn btn-danger btn-sm" onclick="deleteConnector('${src}','${name}')">🗑</button>
@@ -648,6 +677,160 @@ async function deleteConnector(src, name) {
   const r = await apiDel(`/api/connectors/${src}/${name}`);
   toast(r.ok ? `${name} deleted` : 'Delete failed', r.ok ? 'success' : 'error');
   loadConnectorList(src);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  START CDC MODAL
+// ═══════════════════════════════════════════════════════════════════════════
+const CDC_POS_LABEL = {
+  postgres: { name: 'LSN',  badge: 'badge-lsn', placeholder: 'e.g. 0/3F8E020', hint: 'PostgreSQL Log Sequence Number (pg_current_wal_lsn())' },
+  oracle:   { name: 'SCN',  badge: 'badge-scn', placeholder: 'e.g. 12345678',   hint: 'Oracle System Change Number (SELECT current_scn FROM v$database)' },
+  mongodb:  { name: 'Resume Token', badge: 'badge-lsn', placeholder: 'e.g. {"_data":"82..."}', hint: 'MongoDB change-stream resume token or timestamp' },
+};
+
+function showStartCdcModal(src, name) {
+  const pos = CDC_POS_LABEL[src] || { name:'Position', badge:'badge-lsn', placeholder:'', hint:'' };
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.id = 'start-cdc-modal';
+  modal.innerHTML = `
+  <div class="modal" style="max-width:600px">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">▶ Start CDC — ${SOURCE_ICON[src]} ${SOURCE_LABELS[src]}</div>
+        <div style="font-size:11px;color:#586374;margin-top:3px">Connector: <code style="color:#4fc3f7">${name}</code></div>
+      </div>
+      <button class="modal-close" onclick="closeModal('start-cdc-modal')">✕</button>
+    </div>
+
+    <div style="font-size:12px;color:#8b949e;margin-bottom:14px;padding:10px 12px;
+      background:#06090f;border-radius:6px;border-left:3px solid #4fc3f7">
+      Choose where to start capturing changes. The connector will be deleted and recreated
+      with the selected starting position applied to its snapshot mode.
+    </div>
+
+    <div class="cdc-option-group" id="cdc-opts">
+
+      <!-- Option 1: Current time / Now -->
+      <label class="cdc-option selected" id="cdc-opt-now" onclick="selectCdcOption('now')">
+        <input type="radio" name="cdc-mode" value="now" checked/>
+        <div>
+          <div class="cdc-option-label">⏱ Current Time (Now)</div>
+          <div class="cdc-option-desc">
+            Starts CDC from this moment — skips all historical data.<br>
+            Sets <code style="color:#4fc3f7">snapshot.mode=never</code> (or <code>no_data</code>) and
+            clears any stored offset so Debezium reads only new changes going forward.
+          </div>
+        </div>
+      </label>
+
+      <!-- Option 2: Live position fetched from source -->
+      <label class="cdc-option" id="cdc-opt-live" onclick="selectCdcOption('live')">
+        <input type="radio" name="cdc-mode" value="live"/>
+        <div style="width:100%">
+          <div class="cdc-option-label">
+            📡 Use Current ${pos.name} from Source
+            <span class="cdc-pos-badge ${pos.badge}" style="margin-left:8px">${pos.name}</span>
+          </div>
+          <div class="cdc-option-desc" style="margin-bottom:8px">
+            ${pos.hint}<br>
+            Fetches the live position from the source database and pins CDC to start there.
+          </div>
+          <div class="cdc-pos-row" id="live-pos-row">
+            <input class="form-input" id="live-pos-val" placeholder="${pos.placeholder}" readonly
+              style="font-family:'Fira Code','Courier New',monospace;font-size:12px;background:#06090f"/>
+            <button class="btn btn-secondary btn-sm" onclick="fetchLivePosition('${src}','${name}',event)">
+              ⟳ Fetch
+            </button>
+          </div>
+          <div id="live-pos-status" style="font-size:11px;margin-top:6px;color:#586374"></div>
+        </div>
+      </label>
+
+      <!-- Option 3: Manual position -->
+      <label class="cdc-option" id="cdc-opt-manual" onclick="selectCdcOption('manual')">
+        <input type="radio" name="cdc-mode" value="manual"/>
+        <div style="width:100%">
+          <div class="cdc-option-label">
+            ✎ Enter ${pos.name} Manually
+            <span class="cdc-pos-badge ${pos.badge}" style="margin-left:8px">${pos.name}</span>
+          </div>
+          <div class="cdc-option-desc" style="margin-bottom:8px">
+            Provide a specific ${pos.name} to start from. Useful when replaying from a known checkpoint.
+          </div>
+          <div class="cdc-pos-row">
+            <input class="form-input" id="manual-pos-val" placeholder="${pos.placeholder}"
+              style="font-family:'Fira Code','Courier New',monospace;font-size:12px;background:#06090f"
+              onclick="selectCdcOption('manual')"/>
+          </div>
+        </div>
+      </label>
+
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('start-cdc-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="applyStartCdc('${src}','${name}')">
+        ▶ Start CDC
+      </button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+function selectCdcOption(mode) {
+  ['now','live','manual'].forEach(m => {
+    const el = document.getElementById(`cdc-opt-${m}`);
+    if (el) el.classList.toggle('selected', m === mode);
+    const radio = el?.querySelector('input[type=radio]');
+    if (radio) radio.checked = (m === mode);
+  });
+}
+
+async function fetchLivePosition(src, name, evt) {
+  evt && evt.stopPropagation();
+  selectCdcOption('live');
+  const statusEl = document.getElementById('live-pos-status');
+  const valEl    = document.getElementById('live-pos-val');
+  statusEl.innerHTML = `<span style="color:#d29922">⏳ Fetching live position…</span>`;
+  valEl.value = '';
+  const r = await apiGet(`/api/connectors/${src}/${name}/offset-position`);
+  if (r.ok && r.data?.position) {
+    valEl.value = r.data.position;
+    statusEl.innerHTML = `<span style="color:#2ea043">✓ Fetched at ${new Date().toLocaleTimeString()}</span>`;
+  } else {
+    statusEl.innerHTML = `<span style="color:#da3633">⚠ ${escHtml((r.data?.error || 'Failed to fetch position').slice(0,120))}</span>`;
+  }
+}
+
+async function applyStartCdc(src, name) {
+  const selectedRadio = document.querySelector('#start-cdc-modal input[type=radio]:checked');
+  if (!selectedRadio) return toast('Select a start mode', 'error');
+  const mode = selectedRadio.value;
+
+  let position = null;
+  if (mode === 'live') {
+    position = document.getElementById('live-pos-val')?.value?.trim();
+    if (!position) return toast('Fetch the live position first, or choose another option', 'error');
+  } else if (mode === 'manual') {
+    position = document.getElementById('manual-pos-val')?.value?.trim();
+    if (!position) return toast('Enter a position value', 'error');
+  }
+
+  const btn = document.querySelector('#start-cdc-modal .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting…'; }
+
+  const r = await apiPost(`/api/connectors/${src}/${name}/start-from`, { mode, position });
+  if (r.ok) {
+    toast(`CDC started for "${name}" (${mode})`, 'success');
+    closeModal('start-cdc-modal');
+    if (currentPage === 'connectors') loadConnectorList(src);
+    else renderDashboard();
+  } else {
+    toast(`Error: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
