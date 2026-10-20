@@ -13,7 +13,6 @@ spec:
     - "https://openbao.github.io/openbao-helm"
     - "https://argoproj.github.io/argo-helm"
     - "https://charts.bitnami.com/bitnami"
-    - "https://akhq.io"
     - "https://strimzi.io/charts/"
     - "https://confluentinc.github.io/cp-helm-charts/"
     - "https://opensearch-project.github.io/helm-charts/"

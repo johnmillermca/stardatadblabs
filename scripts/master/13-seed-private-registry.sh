@@ -89,9 +89,6 @@ push_image "quay.io/strimzi/operator:latest"                     "strimzi/operat
 # Confluent Schema Registry
 push_image "docker.io/confluentinc/cp-schema-registry:7.9.0"    "confluentinc/cp-schema-registry:7.9.0"
 
-# AKHQ Kafka UI
-push_image "docker.io/tchiotludo/akhq:0.27.0"                     "tchiotludo/akhq:0.27.0"
-
 log "=== Databases (master-pinned — keep as fallback) ==="
 
 # PostgreSQL (bitnami)

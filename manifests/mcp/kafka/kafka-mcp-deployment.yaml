@@ -5,7 +5,7 @@
 # Port      : 3104 (MCP SSE)
 # NodePort  : 30314
 # Image     : 192.168.1.50:30500/mcp-kafka:1.0.0
-# Secret    : akhq-credentials (reuses kafka-sasl-username/password keys)
+# Secret    : kafka-credentials (kafka-sasl-username/kafka-sasl-password keys)
 # =============================================================================
 ---
 apiVersion: apps/v1
@@ -51,12 +51,12 @@ spec:
             - name: KAFKA_USER
               valueFrom:
                 secretKeyRef:
-                  name: akhq-credentials
+                  name: kafka-credentials
                   key: kafka-sasl-username
             - name: KAFKA_PASS
               valueFrom:
                 secretKeyRef:
-                  name: akhq-credentials
+                  name: kafka-credentials
                   key: kafka-sasl-password
             - name: FASTMCP_HOST
               value: "0.0.0.0"

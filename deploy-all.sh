@@ -56,7 +56,6 @@ helm repo add argo            https://argoproj.github.io/argo-helm              
 helm repo add bitnami         https://charts.bitnami.com/bitnami                    2>/dev/null || true
 helm repo add openbao         https://openbao.github.io/openbao-helm                2>/dev/null || true
 helm repo add strimzi         https://strimzi.io/charts/                            2>/dev/null || true
-helm repo add akhq            https://akhq.io                                        2>/dev/null || true
 helm repo add confluent       https://confluentinc.github.io/cp-helm-charts/        2>/dev/null || true
 helm repo add opensearch      https://opensearch-project.github.io/helm-charts/     2>/dev/null || true
 helm repo add jupyterhub      https://hub.jupyter.org/helm-chart/                   2>/dev/null || true
@@ -110,8 +109,8 @@ done
 log_done "Prod infra layer"
 
 # ── Step 10: Sync streaming layer (Strimzi → Kafka → Schema-Registry → …) ────
-log "Step 10: Sync streaming (strimzi-operator → strimzi-kafka → schema-registry → akhq → debezium)"
-for APP in strimzi-operator strimzi-kafka schema-registry akhq debezium; do
+log "Step 10: Sync streaming (strimzi-operator → strimzi-kafka → schema-registry → debezium)"
+for APP in strimzi-operator strimzi-kafka schema-registry debezium; do
   if kubectl get application "${APP}" -n argocd &>/dev/null 2>&1; then
     argocd app sync "${APP}" --prune --timeout 300 2>/dev/null || \
       echo "  ⚠  ${APP} sync non-fatal"
@@ -220,7 +219,6 @@ echo "╠═══════════════════════�
 echo "║  PROD NAMESPACE — Streaming                                               ║"
 echo "║    Kafka bootstrap:        strimzi-kafka-kafka-bootstrap.prod:9092        ║"
 echo "║    Kafka external:         192.168.1.50:30093                             ║"
-echo "║    AKHQ UI:                http://192.168.1.50:30808                      ║"
 echo "║    Schema Registry:        http://schema-registry.prod:8081               ║"
 echo "║    Debezium:               http://192.168.1.50:30083                      ║"
 echo "╠═══════════════════════════════════════════════════════════════════════════╣"

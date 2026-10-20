@@ -31,7 +31,7 @@ if [[ -z "${KDC_POD}" ]]; then
 else
   for principal in \
       "svc/doris" "svc/spark" "svc/sqlmesh" "svc/kestra" \
-      "svc/kafka" "svc/schema-registry" "svc/debezium" "svc/akhq" "svc/opensearch" \
+      "svc/kafka" "svc/schema-registry" "svc/debezium" "svc/opensearch" \
       "platform_admin" \
       "caching_admin_user" "caching_dev_user" \
       "processing_admin_user" "processing_dev_user" \
@@ -51,7 +51,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 log "=== Checking Keytab Secrets ==="
 for secret in doris-keytab spark-keytab sqlmesh-keytab kestra-keytab \
-              kafka-keytab schema-registry-keytab debezium-keytab akhq-keytab \
+              kafka-keytab schema-registry-keytab debezium-keytab \
               opensearch-keytab polaris-keytab; do
   if kubectl get secret "${secret}" -n ${NAMESPACE} -o name \
       > /dev/null 2>&1; then

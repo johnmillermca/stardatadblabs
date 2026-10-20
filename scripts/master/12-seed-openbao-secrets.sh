@@ -12,7 +12,6 @@
 #   mongodb-credentials         → prod
 #   oracle-credentials          → prod
 #   kafka-credentials           → prod
-#   akhq-credentials            → prod
 #   debezium-credentials        → prod
 #   schema-registry-credentials → prod
 #   opensearch-credentials      → prod
@@ -132,7 +131,7 @@ else
   ok "oracle-credentials"
 fi
 
-# ─── 4. Kafka (bitnami) ───────────────────────────────────────────────────────
+# ─── 4. Kafka ─────────────────────────────────────────────────────────────────
 ensure_ns prod
 if bao_secret_exists "secret/data/kafka/credentials"; then
   skip "kafka-credentials"
@@ -140,30 +139,18 @@ else
   KAFKA_PASS=$(gen_password)
   bao_write "secret/data/kafka/credentials" \
     "kafka-password=${KAFKA_PASS}" \
-    "kafka-user=kafka-user"
+    "kafka-user=kafka-user" \
+    "kafka-sasl-username=kafka-app-user" \
+    "kafka-sasl-password=${KAFKA_PASS}"
   kube_secret kafka-credentials prod \
     "kafka-password=${KAFKA_PASS}" \
-    "kafka-user=kafka-user"
+    "kafka-user=kafka-user" \
+    "kafka-sasl-username=kafka-app-user" \
+    "kafka-sasl-password=${KAFKA_PASS}"
   ok "kafka-credentials"
 fi
 
-# ─── 5. AKHQ ─────────────────────────────────────────────────────────────────
-if bao_secret_exists "secret/data/akhq/credentials"; then
-  skip "akhq-credentials"
-else
-  AKHQ_PASS=$(gen_password)
-  bao_write "secret/data/akhq/credentials" \
-    "kafka-sasl-username=kafka-app-user" \
-    "kafka-sasl-password=${AKHQ_PASS}" \
-    "admin-password=${AKHQ_PASS}"
-  kube_secret akhq-credentials prod \
-    "kafka-sasl-username=kafka-app-user" \
-    "kafka-sasl-password=${AKHQ_PASS}" \
-    "admin-password=${AKHQ_PASS}"
-  ok "akhq-credentials"
-fi
-
-# ─── 6. Debezium ──────────────────────────────────────────────────────────────
+# ─── 5. Debezium ──────────────────────────────────────────────────────────────
 if bao_secret_exists "secret/data/debezium/credentials"; then
   skip "debezium-credentials"
 else
@@ -396,7 +383,6 @@ printf "  %-38s %-15s  %s\n" "postgresql-credentials"       "prod"            "s
 printf "  %-38s %-15s  %s\n" "mongodb-credentials"          "prod"            "secret/data/mongodb/credentials"
 printf "  %-38s %-15s  %s\n" "oracle-credentials"           "prod"            "secret/data/oracle/credentials"
 printf "  %-38s %-15s  %s\n" "kafka-credentials"            "prod"            "secret/data/kafka/credentials"
-printf "  %-38s %-15s  %s\n" "akhq-credentials"             "prod"            "secret/data/akhq/credentials"
 printf "  %-38s %-15s  %s\n" "debezium-credentials"         "prod"            "secret/data/debezium/credentials"
 printf "  %-38s %-15s  %s\n" "schema-registry-credentials"  "prod"            "secret/data/schema-registry/credentials"
 printf "  %-38s %-15s  %s\n" "opensearch-credentials"       "prod"            "secret/data/opensearch/credentials"

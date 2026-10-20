@@ -18,7 +18,7 @@
 #
 # Service principals:
 #   svc/doris, svc/spark, svc/sqlmesh, svc/kestra,
-#   svc/kafka, svc/schema-registry, svc/debezium, svc/akhq
+#   svc/kafka, svc/schema-registry, svc/debezium
 # =============================================================================
 set -euo pipefail
 
@@ -90,7 +90,7 @@ get_pass() {
 
 # ── 1. Service principals (randkey — auth via keytab only) ────────────────────
 log "=== Creating service principals ==="
-for svc in doris spark sqlmesh kestra kafka schema-registry debezium akhq opensearch polaris; do
+for svc in doris spark sqlmesh kestra kafka schema-registry debezium opensearch polaris; do
   addprinc_if_missing "svc/${svc}" "-randkey"
 done
 
@@ -130,7 +130,6 @@ export_keytab "svc/kestra"          "kestra-keytab"          "${NAMESPACE}"
 export_keytab "svc/kafka"           "kafka-keytab"           "${NAMESPACE}"
 export_keytab "svc/schema-registry" "schema-registry-keytab" "${NAMESPACE}"
 export_keytab "svc/debezium"        "debezium-keytab"        "${NAMESPACE}"
-export_keytab "svc/akhq"            "akhq-keytab"            "${NAMESPACE}"
 export_keytab "svc/opensearch"      "opensearch-keytab"      "${NAMESPACE}"
 export_keytab "svc/polaris"         "polaris-keytab"         "${NAMESPACE}"
 
