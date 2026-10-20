@@ -290,36 +290,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── AKHQ (Kafka UI) ───────────────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: akhq
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "5"
-spec:
-  project: platform
-  sources:
-    - repoURL: https://akhq.io
-      chart: akhq
-      targetRevision: "0.27.0"
-      helm:
-        releaseName: akhq
-        valueFiles:
-          - $values/helm/akhq/values.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── Debezium CDC ──────────────────────────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -679,4 +649,28 @@ spec:
     namespace: prod
   syncPolicy:
     automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+---
+# ── Storage (local-path StorageClass + provisioner ConfigMap) ─────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: storage
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "-15"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/storage
+    directory:
+      include: "storageclass.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  syncPolicy:
+    automated: {prune: false, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
