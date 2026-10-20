@@ -309,6 +309,7 @@ input,select,textarea{font-family:inherit}
 .toast-success{border-left:3px solid #2ea043}
 .toast-error{border-left:3px solid #da3633}
 .toast-info{border-left:3px solid #4fc3f7}
+.toast-warn{border-left:3px solid #d29922;color:#d29922}
 @keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
 
 /* ── Code highlight ── */
@@ -571,7 +572,7 @@ async function renderDashboard() {
                 </button>
                 <div class="act-menu">
                   <button class="act-item" onclick="closeActMenus();navigate('connectors');currentSource='${c.source}'">⚙ Config</button>
-                  <button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>
+                  <button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}','${c.state}')">▶ Start CDC</button>
                   ${isRunning
                     ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${c.source}','${c.name}')">⏹ Stop</button>`
                     : ''
@@ -675,7 +676,7 @@ async function loadConnectorList(src) {
           </button>
           <div class="act-menu">
             <button class="act-item" onclick="closeActMenus();editConnector('${src}','${name}')">✎ Edit Config</button>
-            <button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start CDC</button>
+            <button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}','${state}')">▶ Start CDC</button>
             ${running
               ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${src}','${name}')">⏹ Stop</button>`
               : ''
@@ -741,7 +742,11 @@ const CDC_POS_LABEL = {
   mongodb:  { name: 'Resume Token', badge: 'badge-lsn', placeholder: 'e.g. {"_data":"82..."}', hint: 'MongoDB change-stream resume token or timestamp' },
 };
 
-function showStartCdcModal(src, name) {
+function showStartCdcModal(src, name, state) {
+  if ((state || '').toUpperCase() === 'RUNNING') {
+    toast(`CDC already running for "${name}"`, 'warn');
+    return;
+  }
   const pos = CDC_POS_LABEL[src] || { name:'Position', badge:'badge-lsn', placeholder:'', hint:'' };
 
   const modal = document.createElement('div');
