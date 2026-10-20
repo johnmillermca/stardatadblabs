@@ -545,6 +545,7 @@ async function renderDashboard() {
                    ? `<button class="btn btn-danger btn-sm" onclick="pauseConnector('${c.source}','${c.name}')">⏹ Stop</button>`
                    : `<button class="btn btn-success btn-sm" onclick="showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>`
                  }
+                 <button class="btn btn-danger btn-sm" onclick="deleteConnector('${c.source}','${c.name}')">🗑 Delete</button>
               </div>
             </td>
           </tr>`;
