@@ -598,6 +598,8 @@ spec:
             memory: 2Gi
       restartPolicy: Always
       serviceAccountName: spark-cleanup
+      nodeSelector:
+        kubernetes.io/hostname: worker6.local
       terminationGracePeriodSeconds: 90
 ---
 apiVersion: apps/v1
@@ -758,6 +760,8 @@ spec:
             memory: 2Gi
       restartPolicy: Always
       serviceAccountName: spark-cleanup
+      nodeSelector:
+        kubernetes.io/hostname: worker6.local
       terminationGracePeriodSeconds: 90
 ---
 apiVersion: apps/v1
@@ -918,6 +922,8 @@ spec:
             memory: 2Gi
       restartPolicy: Always
       serviceAccountName: spark-cleanup
+      nodeSelector:
+        kubernetes.io/hostname: worker6.local
       terminationGracePeriodSeconds: 90
 ---
 apiVersion: apps/v1
