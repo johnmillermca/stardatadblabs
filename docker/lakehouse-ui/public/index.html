@@ -145,6 +145,33 @@ input,select,textarea{font-family:inherit}
 .btn-sm{padding:4px 10px;font-size:11px}
 .btn-group{display:flex;gap:6px;flex-wrap:wrap}
 
+/* ── Actions dropdown ── */
+.act-wrap{position:relative;display:inline-block}
+.act-trigger{
+  display:flex;align-items:center;gap:5px;
+  padding:4px 10px;font-size:11px;font-weight:500;
+  background:#0d1f30;border:1px solid #1c2a3a;border-radius:6px;
+  color:#e6edf3;cursor:pointer;white-space:nowrap;
+}
+.act-trigger:hover{border-color:#4fc3f7;color:#4fc3f7}
+.act-trigger .caret{font-size:9px;margin-left:2px}
+.act-menu{
+  display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:999;
+  background:#0d1f30;border:1px solid #1c2a3a;border-radius:8px;
+  min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden;
+}
+.act-wrap.open .act-menu{display:block}
+.act-item{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 14px;font-size:12px;color:#e6edf3;
+  cursor:pointer;white-space:nowrap;background:none;border:none;
+  width:100%;text-align:left;
+}
+.act-item:hover{background:#1c2a3a}
+.act-item.danger{color:#f85149}
+.act-item.danger:hover{background:#2d1a1a}
+.act-sep{border:none;border-top:1px solid #1c2a3a;margin:4px 0}
+
 /* ── Form ── */
 .form-row{display:grid;grid-template-columns:1fr 2fr;gap:12px;margin-bottom:12px;align-items:start}
 .form-label{font-size:12px;color:#8b949e;padding-top:8px;font-weight:500}
@@ -532,20 +559,26 @@ async function renderDashboard() {
       <tbody>
         ${connSummary.map(c => {
           const isRunning = c.state === 'RUNNING';
-          const isStopped = c.state === 'PAUSED' || c.state === 'STOPPED' || c.state === 'FAILED' || c.state === 'UNKNOWN';
           return `
           <tr>
             <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
             <td><code style="color:#4fc3f7;font-size:12px">${c.name}</code></td>
             <td>${stateBadge(c.state)}</td>
             <td>
-              <div class="btn-group">
-                 <button class="btn btn-secondary btn-sm" onclick="navigate('connectors');currentSource='${c.source}'">Config</button>
-                 ${isRunning
-                   ? `<button class="btn btn-danger btn-sm" onclick="pauseConnector('${c.source}','${c.name}')">⏹ Stop</button>`
-                   : `<button class="btn btn-success btn-sm" onclick="showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>`
-                 }
-                 <button class="btn btn-danger btn-sm" onclick="deleteConnector('${c.source}','${c.name}')">🗑 Delete</button>
+              <div class="act-wrap" id="act-dash-${c.source}-${c.name}">
+                <button class="act-trigger" onclick="toggleActMenu('act-dash-${c.source}-${c.name}')">
+                  Actions <span class="caret">▾</span>
+                </button>
+                <div class="act-menu">
+                  <button class="act-item" onclick="closeActMenus();navigate('connectors');currentSource='${c.source}'">⚙ Config</button>
+                  <button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>
+                  ${isRunning
+                    ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${c.source}','${c.name}')">⏹ Stop</button>`
+                    : ''
+                  }
+                  <hr class="act-sep"/>
+                  <button class="act-item danger" onclick="closeActMenus();deleteConnector('${c.source}','${c.name}')">🗑 Delete</button>
+                </div>
               </div>
             </td>
           </tr>`;
@@ -636,13 +669,20 @@ async function loadConnectorList(src) {
       <td>${stateBadge(state)}</td>
       <td>${stateBadge(taskState)} <span style="color:#586374;font-size:11px">(${tasks} task)</span></td>
       <td>
-        <div class="btn-group">
-          <button class="btn btn-secondary btn-sm" onclick="editConnector('${src}','${name}')">✎ Edit</button>
-          ${running
-            ? `<button class="btn btn-danger btn-sm" onclick="pauseConnector('${src}','${name}')">⏹ Stop</button>`
-            : `<button class="btn btn-success btn-sm" onclick="showStartCdcModal('${src}','${name}')">▶ Start CDC</button>`
-          }
-          <button class="btn btn-danger btn-sm" onclick="deleteConnector('${src}','${name}')">🗑 Delete</button>
+        <div class="act-wrap" id="act-conn-${src}-${name}">
+          <button class="act-trigger" onclick="toggleActMenu('act-conn-${src}-${name}')">
+            Actions <span class="caret">▾</span>
+          </button>
+          <div class="act-menu">
+            <button class="act-item" onclick="closeActMenus();editConnector('${src}','${name}')">✎ Edit Config</button>
+            <button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start CDC</button>
+            ${running
+              ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${src}','${name}')">⏹ Stop</button>`
+              : ''
+            }
+            <hr class="act-sep"/>
+            <button class="act-item danger" onclick="closeActMenus();deleteConnector('${src}','${name}')">🗑 Delete</button>
+          </div>
         </div>
       </td>
     </tr>`;
@@ -1741,6 +1781,22 @@ function stateBadge(state) {
   if (s==='STARTING') return `<span class="s-badge s-paused"><span class="status-dot dot-yellow"></span>${s}</span>`;
   return `<span class="s-badge s-stopped">${s||'–'}</span>`;
 }
+
+// ── Actions dropdown helpers ─────────────────────────────────────────────────
+function toggleActMenu(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const isOpen = el.classList.contains('open');
+  closeActMenus();
+  if (!isOpen) el.classList.add('open');
+}
+function closeActMenus() {
+  document.querySelectorAll('.act-wrap.open').forEach(el => el.classList.remove('open'));
+}
+// Close on any outside click
+document.addEventListener('click', e => {
+  if (!e.target.closest('.act-wrap')) closeActMenus();
+});
 
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
