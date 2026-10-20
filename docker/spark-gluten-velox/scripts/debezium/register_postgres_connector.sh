@@ -196,7 +196,7 @@ curl -sf -X POST "$DEBEZIUM_URL/connectors" \
     "topic.prefix":         "postgres.cache_testing",
     "topic.naming.strategy": "io.debezium.schema.DefaultTopicNamingStrategy",
 
-    "snapshot.mode":        "never",
+    "snapshot.mode":        "no_data",
 
     "schema.history.internal.kafka.bootstrap.servers": "${KAFKA_BOOTSTRAP}",
     "schema.history.internal.kafka.topic":             "schema-changes.postgres",
