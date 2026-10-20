@@ -39,6 +39,10 @@ spec:
             - key: node-role.kubernetes.io/control-plane
               operator: Exists
               effect: NoSchedule
+            - key: workload
+              operator: Equal
+              value: master
+              effect: NoSchedule
           containers:
             - name: unseal
               image: 192.168.1.50:30500/busybox:1.36

@@ -39,6 +39,11 @@ hub:
   # Pin hub to spark-opensearch pool — worker2/3/4.
   nodeSelector:
     workload: spark-opensearch
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "spark-opensearch"
+      effect: "NoSchedule"
 
 proxy:
   service:
