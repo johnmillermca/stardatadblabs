@@ -1282,12 +1282,24 @@ def _start_source_stream(
 # ── Spark session factory ─────────────────────────────────────────────────────
 
 def _build_spark(bao: BaoSparkInit) -> SparkSession:
+    # bao.spark_conf() already sets spark.executor.memory and spark.executor.cores
+    # from SPARK_EXECUTOR_MEMORY / SPARK_EXECUTOR_CORES env vars (defaults: 400m / 1).
+    # We pass EXECUTOR_MEMORY and EXECUTOR_CORES as those env vars so the ConfigMap
+    # values flow through the single authoritative setter in bao_spark_init.
+    import os as _os
+    _os.environ.setdefault("SPARK_EXECUTOR_MEMORY", EXECUTOR_MEMORY)
+    _os.environ.setdefault("SPARK_EXECUTOR_CORES",  str(EXECUTOR_CORES))
+
     conf = bao.spark_conf(app_name=f"kafka-to-iceberg-{WRITE_MODE}")
 
+    # spark.cores.max: total cores the app may claim across ALL workers.
+    # With MAX_EXECUTORS=1 and EXECUTOR_CORES=1 this is 1, which prevents any
+    # single streaming job from monopolising the cluster.
     conf.set("spark.cores.max",          str(MAX_EXECUTORS * EXECUTOR_CORES))
     conf.set("spark.executor.instances", str(EXECUTOR_INSTANCES))
-    conf.set("spark.executor.cores",     str(EXECUTOR_CORES))
 
+    # Dynamic allocation — release idle executors quickly (30s) so starpump and
+    # other jobs can claim the slot without waiting.
     conf.set("spark.dynamicAllocation.enabled",                          "true")
     conf.set("spark.dynamicAllocation.minExecutors",                     "0")
     conf.set("spark.dynamicAllocation.maxExecutors",                     str(MAX_EXECUTORS))
@@ -1296,8 +1308,10 @@ def _build_spark(bao: BaoSparkInit) -> SparkSession:
     conf.set("spark.dynamicAllocation.sustainedSchedulerBacklogTimeout", f"{BURST_BACKLOG_TIMEOUT_S}s")
     conf.set("spark.dynamicAllocation.shuffleTracking.enabled",          "true")
 
-    conf.set("spark.executor.memory",    EXECUTOR_MEMORY)
-    conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
+    # Off-heap: only set when non-zero (EXECUTOR_OFFHEAP="0" means Gluten is off).
+    if EXECUTOR_OFFHEAP and EXECUTOR_OFFHEAP != "0":
+        conf.set("spark.memory.offHeap.size", EXECUTOR_OFFHEAP)
+
     conf.set("spark.sql.adaptive.enabled",                               "true")
     conf.set("spark.sql.adaptive.coalescePartitions.enabled",            "true")
     conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize",   "33554432")

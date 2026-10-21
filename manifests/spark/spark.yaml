@@ -1,6 +1,6 @@
 # =============================================================================
 # Apache Spark 3.5.1 — 1 master + 3 standard workers + 1 large worker
-# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
 # Access   : http://192.168.1.5x:30707  (Master UI — no auth gate)
 #            spark://192.168.1.5x:30777 (RPC — via krb-spark-guard)
 #
@@ -150,6 +150,44 @@ spec:
                     values:
                       - spark-opensearch
       containers:
+        # ── spark-guardian sidecar ───────────────────────────────────────────
+        # Continuously polls localhost:8080/json/ every 15 s and evicts apps
+        # that match any of four staleness rules:
+        #   A) dead driver    — UI unreachable after ORPHAN_RUNNING_S (120 s)
+        #   B) executor loss  — RUNNING with 0 cores after ORPHAN_RUNNING_S
+        #   C) starvation     — WAITING for >ORPHAN_WAITING_S (120 s)
+        #   D) idle session   — no Spark job submitted for >IDLE_SINCE_S (1800 s)
+        # Replaces the spark-app-cleanup CronJob (10-min lag → 15-s reaction).
+        - name: spark-guardian
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+          command: ["python3", "/opt/spark/work-dir/spark-guardian.py"]
+          env:
+            - name: SPARK_MASTER_UI
+              value: "http://localhost:8080"
+            - name: POLL_INTERVAL_S
+              value: "15"
+            # Rule A/B: kill RUNNING apps with dead/no executors after 120 s
+            - name: ORPHAN_RUNNING_S
+              value: "120"
+            # Rule C: kill WAITING apps after 120 s — with correct executor
+            # sizing every healthy app gets a slot within seconds; anything
+            # still waiting at 120 s has a misconfigured memory request.
+            - name: ORPHAN_WAITING_S
+              value: "120"
+            # Rule D: kill idle sessions after 30 min of zero Spark job activity.
+            # Real pipelines submit jobs continuously; JupyterHub idle kernels do not.
+            - name: IDLE_SINCE_S
+              value: "1800"
+            - name: DRY_RUN
+              value: "0"
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 10m
+            limits:
+              memory: 128Mi
+              cpu: 100m
+
         # ── krb-spark-guard sidecar ──────────────────────────────────────────
         # Port 7077: RPC proxy — validates X-Krb-Token before forwarding to :17077
         # Port 7078: HTTP auth API — POST /auth {username,keytab_b64} → token
@@ -199,7 +237,7 @@ spec:
         # Listens on 17077 — NOT exposed by the Service directly.
         # Only the krb-spark-guard sidecar (127.0.0.1:7077) forwards to it.
         - name: spark-master
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
           command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
           env:
             - name: SPARK_MASTER_HOST
@@ -301,7 +339,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
           command:
             - /opt/spark/bin/spark-class
             - org.apache.spark.deploy.worker.Worker
@@ -391,7 +429,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
           imagePullPolicy: Always
           command:
             - /opt/spark/bin/spark-class

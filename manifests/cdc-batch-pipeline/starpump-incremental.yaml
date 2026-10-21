@@ -28,12 +28,21 @@ metadata:
 data:
   # Common settings (overridden per-source by env vars in the CronJob spec)
   BATCH_SIZE:          "100000"
-  MAX_THREADS:         "8"
+  MAX_THREADS:         "4"      # 4 threads on a 1-executor cluster: each thread runs driver-side
+                                # JDBC reads then hands off to the single executor for writes.
+                                # 8 threads caused contention on the shared SparkSession lock.
   MODE:                "incremental"
   DDL_DRIFT_DETECT:    "1"
   DRY_RUN:             "0"
   MAX_TABLE_SIZE_GB:   "0"      # no size filter for incremental — only new rows are fetched
   ADDR:                "http://openbao.prod.svc.cluster.local:8200"
+
+  # ── Executor sizing — matched to 800m SPARK_WORKER_MEMORY ─────────────────
+  # heap 400m + overhead max(384m, 60m) = 784m total < 800m worker capacity.
+  # bao_spark_init.spark_conf() reads these env vars directly.
+  SPARK_EXECUTOR_MEMORY: "400m"
+  SPARK_EXECUTOR_CORES:  "1"
+  DISABLE_GLUTEN:        "1"    # Gluten/Velox requires ≥4 Gi worker; disabled on 800m cluster.
 
   # PostgreSQL incremental config
   pg-SCHEMAS:          "public"
@@ -74,7 +83,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
-      activeDeadlineSeconds: 600  # kill if running > 10 min
+      activeDeadlineSeconds: 1800 # 30 min: incremental load of 4 tables with watermark queries
       template:
         metadata:
           labels:
@@ -85,7 +94,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-30
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
               imagePullPolicy: Always
               command:
                 - /bin/bash
@@ -107,9 +116,24 @@ spec:
                 - name: BATCH_SIZE
                   value: "100000"
                 - name: MAX_THREADS
-                  value: "8"
+                  value: "4"
                 - name: MAX_TABLE_SIZE_GB
                   value: "0"
+                - name: SPARK_EXECUTOR_MEMORY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: SPARK_EXECUTOR_MEMORY
+                - name: SPARK_EXECUTOR_CORES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: SPARK_EXECUTOR_CORES
+                - name: DISABLE_GLUTEN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: DISABLE_GLUTEN
                 - name: INCLUDE_TABLES
                   valueFrom:
                     configMapKeyRef:
@@ -137,11 +161,11 @@ spec:
                       key: ADDR
               resources:
                 requests:
-                  memory: "2Gi"
-                  cpu: "500m"
+                  memory: "512Mi"
+                  cpu: "250m"
                 limits:
-                  memory: "4Gi"
-                  cpu: "2"
+                  memory: "1Gi"
+                  cpu: "1"
 
 ---
 # ── CronJob: Oracle incremental load ─────────────────────────────────────────
@@ -164,7 +188,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
-      activeDeadlineSeconds: 600
+      activeDeadlineSeconds: 1800 # 30 min
       template:
         metadata:
           labels:
@@ -175,7 +199,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-30
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
               imagePullPolicy: Always
               command:
                 - /bin/bash
@@ -197,9 +221,24 @@ spec:
                 - name: BATCH_SIZE
                   value: "100000"
                 - name: MAX_THREADS
-                  value: "8"
+                  value: "4"
                 - name: MAX_TABLE_SIZE_GB
                   value: "0"
+                - name: SPARK_EXECUTOR_MEMORY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: SPARK_EXECUTOR_MEMORY
+                - name: SPARK_EXECUTOR_CORES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: SPARK_EXECUTOR_CORES
+                - name: DISABLE_GLUTEN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: DISABLE_GLUTEN
                 - name: INCLUDE_TABLES
                   valueFrom:
                     configMapKeyRef:
@@ -227,11 +266,11 @@ spec:
                       key: ADDR
               resources:
                 requests:
-                  memory: "2Gi"
-                  cpu: "500m"
+                  memory: "512Mi"
+                  cpu: "250m"
                 limits:
-                  memory: "4Gi"
-                  cpu: "2"
+                  memory: "1Gi"
+                  cpu: "1"
 
 ---
 # ── CronJob: MongoDB incremental load ────────────────────────────────────────
@@ -254,7 +293,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
-      activeDeadlineSeconds: 600
+      activeDeadlineSeconds: 1800 # 30 min
       template:
         metadata:
           labels:
@@ -265,7 +304,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-30
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
               imagePullPolicy: Always
               command:
                 - /bin/bash
@@ -290,6 +329,21 @@ spec:
                   value: "4"
                 - name: MAX_TABLE_SIZE_GB
                   value: "0"
+                - name: SPARK_EXECUTOR_MEMORY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: SPARK_EXECUTOR_MEMORY
+                - name: SPARK_EXECUTOR_CORES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: SPARK_EXECUTOR_CORES
+                - name: DISABLE_GLUTEN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: starpump-incremental-config
+                      key: DISABLE_GLUTEN
                 - name: INCLUDE_TABLES
                   valueFrom:
                     configMapKeyRef:
@@ -317,8 +371,8 @@ spec:
                       key: ADDR
               resources:
                 requests:
-                  memory: "2Gi"
-                  cpu: "500m"
+                  memory: "512Mi"
+                  cpu: "250m"
                 limits:
-                  memory: "4Gi"
-                  cpu: "2"
+                  memory: "1Gi"
+                  cpu: "1"

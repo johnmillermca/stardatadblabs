@@ -495,21 +495,19 @@ class BaoSparkInit:
         conf.set("spark.driver.extraJavaOptions",   _opens)
         conf.set("spark.executor.extraJavaOptions", _opens)
 
-        # ── Gluten + Velox (DEFAULT: always enabled) ──────────────────────────
-        # Gluten/Velox columnar native execution is ON by default for every
-        # Spark job on this cluster.  Set DISABLE_GLUTEN=1 to turn it off for
-        # a specific run (e.g. debugging, compatibility testing).
+        # ── Gluten + Velox (DEFAULT: disabled — set DISABLE_GLUTEN=0 to enable) ──
+        # Workers are 800m (1 Gi pod limit). Gluten/Velox needs ~1500m off-heap
+        # on top of the executor heap, which exceeds worker capacity. Keep disabled
+        # unless running on larger worker pods (≥4 Gi).
         #
-        # When enabled (default):
-        #   - spark.plugins loads GlutenPlugin (Velox backend)
-        #   - off-heap memory: 1500m per executor (reduced from 2g so the total
-        #     per-executor footprint fits within the 6 Gi regular worker pod:
-        #     heap 3g + off-heap 1500m + overhead 450m ≈ 4.95 GB < 6 Gi)
-        # When disabled (DISABLE_GLUTEN=1):
+        # When disabled (default DISABLE_GLUTEN=1):
         #   - spark.plugins is cleared — no ClassNotFoundException at startup
-        #   - off-heap is not reserved (frees ~1.5 GB per executor for heap use)
-        _gluten_disabled = os.environ.get("DISABLE_GLUTEN", "0") == "1"
-        # OFFHEAP_SIZE: override the default 1500m if the job needs more/less.
+        #   - off-heap is not reserved (correct for 800m workers)
+        # When enabled (DISABLE_GLUTEN=0, large-worker cluster only):
+        #   - spark.plugins loads GlutenPlugin (Velox backend)
+        #   - off-heap: OFFHEAP_SIZE env var (default 1500m — requires ≥4 Gi worker)
+        _gluten_disabled = os.environ.get("DISABLE_GLUTEN", "1") == "1"
+        # OFFHEAP_SIZE: only used when Gluten is enabled.
         _offheap_size = os.environ.get("OFFHEAP_SIZE", "1500m")
         if not _gluten_disabled:
             logger.info(
@@ -521,9 +519,28 @@ class BaoSparkInit:
             conf.set("spark.memory.offHeap.enabled",          "true")
             conf.set("spark.memory.offHeap.size",             _offheap_size)
         else:
-            logger.info("Gluten/Velox DISABLED (DISABLE_GLUTEN=1).")
+            logger.info("Gluten/Velox DISABLED (DISABLE_GLUTEN=1 — default for 800m workers).")
             conf.set("spark.plugins",                "")
             conf.set("spark.memory.offHeap.enabled", "false")
+
+        # ── Executor sizing — env-overridable, capped to fit 800m workers ────────
+        # SPARK_EXECUTOR_MEMORY: heap per executor.
+        #   Default 400m: heap 400m + overhead max(384m, 400m×0.15) = 784m total,
+        #   fits in the 800m SPARK_WORKER_MEMORY with 16m to spare.
+        #   Override per-job via env var (e.g. SPARK_EXECUTOR_MEMORY=600m for
+        #   starpump on a larger worker).  Values above 400m will fail to schedule
+        #   on the standard 800m workers.
+        # SPARK_EXECUTOR_CORES: cores per executor.
+        #   Default 1: one task slot per executor. The worker has 3 cores but memory
+        #   limits it to 1 executor per worker, so more than 1 core wastes nothing.
+        _executor_memory = os.environ.get("SPARK_EXECUTOR_MEMORY", "400m")
+        _executor_cores  = os.environ.get("SPARK_EXECUTOR_CORES",  "1")
+        conf.set("spark.executor.memory", _executor_memory)
+        conf.set("spark.executor.cores",  _executor_cores)
+        logger.info(
+            "Executor sizing: memory=%s cores=%s (override via SPARK_EXECUTOR_MEMORY / SPARK_EXECUTOR_CORES).",
+            _executor_memory, _executor_cores,
+        )
 
         # ── Memory / AQE settings (OOM prevention) ────────────────────────────
         # These mirror spark-defaults.conf but are set here so per-session

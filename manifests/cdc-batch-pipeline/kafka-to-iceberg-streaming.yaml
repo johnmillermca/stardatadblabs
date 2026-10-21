@@ -66,20 +66,22 @@ data:
   COALESCE_BEFORE_MERGE:        "1"
   # ADAPTIVE_COALESCE_TARGET: AQE target bytes per post-shuffle partition (64 MB)
   ADAPTIVE_COALESCE_TARGET:     "67108864"
-  # EXECUTOR_INSTANCES / EXECUTOR_CORES / EXECUTOR_MEMORY / EXECUTOR_OFFHEAP:
-  # Keep at 1x1 core for normal CDC streaming — micro-batches are tiny (1-1000 rows).
+  # ── Executor sizing — matched to 800m SPARK_WORKER_MEMORY (1 Gi worker pods) ──
+  # Budget: heap 400m + JVM overhead max(384m, 400m×0.15=60m) = 784m < 800m.
+  # Each 800m worker can hold exactly 1 executor.
+  # EXECUTOR_INSTANCES: 1 — one resident executor for fast micro-batch startup.
+  # EXECUTOR_CORES:     1 — CDC batches are tiny; 1 core is sufficient.
+  # EXECUTOR_MEMORY:    400m — heap that fits in 800m worker (784m total with overhead).
+  # EXECUTOR_OFFHEAP:   0 — Gluten/Velox disabled on 800m workers; no off-heap needed.
+  # MAX_EXECUTORS:      1 — cap dynamic allocation at 1; streaming CDC never needs burst.
+  #   (raising this beyond 1 would queue multiple executors against 800m workers that
+  #    can only hold 1 each, starving other jobs permanently — the previous root cause)
   EXECUTOR_INSTANCES:           "1"
   EXECUTOR_CORES:               "1"
-  EXECUTOR_MEMORY:              "2g"
-  # 512m is sufficient for CDC micro-batches — Velox 1500m is only needed for large
-  # vectorised scans. Keeping at 512m prevents executor OOM on 4GB worker containers
-  # (2g heap + 512m off-heap + ~308m JVM overhead = ~2.8GB per executor, fits in 4GB).
-  EXECUTOR_OFFHEAP:             "512m"
-  # MAX_EXECUTORS: cap at 1 for CDC streaming — micro-batches are 1-1000 rows and
-  # never need burst executors. Burst to 3 was causing OOM on worker containers.
+  EXECUTOR_MEMORY:              "400m"
+  EXECUTOR_OFFHEAP:             "0"
   MAX_EXECUTORS:                "1"
-  # BURST_BACKLOG_TIMEOUT_S: seconds of sustained task backlog before adding a
-  # 2nd (then 3rd) executor. Default 60 — waits 1 minute before bursting.
+  # BURST_BACKLOG_TIMEOUT_S: irrelevant with MAX_EXECUTORS=1 but kept for completeness.
   BURST_BACKLOG_TIMEOUT_S:      "60"
   # TARGET_NAMESPACE: when set, overrides the Iceberg namespace derived from the Kafka topic
   # for ALL sources (postgres + oracle + mongodb) so every table lands in one namespace.
@@ -254,7 +256,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -414,7 +416,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -574,7 +576,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -736,7 +738,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -898,7 +900,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1060,7 +1062,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1220,7 +1222,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1380,7 +1382,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1540,7 +1542,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-29
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3

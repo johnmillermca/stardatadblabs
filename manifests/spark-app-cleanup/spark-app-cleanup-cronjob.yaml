@@ -1,45 +1,32 @@
 ---
 # =============================================================================
-# Spark Orphan App Cleanup — CronJob
+# Spark Orphan App Cleanup — RBAC + manual tool
 # =============================================================================
 #
-# ROOT CAUSE
-# ----------
-# Spark standalone has no server-side idle timeout. When a JupyterHub user
-# creates a SparkSession and closes the browser tab without calling
-# spark.stop(), the kernel process and its executors stay alive indefinitely,
-# holding ALL cluster cores. Every subsequent spark-submit sits at cores=0
-# waiting forever.
+# The periodic CronJob has been REPLACED by the spark-guardian sidecar
+# running continuously inside the spark-master pod (see manifests/spark/spark.yaml).
 #
-# THIS FILE implements the permanent solution:
+# spark-guardian polls localhost:8080/json/ every 15 seconds and evicts stalled
+# apps within one poll cycle — replacing the previous 10-minute CronJob lag.
 #
-#   1. CronJob — runs spark-app-cleanup.sh every 10 minutes.
-#      Kills any app that matches:
-#        a) RUNNING + cores>0 + age > IDLE_RUNNING_SECONDS (2 h) + no active stages
-#        b) RUNNING + cores=0 + age > 120 s (executor loss / OOM)
-#        c) WAITING + age > 600 s (resource starvation)
-#        d) RUNNING + driver UI unreachable (dead kernel, pod crash)
+# This file retains only the ServiceAccount / Role / RoleBinding needed for
+# the kubectl exec manual kill command below.  The CronJob resource itself has
+# been removed.
 #
-#   2. spark-defaults.conf (in the Spark image) sets the master-side timeouts:
-#        spark.worker.timeout = 60          → dead worker evicted in 60 s
-#        spark.network.timeout = 60s        → RPC heartbeat deadline 60 s
-#        spark.worker.cleanup.enabled = true → worker dirs cleaned up after jobs
-#
-#   3. JupyterHub notebooks should ALWAYS end with:
-#        spark.stop()
-#      The cleanup CronJob is a safety net for when they don't.
-#
-# Manual kill (from master terminal)
-# ------------------------------------
-#   SPARK_POD=$(kubectl get pods -n prod -l app=spark-master \
+# Manual one-shot kill (ad-hoc, from any node with cluster access)
+# ----------------------------------------------------------------
+#   SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
 #     --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 #   kubectl exec -n prod $SPARK_POD -c spark-master -- \
 #     /usr/local/bin/spark-app-cleanup
 #
-# Tune idle threshold
-# -------------------
-#   Edit IDLE_RUNNING_SECONDS below (default: 7200 = 2 h).
-#   Set to 3600 for 1-hour sessions, 14400 for 4-hour sessions.
+# Tune guardian thresholds
+# ------------------------
+#   Edit the env vars on the spark-guardian container in manifests/spark/spark.yaml:
+#     ORPHAN_RUNNING_S   Rule A/B — dead-driver / no-executor timeout (default 120 s)
+#     ORPHAN_WAITING_S   Rule C   — resource-starvation timeout       (default 120 s)
+#     IDLE_SINCE_S       Rule D   — idle-session timeout               (default 1800 s)
+#     POLL_INTERVAL_S              poll cadence                        (default 15 s)
 #
 # =============================================================================
 apiVersion: v1
@@ -75,62 +62,5 @@ roleRef:
   name: spark-cleanup
   apiGroup: rbac.authorization.k8s.io
 ---
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: spark-app-cleanup
-  namespace: prod
-  labels:
-    app: spark-app-cleanup
-spec:
-  # Every 10 minutes — catches zombies within one polling cycle
-  schedule: "*/10 * * * *"
-  concurrencyPolicy: Forbid           # never overlap two cleanup runs
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      activeDeadlineSeconds: 180      # kill the job itself if it hangs > 3 min
-      template:
-        spec:
-          serviceAccountName: spark-cleanup
-          restartPolicy: OnFailure
-          containers:
-            - name: cleanup
-              image: bitnami/kubectl:latest
-              env:
-                # ── Idle threshold: kill RUNNING apps whose last completed job
-                # was more than 30 minutes ago (or never ran any job at all).
-                # 30 min gives enough headroom for:
-                #   - executor cold-start (30–90 s)
-                #   - large S3 reads / Iceberg scans (several minutes)
-                #   - batch jobs that pause between commits
-                # An idle JupyterHub kernel that never ran any cell stays below
-                # this only if the user is actively working.
-                - name: IDLE_SINCE_SECONDS
-                  value: "1800"
-                # ── Orphan: RUNNING with 0 cores (lost all executors) after 2 min
-                - name: ORPHAN_RUNNING_SECONDS
-                  value: "120"
-                # ── Starvation: WAITING for resources for > 10 min
-                - name: ORPHAN_WAITING_SECONDS
-                  value: "600"
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  set -eu
-                  MASTER=$(kubectl get pod -n prod \
-                    -l app=spark-master \
-                    --no-headers \
-                    -o custom-columns=NAME:.metadata.name | head -1)
-                  echo "[cleanup-cron] Spark master pod: $MASTER"
-                  kubectl exec -n prod "$MASTER" -c spark-master -- \
-                    /usr/local/bin/spark-app-cleanup
-              resources:
-                requests:
-                  cpu: 50m
-                  memory: 64Mi
-                limits:
-                  cpu: 200m
-                  memory: 128Mi
+# CronJob removed — spark-guardian sidecar handles cleanup dynamically.
+# See manifests/spark/spark.yaml → containers[spark-guardian].

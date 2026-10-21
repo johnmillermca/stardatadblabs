@@ -212,10 +212,16 @@ RUN printf '#!/bin/sh\nexec python3 /opt/spark/work-dir/starpump.py "$@"\n' \
     && chmod 755 /usr/local/bin/starpump \
     && ln -sf /usr/local/bin/starpump /usr/local/bin/snowflake-to-iceberg
 
-# spark-app-cleanup: kills stale/orphaned apps via the Spark master REST API.
+# spark-app-cleanup: manual one-shot kill tool (kept for ad-hoc use).
 #   kubectl exec -n prod $MASTER -c spark-master -- spark-app-cleanup
 COPY scripts/spark-app-cleanup.sh /usr/local/bin/spark-app-cleanup
 RUN chmod 755 /usr/local/bin/spark-app-cleanup
+
+# spark-guardian: continuous sidecar daemon (replaces the CronJob).
+# Runs as its own container inside the spark-master pod — see spark.yaml.
+COPY scripts/spark-guardian.py /opt/spark/work-dir/spark-guardian.py
+RUN chmod 755 /opt/spark/work-dir/spark-guardian.py \
+    && ln -sf /opt/spark/work-dir/spark-guardian.py /usr/local/bin/spark-guardian
 
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
@@ -286,18 +292,27 @@ spark.sql.parquet.compression.codec                  snappy
 spark.serializer                                     org.apache.spark.serializer.KryoSerializer
 
 # ── Driver / executor sizing ──────────────────────────────────────────────────
-# Regular worker pods: 6 Gi RAM limit.
-# Budget per executor:
-#   heap 3g + off-heap 1500m + JVM overhead 400m = ~4.9 GB → 1 executor/worker (safe)
-# Large worker pod: 14 Gi RAM.
-#   heap 3g + off-heap 1500m + overhead 400m = ~4.9 GB → 2 executors (safe)
+# Worker pods: 1 Gi limit, SPARK_WORKER_MEMORY=800m (spark.yaml).
+# Budget per executor (memory-bound cluster):
+#   heap 400m + JVM overhead max(384m, 400m×0.15=60m) = 400m + 384m = 784m
+#   → fits inside 800m worker with 16m to spare → 1 executor per worker.
 #
-# memoryOverheadFactor: Spark adds max(384m, executor.memory × factor) as overhead
-#   Default factor is 0.1 (300m on 3g).  Raising to 0.15 gives 450m — enough
-#   headroom for Gluten/Velox native allocations that happen outside off-heap.
-spark.driver.memory                                  4g
-spark.executor.memory                                3g
-spark.executor.cores                                 2
+# Gluten/Velox off-heap (1500m) is NOT included here: Gluten is disabled by
+# default via DISABLE_GLUTEN=1 on the CronJob/Deployment env.  When Gluten is
+# re-enabled a larger worker pod (≥4 Gi) is required.
+#
+# spark.executor.memory / spark.executor.cores are intentionally kept LOW here
+# (safe defaults for the 800m worker).  Any job that genuinely needs more
+# should override via the SPARK_EXECUTOR_MEMORY / SPARK_EXECUTOR_CORES env vars
+# which bao_spark_init.spark_conf() reads and applies before SparkSession.builder.
+#
+# Driver runs inside the CronJob / Deployment pod (not on a worker), so
+# spark.driver.memory is capped at what the pod's K8s resources.limits allow.
+# The starpump and kafka-to-iceberg pods are limited to 4 Gi (see their manifests),
+# so 1g is a safe driver heap.
+spark.driver.memory                                  1g
+spark.executor.memory                                400m
+spark.executor.cores                                 1
 spark.executor.memoryOverheadFactor                  0.15
 
 # ── Memory management ─────────────────────────────────────────────────────────
