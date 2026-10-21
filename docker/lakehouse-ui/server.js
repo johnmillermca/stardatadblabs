@@ -206,6 +206,10 @@ app.post('/api/connectors/:source', async (req, res) => {
     const { source } = req.params;
     const payload = { ...req.body };
     payload.config = await injectCredentials(source, payload.config || {});
+    // Always strip table/collection include lists on creation — tables are assigned
+    // later via "Assign Tables & Start" after supplemental logging is verified.
+    delete payload.config['table.include.list'];
+    delete payload.config['collection.include.list'];
     const { status: s, body } = await dbzRequest(source, 'POST', '/connectors', payload);
     if (s >= 300) return res.status(s).json(body);
 
@@ -967,7 +971,6 @@ app.get('/api/connectors/template/:source', async (req, res) => {
         'publication.name':            'debezium_pub_cache_testing',
         'plugin.name':                 'pgoutput',
         'schema.include.list':         'public',
-        'table.include.list':          'public.customers,public.orders,public.products',
         'snapshot.mode':               'no_data',
         'decimal.handling.mode':       'double',
         'time.precision.mode':         'connect',
@@ -988,7 +991,6 @@ app.get('/api/connectors/template/:source', async (req, res) => {
         'database.dbname':             'XE',
         'database.pdb.name':           'XEPDB1',
         'schema.include.list':         'CACHE_TESTING',
-        'table.include.list':          'CACHE_TESTING.CUSTOMERS,CACHE_TESTING.ORDERS,CACHE_TESTING.PRODUCTS',
         'snapshot.mode':               'schema_only',
         'log.mining.strategy':         'online_catalog',
         'decimal.handling.mode':       'double',
@@ -1006,7 +1008,6 @@ app.get('/api/connectors/template/:source', async (req, res) => {
         'topic.prefix':                'mongodb',
         'mongodb.connection.string':   `mongodb://debezium:${mgoPassword}@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0`,
         'database.include.list':       'cache_testing',
-        'collection.include.list':     'cache_testing.customers,cache_testing.orders,cache_testing.products',
         'snapshot.mode':               'no_data',
         'decimal.handling.mode':       'double',
         'tombstones.on.delete':        'false',
