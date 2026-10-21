@@ -6,9 +6,10 @@ const fetch   = require('node-fetch');
 const path    = require('path');
 const WebSocket = require('ws');
 const http    = require('http');
-const oracledb = require('oracledb');
+const oracledb   = require('oracledb');
 // oracledb v6+ defaults to thin mode (pure JS, no Instant Client) when
 // initOracleClient() is never called — no extra configuration needed.
+const { MongoClient } = require('mongodb');
 
 // ── Oracle JDBC-style query helper ───────────────────────────────────────────
 // Connects directly to Oracle over TCP using credentials from the connector
@@ -43,6 +44,34 @@ async function oracleConnCfg(cfg) {
     user:     cfg['database.user']     || 'c##dbzcdc',
     password: ora.cdc_password ?? ora.password,
   };
+}
+
+// ── MongoDB query helper ─────────────────────────────────────────────────────
+// Builds a connection string from the Debezium connector config + OpenBao creds.
+// Works for any MongoDB instance (in-cluster or external).
+async function mongoConnString(cfg) {
+  const mg = await baoRead(BAO_PATH.mongodb);
+  // If the connector already has a full connection string use it as the base,
+  // replacing the password placeholder with the live value from OpenBao.
+  const existing = cfg['mongodb.connection.string'] || '';
+  if (existing) {
+    return existing.replace(/^(mongodb(?:\+srv)?:\/\/[^:]+:)[^@]*(@)/, `$1${encodeURIComponent(mg.password)}$2`);
+  }
+  // Fall back to constructing from individual fields (matches Debezium defaults)
+  const host = cfg['mongodb.hosts'] || 'mongodb.prod.svc.cluster.local:27017';
+  return `mongodb://debezium:${encodeURIComponent(mg.password)}@${host}/?authSource=admin&replicaSet=rs0`;
+}
+
+// Run a callback with a connected MongoClient — handles connect + cleanup.
+async function withMongo(cfg, fn, timeoutMs = 10000) {
+  const uri    = await mongoConnString(cfg);
+  const client = new MongoClient(uri, { serverSelectionTimeoutMS: timeoutMs, connectTimeoutMS: timeoutMs });
+  try {
+    await client.connect();
+    return await fn(client);
+  } finally {
+    await client.close().catch(() => {});
+  }
 }
 
 const app = express();
@@ -289,16 +318,11 @@ app.post('/api/connectors/:source', async (req, res) => {
     } else if (source === 'mongodb') {
       const dbList = (cfgForValidation['database.include.list'] || '').split(',').map(s => s.trim()).filter(Boolean);
       if (dbList.length) {
-        const pod = await getSourcePod('mongodb', 'mongodb');
-        const secretRes  = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/mongodb-credentials`);
-        const secretJson = await secretRes.json();
-        const rootPass   = Buffer.from(secretJson.data?.['mongodb-root-password'] || '', 'base64').toString();
-        const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'mongosh', '--quiet', '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
-          '--eval', `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
-        ], { timeout: 10000 });
-        const validDbs = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+        // Connect directly via MongoDB driver — works for in-cluster and external MongoDB.
+        const validDbs = await withMongo(cfgForValidation, async (client) => {
+          const result = await client.db('admin').command({ listDatabases: 1, nameOnly: true });
+          return result.databases.map(d => d.name).filter(n => !['admin','config','local'].includes(n));
+        });
         const invalid = dbList.filter(d => !validDbs.includes(d));
         if (invalid.length) {
           return res.status(422).json({
@@ -402,16 +426,10 @@ app.get('/api/connectors/:source/:name/offset-position', async (req, res) => {
       return res.json({ source, type: 'LSN', position: lsn });
 
     } else if (source === 'mongodb') {
-      // Return current timestamp as a proxy for resume-token starting point
-      const pod = await getSourcePod('mongodb', 'mongodb');
-      const { stdout } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'mongosh', '--quiet', '--eval',
-        'JSON.stringify({ts: new Timestamp(Math.floor(Date.now()/1000), 1)})',
-      ], { timeout: 10000 });
-      const line = stdout.trim().split('\n').find(l => l.includes('"ts"'));
-      if (!line) return res.status(502).json({ error: 'Could not parse timestamp from MongoDB', raw: stdout.slice(0, 300) });
-      return res.json({ source, type: 'Timestamp', position: line.trim() });
+      // Return current timestamp as a proxy for resume-token starting point.
+      // Connect directly via MongoDB driver — no pod exec needed.
+      const ts = Math.floor(Date.now() / 1000);
+      return res.json({ source, type: 'Timestamp', position: JSON.stringify({ ts: { $timestamp: { t: ts, i: 1 } } }) });
 
     } else {
       return res.status(400).json({ error: `Unknown source: ${source}` });
@@ -457,16 +475,11 @@ app.get('/api/schemas/:source', async (req, res) => {
       return res.json({ schemas });
 
     } else if (source === 'mongodb') {
-      const pod = await getSourcePod('mongodb', 'mongodb');
-      const secretRes  = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/mongodb-credentials`);
-      const secretJson = await secretRes.json();
-      const rootPass   = Buffer.from(secretJson.data?.['mongodb-root-password'] || '', 'base64').toString();
-      const { stdout } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'mongosh', '--quiet', '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
-        '--eval', `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
-      ], { timeout: 10000 });
-      const schemas = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+      // Connect directly via MongoDB driver — works for in-cluster and external MongoDB.
+      const schemas = await withMongo({}, async (client) => {
+        const result = await client.db('admin').command({ listDatabases: 1, nameOnly: true });
+        return result.databases.map(d => d.name).filter(n => !['admin','config','local'].includes(n));
+      });
       return res.json({ schemas });
 
     } else {
@@ -517,37 +530,18 @@ app.post('/api/schema/:source', async (req, res) => {
       res.json({ source: 'postgres', databases: result });
 
     } else if (source === 'mongodb') {
-      // Use root credentials from K8s secret — debezium user may not have listDatabases
-      const pod = await getSourcePod('mongodb', 'mongodb');
-
-      // Fetch root password from secret at runtime
-      const secretRes = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/mongodb-credentials`);
-      const secretJson = await secretRes.json();
-      const rootPass = Buffer.from(secretJson.data?.['mongodb-root-password'] || '', 'base64').toString();
-
-      // 1. List all non-system databases
-      const { stdout: dbOut } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'mongosh', '--quiet',
-        '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
-        '--eval',
-        `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
-      ], { timeout: 10000 });
-
-      const dbs = dbOut.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
-
-      // 2. For each database list collections
-      const result = {};
-      for (const database of dbs) {
-        const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'mongosh', '--quiet', database,
-          '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
-          '--eval', `db.getCollectionNames().forEach(c=>print(c))`,
-        ], { timeout: 10000 });
-        const cols = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
-        if (cols.length) result[database] = cols;
-      }
+      // Connect directly via MongoDB driver — works for in-cluster and external MongoDB.
+      const result = await withMongo(cfg, async (client) => {
+        const dbList = await client.db('admin').command({ listDatabases: 1, nameOnly: true });
+        const dbs = dbList.databases.map(d => d.name).filter(n => !['admin','config','local'].includes(n));
+        const out = {};
+        for (const database of dbs) {
+          const cols = await client.db(database).listCollections().toArray();
+          const names = cols.map(c => c.name).filter(n => !n.startsWith('system.'));
+          if (names.length) out[database] = names;
+        }
+        return out;
+      });
       res.json({ source: 'mongodb', databases: result });
 
     } else if (source === 'oracle') {
