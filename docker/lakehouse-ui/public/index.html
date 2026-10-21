@@ -575,6 +575,7 @@ async function renderDashboard() {
       <tbody>
         ${connSummary.map(c => {
           const isRunning = c.state === 'RUNNING';
+          const isPaused  = c.state === 'PAUSED';
           return `
           <tr>
             <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
@@ -587,7 +588,10 @@ async function renderDashboard() {
                 </button>
                 <div class="act-menu">
                   <button class="act-item" onclick="closeActMenus();navigate('connectors');currentSource='${c.source}'">⚙ Config</button>
-                  <button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>
+                  ${isPaused
+                    ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>`
+                    : ''
+                  }
                   ${isRunning
                     ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${c.source}','${c.name}')">⏹ Stop</button>`
                     : ''
@@ -680,6 +684,7 @@ async function loadConnectorList(src) {
     const taskState = info?.status?.tasks?.[0]?.state || '–';
     const tasks = info?.status?.tasks?.length || 0;
     const running = state === 'RUNNING';
+    const paused  = state === 'PAUSED';
     return `<tr>
       <td><code style="color:#4fc3f7;font-size:12px">${name}</code></td>
       <td>${stateBadge(state)}</td>
@@ -691,7 +696,10 @@ async function loadConnectorList(src) {
           </button>
           <div class="act-menu">
             <button class="act-item" onclick="closeActMenus();editConnector('${src}','${name}')">✎ Edit Config</button>
-            <button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start CDC</button>
+            ${paused
+              ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start CDC</button>`
+              : ''
+            }
             ${running
               ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${src}','${name}')">⏹ Stop</button>`
               : ''
@@ -727,26 +735,16 @@ async function editConnector(src, name) {
 }
 
 async function pauseConnector(src, name) {
-  // Kafka Connect "pause" only stops the framework scheduler — the task thread
-  // keeps running and data keeps flowing into Kafka. To truly stop capture we
-  // must DELETE the connector so the task dies and the replication slot closes.
-  // The offset is persisted in the Kafka offsets topic, so Start CDC → Resume
-  // picks up exactly where it left off.
-  if (!confirm(`Stop CDC for "${name}"?\n\nThis will delete the connector and close the replication slot connection. Data capture will stop immediately.\n\nUse "Start CDC → Resume" to restart from the same position.`)) return;
-
-  // Save current config before deleting so Resume can recreate it
-  const cfgR = await apiGet(`/api/connectors/${src}/${name}/config`);
-  if (!cfgR.ok) return toast('Could not read connector config before stopping', 'error');
-
-  const r = await apiDel(`/api/connectors/${src}/${name}`);
+  // PUT /pause — stops the task thread so no more data flows from source to Kafka.
+  // The connector stays registered and the offset is preserved.
+  // Use Start CDC → Resume to unpause from the exact same position.
+  const r = await apiPost(`/api/connectors/${src}/${name}/pause`);
   if (r.ok) {
-    // Store config in sessionStorage so Start CDC → Resume can recreate it
-    sessionStorage.setItem(`connector_cfg_${src}_${name}`, JSON.stringify(cfgR.data));
-    toast(`${name} stopped — data capture halted. Use Start CDC to resume.`, 'success');
+    toast(`${name} paused — data capture stopped. Use Start CDC to resume.`, 'success');
   } else {
     toast(`Stop failed: ${JSON.stringify(r.data).slice(0,120)}`, 'error');
   }
-  loadConnectorList(src);
+  setTimeout(() => loadConnectorList(src), 1000);
 }
 async function resumeConnector(src, name) {
   const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
@@ -777,9 +775,19 @@ const CDC_POS_LABEL = {
 async function showStartCdcModal(src, name) {
   // Always check live status — don't trust the state passed from stale rendered HTML
   const statusR = await apiGet(`/api/connectors/${src}/${name}/status`);
-  const liveState = statusR?.data?.connector?.state || '';
-  if (liveState.toUpperCase() === 'RUNNING') {
+  const liveState = (statusR?.data?.connector?.state || '').toUpperCase();
+  if (liveState === 'RUNNING') {
     toast(`CDC already running for "${name}"`, 'warn');
+    return;
+  }
+  // If paused, default to Resume and skip the modal entirely for speed
+  if (liveState === 'PAUSED') {
+    const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
+    toast(r.ok ? `${name} resumed — picking up from last offset ✓` : `Resume failed: ${JSON.stringify(r.data).slice(0,120)}`, r.ok ? 'success' : 'error');
+    if (r.ok) {
+      if (currentPage === 'connectors') loadConnectorList(src);
+      else renderDashboard();
+    }
     return;
   }
   const pos = CDC_POS_LABEL[src] || { name:'Position', badge:'badge-lsn', placeholder:'', hint:'' };
@@ -923,47 +931,19 @@ async function applyStartCdc(src, name) {
   if (!selectedRadio) return toast('Select a start mode', 'error');
   const mode = selectedRadio.value;
 
-  // Resume — connector may have been deleted by Stop, so check if it exists first
+  // Resume — connector is paused (never deleted), just call PUT /resume
   if (mode === 'resume') {
     const btn = document.querySelector('#start-cdc-modal .btn-primary');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Resuming…'; }
-
-    // Check if connector still exists
-    const statusR = await apiGet(`/api/connectors/${src}/${name}/status`);
-
-    if (statusR.status === 404 || statusR.data?.error_code === 404) {
-      // Connector was deleted by Stop — recreate it from saved config
-      const savedCfg = sessionStorage.getItem(`connector_cfg_${src}_${name}`);
-      if (!savedCfg) {
-        toast(`Connector "${name}" no longer exists and no saved config found. Use "Edit Config" to recreate it.`, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
-        return;
-      }
-      const cfg = { ...JSON.parse(savedCfg), 'snapshot.mode': 'no_data' };
-      delete cfg.name;
-      const createR = await apiPost(`/api/connectors/${src}`, { name, config: cfg });
-      if (createR.ok) {
-        sessionStorage.removeItem(`connector_cfg_${src}_${name}`);
-        toast(`Connector "${name}" restarted — resuming from last offset ✓`, 'success');
-        closeModal('start-cdc-modal');
-        if (currentPage === 'connectors') loadConnectorList(src);
-        else renderDashboard();
-      } else {
-        toast(`Recreate failed: ${JSON.stringify(createR.data).slice(0,160)}`, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
-      }
+    const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
+    if (r.ok) {
+      toast(`${name} resumed — picking up from last offset ✓`, 'success');
+      closeModal('start-cdc-modal');
+      if (currentPage === 'connectors') loadConnectorList(src);
+      else renderDashboard();
     } else {
-      // Connector exists (was paused, not deleted) — just resume it
-      const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
-      if (r.ok) {
-        toast(`Connector "${name}" resumed ✓`, 'success');
-        closeModal('start-cdc-modal');
-        if (currentPage === 'connectors') loadConnectorList(src);
-        else renderDashboard();
-      } else {
-        toast(`Resume failed: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
-        if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
-      }
+      toast(`Resume failed: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
     }
     return;
   }

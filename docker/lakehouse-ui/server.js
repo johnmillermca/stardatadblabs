@@ -620,6 +620,53 @@ app.put('/api/iceberg/config', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  STOPPED-CONNECTOR CONFIG STORE
+//  Persists the connector config to disk when the user clicks Stop so that
+//  Start CDC → Resume can recreate it from any browser session / tab.
+//  Stored as a JSON file alongside the running process so it survives pod
+//  restarts when an emptyDir or hostPath volume is mounted at /data.
+// ═══════════════════════════════════════════════════════════════════════════
+const STOPPED_CFG_FILE = process.env.STOPPED_CFG_FILE || '/tmp/stopped-connectors.json';
+
+function loadStoppedCfgs() {
+  try { return JSON.parse(fs.readFileSync(STOPPED_CFG_FILE, 'utf8')); } catch { return {}; }
+}
+function saveStoppedCfgs(map) {
+  try { fs.writeFileSync(STOPPED_CFG_FILE, JSON.stringify(map, null, 2)); } catch (e) {
+    console.error('Could not persist stopped-connector configs:', e.message);
+  }
+}
+
+// GET  /api/connectors/:source/:name/saved-config  → { config } | 404
+app.get('/api/connectors/:source/:name/saved-config', (req, res) => {
+  const { source, name } = req.params;
+  const map = loadStoppedCfgs();
+  const cfg = map[`${source}::${name}`];
+  if (!cfg) return res.status(404).json({ error: 'No saved config found' });
+  res.json({ config: cfg });
+});
+
+// PUT  /api/connectors/:source/:name/saved-config  body: { config }
+app.put('/api/connectors/:source/:name/saved-config', (req, res) => {
+  const { source, name } = req.params;
+  const { config } = req.body;
+  if (!config || typeof config !== 'object') return res.status(400).json({ error: 'config object required' });
+  const map = loadStoppedCfgs();
+  map[`${source}::${name}`] = config;
+  saveStoppedCfgs(map);
+  res.json({ ok: true });
+});
+
+// DELETE /api/connectors/:source/:name/saved-config
+app.delete('/api/connectors/:source/:name/saved-config', (req, res) => {
+  const { source, name } = req.params;
+  const map = loadStoppedCfgs();
+  delete map[`${source}::${name}`];
+  saveStoppedCfgs(map);
+  res.json({ ok: true });
+});
+
 // ─── Catch-all: serve SPA ───────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
