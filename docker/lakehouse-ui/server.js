@@ -201,7 +201,7 @@ async function dbzRequest(source, method, path, body) {
 app.get('/api/connectors/:source', async (req, res) => {
   try {
     const { source } = req.params;
-    const { status: s, body } = await dbzRequest(source, 'GET', '/connectors?expand=status');
+    const { status: s, body } = await dbzRequest(source, 'GET', '/connectors?expand=status&expand=info');
     res.status(s).json(body);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
