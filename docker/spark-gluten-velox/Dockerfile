@@ -223,6 +223,13 @@ COPY scripts/spark-guardian.py /opt/spark/work-dir/spark-guardian.py
 RUN chmod 755 /opt/spark/work-dir/spark-guardian.py \
     && ln -sf /opt/spark/work-dir/spark-guardian.py /usr/local/bin/spark-guardian
 
+# starpump-scheduler: replaces the three starpump CronJobs with a single
+# long-running Deployment.  Runs starpump.py for each source (postgres /
+# oracle / mongodb) in sequence on a configurable interval (default 15 min).
+COPY scripts/starpump-scheduler.py /opt/spark/work-dir/starpump-scheduler.py
+RUN chmod 755 /opt/spark/work-dir/starpump-scheduler.py \
+    && ln -sf /opt/spark/work-dir/starpump-scheduler.py /usr/local/bin/starpump-scheduler
+
 # ── spark-defaults.conf ───────────────────────────────────────────────────────
 # Written to ${SPARK_HOME}/conf/spark-defaults.conf (empty in base image).
 # Credentials (S3 keys, Polaris secret, Snowflake password) are NOT here —
@@ -318,7 +325,13 @@ spark.serializer                                     org.apache.spark.serializer
 # so 512m is a safe driver heap.
 spark.driver.memory                                  512m
 spark.executor.memory                                450m
-spark.executor.cores                                 1
+# executor.cores=3: 1 executor uses all 3 cores on 1 worker node.
+# Combined with spark.cores.max=3 this keeps every job on a single worker —
+# the job never spreads to other workers, leaving them free for concurrent jobs.
+spark.executor.cores                                 3
+# spark.cores.max=3: cluster-wide cap. Prevents Spark standalone from placing
+# extra executors on other workers even if memory permits it.
+spark.cores.max                                      3
 spark.executor.memoryOverheadFactor                  0.15
 
 # ── Memory management ─────────────────────────────────────────────────────────

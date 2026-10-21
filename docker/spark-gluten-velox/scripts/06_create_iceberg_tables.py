@@ -495,100 +495,104 @@ def main() -> None:
     conf  = bao.spark_conf(app_name="create-iceberg-tables")
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
-    builder = IcebergTableBuilder(spark, running_user=SPARK_USER)
 
-    registry = _build_registry()
+    errors = 0
+    try:
+        builder = IcebergTableBuilder(spark, running_user=SPARK_USER)
 
-    # Apply filters
-    if SOURCE_FILTER:
-        registry = [r for r in registry if r["source_key"] == SOURCE_FILTER]
-    if TABLE_GROUP != "all":
-        registry = [r for r in registry if r["group"] == TABLE_GROUP]
+        registry = _build_registry()
 
-    # Ensure namespaces
-    seen_ns: set[tuple] = set()
-    for r in registry:
-        key = (r["catalog"], r["namespace"])
-        if key not in seen_ns:
-            if not DRY_RUN:
-                builder.ensure_namespace(r["catalog"], r["namespace"])
-            else:
-                logger.info("[DRY_RUN] namespace `%s`.`%s`", r["catalog"], r["namespace"])
-            seen_ns.add(key)
+        # Apply filters
+        if SOURCE_FILTER:
+            registry = [r for r in registry if r["source_key"] == SOURCE_FILTER]
+        if TABLE_GROUP != "all":
+            registry = [r for r in registry if r["group"] == TABLE_GROUP]
 
-    created = skipped = errors = 0
+        # Ensure namespaces
+        seen_ns: set[tuple] = set()
+        for r in registry:
+            key = (r["catalog"], r["namespace"])
+            if key not in seen_ns:
+                if not DRY_RUN:
+                    builder.ensure_namespace(r["catalog"], r["namespace"])
+                else:
+                    logger.info("[DRY_RUN] namespace `%s`.`%s`", r["catalog"], r["namespace"])
+                seen_ns.add(key)
 
-    for r in registry:
-        cat, ns, tbl = r["catalog"], r["namespace"], r["table"]
-        pk_col       = r["pk_col"]
-        schema       = r["schema"]
-        location     = f"s3://{S3_BUCKET}/{r['s3_prefix']}"
-        fqn          = f"`{cat}`.`{ns}`.`{tbl}`"
+        created = skipped = errors = 0
 
-        if builder.table_exists(cat, ns, tbl):
-            logger.info("  [EXISTS]  %-60s  %s", fqn, r["purpose"])
-            skipped += 1
-            continue
+        for r in registry:
+            cat, ns, tbl = r["catalog"], r["namespace"], r["table"]
+            pk_col       = r["pk_col"]
+            schema       = r["schema"]
+            location     = f"s3://{S3_BUCKET}/{r['s3_prefix']}"
+            fqn          = f"`{cat}`.`{ns}`.`{tbl}`"
 
-        partition_spec = [
-            IcebergTableBuilder.hours("snap_timestamp"),
-            IcebergTableBuilder.bucket(pk_col, 16),
-        ]
+            if builder.table_exists(cat, ns, tbl):
+                logger.info("  [EXISTS]  %-60s  %s", fqn, r["purpose"])
+                skipped += 1
+                continue
 
-        if DRY_RUN:
-            aug = StructType(schema.fields + [
-                _S("snap_id",        LongType(),      True),
-                _S("snap_timestamp", TimestampType(), True),
-            ])
-            col_ddl = "\n".join(f"    {f.name} {f.dataType.simpleString()}" for f in aug.fields)
-            logger.info(
-                "[DRY_RUN] CREATE TABLE %s (\n%s\n)"
-                "\n  PARTITIONED BY (hours(snap_timestamp), bucket(16, %s))"
-                "\n  LOCATION '%s'  -- %s",
-                fqn, col_ddl, pk_col, location, r["purpose"],
-            )
-            created += 1
-            continue
+            partition_spec = [
+                IcebergTableBuilder.hours("snap_timestamp"),
+                IcebergTableBuilder.bucket(pk_col, 16),
+            ]
 
-        try:
-            builder.create_table(
-                catalog          = cat,
-                namespace        = ns,
-                table            = tbl,
-                schema           = schema,
-                partition_spec   = partition_spec,
-                location         = location,
-                extra_properties = {
-                    "pipeline.write-mode": r["write_mode"],
-                    "pipeline.source":     r["source_key"],
-                    "pipeline.group":      r["group"],
-                    "pipeline.pk-col":     pk_col,
-                    "pipeline.purpose":    r["purpose"],
-                },
-            )
-            logger.info("  [CREATED] %-60s  %s", fqn, r["purpose"])
-            created += 1
-        except Exception as exc:
-            logger.error("  [ERROR]   %-60s  %s", fqn, exc)
-            errors += 1
+            if DRY_RUN:
+                aug = StructType(schema.fields + [
+                    _S("snap_id",        LongType(),      True),
+                    _S("snap_timestamp", TimestampType(), True),
+                ])
+                col_ddl = "\n".join(f"    {f.name} {f.dataType.simpleString()}" for f in aug.fields)
+                logger.info(
+                    "[DRY_RUN] CREATE TABLE %s (\n%s\n)"
+                    "\n  PARTITIONED BY (hours(snap_timestamp), bucket(16, %s))"
+                    "\n  LOCATION '%s'  -- %s",
+                    fqn, col_ddl, pk_col, location, r["purpose"],
+                )
+                created += 1
+                continue
 
-    # ── Summary ────────────────────────────────────────────────────────────────
-    logger.info("")
-    logger.info("═" * 70)
-    logger.info("  Group filter   : %s", TABLE_GROUP)
-    logger.info("  Source filter  : %s", SOURCE_FILTER or "all")
-    logger.info("  Total entries  : %d", len(registry))
-    logger.info("  Created        : %d", created)
-    logger.info("  Already exist  : %d (skipped)", skipped)
-    logger.info("  Errors         : %d", errors)
-    logger.info("═" * 70)
-    logger.info("")
-    logger.info("  Table groups in this run:")
-    for grp in sorted({r["group"] for r in registry}):
-        ns_list = sorted({f"`{r['catalog']}`.`{r['namespace']}`" for r in registry if r["group"] == grp})
-        logger.info("    %-12s → namespaces: %s", grp, ", ".join(ns_list))
+            try:
+                builder.create_table(
+                    catalog          = cat,
+                    namespace        = ns,
+                    table            = tbl,
+                    schema           = schema,
+                    partition_spec   = partition_spec,
+                    location         = location,
+                    extra_properties = {
+                        "pipeline.write-mode": r["write_mode"],
+                        "pipeline.source":     r["source_key"],
+                        "pipeline.group":      r["group"],
+                        "pipeline.pk-col":     pk_col,
+                        "pipeline.purpose":    r["purpose"],
+                    },
+                )
+                logger.info("  [CREATED] %-60s  %s", fqn, r["purpose"])
+                created += 1
+            except Exception as exc:
+                logger.error("  [ERROR]   %-60s  %s", fqn, exc)
+                errors += 1
 
-    spark.stop()
+        # ── Summary ──────────────────────────────────────────────────────────
+        logger.info("")
+        logger.info("═" * 70)
+        logger.info("  Group filter   : %s", TABLE_GROUP)
+        logger.info("  Source filter  : %s", SOURCE_FILTER or "all")
+        logger.info("  Total entries  : %d", len(registry))
+        logger.info("  Created        : %d", created)
+        logger.info("  Already exist  : %d (skipped)", skipped)
+        logger.info("  Errors         : %d", errors)
+        logger.info("═" * 70)
+        logger.info("")
+        logger.info("  Table groups in this run:")
+        for grp in sorted({r["group"] for r in registry}):
+            ns_list = sorted({f"`{r['catalog']}`.`{r['namespace']}`" for r in registry if r["group"] == grp})
+            logger.info("    %-12s → namespaces: %s", grp, ", ".join(ns_list))
+    finally:
+        spark.stop()
+
     if errors:
         sys.exit(1)
 

@@ -298,47 +298,50 @@ def main() -> None:
     spark = _build_spark(bao)
     spark.sparkContext.setLogLevel("WARN")
 
-    builder = IcebergTableBuilder(spark, running_user=USER)
+    try:
+        builder = IcebergTableBuilder(spark, running_user=USER)
 
-    # (a) Ensure namespace
-    builder.ensure_namespace(CATALOG, NAMESPACE)
+        # (a) Ensure namespace
+        builder.ensure_namespace(CATALOG, NAMESPACE)
 
-    # (a)+(b) Create Iceberg table with explicit S3 location on stardata_databricks
-    s3_location = f"s3://{S3_BUCKET}/iceberg/warehouse/{NAMESPACE}/{TABLE}"
-    fqn = builder.create_table(
-        catalog        = CATALOG,
-        namespace      = NAMESPACE,
-        table          = TABLE,
-        schema         = CUSTOMER_SCHEMA,
-        partition_spec = [
-            IcebergTableBuilder.hours("snap_timestamp"),
-            IcebergTableBuilder.bucket("snap_id", 4),
-        ],
-        location       = s3_location,
-    )
-    logger.info("Table ready: %s  location=%s", fqn, s3_location)
+        # (a)+(b) Create Iceberg table with explicit S3 location on stardata_databricks
+        s3_location = f"s3://{S3_BUCKET}/iceberg/warehouse/{NAMESPACE}/{TABLE}"
+        fqn = builder.create_table(
+            catalog        = CATALOG,
+            namespace      = NAMESPACE,
+            table          = TABLE,
+            schema         = CUSTOMER_SCHEMA,
+            partition_spec = [
+                IcebergTableBuilder.hours("snap_timestamp"),
+                IcebergTableBuilder.bucket("snap_id", 4),
+            ],
+            location       = s3_location,
+        )
+        logger.info("Table ready: %s  location=%s", fqn, s3_location)
 
-    if DRY_RUN:
-        logger.info("DRY_RUN=1 — skipping data insert.")
-        spark.sql(f"SELECT COUNT(*) AS total FROM `{CATALOG}`.`{NAMESPACE}`.`{TABLE}`").show()
-        return
+        if DRY_RUN:
+            logger.info("DRY_RUN=1 — skipping data insert.")
+            spark.sql(f"SELECT COUNT(*) AS total FROM `{CATALOG}`.`{NAMESPACE}`.`{TABLE}`").show()
+            return
 
-    # (c) Generate and insert 1 000 rows
-    rows = _gen_rows(ROWS)
-    df   = spark.createDataFrame(rows, schema=CUSTOMER_SCHEMA)
+        # (c) Generate and insert 1 000 rows
+        rows = _gen_rows(ROWS)
+        df   = spark.createDataFrame(rows, schema=CUSTOMER_SCHEMA)
 
-    n = builder.write_append(df, catalog=CATALOG, namespace=NAMESPACE, table=TABLE)
-    logger.info("Inserted %d rows into %s", n, fqn)
+        n = builder.write_append(df, catalog=CATALOG, namespace=NAMESPACE, table=TABLE)
+        logger.info("Inserted %d rows into %s", n, fqn)
 
-    spark.sql(
-        f"SELECT COUNT(*) AS total FROM `{CATALOG}`.`{NAMESPACE}`.`{TABLE}`"
-    ).show()
-    spark.sql(f"""
-        SELECT customer_id, full_name, city, customer_tier
-        FROM `{CATALOG}`.`{NAMESPACE}`.`{TABLE}`
-        ORDER BY customer_id
-        LIMIT 10
-    """).show(truncate=False)
+        spark.sql(
+            f"SELECT COUNT(*) AS total FROM `{CATALOG}`.`{NAMESPACE}`.`{TABLE}`"
+        ).show()
+        spark.sql(f"""
+            SELECT customer_id, full_name, city, customer_tier
+            FROM `{CATALOG}`.`{NAMESPACE}`.`{TABLE}`
+            ORDER BY customer_id
+            LIMIT 10
+        """).show(truncate=False)
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":

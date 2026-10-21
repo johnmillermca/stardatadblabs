@@ -26,6 +26,7 @@ spark = SparkSession.builder.config(conf=conf).getOrCreate()
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -531,15 +532,21 @@ class BaoSparkInit:
         #   starpump on a larger worker).  Values above 400m will fail to schedule
         #   on the standard 800m workers.
         # SPARK_EXECUTOR_CORES: cores per executor.
-        #   Default 1: one task slot per executor. The worker has 3 cores but memory
-        #   limits it to 1 executor per worker, so more than 1 core wastes nothing.
+        #   Default 3: 1 executor uses all 3 cores of a single worker node.
+        #   Combined with SPARK_CORES_MAX=3 this keeps every job on one worker.
+        # SPARK_CORES_MAX: total cores this app may claim across the whole cluster.
+        #   Default 3: caps at 1 worker's worth of cores so the job never spreads
+        #   to other workers and leaves them free for concurrent jobs.
         _executor_memory = os.environ.get("SPARK_EXECUTOR_MEMORY", "450m")
-        _executor_cores  = os.environ.get("SPARK_EXECUTOR_CORES",  "1")
+        _executor_cores  = os.environ.get("SPARK_EXECUTOR_CORES",  "3")
+        _cores_max       = os.environ.get("SPARK_CORES_MAX",        "3")
         conf.set("spark.executor.memory", _executor_memory)
         conf.set("spark.executor.cores",  _executor_cores)
+        conf.set("spark.cores.max",       _cores_max)
         logger.info(
-            "Executor sizing: memory=%s cores=%s (override via SPARK_EXECUTOR_MEMORY / SPARK_EXECUTOR_CORES).",
-            _executor_memory, _executor_cores,
+            "Executor sizing: memory=%s cores=%s cores_max=%s "
+            "(override via SPARK_EXECUTOR_MEMORY / SPARK_EXECUTOR_CORES / SPARK_CORES_MAX).",
+            _executor_memory, _executor_cores, _cores_max,
         )
 
         # ── Memory / AQE settings (OOM prevention) ────────────────────────────
@@ -730,6 +737,31 @@ class BaoSparkInit:
         if extra_conf:
             for k, v in extra_conf.items():
                 conf.set(k, v)
+
+        # ── Auto-stop safety net ───────────────────────────────────────────────
+        # Register a one-time atexit handler that calls spark.stop() when this
+        # Python process exits — covers every path: normal return, unhandled
+        # exception, sys.exit(), or a script author who simply forgot the call.
+        #
+        # The handler is intentionally a no-op for streaming jobs: those scripts
+        # manage their own session lifecycle (spark.stop() inside _run_once's
+        # finally block) and typically run forever.  atexit fires only when the
+        # process actually exits, so streaming jobs are unaffected while running.
+        #
+        # Scripts that call spark.stop() themselves are also safe: calling stop()
+        # twice is harmless — the second call returns immediately when the context
+        # is already stopped.
+        def _atexit_stop_spark() -> None:
+            try:
+                from pyspark.sql import SparkSession as _SS
+                active = _SS.getActiveSession()
+                if active is not None:
+                    logger.debug("atexit: calling spark.stop() on active session.")
+                    active.stop()
+            except Exception:
+                pass  # best-effort — never raise inside atexit
+
+        atexit.register(_atexit_stop_spark)
 
         return conf
 
