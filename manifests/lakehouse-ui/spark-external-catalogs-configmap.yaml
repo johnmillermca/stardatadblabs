@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-external-catalogs
+  namespace: prod
+  labels:
+    app: lakehouse-ui
+    managed-by: lakehouse-ui
+  annotations:
+    description: "Registry of Spark external catalogs per CDC source. Read by
+      lakehouse-ui /api/connectors/preflight/:source before a Debezium connector
+      is created. Each key must contain both the source name and the required
+      database/schema name (case-insensitive) so the preflight lookup succeeds."
+data:
+  # postgres → database cache_testing  (Spark catalog: postgres / warehouse: pg_lakehouse)
+  # Credentials in OpenBao: secret/platform/postgres  (user: rbac, bao_secret_path)
+  postgres.cache_testing: '{"source":"postgres","type":"jdbc","database":"cache_testing","schema":"public","host":"postgresql.prod.svc.cluster.local","port":"5432","user":"rbac","bao_secret_path":"secret/platform/postgres","spark_catalog":"postgres","spark_warehouse":"pg_lakehouse","tables":"customers,orders,products,order_items,inventory_events,product_reviews"}'
+
+  # oracle → schema CACHE_TESTING  (Spark catalog: oracle / warehouse: ora_lakehouse)
+  # Credentials in OpenBao: secret/platform/oracle
+  oracle.CACHE_TESTING: '{"source":"oracle","type":"jdbc","database":"XE","schema":"CACHE_TESTING","host":"oracle-xe.prod.svc.cluster.local","port":"1521","user":"c##dbzcdc","bao_secret_path":"secret/platform/oracle","spark_catalog":"oracle","spark_warehouse":"ora_lakehouse","tables":"CUSTOMERS,ORDERS,PRODUCTS"}'
+
+  # mongodb → database cache_testing  (Spark catalog: mongodb / warehouse: mgo_lakehouse)
+  # Credentials in OpenBao: secret/platform/mongodb
+  mongodb.cache_testing: '{"source":"mongodb","type":"mongodb","database":"cache_testing","host":"mongodb.prod.svc.cluster.local","port":"27017","user":"debezium","bao_secret_path":"secret/platform/mongodb","spark_catalog":"mongodb","spark_warehouse":"mgo_lakehouse","collections":"customers,orders,products"}'
