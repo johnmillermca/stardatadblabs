@@ -737,19 +737,26 @@ async function editConnector(src, name) {
 async function pauseConnector(src, name) {
   // PUT /pause — stops the task thread so no more data flows from source to Kafka.
   // The connector stays registered and the offset is preserved.
-  // Use Start CDC → Resume to unpause from the exact same position.
+  // Use Start to unpause from the exact same position.
   const r = await apiPost(`/api/connectors/${src}/${name}/pause`);
   if (r.ok) {
-    toast(`${name} paused — data capture stopped. Use Start CDC to resume.`, 'success');
+    toast(`${name} stopped — data capture halted. Use Start to resume.`, 'success');
   } else {
     toast(`Stop failed: ${JSON.stringify(r.data).slice(0,120)}`, 'error');
   }
-  setTimeout(() => loadConnectorList(src), 1000);
+  // Wait for Debezium to propagate PAUSED state before refreshing
+  setTimeout(() => {
+    if (currentPage === 'connectors') loadConnectorList(src);
+    else renderDashboard();
+  }, 2500);
 }
 async function resumeConnector(src, name) {
   const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
   toast(r.ok ? `${name} resumed` : 'Resume failed', r.ok ? 'success' : 'error');
-  loadConnectorList(src);
+  setTimeout(() => {
+    if (currentPage === 'connectors') loadConnectorList(src);
+    else renderDashboard();
+  }, 2500);
 }
 async function restartConnector(src, name) {
   const r = await apiPost(`/api/connectors/${src}/${name}/restart`);
@@ -785,8 +792,10 @@ async function showStartCdcModal(src, name) {
     const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
     toast(r.ok ? `${name} resumed — picking up from last offset ✓` : `Resume failed: ${JSON.stringify(r.data).slice(0,120)}`, r.ok ? 'success' : 'error');
     if (r.ok) {
-      if (currentPage === 'connectors') loadConnectorList(src);
-      else renderDashboard();
+      setTimeout(() => {
+        if (currentPage === 'connectors') loadConnectorList(src);
+        else renderDashboard();
+      }, 2500);
     }
     return;
   }
