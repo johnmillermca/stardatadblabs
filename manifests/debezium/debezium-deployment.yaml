@@ -138,6 +138,14 @@ data:
     value.converter.schemas.enable=false
 
     plugin.path=/kafka/connect
+
+    # Topic auto-creation — Debezium creates data topics with controlled settings
+    # instead of relying on broker defaults (which produce 1-partition topics).
+    topic.creation.enable=true
+    topic.creation.default.replication.factor=1
+    topic.creation.default.partitions=3
+    topic.creation.default.cleanup.policy=compact
+    topic.creation.default.compression.type=lz4
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -180,6 +188,14 @@ data:
     value.converter.schemas.enable=false
 
     plugin.path=/kafka/connect
+
+    # Topic auto-creation — Debezium creates data topics with controlled settings
+    # instead of relying on broker defaults (which produce 1-partition topics).
+    topic.creation.enable=true
+    topic.creation.default.replication.factor=1
+    topic.creation.default.partitions=3
+    topic.creation.default.cleanup.policy=compact
+    topic.creation.default.compression.type=lz4
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -222,6 +238,14 @@ data:
     value.converter.schemas.enable=false
 
     plugin.path=/kafka/connect
+
+    # Topic auto-creation — Debezium creates data topics with controlled settings
+    # instead of relying on broker defaults (which produce 1-partition topics).
+    topic.creation.enable=true
+    topic.creation.default.replication.factor=1
+    topic.creation.default.partitions=3
+    topic.creation.default.cleanup.policy=compact
+    topic.creation.default.compression.type=lz4
 
 # =============================================================================
 # Deployment: debezium-connect-postgres
