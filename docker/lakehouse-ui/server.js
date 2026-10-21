@@ -689,6 +689,13 @@ app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => 
   }
 
   try {
+    // Fetch the live connector config once — used by both the logging check and the patch step.
+    const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
+    if (cfgR.status >= 300) {
+      return res.status(cfgR.status).json({ error: 'Could not read connector config', detail: cfgR.body });
+    }
+    const cfg = { ...cfgR.body };
+
     // ── 1. Supplemental logging check ──────────────────────────────────────
     const logErrors = [];
 
@@ -698,9 +705,8 @@ app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => 
       // or is set to FOR ALL TABLES it covers everything — pass automatically.
       const pod = await getSourcePod('postgresql', 'postgres');
 
-      // Get the publication name from the connector's current config
-      const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
-      const pubName = cfgR.body?.['publication.name'] || 'debezium_pub_cache_testing';
+      // Get the publication name from the live connector config
+      const pubName = cfg['publication.name'] || 'debezium_pub_cache_testing';
 
       // Check if publication covers ALL tables
       const { stdout: pubAll } = await execFileAsync('kubectl', [
@@ -760,11 +766,7 @@ app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => 
     }
 
     // ── 3. Patch connector config ────────────────────────────────────────────
-    const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
-    if (cfgR.status >= 300) {
-      return res.status(cfgR.status).json({ error: 'Could not read connector config', detail: cfgR.body });
-    }
-    const cfg = { ...cfgR.body };
+    // cfg already fetched above — just apply the table list and credentials.
 
     // Set tasks.max=1 and the selected table list
     cfg['tasks.max'] = '1';
