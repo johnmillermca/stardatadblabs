@@ -504,6 +504,148 @@ app.post('/api/connectors/:source/:name/start-from', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  START-WITH-TABLES
+//  POST /api/connectors/:source/:name/start-with-tables
+//  Body: { tables: ["schema.table", ...] }
+//
+//  Steps:
+//   1. Validate supplemental logging is enabled for every requested table.
+//      • Postgres  : checks pg_publication_tables — table must be in the
+//                    connector's publication (all columns logged by default).
+//      • Oracle    : checks ALL_LOG_GROUPS — table must have ALL COLUMNS
+//                    supplemental logging (ADD ALL COLUMNS).
+//      • MongoDB   : change-streams capture full documents by default —
+//                    no extra logging config needed, check always passes.
+//   2. If any table fails → HTTP 409 { logErrors, fixHint }
+//   3. On pass → patch connector config (tasks.max=1, table/collection.include.list)
+//      then PUT to Debezium.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => {
+  const { source, name } = req.params;
+  const { tables } = req.body;   // ["schema.table", ...]
+
+  if (!Array.isArray(tables) || tables.length === 0) {
+    return res.status(400).json({ error: 'tables array required' });
+  }
+
+  try {
+    // ── 1. Supplemental logging check ──────────────────────────────────────
+    const logErrors = [];
+
+    if (source === 'postgres') {
+      // Postgres: every selected table must exist in the connector's publication.
+      // If the publication was created WITH (publish_via_partition_root = true)
+      // or is set to FOR ALL TABLES it covers everything — pass automatically.
+      const pod = await getSourcePod('postgresql', 'postgres');
+
+      // Get the publication name from the connector's current config
+      const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
+      const pubName = cfgR.body?.['publication.name'] || 'debezium_pub_cache_testing';
+
+      // Check if publication covers ALL tables
+      const { stdout: pubAll } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'psql', '-U', 'postgres', '-d', 'cache_testing', '-tAc',
+        `SELECT puballtables FROM pg_publication WHERE pubname='${pubName}'`,
+      ], { timeout: 10000 });
+
+      if (pubAll.trim() === 't') {
+        // Publication covers all tables — no per-table check needed
+      } else {
+        // Check each table is in the publication
+        for (const full of tables) {
+          const [schema, table] = full.split('.');
+          const { stdout } = await execFileAsync('kubectl', [
+            'exec', '-n', K8S_NAMESPACE, pod, '--',
+            'psql', '-U', 'postgres', '-d', 'cache_testing', '-tAc',
+            `SELECT COUNT(*) FROM pg_publication_tables WHERE pubname='${pubName}' AND schemaname='${schema}' AND tablename='${table}'`,
+          ], { timeout: 10000 });
+          if (stdout.trim() === '0') {
+            logErrors.push({
+              table: full,
+              reason: `Not in publication "${pubName}" — run: ALTER PUBLICATION ${pubName} ADD TABLE ${full};`,
+            });
+          }
+        }
+      }
+
+    } else if (source === 'oracle') {
+      // Oracle: each table must have ALL COLUMNS supplemental logging enabled.
+      const pod = await getSourcePod('oracle-xe', 'oracle');
+
+      const runSql = async (sql) => {
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
+          'bash', '-c', `echo "${sql}" | sqlplus -S / as sysdba`,
+        ], { timeout: 15000 });
+        return stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      };
+
+      for (const full of tables) {
+        const parts  = full.split('.');
+        const owner  = parts.length === 2 ? parts[0].toUpperCase() : 'CACHE_TESTING';
+        const tbl    = parts.length === 2 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+        const lines  = await runSql(
+          `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
+          `SELECT LOG_GROUP_TYPE FROM ALL_LOG_GROUPS WHERE OWNER='${owner}' AND TABLE_NAME='${tbl}' AND LOG_GROUP_TYPE='ALL COLUMN LOGGING';\nEXIT;`
+        );
+        const hasAll = lines.some(l => l.includes('ALL COLUMN LOGGING'));
+        if (!hasAll) {
+          logErrors.push({
+            table: full,
+            reason: 'ALL COLUMNS supplemental logging not enabled',
+          });
+        }
+      }
+
+    } else if (source === 'mongodb') {
+      // MongoDB change-streams capture full documents — no extra logging config.
+      // Check always passes.
+    }
+
+    // ── 2. Return errors if any ─────────────────────────────────────────────
+    if (logErrors.length > 0) {
+      const fixHint = source === 'postgres'
+        ? `For each table run: ALTER PUBLICATION <pub_name> ADD TABLE <schema>.<table>;`
+        : source === 'oracle'
+        ? `For each table run: ALTER TABLE <owner>.<table> ADD SUPPLEMENTAL LOG DATA (ALL COLUMNS);`
+        : '';
+      return res.status(409).json({ logErrors, fixHint });
+    }
+
+    // ── 3. Patch connector config and start ─────────────────────────────────
+    const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
+    if (cfgR.status >= 300) {
+      return res.status(cfgR.status).json({ error: 'Could not read connector config', detail: cfgR.body });
+    }
+    const cfg = { ...cfgR.body };
+
+    // Enable tasks and set the selected table list
+    cfg['tasks.max'] = '1';
+    if (source === 'mongodb') {
+      cfg['collection.include.list'] = tables.join(',');
+      delete cfg['table.include.list'];
+    } else {
+      cfg['table.include.list'] = tables.join(',');
+      delete cfg['collection.include.list'];
+    }
+
+    // Inject live credentials from OpenBao before writing
+    const patchedCfg = await injectCredentials(source, cfg);
+
+    const putR = await dbzRequest(source, 'PUT', `/connectors/${name}/config`, patchedCfg);
+    if (putR.status >= 300) {
+      return res.status(putR.status).json({ error: 'Debezium rejected config update', detail: putR.body });
+    }
+
+    res.json({ ok: true, tables, config: patchedCfg });
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  KUBERNETES STREAMING JOBS
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -685,16 +685,29 @@ async function loadConnectorList(src) {
     const tasks = info?.status?.tasks?.length || 0;
     const running = state === 'RUNNING';
     const paused  = state === 'PAUSED';
+    // A connector is "unstarted" when tasks.max is 0 OR has no tasks yet and is not RUNNING/PAUSED
+    const taskMax  = info?.info?.config?.['tasks.max'] ?? info?.status?.tasks?.length ?? 1;
+    const unstarted = String(taskMax) === '0' || (tasks === 0 && !running && !paused);
     return `<tr>
       <td><code style="color:#4fc3f7;font-size:12px">${name}</code></td>
       <td>${stateBadge(state)}</td>
-      <td>${stateBadge(taskState)} <span style="color:#586374;font-size:11px">(${tasks} task)</span></td>
+      <td>${unstarted
+        ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>NO TABLES</span>`
+        : `${stateBadge(taskState)} <span style="color:#586374;font-size:11px">(${tasks} task)</span>`
+      }</td>
       <td>
         <div class="act-wrap" id="act-conn-${src}-${name}">
           <button class="act-trigger" onclick="toggleActMenu('act-conn-${src}-${name}')">
             Actions <span class="caret">▾</span>
           </button>
           <div class="act-menu">
+            ${unstarted
+              ? `<button class="act-item" style="color:#56d364;font-weight:600"
+                   onclick="closeActMenus();showAssignTablesModal('${src}','${name}')">
+                   ▶ Assign Tables &amp; Start</button>
+                 <hr class="act-sep"/>`
+              : ''
+            }
             <button class="act-item" onclick="closeActMenus();editConnector('${src}','${name}')">✎ Edit Config</button>
             ${paused
               ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start</button>`
@@ -979,6 +992,184 @@ async function applyStartCdc(src, name) {
     toast(`Error: ${JSON.stringify(r.data).slice(0,160)}`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '▶ Start CDC'; }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ASSIGN TABLES & START MODAL
+//  Opens when a connector has tasks.max=0 / no tables assigned.
+//  Flow:
+//   1. User picks tables from the live DB browser
+//   2. Click "Check & Start" → calls /api/connectors/:src/:name/start-with-tables
+//   3. Server validates supplemental logging for every selected table, then
+//      patches tasks.max=1 + table.include.list and starts the connector.
+// ═══════════════════════════════════════════════════════════════════════════
+async function showAssignTablesModal(src, name) {
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.id = 'assign-modal';
+  modal.innerHTML = `
+  <div class="modal" style="max-width:680px">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">▶ Assign Tables &amp; Start — ${SOURCE_ICON[src]} ${SOURCE_LABELS[src]}</div>
+        <div style="font-size:11px;color:#586374;margin-top:3px">Connector: <code style="color:#4fc3f7">${name}</code></div>
+      </div>
+      <button class="modal-close" onclick="closeModal('assign-modal')">✕</button>
+    </div>
+
+    <div style="font-size:12px;color:#8b949e;margin-bottom:14px;padding:10px 12px;
+      background:#06090f;border-radius:6px;border-left:3px solid #56d364">
+      Select the tables you want to replicate, then click
+      <b style="color:#e6edf3">Check &amp; Start</b>. The server will verify
+      supplemental logging is enabled for every selected table before starting tasks.
+    </div>
+
+    <div class="tpick-wrap" id="assign-tpick-wrap">
+      <div class="tpick-header">
+        <div class="tpick-title">📋 Table / Collection Selection</div>
+      </div>
+      <div id="assign-tpick-body">
+        <div style="color:#586374;font-size:12px">Click <b style="color:#4fc3f7">Load Tables</b> to browse available tables.</div>
+      </div>
+      <div class="tpick-actions">
+        <button class="btn btn-secondary btn-sm" onclick="assignTpickLoad('${src}','${name}')">⟳ Load Tables</button>
+        <span class="tpick-status" id="assign-tpick-status"></span>
+      </div>
+    </div>
+
+    <div id="assign-log-check" style="margin-top:10px"></div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('assign-modal')">Cancel</button>
+      <button class="btn btn-primary" id="assign-start-btn"
+              onclick="assignTablesAndStart('${src}','${name}')">
+        ▶ Check &amp; Start
+      </button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+// Load the table list into the assign-modal picker (mirrors tpickLoad but
+// uses assign-tpick-body / assign-tpick-status IDs and no kv-editor dependency)
+async function assignTpickLoad(src, name) {
+  const statusEl = document.getElementById('assign-tpick-status');
+  const bodyEl   = document.getElementById('assign-tpick-body');
+  statusEl.innerHTML = `<span style="color:#d29922">⏳ Connecting to ${src}…</span>`;
+  bodyEl.innerHTML = '';
+
+  // Fetch current connector config to build the schema query payload
+  const cfgR = await apiGet(`/api/connectors/${src}/${name}/config`);
+  const cfg  = cfgR.ok ? cfgR.data : {};
+
+  const r = await apiPost(`/api/schema/${src}`, cfg);
+  if (!r.ok) {
+    statusEl.innerHTML = `<span style="color:#f85149">⚠ ${escHtml((r.data?.error||'Failed').slice(0,180))}</span>`;
+    return;
+  }
+
+  const databases  = r.data.databases || {};
+  const isMongo    = src === 'mongodb';
+  let total = 0;
+  let html  = `<input class="tpick-search" placeholder="Filter…"
+                 oninput="assignTpickFilter(this.value)"
+                 style="width:100%;background:#0d1117;border:1px solid #1c2a3a;border-radius:6px;
+                        padding:6px 10px;color:#e6edf3;font-size:12px;margin-bottom:8px"/>
+               <div class="tpick-list" id="assign-tpick-list">`;
+
+  Object.entries(databases).forEach(([dbName, schemasOrCols]) => {
+    if (Array.isArray(schemasOrCols)) {
+      // MongoDB
+      schemasOrCols.forEach(col => {
+        const full = `${dbName}.${col}`;
+        total++;
+        html += `<label class="tpick-item" data-table="${escHtml(full)}">
+                   <input type="checkbox" value="${escHtml(full)}"/>
+                   ${escHtml(col)}
+                   <span style="color:#586374;font-size:11px;margin-left:auto">${escHtml(dbName)}</span>
+                 </label>`;
+      });
+    } else {
+      Object.entries(schemasOrCols).forEach(([schemaName, tables]) => {
+        html += `<div class="tpick-schema">${escHtml(schemaName)}</div>`;
+        tables.forEach(tbl => {
+          const full = `${schemaName}.${tbl}`;
+          total++;
+          html += `<label class="tpick-item" data-table="${escHtml(full)}" style="padding-left:20px">
+                     <input type="checkbox" value="${escHtml(full)}"/>
+                     ${escHtml(tbl)}
+                     <span style="color:#586374;font-size:11px;margin-left:auto">${escHtml(schemaName)}</span>
+                   </label>`;
+        });
+      });
+    }
+  });
+  html += '</div>';
+  bodyEl.innerHTML = html;
+  statusEl.innerHTML = `<span style="color:#2ea043">✓ ${total} table(s) loaded — select to replicate</span>`;
+
+  // Clear any previous log-check result when table list reloads
+  document.getElementById('assign-log-check').innerHTML = '';
+}
+
+function assignTpickFilter(q) {
+  const lq = q.toLowerCase();
+  document.querySelectorAll('#assign-tpick-list .tpick-item').forEach(el => {
+    el.style.display = el.dataset.table.toLowerCase().includes(lq) ? '' : 'none';
+  });
+}
+
+async function assignTablesAndStart(src, name) {
+  const checked = [...document.querySelectorAll('#assign-tpick-list .tpick-item input:checked')];
+  if (!checked.length) return toast('Select at least one table to replicate', 'warn');
+
+  const tables   = checked.map(c => c.value);
+  const logEl    = document.getElementById('assign-log-check');
+  const btn      = document.getElementById('assign-start-btn');
+  btn.disabled   = true;
+  btn.textContent = '⏳ Checking supplemental logging…';
+  logEl.innerHTML = '';
+
+  const r = await apiPost(`/api/connectors/${src}/${name}/start-with-tables`, { tables });
+
+  // ── Supplemental logging check failed ─────────────────────────────────────
+  if (r.status === 409 && r.data?.logErrors) {
+    const rows = r.data.logErrors.map(e =>
+      `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1c2a3a">
+         <span style="color:#da3633;font-size:13px">✗</span>
+         <code style="color:#f85149;flex:1">${escHtml(e.table)}</code>
+         <span style="color:#8b949e;font-size:11px">${escHtml(e.reason)}</span>
+       </div>`
+    ).join('');
+    logEl.innerHTML = `
+      <div style="background:#2a0f0f;border:1px solid #6a2020;border-radius:6px;padding:12px 14px;margin-top:4px">
+        <div style="font-weight:700;color:#f85149;margin-bottom:8px">
+          🚫 Cannot start — supplemental logging not enabled for ${r.data.logErrors.length} table(s)
+        </div>
+        ${rows}
+        <div style="margin-top:10px;font-size:11px;color:#d29922;border-top:1px solid #4a2020;padding-top:8px">
+          <b>Action required:</b> ${escHtml(r.data.fixHint || 'Enable supplemental logging on the listed tables then retry.')}
+        </div>
+      </div>`;
+    btn.disabled    = false;
+    btn.textContent = '▶ Check & Start';
+    return;
+  }
+
+  // ── Success ────────────────────────────────────────────────────────────────
+  if (r.ok) {
+    toast(`CDC started for "${name}" on ${tables.length} table(s) ✓`, 'success');
+    closeModal('assign-modal');
+    if (currentPage === 'connectors') loadConnectorList(src);
+    else renderDashboard();
+    return;
+  }
+
+  // ── Other error ───────────────────────────────────────────────────────────
+  const detail = r.data?.error || r.data?.message || JSON.stringify(r.data).slice(0,200);
+  logEl.innerHTML = `<div style="color:#f85149;font-size:12px;margin-top:6px">⚠ ${escHtml(detail)}</div>`;
+  btn.disabled    = false;
+  btn.textContent = '▶ Check & Start';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1538,7 +1729,7 @@ async function createConnectorFromPage() {
     return;
   }
 
-  // prefer JSON editor if it differs from template
+  // prefer JSON editor
   let cfg;
   const jsonRaw = document.getElementById('new-json').value.trim();
   try { cfg = JSON.parse(jsonRaw); } catch { cfg = null; }
@@ -1551,19 +1742,18 @@ async function createConnectorFromPage() {
     });
   }
 
-  // Sanity: never send an empty password — the preflight ensures credentials exist
-  // but warn the user if somehow the field is still blank
-  const pwKey = src === 'postgres' ? 'database.password'
-              : src === 'oracle'   ? 'database.password'
-              : null; // mongodb uses connection string
-  if (pwKey && !cfg[pwKey]) {
-    toast(`Warning: "${pwKey}" is empty — the connector may fail to authenticate. Check the template values.`, 'warn');
-  }
+  // ── (a) Connector is always created STOPPED with no tables assigned ────────
+  // tasks.max=0  → Debezium registers the connector but never starts a task thread.
+  // Removing the include-list means no tables are captured until the user
+  // explicitly picks them via "Assign Tables & Start".
+  cfg['tasks.max'] = '0';
+  delete cfg['table.include.list'];
+  delete cfg['collection.include.list'];
 
   const body = { name, config: cfg };
   const r = await apiPost(`/api/connectors/${src}`, body);
   if (r.ok) {
-    toast(`Connector "${name}" created ✓`, 'success');
+    toast(`Connector "${name}" created — use "Assign Tables & Start" to begin CDC ✓`, 'success');
     currentSource = src;
     navigate('connectors');
   } else {
