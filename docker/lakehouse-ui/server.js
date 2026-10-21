@@ -39,6 +39,55 @@ function k8sToken() {
   try { return fs.readFileSync(K8S_TOKEN_FILE, 'utf8').trim(); } catch { return ''; }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  OPENBAO CLIENT
+//  All DB credentials are read directly from OpenBao — K8s secrets are never
+//  used for passwords.  The SA JWT is used to authenticate (role:
+//  platform-secrets-read, same as every other in-cluster service).
+// ═══════════════════════════════════════════════════════════════════════════
+const BAO_ADDR      = process.env.BAO_ADDR || `http://openbao.${K8S_NAMESPACE}.svc.cluster.local:8200`;
+const BAO_ROLE      = process.env.BAO_ROLE || 'platform-secrets-read';
+const BAO_AUTH_PATH = 'auth/kubernetes/login';
+
+// Token cache — re-authenticate only when the cached token is absent/expired.
+let _baoToken     = null;
+let _baoTokenExp  = 0;   // epoch-ms of expiry (0 = not set)
+
+async function baoToken() {
+  if (_baoToken && Date.now() < _baoTokenExp) return _baoToken;
+  const jwt = fs.readFileSync(K8S_TOKEN_FILE, 'utf8').trim();
+  const res = await fetch(`${BAO_ADDR}/v1/${BAO_AUTH_PATH}`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ role: BAO_ROLE, jwt }),
+  });
+  if (!res.ok) throw new Error(`OpenBao auth failed: HTTP ${res.status}`);
+  const data  = await res.json();
+  _baoToken   = data.auth.client_token;
+  // lease_duration is in seconds; renew 60 s before expiry
+  _baoTokenExp = Date.now() + (data.auth.lease_duration - 60) * 1000;
+  return _baoToken;
+}
+
+async function baoRead(secretPath) {
+  const token = await baoToken();
+  const res   = await fetch(`${BAO_ADDR}/v1/${secretPath}`, {
+    headers: { 'X-Vault-Token': token },
+  });
+  if (!res.ok) throw new Error(`OpenBao read failed for "${secretPath}": HTTP ${res.status}`);
+  const data = await res.json();
+  // KV v2: data.data.data  — KV v1: data.data
+  return data.data?.data ?? data.data;
+}
+
+// Paths in OpenBao KV — mirrors bao_spark_init.py
+const BAO_PATH = {
+  postgres: 'secret/data/platform/postgres',
+  oracle:   'secret/data/platform/oracle',
+  mongodb:  'secret/data/platform/mongodb',
+  kafka:    'secret/data/platform/kafka',
+};
+
 async function k8sFetch(path, opts = {}) {
   const https = require('https');
   let ca;
@@ -108,35 +157,32 @@ app.get('/api/connectors/:source/:name/status', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Helper: inject real credentials from debezium-credentials secret ─────────
-// Ensures the password and (for MongoDB) the connection string always carry the
-// live credential from the K8s secret, regardless of what the browser sends.
-// Called by both POST (create) and PUT (update) connector endpoints.
+// ── Helper: inject real credentials from OpenBao ──────────────────────────────
+// Reads the live password directly from OpenBao KV and stamps it into the
+// connector config before forwarding to Debezium.  K8s secrets are never used.
+// Called by both POST (create) and PUT (update/edit) connector endpoints.
 async function injectCredentials(source, cfg) {
+  const patched = { ...cfg };
   try {
-    const secR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/debezium-credentials`);
-    if (!secR.ok) return cfg; // secret unreadable — pass through and let Debezium report
-    const sec  = await secR.json();
-    const decode = (k) => sec.data?.[k] ? Buffer.from(sec.data[k], 'base64').toString('utf8') : '';
-
-    const patched = { ...cfg };
     if (source === 'postgres') {
-      patched['database.password'] = decode('pg-password');
+      const pg = await baoRead(BAO_PATH.postgres);
+      patched['database.password'] = pg.password;
     } else if (source === 'oracle') {
-      patched['database.password'] = decode('oracle-password');
+      const ora = await baoRead(BAO_PATH.oracle);
+      // Oracle CDC connector uses the dedicated CDC user password
+      patched['database.password'] = ora.cdc_password ?? ora.password;
     } else if (source === 'mongodb') {
-      const mgoPass = decode('mongo-password');
-      // Rebuild the connection string with the live password so it is never blank
+      const mg  = await baoRead(BAO_PATH.mongodb);
       const existing = patched['mongodb.connection.string'] || '';
-      // Replace password segment: mongodb://user:ANY_PASSWORD@host  →  correct password
       patched['mongodb.connection.string'] = existing
-        ? existing.replace(/^(mongodb:\/\/[^:]+:)[^@]*(@)/, `$1${encodeURIComponent(mgoPass)}$2`)
-        : `mongodb://debezium:${encodeURIComponent(mgoPass)}@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0`;
+        ? existing.replace(/^(mongodb:\/\/[^:]+:)[^@]*(@)/, `$1${encodeURIComponent(mg.password)}$2`)
+        : `mongodb://debezium:${encodeURIComponent(mg.password)}@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0`;
     }
-    return patched;
-  } catch {
-    return cfg; // never block connector creation on a credential-inject failure
+  } catch (e) {
+    // Surface the error — never silently forward empty credentials
+    throw new Error(`OpenBao credential inject failed for ${source}: ${e.message}`);
   }
+  return patched;
 }
 
 // Create or update connector (PUT — edit existing)
@@ -642,21 +688,16 @@ app.post('/api/kafka/query', async (req, res) => {
 //  CONNECTOR PRE-FLIGHT CHECK
 //  GET /api/connectors/preflight/:source
 //  Verifies:
-//    1. debezium-credentials secret has a non-empty password for the source
-//    2. spark-external-catalogs ConfigMap has an entry whose database/schema
-//       matches the required replication DB for this source:
-//         postgres  → database "cache_testing"
-//         mongodb   → database "cache_testing"
-//         oracle    → schema   "cache_testing" (stored as "CACHE_TESTING")
-//  Returns { ok: true, catalog, credentialKey } on success,
+//    1. OpenBao has a non-empty password at secret/platform/<source>
+//    2. spark-external-catalogs ConfigMap has a matching entry
+//  Returns { ok: true, catalog, baoPath } on success,
 //  or { ok: false, error, action } with HTTP 422 on failure.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Expected DB / schema per source (must match the Spark external catalog entry)
 const PREFLIGHT_REQUIREMENTS = {
-  postgres: { type: 'database', value: 'cache_testing',  credentialKey: 'pg-password'     },
-  mongodb:  { type: 'database', value: 'cache_testing',  credentialKey: 'mongo-password'   },
-  oracle:   { type: 'schema',   value: 'CACHE_TESTING',  credentialKey: 'oracle-password'  },
+  postgres: { type: 'database', value: 'cache_testing', baoPath: BAO_PATH.postgres },
+  mongodb:  { type: 'database', value: 'cache_testing', baoPath: BAO_PATH.mongodb  },
+  oracle:   { type: 'schema',   value: 'CACHE_TESTING', baoPath: BAO_PATH.oracle   },
 };
 
 app.get('/api/connectors/preflight/:source', async (req, res) => {
@@ -665,23 +706,23 @@ app.get('/api/connectors/preflight/:source', async (req, res) => {
   if (!req_) return res.status(400).json({ ok: false, error: `Unknown source: ${source}` });
 
   try {
-    // ── 1. Check debezium-credentials secret ──────────────────────────────
-    const secR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/debezium-credentials`);
-    if (!secR.ok) {
+    // ── 1. Check OpenBao has credentials for this source ──────────────────
+    let creds;
+    try {
+      creds = await baoRead(req_.baoPath);
+    } catch (e) {
       return res.status(422).json({
         ok: false,
-        error: `Secret "debezium-credentials" not found or inaccessible (HTTP ${secR.status}).`,
-        action: 'Create the Kubernetes secret "debezium-credentials" with the required DB passwords before creating a connector.',
+        error: `Cannot read credentials from OpenBao at "${req_.baoPath}": ${e.message}`,
+        action: `Ensure OpenBao is unsealed and the secret "${req_.baoPath}" exists with a non-empty "password" field.`,
       });
     }
-    const sec = await secR.json();
-    const decode = (k) => sec.data?.[k] ? Buffer.from(sec.data[k], 'base64').toString('utf8') : '';
-    const password = decode(req_.credentialKey);
+    const password = creds?.password ?? creds?.cdc_password ?? '';
     if (!password) {
       return res.status(422).json({
         ok: false,
-        error: `Credential key "${req_.credentialKey}" is missing or empty in the "debezium-credentials" secret.`,
-        action: `Add the key "${req_.credentialKey}" with the correct password to the "debezium-credentials" secret in namespace "${K8S_NAMESPACE}".`,
+        error: `OpenBao secret "${req_.baoPath}" exists but has no "password" field.`,
+        action: `Write the correct password into OpenBao at path "${req_.baoPath}" before creating this connector.`,
       });
     }
 
@@ -691,30 +732,26 @@ app.get('/api/connectors/preflight/:source', async (req, res) => {
       return res.status(422).json({
         ok: false,
         error: `Spark external catalog ConfigMap "spark-external-catalogs" not found (HTTP ${cmR.status}).`,
-        action: `Create the Spark external catalog for the ${source} source (${req_.type} "${req_.value}") first, then retry. The catalog must be registered in the ConfigMap "spark-external-catalogs" in namespace "${K8S_NAMESPACE}".`,
+        action: `Create the Spark external catalog for the ${source} source (${req_.type} "${req_.value}") first, then retry.`,
       });
     }
     const cm = await cmR.json();
     const catalogData = cm.data || {};
-
-    // The ConfigMap data is expected to have keys like "<source>.<type>" or free-form JSON entries.
-    // We accept a match if any value (or key) contains the required DB/schema name (case-insensitive).
     const required = req_.value.toLowerCase();
     const found = Object.entries(catalogData).find(([k, v]) => {
       const haystack = (k + ' ' + v).toLowerCase();
       return haystack.includes(required) && haystack.includes(source);
     });
-
     if (!found) {
       return res.status(422).json({
         ok: false,
         error: `No Spark external catalog found for source "${source}" with ${req_.type} "${req_.value}" in ConfigMap "spark-external-catalogs".`,
-        action: `Go to Spark and create an external catalog for the ${source} source pointing to ${req_.type} "${req_.value}". Ensure its credentials are stored in OpenBao and the catalog entry is registered in the "spark-external-catalogs" ConfigMap in namespace "${K8S_NAMESPACE}" before creating this connector.`,
+        action: `Go to Spark and create an external catalog for the ${source} source pointing to ${req_.type} "${req_.value}". Ensure its credentials are stored in OpenBao at "${req_.baoPath}" before creating this connector.`,
         catalogData,
       });
     }
 
-    res.json({ ok: true, catalog: found[0], credentialKey: req_.credentialKey });
+    res.json({ ok: true, catalog: found[0], baoPath: req_.baoPath });
 
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -724,23 +761,23 @@ app.get('/api/connectors/preflight/:source', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 //  NEW CONNECTOR TEMPLATE
 //  GET /api/connectors/template/:source
-//  Reads credentials from the debezium-credentials K8s secret and returns a
-//  fully-populated connector config template so the UI never shows blank
-//  passwords or wrong hostnames.
+//  Reads credentials directly from OpenBao — K8s secrets never used.
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/api/connectors/template/:source', async (req, res) => {
   const { source } = req.params;
   try {
-    // Read debezium-credentials secret
-    const secR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/debezium-credentials`);
-    if (!secR.ok) return res.status(502).json({ error: 'Could not read debezium-credentials secret' });
-    const sec = await secR.json();
-    const decode = (k) => sec.data?.[k] ? Buffer.from(sec.data[k], 'base64').toString('utf8') : '';
+    // Read all credentials from OpenBao
+    const [pg, ora, mg, kafka] = await Promise.all([
+      baoRead(BAO_PATH.postgres),
+      baoRead(BAO_PATH.oracle),
+      baoRead(BAO_PATH.mongodb),
+      baoRead(BAO_PATH.kafka),
+    ]);
 
-    const pgPassword  = decode('pg-password');
-    const oraPassword = decode('oracle-password');
-    const mgoPassword = decode('mongo-password');
-    const kafkaSaslJaas = decode('kafka-sasl-jaas-config');
+    const pgPassword    = pg.password;
+    const oraPassword   = ora.cdc_password ?? ora.password;
+    const mgoPassword   = mg.password;
+    const kafkaSaslJaas = `org.apache.kafka.common.security.scram.ScramLoginModule required username="${kafka.debezium_user}" password="${kafka.debezium_password}";`;
 
     // Common schema-history Kafka config for Oracle (needs SASL)
     const oraSchemaHistory = {
