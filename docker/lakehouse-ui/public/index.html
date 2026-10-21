@@ -584,7 +584,9 @@ async function renderDashboard() {
           return `
           <tr>
             <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
-            <td><code style="color:#4fc3f7;font-size:12px">${c.name}</code></td>
+            <td><code style="color:#4fc3f7;font-size:12px;cursor:pointer;text-decoration:underline dotted"
+                onclick="currentSource='${c.source}';navigate('connectors')"
+                title="View ${c.name} in Connectors">${c.name}</code></td>
             <td>${unstarted
               ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>PAUSED — NO TABLES</span>`
               : stateBadge(c.state)
@@ -602,7 +604,7 @@ async function renderDashboard() {
                        <hr class="act-sep"/>`
                     : ''
                   }
-                  <button class="act-item" onclick="closeActMenus();navigate('connectors');currentSource='${c.source}'">⚙ Config</button>
+                  <button class="act-item" onclick="closeActMenus();currentSource='${c.source}';navigate('connectors')">⚙ Config</button>
                   ${isPaused && !unstarted
                     ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start</button>`
                     : ''
