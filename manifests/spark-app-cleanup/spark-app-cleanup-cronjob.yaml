@@ -1,34 +1,26 @@
 ---
 # =============================================================================
-# Spark Orphan App Cleanup — RBAC + manual tool
+# Spark Orphan App Cleanup — RBAC
 # =============================================================================
 #
-# The periodic CronJob has been REPLACED by the spark-guardian sidecar
-# running continuously inside the spark-master pod (see manifests/spark/spark.yaml).
+# spark-guardian sidecar (spark-master pod) handles all cleanup dynamically —
+# polls localhost:8080/json/ every 15s, evicts stalled apps, and autoscales
+# the spark-worker Deployment up/down via the K8s API.
 #
-# spark-guardian polls localhost:8080/json/ every 15 seconds and evicts stalled
-# apps within one poll cycle — replacing the previous 10-minute CronJob lag.
+# Two ServiceAccounts:
+#   spark-cleanup   — kept for the manual ad-hoc kill tool (kubectl exec)
+#   spark-guardian  — used by the spark-master pod; needs deployment scale RBAC
 #
-# This file retains only the ServiceAccount / Role / RoleBinding needed for
-# the kubectl exec manual kill command below.  The CronJob resource itself has
-# been removed.
-#
-# Manual one-shot kill (ad-hoc, from any node with cluster access)
+# Manual one-shot kill (ad-hoc)
 # ----------------------------------------------------------------
 #   SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
 #     --no-headers -o custom-columns=NAME:.metadata.name | head -1)
 #   kubectl exec -n prod $SPARK_POD -c spark-master -- \
 #     /usr/local/bin/spark-app-cleanup
 #
-# Tune guardian thresholds
-# ------------------------
-#   Edit the env vars on the spark-guardian container in manifests/spark/spark.yaml:
-#     ORPHAN_RUNNING_S   Rule A/B — dead-driver / no-executor timeout (default 120 s)
-#     ORPHAN_WAITING_S   Rule C   — resource-starvation timeout       (default 120 s)
-#     IDLE_SINCE_S       Rule D   — idle-session timeout               (default 1800 s)
-#     POLL_INTERVAL_S              poll cadence                        (default 15 s)
-#
 # =============================================================================
+
+# ── spark-cleanup: manual ad-hoc kill tool ───────────────────────────────────
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -61,6 +53,36 @@ roleRef:
   kind: Role
   name: spark-cleanup
   apiGroup: rbac.authorization.k8s.io
+
+# ── spark-guardian: used by spark-master pod ─────────────────────────────────
+# Needs to GET and PATCH the spark-worker Deployment replicas for autoscaling.
 ---
-# CronJob removed — spark-guardian sidecar handles cleanup dynamically.
-# See manifests/spark/spark.yaml → containers[spark-guardian].
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-guardian
+  namespace: prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-guardian
+  namespace: prod
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-guardian
+  namespace: prod
+subjects:
+  - kind: ServiceAccount
+    name: spark-guardian
+    namespace: prod
+roleRef:
+  kind: Role
+  name: spark-guardian
+  apiGroup: rbac.authorization.k8s.io
