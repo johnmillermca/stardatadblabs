@@ -578,39 +578,13 @@ async function renderDashboard() {
       </tr></thead>
       <tbody>
         ${connSummary.map(c => {
-          const isRunning  = c.state === 'RUNNING';
-          const isPaused   = c.state === 'PAUSED';
-          const unstarted  = c.unstarted;
+          const unstarted = c.unstarted;
           return `
           <tr>
             <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
-            <td>
-              <div class="act-wrap" id="act-dash-${c.source}-${c.name}">
-                <code style="color:#4fc3f7;font-size:12px;cursor:pointer;text-decoration:underline dotted"
-                      onclick="toggleActMenu('act-dash-${c.source}-${c.name}')"
-                      title="Click for actions">${c.name}</code>
-                <div class="act-menu">
-                  ${unstarted
-                    ? `<button class="act-item" style="color:#56d364;font-weight:600"
-                         onclick="closeActMenus();showAssignTablesModal('${c.source}','${c.name}')">
-                         ▶ Assign Tables &amp; Start</button>
-                       <hr class="act-sep"/>`
-                    : ''
-                  }
-                  <button class="act-item" onclick="closeActMenus();currentSource='${c.source}';navigate('connectors')">⚙ Config</button>
-                  ${isPaused && !unstarted
-                    ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start</button>`
-                    : ''
-                  }
-                  ${isRunning
-                    ? `<button class="act-item" onclick="closeActMenus();pauseConnector('${c.source}','${c.name}')">⏹ Stop</button>`
-                    : ''
-                  }
-                  <hr class="act-sep"/>
-                  <button class="act-item danger" onclick="closeActMenus();deleteConnector('${c.source}','${c.name}')">🗑 Delete</button>
-                </div>
-              </div>
-            </td>
+            <td><code style="color:#4fc3f7;font-size:12px;cursor:pointer;text-decoration:underline dotted"
+                      onclick="currentSource='${c.source}';navigate('connectors')"
+                      title="Go to ${SOURCE_LABELS[c.source]} connectors">${c.name}</code></td>
             <td>${unstarted
               ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>PAUSED — NO TABLES</span>`
               : stateBadge(c.state)
