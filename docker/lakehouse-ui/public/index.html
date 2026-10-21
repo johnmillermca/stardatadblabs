@@ -574,7 +574,7 @@ async function renderDashboard() {
     </div>
     <table class="data-table">
       <thead><tr>
-        <th>Source</th><th>Connector Name</th><th>Status</th><th>Actions</th>
+        <th>Source</th><th>Connector Name</th><th>Status</th>
       </tr></thead>
       <tbody>
         ${connSummary.map(c => {
@@ -584,18 +584,11 @@ async function renderDashboard() {
           return `
           <tr>
             <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
-            <td><code style="color:#4fc3f7;font-size:12px;cursor:pointer;text-decoration:underline dotted"
-                onclick="currentSource='${c.source}';navigate('connectors')"
-                title="View ${c.name} in Connectors">${c.name}</code></td>
-            <td>${unstarted
-              ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>PAUSED — NO TABLES</span>`
-              : stateBadge(c.state)
-            }</td>
             <td>
               <div class="act-wrap" id="act-dash-${c.source}-${c.name}">
-                <button class="act-trigger" onclick="toggleActMenu('act-dash-${c.source}-${c.name}')">
-                  Actions <span class="caret">▾</span>
-                </button>
+                <code style="color:#4fc3f7;font-size:12px;cursor:pointer;text-decoration:underline dotted"
+                      onclick="toggleActMenu('act-dash-${c.source}-${c.name}')"
+                      title="Click for actions">${c.name}</code>
                 <div class="act-menu">
                   ${unstarted
                     ? `<button class="act-item" style="color:#56d364;font-weight:600"
@@ -618,6 +611,10 @@ async function renderDashboard() {
                 </div>
               </div>
             </td>
+            <td>${unstarted
+              ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>PAUSED — NO TABLES</span>`
+              : stateBadge(c.state)
+            }</td>
           </tr>`;
         }).join('')}
       </tbody>
@@ -706,11 +703,17 @@ async function loadConnectorList(src) {
     const hasTables = !!(info?.info?.config?.['table.include.list'] || info?.info?.config?.['collection.include.list']);
     const unstarted = paused && !hasTables;
     return `<tr>
+      <td><code style="color:#4fc3f7;font-size:12px">${name}</code></td>
+      <td>${stateBadge(state)}</td>
+      <td>${unstarted
+        ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>NO TABLES</span>`
+        : `${stateBadge(taskState)} <span style="color:#586374;font-size:11px">(${tasks} task)</span>`
+      }</td>
       <td>
         <div class="act-wrap" id="act-conn-${src}-${name}">
-          <code style="color:#4fc3f7;font-size:12px;cursor:pointer;text-decoration:underline dotted"
-                onclick="toggleActMenu('act-conn-${src}-${name}')"
-                title="Click for actions">${name}</code>
+          <button class="act-trigger" onclick="toggleActMenu('act-conn-${src}-${name}')">
+            Actions <span class="caret">▾</span>
+          </button>
           <div class="act-menu">
             ${unstarted
               ? `<button class="act-item" style="color:#56d364;font-weight:600"
@@ -733,11 +736,6 @@ async function loadConnectorList(src) {
           </div>
         </div>
       </td>
-      <td>${stateBadge(state)}</td>
-      <td>${unstarted
-        ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>NO TABLES</span>`
-        : `${stateBadge(taskState)} <span style="color:#586374;font-size:11px">(${tasks} task)</span>`
-      }</td>
     </tr>`;
   }).join('');
 
@@ -751,7 +749,7 @@ async function loadConnectorList(src) {
       </div>
     </div>
     <table class="data-table">
-      <thead><tr><th>Name</th><th>Connector State</th><th>Task State</th></tr></thead>
+      <thead><tr><th>Name</th><th>Connector State</th><th>Task State</th><th>Actions</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </div>`;
