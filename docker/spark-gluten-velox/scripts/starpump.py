@@ -954,6 +954,11 @@ def _db_list_tables(spark: SparkSession, opts: dict) -> list[str]:
     # Fix: build a URLClassLoader pointing at the JAR, load the Driver class,
     # instantiate it directly, and call Driver.connect() — bypassing
     # DriverManager entirely so classloader isolation does not matter.
+    if not _DATABRICKS_JDBC_JAR:
+        raise FileNotFoundError(
+            "databricks-jdbc-*.jar not found in the Spark JARs directory — "
+            "ensure the JAR is baked into the image."
+        )
     _jar_url_arr = gw.new_array(jvm.java.net.URL, 1)
     _jar_url_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
     _ucl = jvm.java.net.URLClassLoader(_jar_url_arr, jvm.ClassLoader.getSystemClassLoader())
@@ -1076,6 +1081,11 @@ def _db_read_batch(
         if k not in ("url", "driver"):
             props.setProperty(k, str(v))
 
+    if not _DATABRICKS_JDBC_JAR:
+        raise FileNotFoundError(
+            "databricks-jdbc-*.jar not found in the Spark JARs directory — "
+            "ensure the JAR is baked into the image."
+        )
     _jar_url_arr = gw.new_array(jvm.java.net.URL, 1)
     _jar_url_arr[0] = jvm.java.net.URL("file://" + _DATABRICKS_JDBC_JAR)
     _ucl = jvm.java.net.URLClassLoader(_jar_url_arr, jvm.ClassLoader.getSystemClassLoader())

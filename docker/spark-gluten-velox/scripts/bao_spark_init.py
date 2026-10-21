@@ -113,6 +113,12 @@ def _optional_jar(glob_pattern: str) -> str | None:
     except FileNotFoundError:
         return None
 
+# Module-level JAR path constants — used by starpump.py and other callers that
+# need a direct filesystem path to a specific JAR (e.g. to build a URLClassLoader).
+# Each uses _optional_jar() so a missing JAR resolves to None rather than raising
+# at import time.  Callers should guard: if _DATABRICKS_JDBC_JAR is None: ...
+_DATABRICKS_JDBC_JAR: str | None = _optional_jar("databricks-jdbc-*.jar")
+
 # Spark master — env var first, then read from spark-defaults.conf if present,
 # then fall back to in-cluster DNS using the resolved namespace.
 def _resolve_spark_master() -> str:
