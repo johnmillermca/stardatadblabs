@@ -247,13 +247,15 @@ app.post('/api/connectors/:source', async (req, res) => {
           });
         }
         // DBA_USERS is a single-row lookup — far faster than ALL_TABLES join.
-        // No -i flag so stdin closes immediately and sqlplus exits cleanly.
+        // SQL passed via stdin (input:) — no shell quoting issues.
         const inList = schemaList.map(s => `'${s}'`).join(',');
         const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'bash', '-c',
-          `printf 'SET HEADING OFF\nSET FEEDBACK OFF\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME IN (${inList});\nEXIT;\n' | sqlplus -S / as sysdba`,
-        ], { timeout: 10000 });
+          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
+          'sqlplus', '-S', '/', 'as', 'sysdba',
+        ], {
+          timeout: 10000,
+          input: `SET HEADING OFF\nSET FEEDBACK OFF\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME IN (${inList});\nEXIT;\n`,
+        });
         const foundSchemas = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !/^(SQL|ERROR|Connected|Oracle|Copyright)/.test(l));
         const invalid = schemaList.filter(s => !foundSchemas.includes(s));
         if (invalid.length) {
@@ -439,12 +441,14 @@ app.get('/api/schemas/:source', async (req, res) => {
       }
       // DBA_USERS is a single dictionary lookup — faster than ALL_TABLES join.
       // oracle_maintained='N' is cleaner than a manual exclusion list and works on all XE versions.
-      // printf emits real newlines; no -i so stdin closes and sqlplus exits cleanly.
+      // SQL is passed via stdin (input:) — no shell quoting issues with single quotes in the SQL.
       const { stdout } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'bash', '-c',
-        `printf 'SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED=\\'N\\' ORDER BY USERNAME;\nEXIT;\n' | sqlplus -S / as sysdba`,
-      ], { timeout: 10000 });
+        'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
+        'sqlplus', '-S', '/', 'as', 'sysdba',
+      ], {
+        timeout: 10000,
+        input: 'SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED=\'N\' ORDER BY USERNAME;\nEXIT;\n',
+      });
       const schemas = stdout.trim().split('\n')
         .map(l => l.trim())
         .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
@@ -556,12 +560,12 @@ app.post('/api/schema/:source', async (req, res) => {
         return res.status(503).json({ error: 'Oracle database is still starting up. Wait 1–2 minutes and retry.' });
       }
 
-      // printf emits real newlines; no -i so stdin closes and sqlplus exits cleanly.
+      // SQL is passed via stdin (input:) — no shell quoting issues regardless of SQL content.
       const runSqlplus = async (sql) => {
         const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-n', K8S_NAMESPACE, pod, '--',
-          'bash', '-c', `printf '%s\n' ${sql.split('\n').map(l => `'${l}'`).join(' ')} | sqlplus -S / as sysdba`,
-        ], { timeout: 10000 });
+          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
+          'sqlplus', '-S', '/', 'as', 'sysdba',
+        ], { timeout: 10000, input: sql + '\nEXIT;\n' });
         return stdout.trim().split('\n')
           .map(l => l.trim())
           .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING|$)/.test(l));
