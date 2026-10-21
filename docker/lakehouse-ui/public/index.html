@@ -1329,14 +1329,15 @@ const TEMPLATES = {
     "database.port": "5432",
     "database.user": "debezium",
     "database.password": "",
-    "database.dbname": "mydb",
-    "database.server.name": "postgres",
-    "schema.include.list": "public",
-    "table.include.list": "public.customers,public.orders",
+    "database.dbname": "cache_testing",
     "plugin.name": "pgoutput",
-    "slot.name": "debezium_slot",
-    "publication.name": "debezium_pub",
-    "snapshot.mode": "initial",
+    "schema.include.list": "public",
+    "table.include.list": "public.customers,public.orders,public.products",
+    "slot.name": "debezium_cache_testing",
+    "publication.name": "debezium_pub_cache_testing",
+    "snapshot.mode": "no_data",
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "connect",
     "tombstones.on.delete": "false",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "key.converter.schemas.enable": "false",
@@ -1353,8 +1354,8 @@ const TEMPLATES = {
     "database.password": "",
     "database.dbname": "XE",
     "database.pdb.name": "XEPDB1",
-    "schema.include.list": "MYSCHEMA",
-    "table.include.list": "MYSCHEMA.CUSTOMERS",
+    "schema.include.list": "CACHE_TESTING",
+    "table.include.list": "CACHE_TESTING.CUSTOMERS,CACHE_TESTING.ORDERS,CACHE_TESTING.PRODUCTS",
     "snapshot.mode": "schema_only",
     "log.mining.strategy": "online_catalog",
     "decimal.handling.mode": "double",
@@ -1365,16 +1366,16 @@ const TEMPLATES = {
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",
     "schema.history.internal.kafka.bootstrap.servers": "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092",
-    "schema.history.internal.kafka.topic": "schema-changes.oracle"
+    "schema.history.internal.kafka.topic": "schema-history.oracle"
   },
   mongodb: {
     "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
     "tasks.max": "1",
     "topic.prefix": "mongodb",
-    "mongodb.connection.string": "mongodb://root:password@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0",
-    "database.include.list": "mydb",
-    "collection.include.list": "mydb.customers,mydb.orders",
-    "snapshot.mode": "never",
+    "mongodb.connection.string": "mongodb://debezium:@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0",
+    "database.include.list": "cache_testing",
+    "collection.include.list": "cache_testing.customers,cache_testing.orders,cache_testing.products",
+    "snapshot.mode": "no_data",
     "decimal.handling.mode": "double",
     "tombstones.on.delete": "false",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -1391,6 +1392,9 @@ function renderConnectorNew() {
     <div class="card-header">
       <div class="card-title">➕ New Connector</div>
     </div>
+
+    <div id="new-connector-check" style="margin-bottom:14px"></div>
+
     <div class="form-row">
       <div class="form-label">Source Type</div>
       <select class="form-select" id="new-src" onchange="loadTemplate()">
@@ -1399,7 +1403,7 @@ function renderConnectorNew() {
     </div>
     <div class="form-row">
       <div class="form-label">Connector Name</div>
-      <input class="form-input" id="new-name" placeholder="e.g. my-oracle-cdc"/>
+      <input class="form-input" id="new-name" placeholder="e.g. postgres-cdc"/>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px">
@@ -1423,14 +1427,86 @@ function renderConnectorNew() {
   loadTemplate();
 }
 
-function loadTemplate() {
+// Tracks whether the last preflight passed — used by createConnectorFromPage()
+let _preflightOk = false;
+
+async function loadTemplate() {
   const src = document.getElementById('new-src').value;
-  const tmpl = TEMPLATES[src] || {};
-  // fill kv editor
-  const ed = document.getElementById('kv-editor-new');
+  const nameEl   = document.getElementById('new-name');
+  const checkEl  = document.getElementById('new-connector-check');
+  const ed       = document.getElementById('kv-editor-new');
+  const jsonEl   = document.getElementById('new-json');
+  const createBtn = document.querySelector('button[onclick="createConnectorFromPage()"]');
+
+  // Reset preflight gate
+  _preflightOk = false;
+  if (createBtn) { createBtn.disabled = true; createBtn.style.opacity = '0.45'; createBtn.title = 'Preflight check pending…'; }
+
+  // Default connector name
+  const defaultNames = { postgres: 'postgres-cdc', oracle: 'oracle-cdc', mongodb: 'mongodb-cdc' };
+  if (!nameEl.value) nameEl.value = defaultNames[src] || `${src}-cdc`;
+
+  // Show loading state
+  checkEl.innerHTML = `<div style="font-size:12px;color:#d29922;padding:8px 12px;background:#1a1500;border-radius:6px;border:1px solid #4a3800">
+    ⏳ Checking Spark external catalog and credentials for ${SOURCE_LABELS[src]}…</div>`;
+  ed.innerHTML = `<div style="color:#586374;font-size:12px;padding:8px">Loading…</div>`;
+
+  // Run preflight, template fetch and existing-connector check in parallel
+  const [preflightR, tmplR, existingR] = await Promise.all([
+    apiGet(`/api/connectors/preflight/${src}`),
+    apiGet(`/api/connectors/template/${src}`),
+    apiGet(`/api/connectors/${src}`)
+  ]);
+
+  // ── Preflight result (hard gate) ──────────────────────────────────────────
+  if (!preflightR.ok || preflightR.data?.ok === false) {
+    const pfErr  = preflightR.data?.error  || 'Preflight check failed.';
+    const pfAct  = preflightR.data?.action || '';
+    checkEl.innerHTML = `
+      <div style="font-size:12px;padding:12px 14px;background:#2a0f0f;border-radius:6px;border:1px solid #6a2020;color:#f85149;margin-bottom:6px">
+        <div style="font-weight:700;margin-bottom:6px">🚫 Cannot create connector — pre-requisite missing</div>
+        <div style="margin-bottom:6px">${escHtml(pfErr)}</div>
+        ${pfAct ? `<div style="color:#d29922;font-size:11px;border-top:1px solid #4a2020;padding-top:6px;margin-top:4px">
+          <b>Action required:</b> ${escHtml(pfAct)}</div>` : ''}
+      </div>`;
+    // Keep the KV editor empty / disabled so the user can see the error clearly
+    ed.innerHTML = `<div style="color:#586374;font-size:12px;padding:8px">Resolve the pre-requisite above before configuring the connector.</div>`;
+    jsonEl.value = '';
+    // Leave Create button disabled
+    return;
+  }
+
+  // Preflight passed — enable Create button
+  _preflightOk = true;
+  if (createBtn) { createBtn.disabled = false; createBtn.style.opacity = ''; createBtn.title = ''; }
+
+  // ── Existing-connector info banner ────────────────────────────────────────
+  const existing = existingR.ok ? Object.keys(existingR.data).filter(k => {
+    const info = existingR.data[k];
+    return info && typeof info === 'object' && 'status' in info;
+  }) : [];
+
+  if (existing.length > 0) {
+    checkEl.innerHTML = `<div style="font-size:12px;padding:10px 14px;background:#0f2a1a;border-radius:6px;border:1px solid #1a4429;color:#56d364">
+      ✓ <b>Existing connector(s) found:</b> ${existing.map(n=>`<code style="color:#4fc3f7">${n}</code>`).join(', ')}
+      — Creating a new connector will add alongside these. Use <b>Edit Config</b> on the existing connector to modify it.
+    </div>`;
+  } else {
+    checkEl.innerHTML = `<div style="font-size:12px;padding:10px 14px;background:#0d2a10;border-radius:6px;border:1px solid #1a4a20;color:#56d364">
+      ✅ <b>Pre-requisites met</b> — Spark external catalog <code style="color:#4fc3f7">${escHtml(preflightR.data.catalog)}</code>
+      found and credentials are present in OpenBao / debezium-credentials secret.
+    </div>`;
+  }
+
+  // ── Template fetch warning (non-blocking) ─────────────────────────────────
+  if (!tmplR.ok) {
+    checkEl.innerHTML += `<div style="font-size:12px;color:#d29922;margin-top:6px;padding:8px 12px;background:#1a1500;border-radius:6px;border:1px solid #4a3800">
+      ⚠ Could not load server template: ${escHtml((tmplR.data?.error||'unknown').slice(0,120))}. Using built-in fallback template — verify the values below before creating.</div>`;
+  }
+
+  const tmpl = tmplR.ok ? tmplR.data.template : (TEMPLATES[src] || {});
   ed.innerHTML = Object.entries(tmpl).map(([k,v])=>kvRowNew(k,v)).join('');
-  // fill json
-  document.getElementById('new-json').value = JSON.stringify(tmpl, null, 2);
+  jsonEl.value = JSON.stringify(tmpl, null, 2);
 }
 function kvRowNew(k='',v='') {
   return `<div class="kv-row">
@@ -1456,6 +1532,12 @@ async function createConnectorFromPage() {
   const name = document.getElementById('new-name').value.trim();
   if (!name) return toast('Connector name required', 'error');
 
+  // Hard gate: preflight must have passed for this source
+  if (!_preflightOk) {
+    toast('Cannot create connector — Spark external catalog or credentials are missing. See the error banner above.', 'error');
+    return;
+  }
+
   // prefer JSON editor if it differs from template
   let cfg;
   const jsonRaw = document.getElementById('new-json').value.trim();
@@ -1469,6 +1551,15 @@ async function createConnectorFromPage() {
     });
   }
 
+  // Sanity: never send an empty password — the preflight ensures credentials exist
+  // but warn the user if somehow the field is still blank
+  const pwKey = src === 'postgres' ? 'database.password'
+              : src === 'oracle'   ? 'database.password'
+              : null; // mongodb uses connection string
+  if (pwKey && !cfg[pwKey]) {
+    toast(`Warning: "${pwKey}" is empty — the connector may fail to authenticate. Check the template values.`, 'warn');
+  }
+
   const body = { name, config: cfg };
   const r = await apiPost(`/api/connectors/${src}`, body);
   if (r.ok) {
@@ -1476,7 +1567,8 @@ async function createConnectorFromPage() {
     currentSource = src;
     navigate('connectors');
   } else {
-    toast(`Error: ${JSON.stringify(r.data).slice(0,200)}`, 'error');
+    const detail = r.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 200);
+    toast(`Error creating connector: ${detail}`, 'error');
   }
 }
 

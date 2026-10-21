@@ -9,7 +9,17 @@ const http    = require('http');
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files with no-cache so browsers always pick up re-deployed HTML/JS
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+    }
+  },
+}));
 
 // ─── Environment / config ──────────────────────────────────────────────────
 const DEBEZIUM_ENDPOINTS = {
@@ -592,6 +602,194 @@ app.post('/api/kafka/query', async (req, res) => {
     });
     res.json({ messages });
   } catch (e) { res.status(500).json({ error: e.message, messages: [] }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONNECTOR PRE-FLIGHT CHECK
+//  GET /api/connectors/preflight/:source
+//  Verifies:
+//    1. debezium-credentials secret has a non-empty password for the source
+//    2. spark-external-catalogs ConfigMap has an entry whose database/schema
+//       matches the required replication DB for this source:
+//         postgres  → database "cache_testing"
+//         mongodb   → database "cache_testing"
+//         oracle    → schema   "cache_testing" (stored as "CACHE_TESTING")
+//  Returns { ok: true, catalog, credentialKey } on success,
+//  or { ok: false, error, action } with HTTP 422 on failure.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Expected DB / schema per source (must match the Spark external catalog entry)
+const PREFLIGHT_REQUIREMENTS = {
+  postgres: { type: 'database', value: 'cache_testing',  credentialKey: 'pg-password'     },
+  mongodb:  { type: 'database', value: 'cache_testing',  credentialKey: 'mongo-password'   },
+  oracle:   { type: 'schema',   value: 'CACHE_TESTING',  credentialKey: 'oracle-password'  },
+};
+
+app.get('/api/connectors/preflight/:source', async (req, res) => {
+  const { source } = req.params;
+  const req_ = PREFLIGHT_REQUIREMENTS[source];
+  if (!req_) return res.status(400).json({ ok: false, error: `Unknown source: ${source}` });
+
+  try {
+    // ── 1. Check debezium-credentials secret ──────────────────────────────
+    const secR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/debezium-credentials`);
+    if (!secR.ok) {
+      return res.status(422).json({
+        ok: false,
+        error: `Secret "debezium-credentials" not found or inaccessible (HTTP ${secR.status}).`,
+        action: 'Create the Kubernetes secret "debezium-credentials" with the required DB passwords before creating a connector.',
+      });
+    }
+    const sec = await secR.json();
+    const decode = (k) => sec.data?.[k] ? Buffer.from(sec.data[k], 'base64').toString('utf8') : '';
+    const password = decode(req_.credentialKey);
+    if (!password) {
+      return res.status(422).json({
+        ok: false,
+        error: `Credential key "${req_.credentialKey}" is missing or empty in the "debezium-credentials" secret.`,
+        action: `Add the key "${req_.credentialKey}" with the correct password to the "debezium-credentials" secret in namespace "${K8S_NAMESPACE}".`,
+      });
+    }
+
+    // ── 2. Check spark-external-catalogs ConfigMap ────────────────────────
+    const cmR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/configmaps/spark-external-catalogs`);
+    if (!cmR.ok) {
+      return res.status(422).json({
+        ok: false,
+        error: `Spark external catalog ConfigMap "spark-external-catalogs" not found (HTTP ${cmR.status}).`,
+        action: `Create the Spark external catalog for the ${source} source (${req_.type} "${req_.value}") first, then retry. The catalog must be registered in the ConfigMap "spark-external-catalogs" in namespace "${K8S_NAMESPACE}".`,
+      });
+    }
+    const cm = await cmR.json();
+    const catalogData = cm.data || {};
+
+    // The ConfigMap data is expected to have keys like "<source>.<type>" or free-form JSON entries.
+    // We accept a match if any value (or key) contains the required DB/schema name (case-insensitive).
+    const required = req_.value.toLowerCase();
+    const found = Object.entries(catalogData).find(([k, v]) => {
+      const haystack = (k + ' ' + v).toLowerCase();
+      return haystack.includes(required) && haystack.includes(source);
+    });
+
+    if (!found) {
+      return res.status(422).json({
+        ok: false,
+        error: `No Spark external catalog found for source "${source}" with ${req_.type} "${req_.value}" in ConfigMap "spark-external-catalogs".`,
+        action: `Go to Spark and create an external catalog for the ${source} source pointing to ${req_.type} "${req_.value}". Ensure its credentials are stored in OpenBao and the catalog entry is registered in the "spark-external-catalogs" ConfigMap in namespace "${K8S_NAMESPACE}" before creating this connector.`,
+        catalogData,
+      });
+    }
+
+    res.json({ ok: true, catalog: found[0], credentialKey: req_.credentialKey });
+
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  NEW CONNECTOR TEMPLATE
+//  GET /api/connectors/template/:source
+//  Reads credentials from the debezium-credentials K8s secret and returns a
+//  fully-populated connector config template so the UI never shows blank
+//  passwords or wrong hostnames.
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/connectors/template/:source', async (req, res) => {
+  const { source } = req.params;
+  try {
+    // Read debezium-credentials secret
+    const secR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/debezium-credentials`);
+    if (!secR.ok) return res.status(502).json({ error: 'Could not read debezium-credentials secret' });
+    const sec = await secR.json();
+    const decode = (k) => sec.data?.[k] ? Buffer.from(sec.data[k], 'base64').toString('utf8') : '';
+
+    const pgPassword  = decode('pg-password');
+    const oraPassword = decode('oracle-password');
+    const mgoPassword = decode('mongo-password');
+    const kafkaSaslJaas = decode('kafka-sasl-jaas-config');
+
+    // Common schema-history Kafka config for Oracle (needs SASL)
+    const oraSchemaHistory = {
+      'schema.history.internal.kafka.bootstrap.servers': KAFKA_BOOTSTRAP,
+      'schema.history.internal.kafka.topic': 'schema-history.oracle',
+      'schema.history.internal.producer.security.protocol': 'SASL_PLAINTEXT',
+      'schema.history.internal.producer.sasl.mechanism': 'SCRAM-SHA-512',
+      'schema.history.internal.producer.sasl.jaas.config': kafkaSaslJaas,
+      'schema.history.internal.consumer.security.protocol': 'SASL_PLAINTEXT',
+      'schema.history.internal.consumer.sasl.mechanism': 'SCRAM-SHA-512',
+      'schema.history.internal.consumer.sasl.jaas.config': kafkaSaslJaas,
+    };
+
+    const templates = {
+      postgres: {
+        'connector.class':             'io.debezium.connector.postgresql.PostgresConnector',
+        'tasks.max':                   '1',
+        'topic.prefix':                'postgres',
+        'database.hostname':           'postgresql.prod.svc.cluster.local',
+        'database.port':               '5432',
+        'database.user':               'debezium',
+        'database.password':           pgPassword,
+        'database.dbname':             'cache_testing',
+        'slot.name':                   'debezium_cache_testing',
+        'publication.name':            'debezium_pub_cache_testing',
+        'plugin.name':                 'pgoutput',
+        'schema.include.list':         'public',
+        'table.include.list':          'public.customers,public.orders,public.products',
+        'snapshot.mode':               'no_data',
+        'decimal.handling.mode':       'double',
+        'time.precision.mode':         'connect',
+        'tombstones.on.delete':        'false',
+        'key.converter':               'org.apache.kafka.connect.json.JsonConverter',
+        'key.converter.schemas.enable':'false',
+        'value.converter':             'org.apache.kafka.connect.json.JsonConverter',
+        'value.converter.schemas.enable':'false',
+      },
+      oracle: {
+        'connector.class':             'io.debezium.connector.oracle.OracleConnector',
+        'tasks.max':                   '1',
+        'topic.prefix':                'oracle',
+        'database.hostname':           'oracle-xe.prod.svc.cluster.local',
+        'database.port':               '1521',
+        'database.user':               'c##dbzcdc',
+        'database.password':           oraPassword,
+        'database.dbname':             'XE',
+        'database.pdb.name':           'XEPDB1',
+        'schema.include.list':         'CACHE_TESTING',
+        'table.include.list':          'CACHE_TESTING.CUSTOMERS,CACHE_TESTING.ORDERS,CACHE_TESTING.PRODUCTS',
+        'snapshot.mode':               'schema_only',
+        'log.mining.strategy':         'online_catalog',
+        'decimal.handling.mode':       'double',
+        'time.precision.mode':         'connect',
+        'tombstones.on.delete':        'false',
+        'key.converter':               'org.apache.kafka.connect.json.JsonConverter',
+        'key.converter.schemas.enable':'false',
+        'value.converter':             'org.apache.kafka.connect.json.JsonConverter',
+        'value.converter.schemas.enable':'false',
+        ...oraSchemaHistory,
+      },
+      mongodb: {
+        'connector.class':             'io.debezium.connector.mongodb.MongoDbConnector',
+        'tasks.max':                   '1',
+        'topic.prefix':                'mongodb',
+        'mongodb.connection.string':   `mongodb://debezium:${mgoPassword}@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0`,
+        'database.include.list':       'cache_testing',
+        'collection.include.list':     'cache_testing.customers,cache_testing.orders,cache_testing.products',
+        'snapshot.mode':               'no_data',
+        'decimal.handling.mode':       'double',
+        'tombstones.on.delete':        'false',
+        'key.converter':               'org.apache.kafka.connect.json.JsonConverter',
+        'key.converter.schemas.enable':'false',
+        'value.converter':             'org.apache.kafka.connect.json.JsonConverter',
+        'value.converter.schemas.enable':'false',
+      },
+    };
+
+    const tmpl = templates[source];
+    if (!tmpl) return res.status(400).json({ error: `Unknown source: ${source}` });
+    res.json({ template: tmpl });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
