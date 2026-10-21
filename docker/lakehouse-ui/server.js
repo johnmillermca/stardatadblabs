@@ -438,12 +438,12 @@ app.get('/api/schemas/:source', async (req, res) => {
         return res.status(503).json({ error: 'Oracle database is still starting up. Wait 1–2 minutes and retry.' });
       }
       // DBA_USERS is a single dictionary lookup — faster than ALL_TABLES join.
+      // oracle_maintained='N' is cleaner than a manual exclusion list and works on all XE versions.
       // printf emits real newlines; no -i so stdin closes and sqlplus exits cleanly.
-      const systemSchemas = `'SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','DBSFWUSER','GGSYS','ANONYMOUS','CTXSYS','DVSYS','DVF','GSMADMIN_INTERNAL','MDSYS','OLAPSYS','XDB','WMSYS','OJVMSYS','ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','ORDDATA'`;
       const { stdout } = await execFileAsync('kubectl', [
         'exec', '-n', K8S_NAMESPACE, pod, '--',
         'bash', '-c',
-        `printf 'SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME NOT IN (${systemSchemas}) ORDER BY USERNAME;\nEXIT;\n' | sqlplus -S / as sysdba`,
+        `printf 'SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED=\\'N\\' ORDER BY USERNAME;\nEXIT;\n' | sqlplus -S / as sysdba`,
       ], { timeout: 10000 });
       const schemas = stdout.trim().split('\n')
         .map(l => l.trim())
@@ -567,10 +567,10 @@ app.post('/api/schema/:source', async (req, res) => {
           .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING|$)/.test(l));
       };
 
-      // 1. List schemas from DBA_USERS — single dictionary lookup, much faster than ALL_TABLES join.
-      const systemSchemas = `'SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','DBSFWUSER','GGSYS','ANONYMOUS','CTXSYS','DVSYS','DVF','GSMADMIN_INTERNAL','MDSYS','OLAPSYS','XDB','WMSYS','OJVMSYS','ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','ORDDATA'`;
+      // 1. List schemas from DBA_USERS — oracle_maintained='N' filters all system accounts
+      //    without a fragile manual exclusion list (works on all Oracle XE versions).
       const schemas = await runSqlplus(
-        `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME NOT IN (${systemSchemas}) ORDER BY USERNAME;\nEXIT;`
+        `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED='N' ORDER BY USERNAME;\nEXIT;`
       );
 
       // 2. For each schema list tables (ALL_TABLES filtered by owner — still needed here)
