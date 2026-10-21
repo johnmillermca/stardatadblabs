@@ -108,11 +108,43 @@ app.get('/api/connectors/:source/:name/status', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Create or update connector
+// ── Helper: inject real credentials from debezium-credentials secret ─────────
+// Ensures the password and (for MongoDB) the connection string always carry the
+// live credential from the K8s secret, regardless of what the browser sends.
+// Called by both POST (create) and PUT (update) connector endpoints.
+async function injectCredentials(source, cfg) {
+  try {
+    const secR = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/debezium-credentials`);
+    if (!secR.ok) return cfg; // secret unreadable — pass through and let Debezium report
+    const sec  = await secR.json();
+    const decode = (k) => sec.data?.[k] ? Buffer.from(sec.data[k], 'base64').toString('utf8') : '';
+
+    const patched = { ...cfg };
+    if (source === 'postgres') {
+      patched['database.password'] = decode('pg-password');
+    } else if (source === 'oracle') {
+      patched['database.password'] = decode('oracle-password');
+    } else if (source === 'mongodb') {
+      const mgoPass = decode('mongo-password');
+      // Rebuild the connection string with the live password so it is never blank
+      const existing = patched['mongodb.connection.string'] || '';
+      // Replace password segment: mongodb://user:ANY_PASSWORD@host  →  correct password
+      patched['mongodb.connection.string'] = existing
+        ? existing.replace(/^(mongodb:\/\/[^:]+:)[^@]*(@)/, `$1${encodeURIComponent(mgoPass)}$2`)
+        : `mongodb://debezium:${encodeURIComponent(mgoPass)}@mongodb.prod.svc.cluster.local:27017/?authSource=admin&replicaSet=rs0`;
+    }
+    return patched;
+  } catch {
+    return cfg; // never block connector creation on a credential-inject failure
+  }
+}
+
+// Create or update connector (PUT — edit existing)
 app.put('/api/connectors/:source/:name', async (req, res) => {
   try {
     const { source, name } = req.params;
-    const { status: s, body } = await dbzRequest(source, 'PUT', `/connectors/${name}/config`, req.body);
+    const cfg = await injectCredentials(source, req.body);
+    const { status: s, body } = await dbzRequest(source, 'PUT', `/connectors/${name}/config`, cfg);
     res.status(s).json(body);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -121,7 +153,9 @@ app.put('/api/connectors/:source/:name', async (req, res) => {
 app.post('/api/connectors/:source', async (req, res) => {
   try {
     const { source } = req.params;
-    const { status: s, body } = await dbzRequest(source, 'POST', '/connectors', req.body);
+    const payload = { ...req.body };
+    payload.config = await injectCredentials(source, payload.config || {});
+    const { status: s, body } = await dbzRequest(source, 'POST', '/connectors', payload);
     res.status(s).json(body);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
