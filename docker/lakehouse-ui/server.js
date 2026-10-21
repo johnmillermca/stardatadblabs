@@ -6,6 +6,44 @@ const fetch   = require('node-fetch');
 const path    = require('path');
 const WebSocket = require('ws');
 const http    = require('http');
+const oracledb = require('oracledb');
+// oracledb v6+ defaults to thin mode (pure JS, no Instant Client) when
+// initOracleClient() is never called — no extra configuration needed.
+
+// ── Oracle JDBC-style query helper ───────────────────────────────────────────
+// Connects directly to Oracle over TCP using credentials from the connector
+// config + OpenBao.  Works for any Oracle instance (in-cluster or external).
+// connCfg: { hostname, port, dbname, user, password }
+// sql:     SELECT statement (single result set)
+// returns: string[][] — rows as arrays of string values
+async function oracleQuery(connCfg, sql, timeoutMs = 10000) {
+  const { hostname, port, dbname, user, password } = connCfg;
+  const connectString = `${hostname}:${port}/${dbname}`;
+  let conn;
+  try {
+    conn = await Promise.race([
+      oracledb.getConnection({ user, password, connectString }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Oracle connect timed out')), timeoutMs)),
+    ]);
+    const result = await conn.execute(sql, [], { outFormat: oracledb.OUT_FORMAT_ARRAY, fetchArraySize: 200 });
+    return (result.rows || []).map(r => r.map(v => (v == null ? '' : String(v))));
+  } finally {
+    if (conn) await conn.close().catch(() => {});
+  }
+}
+
+// Build Oracle connCfg from a Debezium connector config object + OpenBao creds.
+// Falls back to defaults from the template when fields are absent.
+async function oracleConnCfg(cfg) {
+  const ora = await baoRead(BAO_PATH.oracle);
+  return {
+    hostname: cfg['database.hostname'] || 'oracle-xe.prod.svc.cluster.local',
+    port:     parseInt(cfg['database.port'] || '1521', 10),
+    dbname:   cfg['database.pdb.name'] || cfg['database.dbname'] || 'XEPDB1',
+    user:     cfg['database.user']     || 'c##dbzcdc',
+    password: ora.cdc_password ?? ora.password,
+  };
+}
 
 const app = express();
 app.use(express.json());
@@ -234,29 +272,12 @@ app.post('/api/connectors/:source', async (req, res) => {
     } else if (source === 'oracle') {
       const schemaList = (cfgForValidation['schema.include.list'] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
       if (schemaList.length) {
-        const pod = await getSourcePod('oracle-xe', 'oracle');
-        // Check DB is open via lsnrctl before attempting sqlplus — if the listener
-        // shows no services the DB is still starting and sqlplus would block forever.
-        const { stdout: lsnrOut } = await execFileAsync('kubectl', [
-          'exec', '-n', K8S_NAMESPACE, pod, '--', 'lsnrctl', 'status',
-        ], { timeout: 8000 });
-        if (lsnrOut.includes('The listener supports no services')) {
-          return res.status(422).json({
-            error: 'Oracle database is still starting up — listener has no registered services yet.',
-            action: 'Wait 1–2 minutes for Oracle XE to fully open, then retry.',
-          });
-        }
-        // DBA_USERS is a single-row lookup — far faster than ALL_TABLES join.
-        // SQL passed via stdin (input:) — no shell quoting issues.
-        const inList = schemaList.map(s => `'${s}'`).join(',');
-        const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
-          'sqlplus', '-S', '/', 'as', 'sysdba',
-        ], {
-          timeout: 10000,
-          input: `SET HEADING OFF\nSET FEEDBACK OFF\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME IN (${inList});\nEXIT;\n`,
-        });
-        const foundSchemas = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !/^(SQL|ERROR|Connected|Oracle|Copyright)/.test(l));
+        // Connect directly via JDBC — works for in-cluster and external Oracle.
+        const connCfg = await oracleConnCfg(cfgForValidation);
+        const inList  = schemaList.map(s => `'${s}'`).join(',');
+        const rows    = await oracleQuery(connCfg,
+          `SELECT USERNAME FROM DBA_USERS WHERE USERNAME IN (${inList})`);
+        const foundSchemas = rows.map(r => r[0]);
         const invalid = schemaList.filter(s => !foundSchemas.includes(s));
         if (invalid.length) {
           return res.status(422).json({
@@ -361,14 +382,11 @@ app.get('/api/connectors/:source/:name/offset-position', async (req, res) => {
   const { source } = req.params;
   try {
     if (source === 'oracle') {
-      // Query Oracle XE for current SCN
-      const pod = await getSourcePod('oracle-xe', 'oracle');
-      const { stdout } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--',
-        'sqlplus', '-S', 'c##dbzcdc/dbzpassword@//localhost:1521/XEPDB1',
-      ], { input: 'SET HEADING OFF\nSET FEEDBACK OFF\nSELECT current_scn FROM v$database;\nEXIT;\n', timeout: 15000 });
-      const scn = stdout.trim().split('\n').map(l => l.trim()).filter(l => /^\d+$/.test(l)).pop();
-      if (!scn) return res.status(502).json({ error: 'Could not parse SCN from Oracle output', raw: stdout.slice(0, 300) });
+      // Query Oracle for current SCN via JDBC — works for any Oracle instance.
+      const connCfg = await oracleConnCfg({});   // use defaults from template/OpenBao
+      const rows = await oracleQuery(connCfg, 'SELECT current_scn FROM v$database', 15000);
+      const scn  = rows?.[0]?.[0];
+      if (!scn) return res.status(502).json({ error: 'Could not read SCN from Oracle' });
       return res.json({ source, type: 'SCN', position: scn });
 
     } else if (source === 'postgres') {
@@ -431,27 +449,11 @@ app.get('/api/schemas/:source', async (req, res) => {
       return res.json({ schemas });
 
     } else if (source === 'oracle') {
-      const pod = await getSourcePod('oracle-xe', 'oracle');
-      // Check DB is open before calling sqlplus — avoids hanging indefinitely.
-      const { stdout: lsnrOut } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--', 'lsnrctl', 'status',
-      ], { timeout: 8000 });
-      if (lsnrOut.includes('The listener supports no services')) {
-        return res.status(503).json({ error: 'Oracle database is still starting up. Wait 1–2 minutes and retry.' });
-      }
-      // DBA_USERS is a single dictionary lookup — faster than ALL_TABLES join.
-      // oracle_maintained='N' is cleaner than a manual exclusion list and works on all XE versions.
-      // SQL is passed via stdin (input:) — no shell quoting issues with single quotes in the SQL.
-      const { stdout } = await execFileAsync('kubectl', [
-        'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
-        'sqlplus', '-S', '/', 'as', 'sysdba',
-      ], {
-        timeout: 10000,
-        input: 'SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED=\'N\' ORDER BY USERNAME;\nEXIT;\n',
-      });
-      const schemas = stdout.trim().split('\n')
-        .map(l => l.trim())
-        .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
+      // Connect directly via JDBC — works for in-cluster and external Oracle.
+      const connCfg = await oracleConnCfg({});
+      const rows    = await oracleQuery(connCfg,
+        `SELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED='N' ORDER BY USERNAME`);
+      const schemas = rows.map(r => r[0]);
       return res.json({ schemas });
 
     } else if (source === 'mongodb') {
@@ -549,40 +551,20 @@ app.post('/api/schema/:source', async (req, res) => {
       res.json({ source: 'mongodb', databases: result });
 
     } else if (source === 'oracle') {
-      // Use OS auth (/ as sysdba) inside the pod — no password needed
-      const pod = await getSourcePod('oracle-xe', 'oracle');
+      // Connect directly via JDBC — works for in-cluster and external Oracle.
+      const connCfg = await oracleConnCfg({});
 
-      // Check DB is open before calling sqlplus — avoids hanging indefinitely.
-      const { stdout: lsnrOut } = await execFileAsync('kubectl', [
-        'exec', '-n', K8S_NAMESPACE, pod, '--', 'lsnrctl', 'status',
-      ], { timeout: 8000 });
-      if (lsnrOut.includes('The listener supports no services')) {
-        return res.status(503).json({ error: 'Oracle database is still starting up. Wait 1–2 minutes and retry.' });
-      }
+      // 1. List non-system schemas
+      const schemaRows = await oracleQuery(connCfg,
+        `SELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED='N' ORDER BY USERNAME`);
+      const schemas = schemaRows.map(r => r[0]);
 
-      // SQL is passed via stdin (input:) — no shell quoting issues regardless of SQL content.
-      const runSqlplus = async (sql) => {
-        const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
-          'sqlplus', '-S', '/', 'as', 'sysdba',
-        ], { timeout: 10000, input: sql + '\nEXIT;\n' });
-        return stdout.trim().split('\n')
-          .map(l => l.trim())
-          .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING|$)/.test(l));
-      };
-
-      // 1. List schemas from DBA_USERS — oracle_maintained='N' filters all system accounts
-      //    without a fragile manual exclusion list (works on all Oracle XE versions).
-      const schemas = await runSqlplus(
-        `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE ORACLE_MAINTAINED='N' ORDER BY USERNAME;\nEXIT;`
-      );
-
-      // 2. For each schema list tables (ALL_TABLES filtered by owner — still needed here)
+      // 2. For each schema list tables
       const result = {};
       for (const schema of schemas) {
-        const tables = await runSqlplus(
-          `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME;\nEXIT;`
-        );
+        const tableRows = await oracleQuery(connCfg,
+          `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME`);
+        const tables = tableRows.map(r => r[0]);
         if (tables.length) result[schema] = tables;
       }
       res.json({ source: 'oracle', databases: result });
@@ -593,7 +575,9 @@ app.post('/api/schema/:source', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Cache of source pod names (30s)
+// Cache of source pod names (30s).
+// Returns null when no pod is found — callers must handle null to support
+// external (non-Kubernetes) databases where kubectl exec is not available.
 const _srcPodCache = {};
 async function getSourcePod(appLabel, source) {
   const key = appLabel;
@@ -603,10 +587,9 @@ async function getSourcePod(appLabel, source) {
     '-l', `app=${appLabel}`,
     '-o', 'jsonpath={.items[0].metadata.name}',
   ], { timeout: 10000 });
-  const name = stdout.trim();
-  if (!name) throw new Error(`No running pod found with app=${appLabel}`);
+  const name = stdout.trim() || null;
   _srcPodCache[key] = { name, exp: Date.now() + 30000 };
-  return name;
+  return name;   // null = no in-cluster pod (external DB)
 }
 
 // POST /api/connectors/:source/:name/start-from
@@ -747,31 +730,17 @@ app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => 
       }
 
     } else if (source === 'oracle') {
-      // Oracle: each table must have ALL COLUMNS supplemental logging enabled.
-      const pod = await getSourcePod('oracle-xe', 'oracle');
-
-      const runSql = async (sql) => {
-        const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
-          'bash', '-c', `echo "${sql}" | sqlplus -S / as sysdba`,
-        ], { timeout: 15000 });
-        return stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
-      };
+      // Connect directly via JDBC — works for in-cluster and external Oracle.
+      const connCfg = await oracleConnCfg(cfg);
 
       for (const full of tables) {
-        const parts  = full.split('.');
-        const owner  = parts.length === 2 ? parts[0].toUpperCase() : 'CACHE_TESTING';
-        const tbl    = parts.length === 2 ? parts[1].toUpperCase() : parts[0].toUpperCase();
-        const lines  = await runSql(
-          `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\n` +
-          `SELECT LOG_GROUP_TYPE FROM ALL_LOG_GROUPS WHERE OWNER='${owner}' AND TABLE_NAME='${tbl}' AND LOG_GROUP_TYPE='ALL COLUMN LOGGING';\nEXIT;`
-        );
-        const hasAll = lines.some(l => l.includes('ALL COLUMN LOGGING'));
-        if (!hasAll) {
-          logErrors.push({
-            table: full,
-            reason: 'ALL COLUMNS supplemental logging not enabled',
-          });
+        const parts = full.split('.');
+        const owner = (parts.length === 2 ? parts[0] : 'CACHE_TESTING').toUpperCase();
+        const tbl   = (parts.length === 2 ? parts[1] : parts[0]).toUpperCase();
+        const rows  = await oracleQuery(connCfg,
+          `SELECT LOG_GROUP_TYPE FROM ALL_LOG_GROUPS WHERE OWNER='${owner}' AND TABLE_NAME='${tbl}' AND LOG_GROUP_TYPE='ALL COLUMN LOGGING'`);
+        if (!rows.length) {
+          logErrors.push({ table: full, reason: 'ALL COLUMNS supplemental logging not enabled' });
         }
       }
 
