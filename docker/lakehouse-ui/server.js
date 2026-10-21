@@ -206,10 +206,98 @@ app.post('/api/connectors/:source', async (req, res) => {
     const { source } = req.params;
     const payload = { ...req.body };
     payload.config = await injectCredentials(source, payload.config || {});
+
+    // ── Validate schema / database exists in the source DB ──────────────────
+    // Reject immediately with HTTP 422 if the user typed a schema/db that does
+    // not exist — prevents a connector that will never capture any data.
+    const cfgForValidation = payload.config;
+    if (source === 'postgres') {
+      const schemaList = (cfgForValidation['schema.include.list'] || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (schemaList.length) {
+        const pod = await getSourcePod('postgresql', 'postgres');
+        const db  = cfgForValidation['database.dbname'] || 'cache_testing';
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'psql', '-U', 'postgres', '-d', db, '-tAc',
+          `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema','pg_toast')`,
+        ], { timeout: 10000 });
+        const validSchemas = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
+        const invalid = schemaList.filter(s => !validSchemas.includes(s));
+        if (invalid.length) {
+          return res.status(422).json({
+            error: `schema.include.list contains schema(s) that do not exist in database "${db}": ${invalid.join(', ')}`,
+            valid: validSchemas,
+            hint: `Valid schemas in "${db}": ${validSchemas.join(', ')}`,
+          });
+        }
+      }
+    } else if (source === 'oracle') {
+      const schemaList = (cfgForValidation['schema.include.list'] || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      if (schemaList.length) {
+        const pod = await getSourcePod('oracle-xe', 'oracle');
+        // Check DB is open via lsnrctl before attempting sqlplus — if the listener
+        // shows no services the DB is still starting and sqlplus would block forever.
+        const { stdout: lsnrOut } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--', 'lsnrctl', 'status',
+        ], { timeout: 8000 });
+        if (lsnrOut.includes('The listener supports no services')) {
+          return res.status(422).json({
+            error: 'Oracle database is still starting up — listener has no registered services yet.',
+            action: 'Wait 1–2 minutes for Oracle XE to fully open, then retry.',
+          });
+        }
+        // DBA_USERS is a single-row lookup — far faster than ALL_TABLES join.
+        // No -i flag so stdin closes immediately and sqlplus exits cleanly.
+        const inList = schemaList.map(s => `'${s}'`).join(',');
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'bash', '-c',
+          `printf 'SET HEADING OFF\nSET FEEDBACK OFF\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME IN (${inList});\nEXIT;\n' | sqlplus -S / as sysdba`,
+        ], { timeout: 10000 });
+        const foundSchemas = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !/^(SQL|ERROR|Connected|Oracle|Copyright)/.test(l));
+        const invalid = schemaList.filter(s => !foundSchemas.includes(s));
+        if (invalid.length) {
+          return res.status(422).json({
+            error: `schema.include.list contains schema(s) that do not exist in Oracle: ${invalid.join(', ')}`,
+            hint: `Schema(s) not found: ${invalid.join(', ')}`,
+          });
+        }
+      }
+    } else if (source === 'mongodb') {
+      const dbList = (cfgForValidation['database.include.list'] || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (dbList.length) {
+        const pod = await getSourcePod('mongodb', 'mongodb');
+        const secretRes  = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/mongodb-credentials`);
+        const secretJson = await secretRes.json();
+        const rootPass   = Buffer.from(secretJson.data?.['mongodb-root-password'] || '', 'base64').toString();
+        const { stdout } = await execFileAsync('kubectl', [
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'mongosh', '--quiet', '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
+          '--eval', `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
+        ], { timeout: 10000 });
+        const validDbs = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+        const invalid = dbList.filter(d => !validDbs.includes(d));
+        if (invalid.length) {
+          return res.status(422).json({
+            error: `database.include.list contains database(s) that do not exist in MongoDB: ${invalid.join(', ')}`,
+            valid: validDbs,
+            hint: `Valid databases: ${validDbs.join(', ')}`,
+          });
+        }
+      }
+    }
+
     // Always strip table/collection include lists on creation — tables are assigned
     // later via "Assign Tables & Start" after supplemental logging is verified.
     delete payload.config['table.include.list'];
     delete payload.config['collection.include.list'];
+
+    // Debezium rejects tasks.max < 1. The connector is paused immediately after
+    // creation, so tasks.max=0 is never needed — clamp to 1 as a safety net.
+    if (parseInt(payload.config['tasks.max'], 10) < 1) {
+      payload.config['tasks.max'] = '1';
+    }
+
     const { status: s, body } = await dbzRequest(source, 'POST', '/connectors', payload);
     if (s >= 300) return res.status(s).json(body);
 
@@ -319,6 +407,68 @@ app.get('/api/connectors/:source/:name/offset-position', async (req, res) => {
 //  Derives host/port/user/password/db dynamically from the connector config.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ── GET /api/schemas/:source ─────────────────────────────────────────────────
+// Lightweight endpoint — returns only schema/database names (no tables).
+// Used by the schema picker on the New Connector page so the user selects
+// from real values instead of typing free text.
+//   postgres → schemas in database.dbname  (query param: db=<name>)
+//   oracle   → schema owners with tables
+//   mongodb  → database names
+app.get('/api/schemas/:source', async (req, res) => {
+  const { source } = req.params;
+  const db = req.query.db || 'cache_testing';
+  try {
+    if (source === 'postgres') {
+      const pod = await getSourcePod('postgresql', 'postgres');
+      const { stdout } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'psql', '-U', 'postgres', '-d', db, '-tAc',
+        `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema','pg_toast') ORDER BY schema_name`,
+      ], { timeout: 10000 });
+      const schemas = stdout.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      return res.json({ schemas });
+
+    } else if (source === 'oracle') {
+      const pod = await getSourcePod('oracle-xe', 'oracle');
+      // Check DB is open before calling sqlplus — avoids hanging indefinitely.
+      const { stdout: lsnrOut } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--', 'lsnrctl', 'status',
+      ], { timeout: 8000 });
+      if (lsnrOut.includes('The listener supports no services')) {
+        return res.status(503).json({ error: 'Oracle database is still starting up. Wait 1–2 minutes and retry.' });
+      }
+      // DBA_USERS is a single dictionary lookup — faster than ALL_TABLES join.
+      // printf emits real newlines; no -i so stdin closes and sqlplus exits cleanly.
+      const systemSchemas = `'SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','DBSFWUSER','GGSYS','ANONYMOUS','CTXSYS','DVSYS','DVF','GSMADMIN_INTERNAL','MDSYS','OLAPSYS','XDB','WMSYS','OJVMSYS','ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','ORDDATA'`;
+      const { stdout } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'bash', '-c',
+        `printf 'SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME NOT IN (${systemSchemas}) ORDER BY USERNAME;\nEXIT;\n' | sqlplus -S / as sysdba`,
+      ], { timeout: 10000 });
+      const schemas = stdout.trim().split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING)/.test(l));
+      return res.json({ schemas });
+
+    } else if (source === 'mongodb') {
+      const pod = await getSourcePod('mongodb', 'mongodb');
+      const secretRes  = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/secrets/mongodb-credentials`);
+      const secretJson = await secretRes.json();
+      const rootPass   = Buffer.from(secretJson.data?.['mongodb-root-password'] || '', 'base64').toString();
+      const { stdout } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--',
+        'mongosh', '--quiet', '-u', 'root', '-p', rootPass, '--authenticationDatabase', 'admin',
+        '--eval', `db.adminCommand({listDatabases:1}).databases.filter(d=>!['admin','config','local'].includes(d.name)).forEach(d=>print(d.name))`,
+      ], { timeout: 10000 });
+      const schemas = stdout.trim().split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('['));
+      return res.json({ schemas });
+
+    } else {
+      return res.status(400).json({ error: `Unknown source: ${source}` });
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/schema/:source', async (req, res) => {
   const { source } = req.params;
   const cfg = req.body || {};   // full connector config key/value object from the UI
@@ -398,31 +548,36 @@ app.post('/api/schema/:source', async (req, res) => {
       // Use OS auth (/ as sysdba) inside the pod — no password needed
       const pod = await getSourcePod('oracle-xe', 'oracle');
 
+      // Check DB is open before calling sqlplus — avoids hanging indefinitely.
+      const { stdout: lsnrOut } = await execFileAsync('kubectl', [
+        'exec', '-n', K8S_NAMESPACE, pod, '--', 'lsnrctl', 'status',
+      ], { timeout: 8000 });
+      if (lsnrOut.includes('The listener supports no services')) {
+        return res.status(503).json({ error: 'Oracle database is still starting up. Wait 1–2 minutes and retry.' });
+      }
+
+      // printf emits real newlines; no -i so stdin closes and sqlplus exits cleanly.
       const runSqlplus = async (sql) => {
         const { stdout } = await execFileAsync('kubectl', [
-          'exec', '-i', '-n', K8S_NAMESPACE, pod, '--',
-          'bash', '-c', `echo "${sql}" | sqlplus -S / as sysdba`,
-        ], { timeout: 15000 });
+          'exec', '-n', K8S_NAMESPACE, pod, '--',
+          'bash', '-c', `printf '%s\n' ${sql.split('\n').map(l => `'${l}'`).join(' ')} | sqlplus -S / as sysdba`,
+        ], { timeout: 10000 });
         return stdout.trim().split('\n')
           .map(l => l.trim())
           .filter(l => l && !/^(SQL|ERROR|Connected|Disconnected|Oracle|Copyright|Last|WARNING|$)/.test(l));
       };
 
-      // 1. List all schemas that own tables (exclude system schemas)
-      const systemSchemas = ['SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','DBSFWUSER','GGSYS','ANONYMOUS',
-        'CTXSYS','DVSYS','DVF','GSMADMIN_INTERNAL','MDSYS','OLAPSYS','XDB','WMSYS','OJVMSYS',
-        'ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','ORDDATA'];
+      // 1. List schemas from DBA_USERS — single dictionary lookup, much faster than ALL_TABLES join.
+      const systemSchemas = `'SYS','SYSTEM','OUTLN','DBSNMP','APPQOSSYS','DBSFWUSER','GGSYS','ANONYMOUS','CTXSYS','DVSYS','DVF','GSMADMIN_INTERNAL','MDSYS','OLAPSYS','XDB','WMSYS','OJVMSYS','ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','ORDDATA'`;
       const schemas = await runSqlplus(
-        'SET HEADING OFF\\nSET FEEDBACK OFF\\nSET PAGESIZE 0\\n' +
-        `SELECT DISTINCT OWNER FROM ALL_TABLES WHERE OWNER NOT IN (${systemSchemas.map(s=>`'${s}'`).join(',')}) ORDER BY OWNER;\\nEXIT;`
+        `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT USERNAME FROM DBA_USERS WHERE USERNAME NOT IN (${systemSchemas}) ORDER BY USERNAME;\nEXIT;`
       );
 
-      // 2. For each schema list tables
+      // 2. For each schema list tables (ALL_TABLES filtered by owner — still needed here)
       const result = {};
       for (const schema of schemas) {
         const tables = await runSqlplus(
-          'SET HEADING OFF\\nSET FEEDBACK OFF\\nSET PAGESIZE 0\\n' +
-          `SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME;\\nEXIT;`
+          `SET HEADING OFF\nSET FEEDBACK OFF\nSET PAGESIZE 0\nSELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER='${schema}' ORDER BY TABLE_NAME;\nEXIT;`
         );
         if (tables.length) result[schema] = tables;
       }

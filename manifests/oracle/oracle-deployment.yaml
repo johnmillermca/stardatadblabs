@@ -47,6 +47,10 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
+        - key: "workload"
+          operator: "Equal"
+          value: "master"
+          effect: "NoSchedule"
       # Graceful shutdown: give Oracle enough time to checkpoint and close cleanly.
       # This prevents stale lock files (ORA-01081) on the next startup.
       terminationGracePeriodSeconds: 120
@@ -63,12 +67,14 @@ spec:
             - -c
             - |
               chown -R 54321:54321 /opt/oracle/oradata
-              # PVC-resident lock & SGA files — cause ORA-01081 on restart
+              # PVC-resident lock & SGA files — cause ORA-01081 / semaphore stalls on restart
               rm -f /opt/oracle/oradata/XE/lk*
               rm -f /opt/oracle/oradata/XE/sgadef.dbf
               rm -f /opt/oracle/oradata/XE/.oracle_ipc_lock
               rm -f /opt/oracle/oradata/dbconfig/XE/lk*
               rm -f /opt/oracle/oradata/dbconfig/XE/sgadef.dbf
+              rm -f /opt/oracle/oradata/dbconfig/XE/sgadef*.dbf
+              rm -f /opt/oracle/oradata/dbconfig/XE/*.pid
               echo "fix-permissions: PVC cleanup done."
           volumeMounts:
             - name: oracle-data

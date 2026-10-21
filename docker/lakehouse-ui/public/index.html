@@ -1609,6 +1609,19 @@ function renderConnectorNew() {
       <input class="form-input" id="new-name" placeholder="e.g. postgres-cdc"/>
     </div>
 
+    <!-- ── Schema / Database picker ───────────────────────────────────────── -->
+    <div class="tpick-wrap" id="schema-picker-wrap" style="margin-bottom:14px">
+      <div class="tpick-header">
+        <div class="tpick-title">🗂 Schema / Database Selection</div>
+        <span id="schema-pick-status" class="tpick-status"></span>
+      </div>
+      <div id="schema-pick-body">
+        <div style="color:#586374;font-size:12px">
+          Schemas will load automatically after the preflight check passes.
+        </div>
+      </div>
+    </div>
+
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px">
       <div>
         <div style="font-size:12px;color:#586374;margin-bottom:8px;font-weight:600">⌨ Key/Value Editor</div>
@@ -1707,9 +1720,80 @@ async function loadTemplate() {
       ⚠ Could not load server template: ${escHtml((tmplR.data?.error||'unknown').slice(0,120))}. Using built-in fallback template — verify the values below before creating.</div>`;
   }
 
+  // KV editor — strip schema.include.list so it comes only from the picker below
   const tmpl = tmplR.ok ? tmplR.data.template : (TEMPLATES[src] || {});
-  ed.innerHTML = Object.entries(tmpl).map(([k,v])=>kvRowNew(k,v)).join('');
+  const SCHEMA_KEY = src === 'mongodb' ? 'database.include.list' : 'schema.include.list';
+  const kvEntries = Object.entries(tmpl).filter(([k]) => k !== SCHEMA_KEY);
+  ed.innerHTML = kvEntries.map(([k,v]) => kvRowNew(k,v)).join('');
   jsonEl.value = JSON.stringify(tmpl, null, 2);
+
+  // ── Schema / database picker ──────────────────────────────────────────────
+  const schemaBodyEl  = document.getElementById('schema-pick-body');
+  const schemaStatEl  = document.getElementById('schema-pick-status');
+  schemaBodyEl.innerHTML = `<div style="color:#d29922;font-size:12px">⏳ Loading schemas…</div>`;
+  schemaStatEl.innerHTML = '';
+
+  const dbParam  = tmpl['database.dbname'] || 'cache_testing';
+  const schemaR  = await apiGet(`/api/schemas/${src}?db=${encodeURIComponent(dbParam)}`);
+
+  if (!schemaR.ok) {
+    schemaBodyEl.innerHTML = `<div style="color:#f85149;font-size:12px">
+      ⚠ Could not load schemas: ${escHtml((schemaR.data?.error||'unknown').slice(0,120))}</div>`;
+    return;
+  }
+
+  const schemas      = schemaR.data.schemas || [];
+  const schemaLabel  = src === 'mongodb' ? 'database' : 'schema';
+  const defaultSel   = src === 'oracle'   ? 'CACHE_TESTING'
+                     : src === 'mongodb'  ? 'cache_testing'
+                     : 'public';
+
+  schemaBodyEl.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:6px 0" id="schema-pick-list">
+      ${schemas.map(s => `
+        <label style="display:flex;align-items:center;gap:6px;padding:5px 10px;
+                       background:${s===defaultSel?'rgba(79,195,247,.12)':'#0d1117'};
+                       border:1px solid ${s===defaultSel?'#4fc3f7':'#1c2a3a'};
+                       border-radius:6px;cursor:pointer;font-size:12px;color:#c9d1d9;
+                       transition:border-color .15s" id="schema-chip-${escHtml(s)}">
+          <input type="checkbox" value="${escHtml(s)}"
+                 ${s === defaultSel ? 'checked' : ''}
+                 style="accent-color:#4fc3f7"
+                 onchange="schemaPickSync()"/>
+          ${escHtml(s)}
+        </label>`).join('')}
+    </div>`;
+  schemaStatEl.innerHTML = `<span style="color:#2ea043">✓ ${schemas.length} ${schemaLabel}(s) found</span>`;
+  schemaPickSync();
+}
+
+// Keep the visual state of schema chips in sync and update the JSON textarea
+function schemaPickSync() {
+  const checked = [...document.querySelectorAll('#schema-pick-list input:checked')].map(i => i.value);
+  // Sync chip border colours
+  document.querySelectorAll('#schema-pick-list label').forEach(lbl => {
+    const inp = lbl.querySelector('input');
+    lbl.style.borderColor = inp.checked ? '#4fc3f7' : '#1c2a3a';
+    lbl.style.background  = inp.checked ? 'rgba(79,195,247,.12)' : '#0d1117';
+  });
+  // Warn if nothing selected
+  const statEl = document.getElementById('schema-pick-status');
+  if (statEl) {
+    statEl.innerHTML = checked.length === 0
+      ? `<span style="color:#da3633">⚠ Select at least one schema</span>`
+      : `<span style="color:#2ea043">✓ ${checked.length} selected: ${checked.map(s=>`<code style="color:#4fc3f7">${escHtml(s)}</code>`).join(', ')}</span>`;
+  }
+  // Reflect into JSON textarea so user can see the full config
+  const jsonEl = document.getElementById('new-json');
+  if (jsonEl && checked.length) {
+    try {
+      const obj = JSON.parse(jsonEl.value);
+      const src = document.getElementById('new-src')?.value || 'postgres';
+      const SCHEMA_KEY = src === 'mongodb' ? 'database.include.list' : 'schema.include.list';
+      obj[SCHEMA_KEY] = checked.join(',');
+      jsonEl.value = JSON.stringify(obj, null, 2);
+    } catch { /* textarea may be empty or mid-edit — skip */ }
+  }
 }
 function kvRowNew(k='',v='') {
   return `<div class="kv-row">
@@ -1755,10 +1839,9 @@ async function createConnectorFromPage() {
   }
 
   // ── (a) Connector is always created STOPPED with no tables assigned ────────
-  // tasks.max=0  → Debezium registers the connector but never starts a task thread.
-  // Removing the include-list means no tables are captured until the user
-  // explicitly picks them via "Assign Tables & Start".
-  cfg['tasks.max'] = '0';
+  // The server immediately issues PUT /pause after creation — tasks.max=0 was
+  // the old approach but Debezium rejects it as invalid (must be >= 1).
+  // Strip include-lists here too; the server does the same as a safety net.
   delete cfg['table.include.list'];
   delete cfg['collection.include.list'];
 
@@ -1769,8 +1852,27 @@ async function createConnectorFromPage() {
     currentSource = src;
     navigate('connectors');
   } else {
-    const detail = r.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 200);
-    toast(`Error creating connector: ${detail}`, 'error');
+    // Show schema validation errors inline below the form, not just as a toast
+    if (r.status === 422 && r.data?.error) {
+      const checkEl = document.getElementById('new-connector-check');
+      if (checkEl) {
+        checkEl.innerHTML = `
+          <div style="font-size:12px;padding:12px 14px;background:#2a0f0f;border-radius:6px;
+                      border:1px solid #6a2020;color:#f85149;margin-bottom:6px">
+            <div style="font-weight:700;margin-bottom:6px">🚫 Invalid configuration — connector not created</div>
+            <div style="margin-bottom:6px">${escHtml(r.data.error)}</div>
+            ${r.data.hint
+              ? `<div style="color:#d29922;font-size:11px;border-top:1px solid #4a2020;padding-top:6px;margin-top:4px">
+                   <b>Fix:</b> ${escHtml(r.data.hint)}</div>`
+              : ''}
+          </div>`;
+        checkEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+      toast(r.data.error.slice(0, 120), 'error');
+    } else {
+      const detail = r.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 200);
+      toast(`Error creating connector: ${detail}`, 'error');
+    }
   }
 }
 
