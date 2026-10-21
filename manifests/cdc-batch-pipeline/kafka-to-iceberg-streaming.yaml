@@ -78,7 +78,7 @@ data:
   #    can only hold 1 each, starving other jobs permanently — the previous root cause)
   EXECUTOR_INSTANCES:           "1"
   EXECUTOR_CORES:               "1"
-  EXECUTOR_MEMORY:              "400m"
+  EXECUTOR_MEMORY:              "450m"
   EXECUTOR_OFFHEAP:             "0"
   MAX_EXECUTORS:                "1"
   # BURST_BACKLOG_TIMEOUT_S: irrelevant with MAX_EXECUTORS=1 but kept for completeness.
@@ -256,7 +256,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -416,7 +416,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -576,7 +576,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -738,7 +738,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -900,7 +900,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1062,7 +1062,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1222,7 +1222,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1382,7 +1382,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3
@@ -1542,7 +1542,7 @@ spec:
               name: kafka-to-iceberg-config
         - name: DISABLE_GLUTEN
           value: "1"
-        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+        image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 3

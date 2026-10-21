@@ -533,7 +533,7 @@ class BaoSparkInit:
         # SPARK_EXECUTOR_CORES: cores per executor.
         #   Default 1: one task slot per executor. The worker has 3 cores but memory
         #   limits it to 1 executor per worker, so more than 1 core wastes nothing.
-        _executor_memory = os.environ.get("SPARK_EXECUTOR_MEMORY", "400m")
+        _executor_memory = os.environ.get("SPARK_EXECUTOR_MEMORY", "450m")
         _executor_cores  = os.environ.get("SPARK_EXECUTOR_CORES",  "1")
         conf.set("spark.executor.memory", _executor_memory)
         conf.set("spark.executor.cores",  _executor_cores)

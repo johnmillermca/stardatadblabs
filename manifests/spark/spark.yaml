@@ -1,6 +1,6 @@
 # =============================================================================
 # Apache Spark 3.5.1 — 1 master + 3 standard workers + 1 large worker
-# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+# Image    : 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
 # Access   : http://192.168.1.5x:30707  (Master UI — no auth gate)
 #            spark://192.168.1.5x:30777 (RPC — via krb-spark-guard)
 #
@@ -159,7 +159,7 @@ spec:
         #   D) idle session   — no Spark job submitted for >IDLE_SINCE_S (1800 s)
         # Replaces the spark-app-cleanup CronJob (10-min lag → 15-s reaction).
         - name: spark-guardian
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
           command: ["python3", "/opt/spark/work-dir/spark-guardian.py"]
           env:
             - name: SPARK_MASTER_UI
@@ -237,7 +237,7 @@ spec:
         # Listens on 17077 — NOT exposed by the Service directly.
         # Only the krb-spark-guard sidecar (127.0.0.1:7077) forwards to it.
         - name: spark-master
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
           command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
           env:
             - name: SPARK_MASTER_HOST
@@ -292,8 +292,8 @@ spec:
 # Scale up to 3 when jobs are needed:
 #   kubectl scale deployment/spark-worker -n prod --replicas=3
 #
-# When active: SPARK_WORKER_MEMORY=800m (fits 1g container limit with JVM overhead).
-# Each executor: spark.executor.memory=800m, spark.executor.cores=3 → 3 CPU / 1Gi cap.
+# When active: SPARK_WORKER_MEMORY=900m (fits 1.1Gi container limit with JVM overhead).
+# Each executor: spark.executor.memory=450m + overhead=384m = 834m total < 900m.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -339,14 +339,14 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
           command:
             - /opt/spark/bin/spark-class
             - org.apache.spark.deploy.worker.Worker
             - spark://spark-master-internal.prod.svc.cluster.local:17077
           env:
             - name: SPARK_WORKER_MEMORY
-              value: "800m"
+              value: "900m"
             - name: SPARK_WORKER_CORES
               value: "3"
             # ── Kerberos: point JVM JAAS at the cluster krb5.conf ─────────────
@@ -364,7 +364,7 @@ spec:
               memory: "32Mi"
             limits:
               cpu: "3"
-              memory: "1Gi"
+              memory: "1100Mi"
       volumes:
         - name: krb5-conf
           configMap:
@@ -378,7 +378,7 @@ spec:
 # Scale up to 1 for heavy single-job workloads:
 #   kubectl scale deployment/spark-worker-large -n prod --replicas=1
 #
-# When active: SPARK_WORKER_MEMORY=800m, max 3 CPU / 1Gi — same cap as standard
+# When active: SPARK_WORKER_MEMORY=900m, max 3 CPU / 1100Mi — same cap as standard
 # worker. The "large" distinction is its anti-affinity (it won't co-locate with
 # standard workers) so it gets a dedicated node for burst work.
 #
@@ -429,7 +429,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: spark-worker
-          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
           imagePullPolicy: Always
           command:
             - /opt/spark/bin/spark-class
@@ -437,7 +437,7 @@ spec:
             - spark://spark-master-internal.prod.svc.cluster.local:17077
           env:
             - name: SPARK_WORKER_MEMORY
-              value: "800m"
+              value: "900m"
             - name: SPARK_WORKER_CORES
               value: "3"
             # ── Kerberos: point JVM JAAS at the cluster krb5.conf ─────────────
@@ -455,7 +455,7 @@ spec:
               memory: "32Mi"
             limits:
               cpu: "3"
-              memory: "1Gi"
+              memory: "1100Mi"
       volumes:
         - name: krb5-conf
           configMap:

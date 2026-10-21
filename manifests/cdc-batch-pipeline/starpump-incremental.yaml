@@ -40,7 +40,7 @@ data:
   # ── Executor sizing — matched to 800m SPARK_WORKER_MEMORY ─────────────────
   # heap 400m + overhead max(384m, 60m) = 784m total < 800m worker capacity.
   # bao_spark_init.spark_conf() reads these env vars directly.
-  SPARK_EXECUTOR_MEMORY: "400m"
+  SPARK_EXECUTOR_MEMORY: "450m"
   SPARK_EXECUTOR_CORES:  "1"
   DISABLE_GLUTEN:        "1"    # Gluten/Velox requires ≥4 Gi worker; disabled on 800m cluster.
 
@@ -94,7 +94,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
               imagePullPolicy: Always
               command:
                 - /bin/bash
@@ -199,7 +199,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
               imagePullPolicy: Always
               command:
                 - /bin/bash
@@ -304,7 +304,7 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-31
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-32
               imagePullPolicy: Always
               command:
                 - /bin/bash

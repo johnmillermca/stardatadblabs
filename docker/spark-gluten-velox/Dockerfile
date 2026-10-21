@@ -302,16 +302,22 @@ spark.serializer                                     org.apache.spark.serializer
 # re-enabled a larger worker pod (≥4 Gi) is required.
 #
 # spark.executor.memory / spark.executor.cores are intentionally kept LOW here
-# (safe defaults for the 800m worker).  Any job that genuinely needs more
+# (safe defaults for the 900m worker).  Any job that genuinely needs more
 # should override via the SPARK_EXECUTOR_MEMORY / SPARK_EXECUTOR_CORES env vars
 # which bao_spark_init.spark_conf() reads and applies before SparkSession.builder.
 #
+# Minimum executor memory enforced by Spark UnifiedMemoryManager:
+#   471859200 bytes = 450m.  Values below 450m cause SparkIllegalArgumentException
+#   at SparkContext init: "Executor memory X must be at least 471859200".
+#   Budget: heap 450m + overhead max(384m, 450m×0.15=67m) = 450+384 = 834m total.
+#   Worker SPARK_WORKER_MEMORY=900m (spark.yaml) — 66m headroom.
+#
 # Driver runs inside the CronJob / Deployment pod (not on a worker), so
 # spark.driver.memory is capped at what the pod's K8s resources.limits allow.
-# The starpump and kafka-to-iceberg pods are limited to 4 Gi (see their manifests),
-# so 1g is a safe driver heap.
-spark.driver.memory                                  1g
-spark.executor.memory                                400m
+# The starpump and kafka-to-iceberg pods are limited to 1 Gi (see their manifests),
+# so 512m is a safe driver heap.
+spark.driver.memory                                  512m
+spark.executor.memory                                450m
 spark.executor.cores                                 1
 spark.executor.memoryOverheadFactor                  0.15
 
