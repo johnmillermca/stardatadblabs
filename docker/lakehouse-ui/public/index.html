@@ -788,18 +788,7 @@ async function showStartCdcModal(src, name) {
     toast(`CDC already running for "${name}"`, 'warn');
     return;
   }
-  // If paused, default to Resume and skip the modal entirely for speed
-  if (liveState === 'PAUSED') {
-    const r = await apiPost(`/api/connectors/${src}/${name}/resume`);
-    toast(r.ok ? `${name} resumed — picking up from last offset ✓` : `Resume failed: ${JSON.stringify(r.data).slice(0,120)}`, r.ok ? 'success' : 'error');
-    if (r.ok) {
-      setTimeout(() => {
-        if (currentPage === 'connectors') loadConnectorList(src);
-        else renderDashboard();
-      }, 2500);
-    }
-    return;
-  }
+  // Always show the full modal so the user can choose Resume, Now, SCN/LSN, or Manual
   const pos = CDC_POS_LABEL[src] || { name:'Position', badge:'badge-lsn', placeholder:'', hint:'' };
 
   const modal = document.createElement('div');
