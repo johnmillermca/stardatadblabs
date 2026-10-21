@@ -196,12 +196,26 @@ app.put('/api/connectors/:source/:name', async (req, res) => {
 });
 
 // Create new connector (POST)
+// After a successful create the connector is immediately paused so it sits in
+// PAUSED state with no tables until the user explicitly picks tables via
+// "Assign Tables & Start".  tasks.max=0 is unreliable across Debezium versions
+// (some silently start 1 task anyway) so a hard PUT /pause is the only safe
+// mechanism to guarantee a stopped initial state.
 app.post('/api/connectors/:source', async (req, res) => {
   try {
     const { source } = req.params;
     const payload = { ...req.body };
     payload.config = await injectCredentials(source, payload.config || {});
     const { status: s, body } = await dbzRequest(source, 'POST', '/connectors', payload);
+    if (s >= 300) return res.status(s).json(body);
+
+    // Pause immediately — small delay lets Kafka Connect finish task initialisation
+    // before the pause takes effect (avoids a race where pause arrives before the
+    // task thread has started and is silently ignored).
+    const connName = payload.name || body.name;
+    await new Promise(r => setTimeout(r, 2000));
+    await dbzRequest(source, 'PUT', `/connectors/${connName}/pause`);
+
     res.status(s).json(body);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -613,14 +627,14 @@ app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => 
       return res.status(409).json({ logErrors, fixHint });
     }
 
-    // ── 3. Patch connector config and start ─────────────────────────────────
+    // ── 3. Patch connector config ────────────────────────────────────────────
     const cfgR = await dbzRequest(source, 'GET', `/connectors/${name}/config`);
     if (cfgR.status >= 300) {
       return res.status(cfgR.status).json({ error: 'Could not read connector config', detail: cfgR.body });
     }
     const cfg = { ...cfgR.body };
 
-    // Enable tasks and set the selected table list
+    // Set tasks.max=1 and the selected table list
     cfg['tasks.max'] = '1';
     if (source === 'mongodb') {
       cfg['collection.include.list'] = tables.join(',');
@@ -637,6 +651,12 @@ app.post('/api/connectors/:source/:name/start-with-tables', async (req, res) => 
     if (putR.status >= 300) {
       return res.status(putR.status).json({ error: 'Debezium rejected config update', detail: putR.body });
     }
+
+    // ── 4. Resume the connector (it was paused at creation) ─────────────────
+    // PUT /config on a paused connector restarts tasks automatically in most
+    // Debezium versions, but an explicit resume guarantees CDC starts.
+    await new Promise(r => setTimeout(r, 1000));
+    await dbzRequest(source, 'PUT', `/connectors/${name}/resume`);
 
     res.json({ ok: true, tables, config: patchedCfg });
 

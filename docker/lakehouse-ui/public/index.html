@@ -526,10 +526,14 @@ async function renderDashboard() {
         // Skip top-level error/metadata keys that Debezium returns alongside connectors
         if (!info || typeof info !== 'object' || !('status' in info)) continue;
         totalConn++;
-        const st = info?.status?.connector?.state || 'UNKNOWN';
+        const st       = info?.status?.connector?.state || 'UNKNOWN';
+        const taskMax  = info?.info?.config?.['tasks.max'];
+        const hasTables= !!(info?.info?.config?.['table.include.list'] || info?.info?.config?.['collection.include.list']);
+        // Connector is "unstarted" when paused AND has no table list assigned yet
+        const unstarted = st === 'PAUSED' && !hasTables;
         if (st === 'RUNNING') runningConn++;
         else if (st === 'FAILED') failedConn++;
-        connSummary.push({ source, name, state: st });
+        connSummary.push({ source, name, state: st, unstarted });
       }
     }
   }
@@ -574,21 +578,32 @@ async function renderDashboard() {
       </tr></thead>
       <tbody>
         ${connSummary.map(c => {
-          const isRunning = c.state === 'RUNNING';
-          const isPaused  = c.state === 'PAUSED';
+          const isRunning  = c.state === 'RUNNING';
+          const isPaused   = c.state === 'PAUSED';
+          const unstarted  = c.unstarted;
           return `
           <tr>
             <td>${SOURCE_ICON[c.source]} ${SOURCE_LABELS[c.source]}</td>
             <td><code style="color:#4fc3f7;font-size:12px">${c.name}</code></td>
-            <td>${stateBadge(c.state)}</td>
+            <td>${unstarted
+              ? `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>PAUSED — NO TABLES</span>`
+              : stateBadge(c.state)
+            }</td>
             <td>
               <div class="act-wrap" id="act-dash-${c.source}-${c.name}">
                 <button class="act-trigger" onclick="toggleActMenu('act-dash-${c.source}-${c.name}')">
                   Actions <span class="caret">▾</span>
                 </button>
                 <div class="act-menu">
+                  ${unstarted
+                    ? `<button class="act-item" style="color:#56d364;font-weight:600"
+                         onclick="closeActMenus();showAssignTablesModal('${c.source}','${c.name}')">
+                         ▶ Assign Tables &amp; Start</button>
+                       <hr class="act-sep"/>`
+                    : ''
+                  }
                   <button class="act-item" onclick="closeActMenus();navigate('connectors');currentSource='${c.source}'">⚙ Config</button>
-                  ${isPaused
+                  ${isPaused && !unstarted
                     ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start</button>`
                     : ''
                   }
@@ -685,9 +700,9 @@ async function loadConnectorList(src) {
     const tasks = info?.status?.tasks?.length || 0;
     const running = state === 'RUNNING';
     const paused  = state === 'PAUSED';
-    // A connector is "unstarted" when tasks.max is 0 OR has no tasks yet and is not RUNNING/PAUSED
-    const taskMax  = info?.info?.config?.['tasks.max'] ?? info?.status?.tasks?.length ?? 1;
-    const unstarted = String(taskMax) === '0' || (tasks === 0 && !running && !paused);
+    // A connector is "unstarted" when it is PAUSED and has no table/collection include list set
+    const hasTables = !!(info?.info?.config?.['table.include.list'] || info?.info?.config?.['collection.include.list']);
+    const unstarted = paused && !hasTables;
     return `<tr>
       <td><code style="color:#4fc3f7;font-size:12px">${name}</code></td>
       <td>${stateBadge(state)}</td>
