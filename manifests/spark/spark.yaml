@@ -163,6 +163,8 @@ spec:
           image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-33
           command: ["python3", "/opt/spark/work-dir/spark-guardian.py"]
           env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
             - name: SPARK_MASTER_UI
               value: "http://localhost:8080"
             - name: POLL_INTERVAL_S
