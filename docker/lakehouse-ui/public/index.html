@@ -589,7 +589,7 @@ async function renderDashboard() {
                 <div class="act-menu">
                   <button class="act-item" onclick="closeActMenus();navigate('connectors');currentSource='${c.source}'">⚙ Config</button>
                   ${isPaused
-                    ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start CDC</button>`
+                    ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${c.source}','${c.name}')">▶ Start</button>`
                     : ''
                   }
                   ${isRunning
@@ -697,7 +697,7 @@ async function loadConnectorList(src) {
           <div class="act-menu">
             <button class="act-item" onclick="closeActMenus();editConnector('${src}','${name}')">✎ Edit Config</button>
             ${paused
-              ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start CDC</button>`
+              ? `<button class="act-item" onclick="closeActMenus();showStartCdcModal('${src}','${name}')">▶ Start</button>`
               : ''
             }
             ${running
