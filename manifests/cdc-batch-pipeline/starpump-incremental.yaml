@@ -85,13 +85,13 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
-              imagePullPolicy: IfNotPresent
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-30
+              imagePullPolicy: Always
               command:
                 - /bin/bash
                 - -c
                 - |
-                  cd /opt/spark/scripts && \
+                  cd /opt/spark/work-dir && \
                   SPARK_USER=dave \
                   python3 starpump.py postgres \
                     --mode incremental
@@ -175,13 +175,13 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
-              imagePullPolicy: IfNotPresent
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-30
+              imagePullPolicy: Always
               command:
                 - /bin/bash
                 - -c
                 - |
-                  cd /opt/spark/scripts && \
+                  cd /opt/spark/work-dir && \
                   SPARK_USER=dave \
                   python3 starpump.py oracle \
                     --mode incremental
@@ -265,13 +265,13 @@ spec:
           serviceAccountName: spark-service-account
           containers:
             - name: starpump
-              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-18
-              imagePullPolicy: IfNotPresent
+              image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-30
+              imagePullPolicy: Always
               command:
                 - /bin/bash
                 - -c
                 - |
-                  cd /opt/spark/scripts && \
+                  cd /opt/spark/work-dir && \
                   SPARK_USER=dave \
                   python3 starpump.py mongodb \
                     --mode incremental
