@@ -1,13 +1,14 @@
-# ArgoCD Application – OpenBao
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: openbao
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
   finalizers:
     - resources-finalizer.argocd.io
 spec:
-  project: default
+  project: platform
   sources:
     - repoURL: https://openbao.github.io/openbao-helm
       chart: openbao
@@ -22,10 +23,22 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
+  ignoreDifferences:
+    # ClusterRoleBindings are cluster-scoped and excluded from the platform project
+    # destination list. ArgoCD marks them OutOfSync but cannot manage them — suppress.
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+      name: prod-openbao-agent-injector-binding
+      jsonPointers: ["/"]
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+      name: prod-openbao-server-binding
+      jsonPointers: ["/"]
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - Replace=true
+      - ServerSideApply=true        # Required — avoids StatefulSet immutable field errors
+      - RespectIgnoreDifferences=true
