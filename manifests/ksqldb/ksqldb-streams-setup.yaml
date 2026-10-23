@@ -1,0 +1,173 @@
+# =============================================================================
+# ksqldb-streams-setup.yaml
+# =========================
+# One-shot Kubernetes Job that creates all ksqlDB TableFlow derived streams.
+#
+# Creates per source × table:
+#   <src>.cache_testing.<table>_sd   — soft-delete upsert view  (compact+delete)
+#   <src>.cache_testing.<table>_hist — history tracking append  (delete)
+#
+# Sources: postgres (6 tables) + oracle (6 tables) + mongodb (6 tables)
+# Total:   36 derived Kafka topics + 36 ksqlDB CSAS queries
+#
+# Idempotent: uses CREATE STREAM IF NOT EXISTS — safe to re-run.
+# Run manually: kubectl create job -n prod ksqldb-streams-setup-manual \
+#                 --from=cronjob/ksqldb-streams-setup 2>/dev/null || \
+#               kubectl delete job -n prod ksqldb-streams-setup && \
+#               kubectl apply -f manifests/ksqldb/ksqldb-streams-setup.yaml
+# =============================================================================
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ksqldb-streams-setup
+  namespace: prod
+  labels:
+    app: ksqldb-streams-setup
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: ksqldb-streams-setup
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: setup
+          image: python:3.11-slim
+          command: ["python3", "-c"]
+          args:
+            - |
+              import json, sys, time, urllib.request
+
+              KSQL = "http://ksqldb.prod.svc.cluster.local:8088"
+
+              def wait_ready(retries=30):
+                  for i in range(retries):
+                      try:
+                          with urllib.request.urlopen(f"{KSQL}/info", timeout=5) as r:
+                              info = json.loads(r.read())
+                              if info.get("KsqlServerInfo", {}).get("serverStatus") == "RUNNING":
+                                  print(f"ksqlDB ready after {i+1} attempts")
+                                  return
+                      except Exception as e:
+                          print(f"  [{i+1}] Not ready: {e}")
+                      time.sleep(5)
+                  sys.exit("ksqlDB not ready after retries")
+
+              def ksql(name, stmt):
+                  body = json.dumps({"ksql": stmt, "streamsProperties": {}}).encode()
+                  req = urllib.request.Request(
+                      f"{KSQL}/ksql", data=body,
+                      headers={"Content-Type": "application/vnd.ksql.v1+json"},
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=15) as r:
+                          d = json.loads(r.read())
+                          status = d[0].get("commandStatus", {}).get("status", "OK") if isinstance(d, list) else d.get("message", "OK")[:60]
+                          print(f"  {name:<55} {status}")
+                          return True
+                  except urllib.error.HTTPError as e:
+                      err = e.read().decode()
+                      if "already exists" in err.lower():
+                          print(f"  {name:<55} EXISTS")
+                          return True
+                      print(f"  {name:<55} FAIL: {err[:100]}")
+                      return False
+
+              wait_ready()
+
+              SOURCES = {
+                  "postgres": {
+                      "stream_pfx": "POSTGRES_CACHE_TESTING",
+                      "topic_pfx":  "postgres.cache_testing",
+                      "pk_after":   "$.after.id",
+                      "pk_before":  "$.before.id",
+                  },
+                  "oracle": {
+                      "stream_pfx": "ORACLE_CACHE_TESTING",
+                      "topic_pfx":  "oracle.cache_testing",
+                      "pk_after":   "$.after.ID",
+                      "pk_before":  "$.before.ID",
+                  },
+                  "mongodb": {
+                      "stream_pfx": "MONGODB_CACHE_TESTING",
+                      "topic_pfx":  "mongodb.cache_testing",
+                      "pk_after":   "$.after._id",
+                      "pk_before":  "$.before._id",
+                  },
+              }
+
+              TABLES = [
+                  "customers", "orders", "products",
+                  "order_items", "inventory_events", "product_reviews",
+              ]
+
+              errors = 0
+              for src, cfg in SOURCES.items():
+                  sp  = cfg["stream_pfx"]
+                  tp  = cfg["topic_pfx"]
+                  pka = cfg["pk_after"]
+                  pkb = cfg["pk_before"]
+                  print(f"\n=== {src.upper()} ===")
+                  for tbl in TABLES:
+                      TBL = tbl.upper()
+                      src_stream = f"{sp}_{TBL}"
+                      sd_stream  = f"{src.upper()}_{TBL}_SD"
+                      ht_stream  = f"{src.upper()}_{TBL}_HIST"
+                      sd_topic   = f"{tp}.{tbl}_sd"
+                      ht_topic   = f"{tp}.{tbl}_hist"
+
+                      # ── SD stream ──────────────────────────────────────────
+                      sd_sql = (
+                          f"CREATE STREAM IF NOT EXISTS {sd_stream} "
+                          f"WITH (KAFKA_TOPIC='{sd_topic}', PARTITIONS=3, REPLICAS=1, "
+                          f"VALUE_FORMAT='JSON', CLEANUP_POLICY='compact,delete', RETENTION_MS=604800000) "
+                          f"AS SELECT "
+                          f"CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' "
+                          f"  THEN EXTRACTJSONFIELD(PAYLOAD,'{pkb}') "
+                          f"  ELSE EXTRACTJSONFIELD(PAYLOAD,'{pka}') END AS PK_ID, "
+                          f"EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, "
+                          f"EXTRACTJSONFIELD(PAYLOAD,'$.before') AS BEFORE_JSON, "
+                          f"CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN 'true' ELSE 'false' END AS IS_DELETED, "
+                          f"CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN CAST(ROWTIME AS VARCHAR) ELSE NULL END AS DELETED_AT, "
+                          f"EXTRACTJSONFIELD(PAYLOAD,'$.op') AS CDC_OP, "
+                          f"CAST(ROWTIME AS BIGINT) AS CDC_TS "
+                          f"FROM {src_stream} "
+                          f"WHERE EXTRACTJSONFIELD(PAYLOAD,'$.op') IS NOT NULL "
+                          f"PARTITION BY CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' "
+                          f"  THEN EXTRACTJSONFIELD(PAYLOAD,'{pkb}') "
+                          f"  ELSE EXTRACTJSONFIELD(PAYLOAD,'{pka}') END "
+                          f"EMIT CHANGES;"
+                      )
+                      if not ksql(f"{src}/{tbl} SD", sd_sql):
+                          errors += 1
+
+                      # ── HIST stream ────────────────────────────────────────
+                      ht_sql = (
+                          f"CREATE STREAM IF NOT EXISTS {ht_stream} "
+                          f"WITH (KAFKA_TOPIC='{ht_topic}', PARTITIONS=3, REPLICAS=1, "
+                          f"VALUE_FORMAT='JSON', CLEANUP_POLICY='delete', RETENTION_MS=2592000000) "
+                          f"AS SELECT "
+                          f"EXTRACTJSONFIELD(PAYLOAD,'{pka}') AS PK_ID, "
+                          f"EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, "
+                          f"EXTRACTJSONFIELD(PAYLOAD,'$.before') AS BEFORE_JSON, "
+                          f"CASE "
+                          f"  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='c' THEN 'INSERT' "
+                          f"  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='u' THEN 'UPDATE' "
+                          f"  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN 'DELETE' "
+                          f"  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='r' THEN 'READ' "
+                          f"  ELSE EXTRACTJSONFIELD(PAYLOAD,'$.op') END AS CDC_OP, "
+                          f"CAST(ROWTIME AS BIGINT) AS CDC_TS "
+                          f"FROM {src_stream} "
+                          f"WHERE EXTRACTJSONFIELD(PAYLOAD,'$.op') IS NOT NULL "
+                          f"EMIT CHANGES;"
+                      )
+                      if not ksql(f"{src}/{tbl} HIST", ht_sql):
+                          errors += 1
+
+              print(f"\n{'='*60}")
+              print(f"Setup complete — errors: {errors}")
+              if errors:
+                  sys.exit(1)

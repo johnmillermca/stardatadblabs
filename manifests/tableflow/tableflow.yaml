@@ -1,0 +1,218 @@
+# =============================================================================
+# tableflow.yaml
+# ==============
+# Kafka-native TableFlow — 3 Deployments (one per CDC source).
+#
+# Architecture:
+#   ksqlDB derives _sd + _hist topics from raw Debezium topics (stateless).
+#   Each tableflow pod consumes those derived topics and writes directly to
+#   Iceberg via PyIceberg + Polaris REST.  No Spark involved.
+#
+#   Write modes per derived topic:
+#     *_sd   → UPSERT by PK_ID  (current soft-delete state)
+#     *_hist → APPEND            (full row-level history)
+#
+# Sources:
+#   tableflow-postgres  → postgres.cache_testing.*_sd / *_hist → pg_lakehouse
+#   tableflow-oracle    → oracle.cache_testing.*_sd  / *_hist  → ora_lakehouse
+#   tableflow-mongodb   → mongodb.cache_testing.*_sd / *_hist  → mgo_lakehouse
+#
+# Credentials:
+#   All from OpenBao via K8s SA JWT (role: platform-secrets-read).
+#   ServiceAccount: spark-cleanup (already has OpenBao role binding).
+#
+# Tuning:
+#   BATCH_SIZE     — rows buffered before Iceberg write (default 500)
+#   FLUSH_INTERVAL — max seconds between forced flushes (default 10)
+#
+# Image:
+#   192.168.1.50:30500/tableflow:1.0.0
+#   Built from docker/tableflow/Dockerfile
+# =============================================================================
+
+# ── ConfigMap: shared tableflow config ───────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tableflow-config
+  namespace: prod
+  labels:
+    app: tableflow
+    pipeline.type: tableflow
+data:
+  BATCH_SIZE:     "500"
+  FLUSH_INTERVAL: "10"
+  DRY_RUN:        "0"
+  S3_BUCKET:      "xdatatoiceberg1"
+
+# =============================================================================
+# tableflow-postgres
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tableflow-postgres
+  namespace: prod
+  labels:
+    app: tableflow
+    tableflow/source: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tableflow
+      tableflow/source: postgres
+  template:
+    metadata:
+      labels:
+        app: tableflow
+        tableflow/source: postgres
+    spec:
+      serviceAccountName: spark-cleanup
+      nodeSelector:
+        kubernetes.io/hostname: worker2.local
+      enableServiceLinks: false
+      containers:
+        - name: tableflow
+          image: 192.168.1.50:30500/tableflow:1.0.0
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: tableflow-config
+          env:
+            - name: SOURCE
+              value: "postgres"
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os, time; age=time.time()-os.path.getmtime('/tmp/tableflow.alive') if os.path.exists('/tmp/tableflow.alive') else 0; exit(1 if age > 120 else 0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python3", "-c", "import os; exit(0 if os.path.exists('/tmp/tableflow.alive') else 1)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+# =============================================================================
+# tableflow-oracle
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tableflow-oracle
+  namespace: prod
+  labels:
+    app: tableflow
+    tableflow/source: oracle
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tableflow
+      tableflow/source: oracle
+  template:
+    metadata:
+      labels:
+        app: tableflow
+        tableflow/source: oracle
+    spec:
+      serviceAccountName: spark-cleanup
+      nodeSelector:
+        kubernetes.io/hostname: worker3.local
+      enableServiceLinks: false
+      containers:
+        - name: tableflow
+          image: 192.168.1.50:30500/tableflow:1.0.0
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: tableflow-config
+          env:
+            - name: SOURCE
+              value: "oracle"
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os, time; age=time.time()-os.path.getmtime('/tmp/tableflow.alive') if os.path.exists('/tmp/tableflow.alive') else 0; exit(1 if age > 120 else 0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python3", "-c", "import os; exit(0 if os.path.exists('/tmp/tableflow.alive') else 1)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+# =============================================================================
+# tableflow-mongodb
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tableflow-mongodb
+  namespace: prod
+  labels:
+    app: tableflow
+    tableflow/source: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tableflow
+      tableflow/source: mongodb
+  template:
+    metadata:
+      labels:
+        app: tableflow
+        tableflow/source: mongodb
+    spec:
+      serviceAccountName: spark-cleanup
+      nodeSelector:
+        kubernetes.io/hostname: worker4.local
+      enableServiceLinks: false
+      containers:
+        - name: tableflow
+          image: 192.168.1.50:30500/tableflow:1.0.0
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: tableflow-config
+          env:
+            - name: SOURCE
+              value: "mongodb"
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os, time; age=time.time()-os.path.getmtime('/tmp/tableflow.alive') if os.path.exists('/tmp/tableflow.alive') else 0; exit(1 if age > 120 else 0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["python3", "-c", "import os; exit(0 if os.path.exists('/tmp/tableflow.alive') else 1)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10

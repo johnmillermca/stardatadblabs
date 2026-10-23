@@ -1,0 +1,8 @@
+# PyIceberg with S3 + REST catalog support
+pyiceberg[s3,rest]==0.7.1
+# Kafka consumer
+confluent-kafka==2.5.0
+# Arrow columnar format (PyIceberg uses it for writes)
+pyarrow==16.1.0
+# For token refresh
+requests==2.32.3

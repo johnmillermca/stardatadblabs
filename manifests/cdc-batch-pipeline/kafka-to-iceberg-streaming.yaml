@@ -1,36 +1,21 @@
 # =============================================================================
 # kafka-to-iceberg-streaming.yaml
 #
-# Real-time CDC pipeline: Kafka (Debezium) → Apache Iceberg via Polaris REST.
+# !! SUPERSEDED by Kafka-native TableFlow (manifests/tableflow/tableflow.yaml) !!
 #
-# Architecture — 3 Deployments × 3 worker nodes × 1 core each:
+# The 3 Spark Structured Streaming deployments (standard, soft-delete,
+# history-tracking) have been scaled to replicas=0.  They are retained here
+# for reference and rollback only.
 #
-#   kafka-to-iceberg-standard         — SCD Type 0 MERGE + hard delete
-#   kafka-to-iceberg-soft-delete      — MERGE upsert + soft-delete flag
-#   kafka-to-iceberg-history-tracking — append-only full row history
+# Replacement architecture:
+#   Debezium → ksqlDB (_sd / _hist derived topics) → tableflow Python pods
+#   → PyIceberg → Polaris REST → Iceberg on S3
 #
-#   Each Deployment runs ALL sources (postgres + oracle + mongodb) in one
-#   Spark app.  No SOURCE filter — _ALL_SOURCES is used automatically.
+# To re-enable Spark streaming (rollback): set replicas back to 1 and scale
+# the 3 dedicated streaming Spark workers back up.
 #
-# Worker layout (one streaming worker per node, 2 GB shared per node):
-#   spark-worker-streaming-worker2  (pinned to worker2.local)  2g / 1 core
-#   spark-worker-streaming-worker3  (pinned to worker3.local)  2g / 1 core
-#   spark-worker-streaming-worker4  (pinned to worker4.local)  2g / 1 core
-#
-#   Each node hosts exactly one streaming app.  All three apps share the
-#   2 GB pool on their respective worker — EXECUTOR_MEMORY=2g means the
-#   one executor on each worker can use up to the full 2 GB.
-#
-#   spark-worker (replicas=0→3, worker3+worker4) — for starpump batch jobs only
-#     Autoscaled by spark-guardian: 0→3 when starpump submits, 3→0 after idle.
-#
-# Guardian autoscale rule:
-#   kafka-to-iceberg streaming apps (STREAMING_APP_PREFIX) are excluded from
-#   the scale-up/down decisions for spark-worker.  The batch worker scales
-#   0→WORKER_REPLICAS when a starpump job is WAITING, and back to 0 after
-#   SCALE_DOWN_IDLE_S seconds with no batch work — regardless of whether
-#   streaming apps are running on spark-worker-streaming-*.
-#
+# Spark batch workers (spark-worker-streaming-worker2/3/4) are also scaled to 0
+# since the tableflow pods now own those nodes.
 # =============================================================================
 
 # ── ConfigMap: shared streaming config ───────────────────────────────────────
@@ -104,7 +89,7 @@ metadata:
     app: spark
     component: worker-streaming
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: spark
@@ -171,7 +156,7 @@ metadata:
     app: spark
     component: worker-streaming
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: spark
@@ -238,7 +223,7 @@ metadata:
     app: spark
     component: worker-streaming
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: spark
@@ -314,7 +299,7 @@ metadata:
     pipeline.type: streaming
     pipeline.write-mode: standard
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
@@ -347,7 +332,8 @@ spec:
               value: dave
             - name: WRITE_MODE
               value: standard
-            # No SOURCE — runs all sources (postgres + oracle + mongodb) in one app
+            - name: SOURCE
+              value: postgres
             - name: DISABLE_GLUTEN
               value: "1"
             - name: HEALTH_PORT
@@ -474,7 +460,7 @@ metadata:
     pipeline.type: streaming
     pipeline.write-mode: soft-delete
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
@@ -507,6 +493,8 @@ spec:
               value: dave
             - name: WRITE_MODE
               value: soft_delete
+            - name: SOURCE
+              value: postgres
             - name: DISABLE_GLUTEN
               value: "1"
             - name: HEALTH_PORT
@@ -633,7 +621,7 @@ metadata:
     pipeline.type: streaming
     pipeline.write-mode: history-tracking
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: kafka-to-iceberg
@@ -666,6 +654,8 @@ spec:
               value: dave
             - name: WRITE_MODE
               value: history_tracking
+            - name: SOURCE
+              value: postgres
             - name: DISABLE_GLUTEN
               value: "1"
             - name: HEALTH_PORT
