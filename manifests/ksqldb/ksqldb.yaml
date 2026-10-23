@@ -1,0 +1,143 @@
+# =============================================================================
+# ksqlDB 0.29.0 — single replica
+# Node        : worker6.local
+# Image       : 192.168.1.50:30500/confluentinc/ksqldb-server:0.29.0
+# REST API    : http://192.168.1.56:30088  (NodePort)
+#               http://ksqldb.prod.svc.cluster.local:8088 (in-cluster)
+#
+# Kafka       : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
+#               Auth: SASL_PLAINTEXT / SCRAM-SHA-512
+#               Credentials: ksqldb-user (Strimzi-managed KafkaUser secret)
+#
+# Schema Reg  : http://schema-registry.prod.svc.cluster.local:8081
+#
+# Internals   : ksqlDB stores its command topic and processing state in Kafka.
+#               All internal topics are prefixed with "_confluent-ksql-default_"
+#               and auto-created by the broker (auto.create.topics.enable=true).
+#               State stores land in /var/lib/ksql/data (emptyDir — ephemeral).
+#
+# CLI access  : kubectl exec -it -n prod deploy/ksqldb -- ksql http://localhost:8088
+#               Or from outside: ksql http://192.168.1.56:30088
+# =============================================================================
+---
+# ── Strimzi KafkaUser — SCRAM-SHA-512 credentials for ksqlDB ─────────────────
+# Strimzi writes the generated password into a secret named "ksqldb-user"
+# with key "sasl.jaas.config" — the Deployment reads it directly.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: ksqldb-user
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  authentication:
+    type: scram-sha-512
+
+---
+# ── ksqlDB Server Deployment ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ksqldb
+  namespace: prod
+  labels:
+    app: ksqldb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ksqldb
+  template:
+    metadata:
+      labels:
+        app: ksqldb
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker6.local
+      enableServiceLinks: false
+      containers:
+        - name: ksqldb-server
+          image: 192.168.1.50:30500/confluentinc/ksqldb-server:0.29.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8088
+          env:
+            # ── Kafka bootstrap ───────────────────────────────────────────────
+            - name: KSQL_BOOTSTRAP_SERVERS
+              value: "SASL_PLAINTEXT://strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
+            # ── Listeners ─────────────────────────────────────────────────────
+            - name: KSQL_LISTENERS
+              value: "http://0.0.0.0:8088"
+            # ── Service ID (used as Kafka consumer group + topic prefix) ──────
+            - name: KSQL_KSQL_SERVICE_ID
+              value: "default_"
+            # ── Schema Registry ───────────────────────────────────────────────
+            - name: KSQL_KSQL_SCHEMA_REGISTRY_URL
+              value: "http://schema-registry.prod.svc.cluster.local:8081"
+            # ── SCRAM-SHA-512 auth — read Strimzi-managed JAAS config ─────────
+            - name: KSQL_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: KSQL_SASL_MECHANISM
+              value: "SCRAM-SHA-512"
+            - name: KSQL_SASL_JAAS_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: ksqldb-user
+                  key: sasl.jaas.config
+            # ── State store directory (emptyDir — lost on pod restart) ────────
+            - name: KSQL_KSQL_STREAMS_STATE_DIR
+              value: "/var/lib/ksql/data"
+            # ── Logging ───────────────────────────────────────────────────────
+            - name: KSQL_LOG4J_ROOT_LOGLEVEL
+              value: "INFO"
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 250m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          volumeMounts:
+            - name: state-dir
+              mountPath: /var/lib/ksql/data
+          startupProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8088
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8088
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8088
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: state-dir
+          emptyDir: {}
+
+---
+# ── ksqlDB Service ────────────────────────────────────────────────────────────
+# NodePort 30088 → REST API (ksql CLI, HTTP queries)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ksqldb
+  namespace: prod
+spec:
+  selector:
+    app: ksqldb
+  type: NodePort
+  ports:
+    - port: 8088
+      targetPort: 8088
+      nodePort: 30088
