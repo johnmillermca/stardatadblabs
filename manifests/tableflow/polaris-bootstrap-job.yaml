@@ -1,0 +1,160 @@
+# =============================================================================
+# polaris-bootstrap-job.yaml
+# ==========================
+# One-shot Job that patches Polaris catalog storageConfigInfo for every
+# warehouse listed in POLARIS_CATALOGS.
+#
+# Problem it solves:
+#   Polaris catalogs provisioned with a roleArn (IAM role for STS assume-role)
+#   fail when the IAM principal is a plain user rather than a role, or when
+#   STS is unreachable (stsUnavailable=true).  This Job re-registers the
+#   catalog using userAccessKeyId / userSecretAccessKey so Polaris vends direct
+#   S3 credentials instead of STS temporary tokens.
+#
+# All secrets come from OpenBao via the pod's K8s SA JWT — nothing is hardcoded.
+#
+# Env vars (all from ConfigMap / defaults — override per-environment):
+#   POLARIS_CATALOGS      comma-separated catalog names to patch
+#   BAO_ADDR              OpenBao address (default: http://openbao.<ns>:8200)
+#   BAO_ROLE              OpenBao K8s auth role (default: platform-secrets-read)
+#   BAO_S3_PATH           OpenBao KV path for S3 creds   (default: secret/data/platform/s3)
+#   BAO_POLARIS_PATH      OpenBao KV path for Polaris     (default: secret/data/platform/polaris)
+#
+# Run manually:
+#   kubectl -n prod create job --from=cronjob/polaris-bootstrap polaris-bootstrap-$(date +%s)
+#   — or just re-apply this file; ArgoCD will re-run on each new job name.
+# =============================================================================
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: polaris-bootstrap-config
+  namespace: prod
+  labels:
+    app: polaris-bootstrap
+data:
+  POLARIS_CATALOGS: "pg_lakehouse,ora_lakehouse,mgo_lakehouse"
+  BAO_ROLE:         "platform-secrets-read"
+  BAO_S3_PATH:      "secret/data/platform/s3"
+  BAO_POLARIS_PATH: "secret/data/platform/polaris"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-bootstrap
+  namespace: prod
+  labels:
+    app: polaris-bootstrap
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: polaris-bootstrap
+    spec:
+      serviceAccountName: spark-cleanup
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: bootstrap
+          image: python:3.11-slim
+          envFrom:
+            - configMapRef:
+                name: polaris-bootstrap-config
+          command: ["python3", "-c"]
+          args:
+            - |
+              import os, ssl, json, urllib.request, urllib.parse
+
+              # ── helpers ──────────────────────────────────────────────────
+              ctx = ssl.create_default_context()
+              ctx.check_hostname = False
+              ctx.verify_mode    = ssl.CERT_NONE
+
+              def get(url, hdrs=None, ctx=ctx):
+                  req = urllib.request.Request(url, headers=hdrs or {})
+                  return json.loads(urllib.request.urlopen(req, timeout=15, context=ctx).read())
+
+              def put(url, payload, hdrs, ctx=ctx):
+                  req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                               headers={**hdrs, 'Content-Type': 'application/json'},
+                                               method='PUT')
+                  try:
+                      return urllib.request.urlopen(req, timeout=15, context=ctx)
+                  except urllib.error.HTTPError as e:
+                      body = e.read().decode()
+                      raise RuntimeError(f'PUT {url} HTTP {e.code}: {body}') from None
+
+              # ── OpenBao auth ──────────────────────────────────────────────
+              ns_file  = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+              jwt_file = '/var/run/secrets/kubernetes.io/serviceaccount/token'
+              ns       = open(ns_file).read().strip() if os.path.exists(ns_file) else 'prod'
+              jwt      = open(jwt_file).read().strip()
+
+              bao_addr = os.environ.get('BAO_ADDR') or f'http://openbao.{ns}.svc.cluster.local:8200'
+              bao_role = os.environ.get('BAO_ROLE', 'platform-secrets-read')
+              req = urllib.request.Request(
+                  f'{bao_addr}/v1/auth/kubernetes/login',
+                  data=json.dumps({'role': bao_role, 'jwt': jwt}).encode(),
+                  headers={'Content-Type': 'application/json'})
+              bao_token = json.loads(urllib.request.urlopen(req, timeout=15).read())['auth']['client_token']
+              bao_hdrs  = {'X-Vault-Token': bao_token}
+
+              # ── Read secrets ──────────────────────────────────────────────
+              s3  = get(f'{bao_addr}/v1/{os.environ["BAO_S3_PATH"]}',  bao_hdrs)['data']['data']
+              pol = get(f'{bao_addr}/v1/{os.environ["BAO_POLARIS_PATH"]}', bao_hdrs)['data']['data']
+
+              # ── Polaris OAuth (root) ───────────────────────────────────────
+              base       = pol['url'].replace('/api/catalog', '')
+              oauth_data = urllib.parse.urlencode({
+                  'grant_type':    'client_credentials',
+                  'client_id':     pol['root_client_id'],
+                  'client_secret': pol['root_client_secret'],
+                  'scope':         'PRINCIPAL_ROLE:ALL',
+              }).encode()
+              token_resp  = json.loads(urllib.request.urlopen(
+                  urllib.request.Request(f'{base}/api/catalog/v1/oauth/tokens', data=oauth_data),
+                  timeout=15, context=ctx).read())
+              access_token = token_resp['access_token']
+              auth_hdrs    = {'Authorization': f'Bearer {access_token}'}
+
+              # ── Patch each catalog ────────────────────────────────────────
+              catalogs = [c.strip() for c in os.environ['POLARIS_CATALOGS'].split(',') if c.strip()]
+              region   = s3.get('region', 'us-east-2')
+
+              for name in catalogs:
+                  cat = get(f'{base}/api/management/v1/catalogs/{name}', auth_hdrs)
+                  ver = cat['entityVersion']
+                  loc = cat['properties'].get('default-base-location',
+                        f's3://{s3["bucket"]}/iceberg/{name}')
+                  existing_si = cat.get('storageConfigInfo', {})
+                  payload = {
+                      'currentEntityVersion': ver,
+                      'properties': {
+                          'default-base-location': loc,
+                          'client.region': region,
+                      },
+                      'storageConfigInfo': {
+                          'storageType':         'S3',
+                          'allowedLocations':    [loc],
+                          'pathStyleAccess':     existing_si.get('pathStyleAccess', False),
+                          'roleArn':             existing_si.get('roleArn', ''),
+                          'externalId':          existing_si.get('externalId', ''),
+                          'userAccessKeyId':     s3['access_key'],
+                          'userSecretAccessKey': s3['secret_key'],
+                      },
+                  }
+                  resp = put(f'{base}/api/management/v1/catalogs/{name}', payload, auth_hdrs)
+                  print(f'[OK] {name} updated (entityVersion {ver} -> {ver+1}), status={resp.status}')
+
+              print('polaris-bootstrap complete.')
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
