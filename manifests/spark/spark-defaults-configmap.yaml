@@ -1,0 +1,149 @@
+# =============================================================================
+# Spark defaults ConfigMap — mounts over /opt/spark/conf/spark-defaults.conf
+# on spark-master, spark-worker, and spark-worker-large pods.
+#
+# Content = full baked-in spark-defaults.conf from the image (unchanged)
+#           + Dynamic Resource Allocation block appended at the end.
+#
+# Dynamic Allocation + Guardian coexist:
+#   • dynamicAllocation manages executor count WITHIN a running job
+#     (adds executors when busy, removes idle ones mid-job)
+#   • spark-guardian manages cluster-level hygiene:
+#     - scales worker PODS to 0 between jobs (frees spark-opensearch nodes)
+#     - kills zombie apps, dead drivers, over-limit sessions
+#   minExecutors=0 keeps both in sync — guardian scales pods to 0 when idle,
+#   dynamic allocation doesn't fight to keep an executor alive.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-defaults-config
+  namespace: prod
+data:
+  spark-defaults.conf: |
+    # ── Gluten + Velox native execution (DEFAULT ON) ─────────────────────────────
+    # Gluten is ALWAYS ACTIVE on this cluster — bao_spark_init.py loads
+    # GlutenPlugin and enables off-heap (2g) for every job by default.
+    # To disable for one run: DISABLE_GLUTEN=1 starpump snowflake
+    # NOTE: JAR is org.apache.gluten (donated to Apache; old io.glutenproject is gone).
+    spark.plugins                                        org.apache.gluten.GlutenPlugin
+    spark.gluten.sql.columnar.backend.lib                velox
+    spark.memory.offHeap.enabled                         true
+    # Off-heap reduced from 2g → 1500m so the total per-executor footprint fits
+    # within the 6 Gi regular worker pod ceiling without OOM:
+    #   executor heap 3g + off-heap 1500m + JVM overhead 400m ≈ 4.9 GB  (was 5.5 GB)
+    spark.memory.offHeap.size                            1500m
+
+    # ── SQL extensions (Iceberg only — Delta added per-session if needed) ─────────
+    spark.sql.extensions                                 org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+
+    # ── Polaris REST catalog (credentials injected at runtime by bao_spark_init) ──
+    spark.sql.catalog.polaris                            org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.polaris.type                       rest
+    spark.sql.catalog.polaris.uri                        http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+    spark.sql.catalog.polaris.warehouse                  IcebergCatalog
+    spark.sql.catalog.polaris.scope                      PRINCIPAL_ROLE:ALL
+
+    # ── Snowflake source catalog (namespace = tpcds_sf10tcl) ─────────────────────
+    spark.sql.catalog.snowflake                   org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.snowflake.type              hadoop
+    spark.sql.catalog.snowflake.warehouse         SNOWFLAKE_SAMPLE_DATA
+    spark.sql.catalog.snowflake.default-namespace tpcds_sf10tcl
+
+    # ── Databricks catalog → Polaris REST (warehouse: star_lakehouse) ─────────────
+    # Credentials (credential, oauth2-server-uri, s3 keys) injected at runtime
+    # by bao_spark_init.spark_conf().  This stanza declares the catalog so pods
+    # have it available without a per-job SparkSession.builder call.
+    spark.sql.catalog.databricks                            org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.databricks.type                       rest
+    spark.sql.catalog.databricks.uri                        http://polaris-rest.prod.svc.cluster.local:8181/api/catalog
+    spark.sql.catalog.databricks.warehouse                  star_lakehouse
+    spark.sql.catalog.databricks.scope                      PRINCIPAL_ROLE:ALL
+    spark.sql.catalog.databricks.rest.auth.type             oauth2
+
+    # ── Global Iceberg write defaults (256 MB file size) ─────────────────────────
+    spark.sql.iceberg.write.format.default               parquet
+    spark.sql.iceberg.target-file-size-bytes             268435456
+
+    # ── Iceberg query optimisations ───────────────────────────────────────────────
+    spark.sql.iceberg.aggregate-pushdown.enabled         true
+
+    # ── S3A defaults (credentials injected at runtime) ───────────────────────────
+    spark.hadoop.fs.s3a.impl                             org.apache.hadoop.fs.s3a.S3AFileSystem
+    spark.hadoop.fs.s3a.endpoint                         https://s3.us-east-2.amazonaws.com
+    spark.hadoop.fs.s3a.endpoint.region                  us-east-2
+    spark.hadoop.fs.s3a.path.style.access                true
+    spark.hadoop.fs.s3a.connection.ssl.enabled           true
+
+    # ── Parquet / compression ─────────────────────────────────────────────────────
+    spark.sql.parquet.compression.codec                  snappy
+
+    # ── Serializer ───────────────────────────────────────────────────────────────
+    spark.serializer                                     org.apache.spark.serializer.KryoSerializer
+
+    # ── Driver / executor sizing ──────────────────────────────────────────────────
+    spark.driver.memory                                  512m
+    spark.executor.memory                                450m
+    # executor.cores=3: 1 executor uses all 3 cores on 1 worker node.
+    spark.executor.cores                                 3
+    # spark.cores.max: removed — dynamic allocation manages core allocation
+    # per-job instead of a static cluster-wide cap.
+    spark.executor.memoryOverheadFactor                  0.15
+
+    # ── Memory management ─────────────────────────────────────────────────────────
+    spark.memory.storageFraction                         0.4
+
+    # ── Adaptive Query Execution ──────────────────────────────────────────────────
+    spark.sql.adaptive.enabled                           true
+    spark.sql.adaptive.coalescePartitions.enabled        true
+    spark.sql.adaptive.skewJoin.enabled                  true
+    spark.sql.adaptive.advisoryPartitionSizeInBytes      128m
+    spark.sql.adaptive.coalescePartitions.minPartitionSize 1m
+
+    # ── Shuffle spill to disk before OOM ─────────────────────────────────────────
+    spark.shuffle.spill                                  true
+    spark.shuffle.spill.compress                         true
+    spark.shuffle.compress                               true
+
+    # ── Kryo buffer ───────────────────────────────────────────────────────────────
+    spark.kryoserializer.buffer.max                      256m
+
+    # ── Logging config ────────────────────────────────────────────────────────────
+    spark.driver.extraJavaOptions   -Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+    spark.executor.extraJavaOptions -Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+
+    # ── Orphan / stalled-app protection ──────────────────────────────────────────
+    spark.worker.timeout                                 60
+    spark.dead.worker.persistence                        0
+    spark.network.timeout                                60s
+    spark.worker.cleanup.enabled                         true
+    spark.worker.cleanup.interval                        60
+    spark.worker.cleanup.appDataTtl                      60
+
+    # ── Dynamic Resource Allocation ───────────────────────────────────────────────
+    # Coexists with spark-guardian sidecar:
+    #   dynamicAllocation = manages executor count WITHIN a running job
+    #   spark-guardian    = kills zombie apps / dead drivers / scales worker PODS
+    #
+    # shuffleTracking replaces the External Shuffle Service requirement (Spark 3.0+).
+    # Safe for standalone mode — no ESS needed.
+    #
+    # Executor sizing vs worker capacity (worker pod: 3 CPU / 1100Mi / SPARK_WORKER_MEMORY=900m):
+    #   spark.executor.cores=3 → 1 executor per worker (uses all 3 worker cores)
+    #   maxExecutors=3         → 1 executor per worker × 3 workers = full cluster
+    #   minExecutors=0         → guardian can scale worker pods to 0 freely
+    #
+    # Idle timeouts:
+    #   executorIdleTimeout=30s      — release idle executor after 30s (no cached data)
+    #   cachedExecutorIdleTimeout=60s — release executor holding cached RDDs after 60s
+    #   These are intentionally short: guardian's SCALE_DOWN_IDLE_S=120s fires after
+    #   all executors have already been released, so there's no contention.
+    spark.dynamicAllocation.enabled                      true
+    spark.dynamicAllocation.shuffleTracking.enabled      true
+    spark.dynamicAllocation.minExecutors                 0
+    spark.dynamicAllocation.maxExecutors                 3
+    spark.dynamicAllocation.executorIdleTimeout          30s
+    spark.dynamicAllocation.cachedExecutorIdleTimeout    60s
+    # initialExecutors=1: request 1 executor immediately on job start rather
+    # than scaling from 0, which avoids a cold-start delay on the first task.
+    spark.dynamicAllocation.initialExecutors             1

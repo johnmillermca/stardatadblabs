@@ -282,6 +282,9 @@ spec:
             - name: spark-keytab
               mountPath: /etc/security/keytabs/spark.service.keytab
               subPath: keytab
+            - name: spark-defaults
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
           resources:
             requests:
               memory: 512Mi
@@ -299,6 +302,9 @@ spec:
         - name: spark-keytab
           secret:
             secretName: spark-keytab
+        - name: spark-defaults
+          configMap:
+            name: spark-defaults-config
 ---
 # ── Standard workers — worker2 / worker3 / worker4 (workload=spark-opensearch) ─
 # replicas=0  → idle, consumes no resources.
@@ -371,6 +377,9 @@ spec:
             - name: krb5-conf
               mountPath: /etc/krb5.conf.d/cluster.conf
               subPath: krb5.conf
+            - name: spark-defaults
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
           resources:
             requests:
               cpu: "10m"
@@ -385,6 +394,9 @@ spec:
             items:
               - key: krb5.conf
                 path: krb5.conf
+        - name: spark-defaults
+          configMap:
+            name: spark-defaults-config
 ---
 # ── Large worker — spark-opensearch pool (worker2/3/4) ────────────────────────
 # replicas=0  → idle, consumes no resources.
@@ -462,6 +474,9 @@ spec:
             - name: krb5-conf
               mountPath: /etc/krb5.conf.d/cluster.conf
               subPath: krb5.conf
+            - name: spark-defaults
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
           resources:
             requests:
               cpu: "10m"
@@ -476,3 +491,6 @@ spec:
             items:
               - key: krb5.conf
                 path: krb5.conf
+        - name: spark-defaults
+          configMap:
+            name: spark-defaults-config
