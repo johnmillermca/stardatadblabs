@@ -314,6 +314,45 @@ def _rows_to_arrow(rows: list[dict]) -> pa.Table:
     return pa.table(columns)
 
 
+def _iceberg_to_arrow_type(ice_type: Any) -> pa.DataType:
+    """Map a PyIceberg field type to the closest PyArrow type for casting."""
+    type_name = type(ice_type).__name__
+    if type_name in ("LongType", "IntegerType"):
+        return pa.int64()
+    if type_name == "FloatType":
+        return pa.float32()
+    if type_name == "DoubleType":
+        return pa.float64()
+    if type_name == "BooleanType":
+        return pa.bool_()
+    if type_name in ("TimestampType", "TimestamptzType"):
+        return pa.string()   # keep as ISO string — safest cross-version approach
+    return pa.string()
+
+
+def _cast_arrow_to_schema(arrow: pa.Table, tbl: Any) -> pa.Table:
+    """
+    Cast each column in `arrow` to match the existing Iceberg table schema.
+    Columns not in the schema are left as-is (schema evolution will add them).
+    Failures are silently ignored — the column stays as string.
+    """
+    ice_types = {f.name: f.field_type for f in tbl.schema().fields}
+    for col_name in arrow.schema.names:
+        if col_name not in ice_types:
+            continue
+        target_pa = _iceberg_to_arrow_type(ice_types[col_name])
+        current_pa = arrow.schema.field(col_name).type
+        if current_pa == target_pa:
+            continue
+        try:
+            col_idx = arrow.schema.get_field_index(col_name)
+            arrow = arrow.set_column(col_idx, col_name,
+                                     arrow.column(col_name).cast(target_pa, safe=False))
+        except Exception:
+            pass   # leave as-is; PyIceberg will report a schema mismatch on write
+    return arrow
+
+
 def ensure_table(catalog: RestCatalog, table_id: tuple, sample_row: dict, mode: str) -> None:
     """Create Iceberg table from sample_row schema if it doesn't exist."""
     try:
@@ -341,6 +380,7 @@ def write_sd_batch(catalog: RestCatalog, table_id: tuple, rows: list[dict]) -> i
     _evolve_schema(catalog, table_id, rows[0])
     tbl    = catalog.load_table(table_id)
     arrow  = _rows_to_arrow(rows)
+    arrow  = _cast_arrow_to_schema(arrow, tbl)
     # align arrow schema to iceberg schema (add missing cols as null, drop unknown)
     ice_field_names = [f.name for f in tbl.schema().fields]
     ice_cols        = set(ice_field_names)
@@ -360,6 +400,7 @@ def write_hist_batch(catalog: RestCatalog, table_id: tuple, rows: list[dict]) ->
     _evolve_schema(catalog, table_id, rows[0])
     tbl             = catalog.load_table(table_id)
     arrow           = _rows_to_arrow(rows)
+    arrow           = _cast_arrow_to_schema(arrow, tbl)
     ice_field_names = [f.name for f in tbl.schema().fields]
     ice_cols        = set(ice_field_names)
     arrow_cols      = set(arrow.schema.names)

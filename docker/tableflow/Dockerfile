@@ -5,7 +5,7 @@
 # Deps  : pyiceberg[s3] confluent-kafka pyarrow
 #
 # Built as:
-#   192.168.1.50:30500/tableflow:1.0.4
+#   192.168.1.50:30500/tableflow:1.0.5
 # =============================================================================
 FROM python:3.11-slim
 
