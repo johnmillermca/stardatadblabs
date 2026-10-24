@@ -78,12 +78,10 @@ spec:
 
               wait_ready()
 
-              # ksqlDB 0.29 does not support CLEANUP_POLICY / RETENTION_MS in
-              # CREATE STREAM ... AS SELECT WITH (...).  Those properties only
-              # work for CREATE STREAM (source declaration), not CSAS derived
-              # streams.  Topic cleanup/retention must be set via Kafka admin
-              # after the topic is created.  We omit them from CSAS here and
-              # set them with a separate Kafka admin call below.
+              # ksqlDB 7.9.10 supports CLEANUP_POLICY and RETENTION_MS in CSAS
+              # WITH clauses.  _sd topics use compact+delete (7 day retention)
+              # so the compacted topic always holds the latest row per PK.
+              # _hist topics use delete-only with 30 day retention for full history.
               SOURCES = {
                   "postgres": {
                       "stream_pfx": "POSTGRES_CACHE_TESTING",
@@ -128,11 +126,10 @@ spec:
                       ht_topic   = f"{tp}.{tbl}_hist"
 
                       # ── SD stream ──────────────────────────────────────────
-                      # CSAS WITH clause: only KAFKA_TOPIC, PARTITIONS, REPLICAS,
-                      # VALUE_FORMAT are valid in ksqlDB 0.29.
                       sd_sql = (
                           f"CREATE STREAM IF NOT EXISTS {sd_stream} "
-                          f"WITH (KAFKA_TOPIC='{sd_topic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') "
+                          f"WITH (KAFKA_TOPIC='{sd_topic}', PARTITIONS=3, REPLICAS=1, "
+                          f"VALUE_FORMAT='JSON', CLEANUP_POLICY='compact,delete', RETENTION_MS=604800000) "
                           f"AS SELECT "
                           f"CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' "
                           f"  THEN EXTRACTJSONFIELD(PAYLOAD,'{pkb}') "
@@ -156,7 +153,8 @@ spec:
                       # ── HIST stream ────────────────────────────────────────
                       ht_sql = (
                           f"CREATE STREAM IF NOT EXISTS {ht_stream} "
-                          f"WITH (KAFKA_TOPIC='{ht_topic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') "
+                          f"WITH (KAFKA_TOPIC='{ht_topic}', PARTITIONS=3, REPLICAS=1, "
+                          f"VALUE_FORMAT='JSON', CLEANUP_POLICY='delete', RETENTION_MS=2592000000) "
                           f"AS SELECT "
                           f"EXTRACTJSONFIELD(PAYLOAD,'{pka}') AS PK_ID, "
                           f"EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, "

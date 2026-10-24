@@ -1,7 +1,7 @@
 # =============================================================================
-# ksqlDB 0.29.0 — single replica
+# ksqlDB 7.9.10 (Confluent Platform cp-ksqldb-server) — single replica
 # Node        : worker6.local
-# Image       : 192.168.1.50:30500/confluentinc/ksqldb-server:0.29.0
+# Image       : 192.168.1.50:30500/confluentinc/ksqldb-server:7.9.10
 # REST API    : http://192.168.1.56:30088  (NodePort)
 #               http://ksqldb.prod.svc.cluster.local:8088 (in-cluster)
 #
@@ -58,7 +58,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: ksqldb-server
-          image: 192.168.1.50:30500/confluentinc/ksqldb-server:0.29.0
+          image: 192.168.1.50:30500/confluentinc/ksqldb-server:7.9.10
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8088
