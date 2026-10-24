@@ -177,6 +177,46 @@ spec:
     retention.bytes: "-1"
     compression.type: lz4
 
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-order-items
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+    pipeline.source: postgres
+    pipeline.database: cache_testing
+spec:
+  topicName: "postgres.cache_testing.order_items"
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "604800000"
+    retention.bytes: "-1"
+    compression.type: lz4
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-inventory-events
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+    pipeline.source: postgres
+    pipeline.database: cache_testing
+spec:
+  topicName: "postgres.cache_testing.inventory_events"
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "604800000"
+    retention.bytes: "-1"
+    compression.type: lz4
+
 # ── Oracle CDC topics ────────────────────────────────────────────────────────
 # Topics use Oracle data-dictionary casing (uppercase) via Debezium's default
 # SchemaTopicNamingStrategy.  To replicate a new Oracle table:

@@ -83,6 +83,8 @@ spec:
               # Debezium raw topics → ksqlDB source streams.
               # order_items and inventory_events were never registered for
               # postgres in the original ksqlDB setup — register them now.
+              # The topics are pre-created via KafkaTopic CRs in kafka-topics.yaml
+              # so ksqlDB can register against them even before Debezium writes.
               # ─────────────────────────────────────────────────────────────
               SOURCE_STREAMS = [
                   # (stream_name, raw_kafka_topic)
@@ -93,6 +95,8 @@ spec:
               ]
               print("\n=== Registering missing source streams ===")
               for sname, stopic in SOURCE_STREAMS:
+                  # Use KAFKA_TOPIC_OFFSET_VALIDATION=false so ksqlDB accepts
+                  # a topic that exists but has no messages yet
                   reg_sql = (f"CREATE STREAM IF NOT EXISTS {sname} "
                              f"(ROWKEY STRING KEY, PAYLOAD STRING) "
                              f"WITH (KAFKA_TOPIC='{stopic}', VALUE_FORMAT='JSON', "
@@ -113,7 +117,9 @@ spec:
               ]
               print("\n=== Dropping stale duplicate streams ===")
               for s in STALE_STREAMS:
-                  ksql(f"drop/{s}", f"DROP STREAM IF EXISTS {s} DELETE TOPIC;")
+                  # Don't DELETE TOPIC — the canonical stream (CACHE_TESTING prefix)
+                  # already owns the same topic; deleting it would remove the data.
+                  ksql(f"drop/{s}", f"DROP STREAM IF EXISTS {s};")
 
               # ─────────────────────────────────────────────────────────────
               # Source config per CDC origin
