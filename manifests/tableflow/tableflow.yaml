@@ -72,7 +72,7 @@ spec:
     spec:
       serviceAccountName: spark-cleanup
       nodeSelector:
-        kubernetes.io/hostname: worker2.local
+        kubernetes.io/hostname: worker7.local
       enableServiceLinks: false
       containers:
         - name: tableflow
@@ -129,7 +129,7 @@ spec:
     spec:
       serviceAccountName: spark-cleanup
       nodeSelector:
-        kubernetes.io/hostname: worker3.local
+        kubernetes.io/hostname: worker8.local
       enableServiceLinks: false
       containers:
         - name: tableflow
@@ -186,7 +186,7 @@ spec:
     spec:
       serviceAccountName: spark-cleanup
       nodeSelector:
-        kubernetes.io/hostname: worker4.local
+        kubernetes.io/hostname: worker9.local
       enableServiceLinks: false
       containers:
         - name: tableflow
