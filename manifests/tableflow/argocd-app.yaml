@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/star-master/k8s-platform.git
+    repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/tableflow
   destination:
