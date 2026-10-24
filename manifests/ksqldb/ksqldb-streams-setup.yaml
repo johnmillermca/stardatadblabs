@@ -78,10 +78,46 @@ spec:
 
               wait_ready()
 
-              # ksqlDB never allows CLEANUP_POLICY in CSAS WITH clauses — it
-              # is always auto-inferred (STREAM=delete, TABLE=compact).
-              # We set compaction + retention via Kafka AdminClient after stream
-              # creation so _sd topics behave like compacted CDC topics.
+              # ─────────────────────────────────────────────────────────────
+              # Source stream registry
+              # Debezium raw topics → ksqlDB source streams.
+              # order_items and inventory_events were never registered for
+              # postgres in the original ksqlDB setup — register them now.
+              # ─────────────────────────────────────────────────────────────
+              SOURCE_STREAMS = [
+                  # (stream_name, raw_kafka_topic)
+                  ("POSTGRES_CACHE_TESTING_ORDER_ITEMS",
+                   "postgres.cache_testing.order_items"),
+                  ("POSTGRES_CACHE_TESTING_INVENTORY_EVENTS",
+                   "postgres.cache_testing.inventory_events"),
+              ]
+              print("\n=== Registering missing source streams ===")
+              for sname, stopic in SOURCE_STREAMS:
+                  reg_sql = (f"CREATE STREAM IF NOT EXISTS {sname} "
+                             f"(ROWKEY STRING KEY, PAYLOAD STRING) "
+                             f"WITH (KAFKA_TOPIC='{stopic}', VALUE_FORMAT='JSON', "
+                             f"WRAP_SINGLE_VALUE=false);")
+                  ksql(f"source/{sname}", reg_sql)
+
+              # ─────────────────────────────────────────────────────────────
+              # Drop duplicate _SD streams created by partial earlier runs
+              # (named without CACHE_TESTING prefix)
+              # ─────────────────────────────────────────────────────────────
+              STALE_STREAMS = [
+                  "POSTGRES_CUSTOMERS_SD","POSTGRES_ORDERS_SD","POSTGRES_PRODUCTS_SD",
+                  "POSTGRES_PRODUCT_REVIEWS_SD","POSTGRES_ORDER_ITEMS_SD","POSTGRES_INVENTORY_EVENTS_SD",
+                  "ORACLE_CUSTOMERS_SD","ORACLE_ORDERS_SD","ORACLE_PRODUCTS_SD",
+                  "ORACLE_PRODUCT_REVIEWS_SD","ORACLE_ORDER_ITEMS_SD","ORACLE_INVENTORY_EVENTS_SD",
+                  "MONGODB_CUSTOMERS_SD","MONGODB_ORDERS_SD","MONGODB_PRODUCTS_SD",
+                  "MONGODB_PRODUCT_REVIEWS_SD","MONGODB_ORDER_ITEMS_SD","MONGODB_INVENTORY_EVENTS_SD",
+              ]
+              print("\n=== Dropping stale duplicate streams ===")
+              for s in STALE_STREAMS:
+                  ksql(f"drop/{s}", f"DROP STREAM IF EXISTS {s} DELETE TOPIC;")
+
+              # ─────────────────────────────────────────────────────────────
+              # Source config per CDC origin
+              # ─────────────────────────────────────────────────────────────
               SOURCES = {
                   "postgres": {
                       "stream_pfx": "POSTGRES_CACHE_TESTING",
@@ -117,15 +153,13 @@ spec:
                   print(f"\n=== {src.upper()} ===")
                   for tbl in TABLES:
                       TBL = tbl.upper()
-                      # ksqlDB stream names use the table name directly —
-                      # order_items raw stream is POSTGRES_CACHE_TESTING_ORDER_ITEMS
                       src_stream = f"{sp}_{TBL}"
-                      sd_stream  = f"{src.upper()}_{TBL}_SD"
-                      ht_stream  = f"{src.upper()}_{TBL}_HIST"
+                      sd_stream  = f"{sp}_{TBL}_SD"
+                      ht_stream  = f"{sp}_{TBL}_HIST"
                       sd_topic   = f"{tp}.{tbl}_sd"
                       ht_topic   = f"{tp}.{tbl}_hist"
 
-                      # ── SD stream ──────────────────────────────────────────
+                      # ── SD stream (PARTITION BY = new key, no ROWKEY needed) ─
                       sd_sql = (
                           f"CREATE STREAM IF NOT EXISTS {sd_stream} "
                           f"WITH (KAFKA_TOPIC='{sd_topic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') "
@@ -149,11 +183,14 @@ spec:
                       if not ksql(f"{src}/{tbl} SD", sd_sql):
                           errors += 1
 
-                      # ── HIST stream ────────────────────────────────────────
+                      # ── HIST stream (no PARTITION BY → must include ROWKEY) ─
+                      # ksqlDB 7.9 requires the source key column in projection
+                      # when no PARTITION BY is specified.
                       ht_sql = (
                           f"CREATE STREAM IF NOT EXISTS {ht_stream} "
                           f"WITH (KAFKA_TOPIC='{ht_topic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') "
                           f"AS SELECT "
+                          f"ROWKEY, "
                           f"EXTRACTJSONFIELD(PAYLOAD,'{pka}') AS PK_ID, "
                           f"EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, "
                           f"EXTRACTJSONFIELD(PAYLOAD,'$.before') AS BEFORE_JSON, "
