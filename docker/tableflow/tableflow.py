@@ -54,7 +54,6 @@ from confluent_kafka import Consumer, KafkaError, TopicPartition
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.schema import Schema
-from pyiceberg.table.upsert_util import _match_rows  # noqa: F401 — presence check
 from pyiceberg.types import (
     BooleanType,
     DoubleType,
