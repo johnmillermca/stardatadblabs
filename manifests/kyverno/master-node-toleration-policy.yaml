@@ -8,16 +8,16 @@
 #
 #   Manifests that pin pods via nodeSelector (kubernetes.io/hostname: master.local)
 #   must tolerate BOTH taints or the pod stays Pending forever.
-#   The second taint is easy to forget, as proven by the Polaris outage.
+#   The second taint is easy to forget — proven by the Polaris outage.
 #
 # What this policy does:
-#   Any Pod (or pod-template in Deployment/StatefulSet/DaemonSet/Job/CronJob)
-#   that has nodeSelector kubernetes.io/hostname=master.local gets the
-#   workload=master:NoSchedule toleration injected automatically at admission
-#   time — even if the manifest omits it.
+#   Any Pod whose nodeSelector contains kubernetes.io/hostname=master.local
+#   gets BOTH master.local tolerations injected at admission time.
 #
-# Effect: this class of bug cannot happen again regardless of who writes
-#         a future manifest.
+# Scoped to Pods only (auto-gen disabled) — the ReplicaSet controller creates
+# pods from the Deployment template, so intercepting Pod CREATE is sufficient
+# and avoids precondition failures on Deployments/StatefulSets that have no
+# nodeSelector at all (e.g. Strimzi, OpenSearch, Doris).
 # =============================================================================
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
@@ -28,12 +28,15 @@ metadata:
     policies.kyverno.io/category: Scheduling
     policies.kyverno.io/severity: high
     policies.kyverno.io/subject: Pod
+    # Disable auto-generation of rules for Deployment/StatefulSet/Job/CronJob.
+    # We intercept Pod CREATE only — avoids JMESPath failures on resources
+    # (Strimzi, OpenSearch, Doris) whose pod templates have no nodeSelector.
+    pod-policies.kyverno.io/autogen-controllers: none
     policies.kyverno.io/description: >-
       master.local carries a custom taint workload=master:NoSchedule in addition
       to the standard control-plane taint. Any pod pinned to master.local via
-      nodeSelector must tolerate both. This policy automatically injects the
-      workload=master:NoSchedule toleration at admission time so pods never get
-      stuck Pending due to the missing toleration.
+      nodeSelector must tolerate both. This policy automatically injects both
+      tolerations at admission time so pods never get stuck Pending.
 spec:
   rules:
     - name: inject-workload-master-toleration
@@ -41,17 +44,21 @@ spec:
         any:
           - resources:
               kinds: [Pod]
+              operations: [CREATE]
       preconditions:
         all:
-          # Only act when the pod is pinned to master.local
-          - key: "{{ request.object.spec.nodeSelector.\"kubernetes.io/hostname\" }}"
+          # Only act when the pod is explicitly pinned to master.local.
+          # Use || '' to avoid a hard JMESPath failure when nodeSelector is absent.
+          - key: "{{ request.object.spec.nodeSelector.\"kubernetes.io/hostname\" || '' }}"
             operator: Equals
             value: master.local
       mutate:
         patchStrategicMerge:
           spec:
             tolerations:
-              # Use $patch:merge so existing tolerations are preserved
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
               - key: workload
                 operator: Equal
                 value: master

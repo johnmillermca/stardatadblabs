@@ -109,14 +109,14 @@ spec:
               cpu: "1"
           readinessProbe:
             httpGet:
-              path: /api/catalog/v1/healthcheck
-              port: 8181
+              path: /q/health/ready
+              port: 8182
             initialDelaySeconds: 30
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /api/catalog/v1/healthcheck
-              port: 8181
+              path: /q/health/live
+              port: 8182
             initialDelaySeconds: 60
             periodSeconds: 15
       volumes:
