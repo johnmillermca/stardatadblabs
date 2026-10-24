@@ -334,22 +334,36 @@ def _cast_arrow_to_schema(arrow: pa.Table, tbl: Any) -> pa.Table:
     """
     Cast each column in `arrow` to match the existing Iceberg table schema.
     Columns not in the schema are left as-is (schema evolution will add them).
-    Failures are silently ignored — the column stays as string.
+
+    Null-safe: rebuilds each column via pa.array(raw_values, type=target)
+    which handles Python None correctly without failing on null values.
+    Falls back to stringify-then-cast for columns arriving as strings
+    (e.g. Kafka JSON delivers id as "42" but Iceberg schema expects LongType).
     """
     ice_types = {f.name: f.field_type for f in tbl.schema().fields}
     for col_name in arrow.schema.names:
         if col_name not in ice_types:
             continue
-        target_pa = _iceberg_to_arrow_type(ice_types[col_name])
+        target_pa  = _iceberg_to_arrow_type(ice_types[col_name])
         current_pa = arrow.schema.field(col_name).type
         if current_pa == target_pa:
             continue
+        col_idx    = arrow.schema.get_field_index(col_name)
+        raw_values = arrow.column(col_name).to_pylist()
         try:
-            col_idx = arrow.schema.get_field_index(col_name)
-            arrow = arrow.set_column(col_idx, col_name,
-                                     arrow.column(col_name).cast(target_pa, safe=False))
-        except Exception:
-            pass   # leave as-is; PyIceberg will report a schema mismatch on write
+            # Direct build — pa.array handles None natively for numeric types
+            new_col = pa.array(raw_values, type=target_pa)
+        except (pa.ArrowInvalid, pa.ArrowTypeError):
+            try:
+                # Fallback: stringify non-null values then cast ("42" → 42)
+                str_col = pa.array(
+                    [str(v) if v is not None else None for v in raw_values],
+                    type=pa.string(),
+                )
+                new_col = str_col.cast(target_pa, safe=False)
+            except Exception:
+                continue  # leave as-is; schema evolution will handle on next pass
+        arrow = arrow.set_column(col_idx, col_name, new_col)
     return arrow
 
 
@@ -509,6 +523,11 @@ class TableFlow:
                     self._commit(last_msg)
                     last_msg = None
                 self._last_flush = time.monotonic()
+                # Heartbeat — readiness/liveness probes check this file
+                try:
+                    open("/tmp/tableflow.alive", "w").close()
+                except Exception:
+                    pass
 
             if msg is None:
                 continue

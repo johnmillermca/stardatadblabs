@@ -103,6 +103,14 @@ spec:
               command: ["python3", "-c", "import os; exit(0 if os.path.exists('/tmp/tableflow.alive') else 1)"]
             initialDelaySeconds: 15
             periodSeconds: 10
+          volumeMounts:
+            - name: tableflow-script
+              mountPath: /app/tableflow.py
+              subPath: tableflow.py
+      volumes:
+        - name: tableflow-script
+          configMap:
+            name: tableflow-script
 
 # =============================================================================
 # tableflow-oracle
@@ -160,6 +168,14 @@ spec:
               command: ["python3", "-c", "import os; exit(0 if os.path.exists('/tmp/tableflow.alive') else 1)"]
             initialDelaySeconds: 15
             periodSeconds: 10
+          volumeMounts:
+            - name: tableflow-script
+              mountPath: /app/tableflow.py
+              subPath: tableflow.py
+      volumes:
+        - name: tableflow-script
+          configMap:
+            name: tableflow-script
 
 # =============================================================================
 # tableflow-mongodb
@@ -217,3 +233,11 @@ spec:
               command: ["python3", "-c", "import os; exit(0 if os.path.exists('/tmp/tableflow.alive') else 1)"]
             initialDelaySeconds: 15
             periodSeconds: 10
+          volumeMounts:
+            - name: tableflow-script
+              mountPath: /app/tableflow.py
+              subPath: tableflow.py
+      volumes:
+        - name: tableflow-script
+          configMap:
+            name: tableflow-script
