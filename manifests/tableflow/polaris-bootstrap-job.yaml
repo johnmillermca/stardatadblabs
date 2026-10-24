@@ -38,10 +38,10 @@ data:
   BAO_ROLE:          "platform-secrets-read"
   BAO_S3_PATH:       "secret/data/platform/s3"
   BAO_POLARIS_PATH:  "secret/data/platform/polaris"
-  # Set to the IAM role ARN once created. When non-empty the bootstrap Job
-  # will replace the roleArn in every listed catalog's storageConfigInfo.
-  # Leave empty to preserve whatever roleArn is already in each catalog.
-  POLARIS_ROLE_ARN:  ""
+  # IAM role (not user) ARN for Polaris STS credential vending.
+  # The role must have a trust policy allowing watsonx-s3-connector to assume
+  # it with externalId=polaris-iceberg.
+  POLARIS_ROLE_ARN:  "arn:aws:iam::586643076710:role/polaris-iceberg-role"
 
 ---
 apiVersion: batch/v1

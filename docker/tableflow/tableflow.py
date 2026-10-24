@@ -342,11 +342,12 @@ def write_sd_batch(catalog: RestCatalog, table_id: tuple, rows: list[dict]) -> i
     tbl    = catalog.load_table(table_id)
     arrow  = _rows_to_arrow(rows)
     # align arrow schema to iceberg schema (add missing cols as null, drop unknown)
-    ice_cols = {f.name for f in tbl.schema().fields}
-    arrow_cols = set(arrow.schema.names)
+    ice_field_names = [f.name for f in tbl.schema().fields]
+    ice_cols        = set(ice_field_names)
+    arrow_cols      = set(arrow.schema.names)
     for missing in ice_cols - arrow_cols:
         arrow = arrow.append_column(missing, pa.array([None] * len(arrow), type=pa.string()))
-    keep = [n for n in tbl.schema().field_names() if n in arrow.schema.names]
+    keep  = [n for n in ice_field_names if n in set(arrow.schema.names)]
     arrow = arrow.select(keep)
     tbl.append(arrow)   # append; compaction handles deduplication via PK_ID key
     return len(rows)
@@ -357,13 +358,14 @@ def write_hist_batch(catalog: RestCatalog, table_id: tuple, rows: list[dict]) ->
     if not rows:
         return 0
     _evolve_schema(catalog, table_id, rows[0])
-    tbl   = catalog.load_table(table_id)
-    arrow = _rows_to_arrow(rows)
-    ice_cols   = {f.name for f in tbl.schema().fields}
-    arrow_cols = set(arrow.schema.names)
+    tbl             = catalog.load_table(table_id)
+    arrow           = _rows_to_arrow(rows)
+    ice_field_names = [f.name for f in tbl.schema().fields]
+    ice_cols        = set(ice_field_names)
+    arrow_cols      = set(arrow.schema.names)
     for missing in ice_cols - arrow_cols:
         arrow = arrow.append_column(missing, pa.array([None] * len(arrow), type=pa.string()))
-    keep = [n for n in tbl.schema().field_names() if n in arrow.schema.names]
+    keep  = [n for n in ice_field_names if n in set(arrow.schema.names)]
     arrow = arrow.select(keep)
     tbl.append(arrow)
     return len(rows)
