@@ -34,10 +34,14 @@ metadata:
   labels:
     app: polaris-bootstrap
 data:
-  POLARIS_CATALOGS: "pg_lakehouse,ora_lakehouse,mgo_lakehouse"
-  BAO_ROLE:         "platform-secrets-read"
-  BAO_S3_PATH:      "secret/data/platform/s3"
-  BAO_POLARIS_PATH: "secret/data/platform/polaris"
+  POLARIS_CATALOGS:  "pg_lakehouse,ora_lakehouse,mgo_lakehouse"
+  BAO_ROLE:          "platform-secrets-read"
+  BAO_S3_PATH:       "secret/data/platform/s3"
+  BAO_POLARIS_PATH:  "secret/data/platform/polaris"
+  # Set to the IAM role ARN once created. When non-empty the bootstrap Job
+  # will replace the roleArn in every listed catalog's storageConfigInfo.
+  # Leave empty to preserve whatever roleArn is already in each catalog.
+  POLARIS_ROLE_ARN:  ""
 
 ---
 apiVersion: batch/v1
@@ -122,8 +126,11 @@ spec:
               auth_hdrs    = {'Authorization': f'Bearer {access_token}'}
 
               # ── Patch each catalog ────────────────────────────────────────
-              catalogs = [c.strip() for c in os.environ['POLARIS_CATALOGS'].split(',') if c.strip()]
-              region   = s3.get('region', 'us-east-2')
+              catalogs      = [c.strip() for c in os.environ['POLARIS_CATALOGS'].split(',') if c.strip()]
+              region        = s3.get('region', 'us-east-2')
+              # If set, override the roleArn in every catalog with this IAM role ARN.
+              # Must be a genuine IAM role (not a user) so STS AssumeRole succeeds.
+              new_role_arn  = os.environ.get('POLARIS_ROLE_ARN', '').strip()
 
               for name in catalogs:
                   cat = get(f'{base}/api/management/v1/catalogs/{name}', auth_hdrs)
@@ -131,24 +138,29 @@ spec:
                   loc = cat['properties'].get('default-base-location',
                         f's3://{s3["bucket"]}/iceberg/{name}')
                   existing_si = cat.get('storageConfigInfo', {})
+                  role_arn    = new_role_arn or existing_si.get('roleArn', '')
+                  external_id = existing_si.get('externalId', 'polaris-iceberg')
+
+                  storage_cfg = {
+                      'storageType':      'S3',
+                      'allowedLocations': [loc],
+                      'pathStyleAccess':  existing_si.get('pathStyleAccess', False),
+                      'externalId':       external_id,
+                  }
+                  if role_arn:
+                      storage_cfg['roleArn'] = role_arn
+
                   payload = {
                       'currentEntityVersion': ver,
                       'properties': {
                           'default-base-location': loc,
                           'client.region': region,
                       },
-                      'storageConfigInfo': {
-                          'storageType':         'S3',
-                          'allowedLocations':    [loc],
-                          'pathStyleAccess':     existing_si.get('pathStyleAccess', False),
-                          'roleArn':             existing_si.get('roleArn', ''),
-                          'externalId':          existing_si.get('externalId', ''),
-                          'userAccessKeyId':     s3['access_key'],
-                          'userSecretAccessKey': s3['secret_key'],
-                      },
+                      'storageConfigInfo': storage_cfg,
                   }
                   resp = put(f'{base}/api/management/v1/catalogs/{name}', payload, auth_hdrs)
-                  print(f'[OK] {name} updated (entityVersion {ver} -> {ver+1}), status={resp.status}')
+                  role_note = f' roleArn={role_arn}' if role_arn else ' (no roleArn)'
+                  print(f'[OK] {name} updated (v{ver}→{ver+1}){role_note}, status={resp.status}')
 
               print('polaris-bootstrap complete.')
           resources:
