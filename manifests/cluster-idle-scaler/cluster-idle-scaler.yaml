@@ -1,0 +1,546 @@
+# =============================================================================
+# cluster-idle-scaler.yaml
+#
+# Scales every non-essential workload to 0 after IDLE_TIMEOUT_S of inactivity,
+# and restores them to their original replica count on demand via a REST API.
+#
+# ── ALWAYS-ON (never touched) ────────────────────────────────────────────────
+#  (a) Doris          — doris-fe, doris-be, doris-write-proxy, doris-cache-manager
+#  (b) Spark          — spark-master, spark-worker*, starpump-incremental
+#                       + all kafka-to-iceberg-* streaming jobs
+#  (c) Kafka/Debezium — strimzi-*, strimzi-kafka-*, debezium-connect-*,
+#                       schema-registry, kafka-to-iceberg-*
+#  (d) ArgoCD         — entire argocd namespace
+#  (e) Lakehouse UI   — lakehouse-ui
+#
+# ── INFRASTRUCTURE (never touched — cluster would break) ────────────────────
+#      kube-system/*, local-path-storage/*, registry/*
+#      prod/openbao, prod/openbao-agent-injector   (secrets engine)
+#      prod/kerberos-kdc                           (Kerberos auth)
+#      prod/postgresql, prod/mongodb               (source DBs for CDC)
+#      prod/oracle-xe                              (source DB)
+#      prod/redis                                  (session store for hub/kestra)
+#      prod/proxy                                  (JupyterHub proxy)
+#      prod/rbac-plane                             (auth plane)
+#      prod/polaris, prod/polaris-auth-proxy,
+#      prod/polaris-tls-proxy                      (Iceberg REST catalog)
+#
+# ── SCALEABLE (scaled to 0 when idle, restored on wake) ─────────────────────
+#      prod/kestra, prod/hub
+#      prod/mcp-doris, prod/mcp-kafka, prod/mcp-kestra,
+#      prod/mcp-opensearch, prod/mcp-spark, prod/mcp-sqlmesh
+#      prod/opensearch-cluster-master, prod/opensearch-dashboards
+#      prod/sqlmesh
+#      prod/star-knowledge-catalog
+#      monitoring/grafana, monitoring/mcp-grafana, monitoring/mcp-prometheus
+#      monitoring/prometheus-prometheus-prometheus
+#      monitoring/alertmanager-prometheus-alertmanager
+#      monitoring/prometheus-kube-state-metrics, monitoring/prometheus-operator
+#
+# ── WAKE-UP API ──────────────────────────────────────────────────────────────
+# POST http://cluster-idle-scaler.prod.svc.cluster.local:8090/wake
+#      body: {"group": "monitoring"}   or  {"name": "kestra", "namespace": "prod"}
+#
+# GET  http://cluster-idle-scaler.prod.svc.cluster.local:8090/status
+#      returns JSON list of all tracked workloads with state + idle seconds
+#
+# ── APPLY ────────────────────────────────────────────────────────────────────
+#   kubectl apply -f manifests/cluster-idle-scaler/cluster-idle-scaler.yaml
+#
+# ── LOGS ─────────────────────────────────────────────────────────────────────
+#   kubectl logs -n prod -l app=cluster-idle-scaler -f
+#
+# ── TUNE ─────────────────────────────────────────────────────────────────────
+#   IDLE_TIMEOUT_S   default 900  (15 min)
+#   POLL_INTERVAL_S  default 60   (1 min)
+#   DRY_RUN          "1" = log only, never patch
+# =============================================================================
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-idle-scaler
+  namespace: prod
+  labels:
+    app: cluster-idle-scaler
+
+---
+# ── ClusterRole ───────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-idle-scaler
+  labels:
+    app: cluster-idle-scaler
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["endpoints", "pods"]
+    verbs: ["get", "list"]
+
+---
+# ── ClusterRoleBinding ────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-idle-scaler
+  labels:
+    app: cluster-idle-scaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-idle-scaler
+    namespace: prod
+roleRef:
+  kind: ClusterRole
+  name: cluster-idle-scaler
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── Service — exposes the wake/status REST API ────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-idle-scaler
+  namespace: prod
+  labels:
+    app: cluster-idle-scaler
+spec:
+  selector:
+    app: cluster-idle-scaler
+  ports:
+    - name: api
+      port: 8090
+      targetPort: 8090
+      protocol: TCP
+
+---
+# ── ConfigMap — controller script ─────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-idle-scaler-script
+  namespace: prod
+  labels:
+    app: cluster-idle-scaler
+data:
+  scaler.py: |
+    #!/usr/bin/env python3
+    """
+    cluster-idle-scaler
+    ════════════════════
+    Scales non-essential workloads to 0 after IDLE_TIMEOUT_S of all their
+    endpoints being idle (no ready pods).  Restores original replica counts
+    on demand via a lightweight HTTP API.
+
+    State per workload:
+      ACTIVE  — replicas == original, endpoints ready
+      IDLE    — replicas > 0 but endpoints have been 0 for too long
+      DORMANT — replicas == 0 (scaled down by us or already was 0)
+
+    The idle clock resets whenever ready endpoints > 0.
+    Scale-down fires when idle_seconds >= IDLE_TIMEOUT_S.
+    """
+    from __future__ import annotations
+    import http.server, json, logging, os, ssl, sys, threading, time, urllib.request, urllib.error
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    IDLE_TIMEOUT_S  = int(os.environ.get("IDLE_TIMEOUT_S",  "900"))
+    POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", "60"))
+    DRY_RUN         = os.environ.get("DRY_RUN", "0") == "1"
+    API_PORT        = int(os.environ.get("API_PORT", "8090"))
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [idle-scaler] %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stdout,
+    )
+    log = logging.getLogger("cluster-idle-scaler")
+
+    # ── Workload registry ─────────────────────────────────────────────────────
+    # Each entry: (namespace, name, kind, group, original_replicas)
+    # kind: "Deployment" or "StatefulSet"
+    # group: logical label for bulk wake (e.g. "monitoring", "opensearch")
+    # original_replicas: what to restore to on wake (fetched at startup)
+    #
+    # PINNED groups (never touched):
+    #   doris, spark, kafka, argocd, lakehouse-ui, infrastructure
+
+    SCALEABLE = [
+        # ── JupyterHub ────────────────────────────────────────────────────────
+        ("prod", "hub",                                   "Deployment",  "jupyterhub"),
+        # ── Kestra ───────────────────────────────────────────────────────────
+        ("prod", "kestra",                                "Deployment",  "kestra"),
+        # ── MCP servers ──────────────────────────────────────────────────────
+        ("prod", "mcp-doris",                             "Deployment",  "mcp"),
+        ("prod", "mcp-kafka",                             "Deployment",  "mcp"),
+        ("prod", "mcp-kestra",                            "Deployment",  "mcp"),
+        ("prod", "mcp-opensearch",                        "Deployment",  "mcp"),
+        ("prod", "mcp-spark",                             "Deployment",  "mcp"),
+        ("prod", "mcp-sqlmesh",                           "Deployment",  "mcp"),
+        # ── OpenSearch ───────────────────────────────────────────────────────
+        ("prod", "opensearch-cluster-master",             "StatefulSet", "opensearch"),
+        ("prod", "opensearch-dashboards",                 "Deployment",  "opensearch"),
+        # ── SQLMesh ──────────────────────────────────────────────────────────
+        ("prod", "sqlmesh",                               "Deployment",  "sqlmesh"),
+        # ── Star knowledge catalog ────────────────────────────────────────────
+        ("prod", "star-knowledge-catalog",                "Deployment",  "star-catalog"),
+        # ── Monitoring ───────────────────────────────────────────────────────
+        ("monitoring", "grafana",                         "Deployment",  "monitoring"),
+        ("monitoring", "mcp-grafana",                     "Deployment",  "monitoring"),
+        ("monitoring", "mcp-prometheus",                  "Deployment",  "monitoring"),
+        ("monitoring", "prometheus-kube-state-metrics",   "Deployment",  "monitoring"),
+        ("monitoring", "prometheus-operator",             "Deployment",  "monitoring"),
+        ("monitoring", "prometheus-prometheus-prometheus","StatefulSet", "monitoring"),
+        ("monitoring", "alertmanager-prometheus-alertmanager", "StatefulSet", "monitoring"),
+    ]
+
+    # ── K8s API ───────────────────────────────────────────────────────────────
+    _K8S = "https://kubernetes.default.svc"
+    _TOK = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    _CA  = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+    def _ssl():
+        ctx = ssl.create_default_context()
+        try:    ctx.load_verify_locations(_CA)
+        except: ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    def _k8s(method: str, path: str, body: dict | None = None):
+        token = open(_TOK).read().strip()
+        ct = ("application/strategic-merge-patch+json"
+              if method == "PATCH" else "application/json")
+        data = json.dumps(body).encode() if body else None
+        req  = urllib.request.Request(
+            f"{_K8S}{path}", data=data, method=method,
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": ct, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, context=_ssl(), timeout=10) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            log.warning("K8s %s %s → %d: %s", method, path, e.code, e.read()[:120])
+            return None
+        except Exception as e:
+            log.warning("K8s %s %s error: %s", method, path, e)
+            return None
+
+    def _api_path(ns: str, name: str, kind: str) -> str:
+        res = "deployments" if kind == "Deployment" else "statefulsets"
+        return f"/apis/apps/v1/namespaces/{ns}/{res}/{name}"
+
+    def _get_spec_replicas(ns: str, name: str, kind: str) -> int | None:
+        r = _k8s("GET", _api_path(ns, name, kind))
+        if r is None: return None
+        return r.get("spec", {}).get("replicas", 0)
+
+    def _get_ready_replicas(ns: str, name: str, kind: str) -> int:
+        r = _k8s("GET", _api_path(ns, name, kind))
+        if r is None: return 0
+        return (r.get("status") or {}).get("readyReplicas") or 0
+
+    def _set_replicas(ns: str, name: str, kind: str, n: int, reason: str):
+        if DRY_RUN:
+            log.warning("DRY-RUN  %s/%s → %d  (%s)", ns, name, n, reason)
+            return
+        _k8s("PATCH", _api_path(ns, name, kind), {"spec": {"replicas": n}})
+        log.warning("SCALE    %s/%s → %d  (%s)", ns, name, n, reason)
+
+    # ── Workload state ────────────────────────────────────────────────────────
+
+    class Workload:
+        def __init__(self, ns: str, name: str, kind: str, group: str):
+            self.ns           = ns
+            self.name         = name
+            self.kind         = kind
+            self.group        = group
+            self.orig_rep     = 1       # populated at startup
+            self.last_active  = time.time()
+            self._lock        = threading.Lock()
+            self.scaled_by_us = False   # True if we were the ones who zeroed it
+
+        def key(self) -> str:
+            return f"{self.ns}/{self.name}"
+
+        def record_active(self):
+            with self._lock:
+                self.last_active = time.time()
+
+        def idle_seconds(self) -> float:
+            with self._lock:
+                return time.time() - self.last_active
+
+        def scale_down(self):
+            _set_replicas(self.ns, self.name, self.kind, 0,
+                          f"idle {self.idle_seconds():.0f}s >= {IDLE_TIMEOUT_S}s")
+            self.scaled_by_us = True
+            self.record_active()  # reset so we don't immediately re-fire
+
+        def scale_up(self):
+            target = max(self.orig_rep, 1)
+            _set_replicas(self.ns, self.name, self.kind, target,
+                          "wake requested")
+            self.scaled_by_us = False
+            self.record_active()
+
+    # Build workload list (orig_rep filled at startup)
+    _workloads: list[Workload] = [
+        Workload(ns, name, kind, group)
+        for ns, name, kind, group in SCALEABLE
+    ]
+    _by_key: dict[str, Workload] = {w.key(): w for w in _workloads}
+
+    def _init_orig_replicas():
+        """Fetch current spec.replicas for every workload at startup."""
+        for w in _workloads:
+            r = _get_spec_replicas(w.ns, w.name, w.kind)
+            if r is not None and r > 0:
+                w.orig_rep = r
+            log.info("INIT     %s/%s  kind=%s  group=%s  orig_rep=%d",
+                     w.ns, w.name, w.kind, w.group, w.orig_rep)
+
+    # ── Idle watcher ──────────────────────────────────────────────────────────
+
+    def _watch_loop():
+        log.info("IdleWatcher  idle=%ds  poll=%ds  dry=%s  workloads=%d",
+                 IDLE_TIMEOUT_S, POLL_INTERVAL_S, DRY_RUN, len(_workloads))
+        while True:
+            for w in _workloads:
+                try:
+                    spec = _get_spec_replicas(w.ns, w.name, w.kind)
+                    if spec is None:
+                        continue
+
+                    if spec == 0:
+                        # Already dormant
+                        log.info("DORMANT  %s/%s", w.ns, w.name)
+                        continue
+
+                    ready = _get_ready_replicas(w.ns, w.name, w.kind)
+                    if ready > 0:
+                        w.record_active()
+
+                    idle = w.idle_seconds()
+                    log.info("CHECK    %s/%s  spec=%d  ready=%d  idle=%.0fs/%ds",
+                             w.ns, w.name, spec, ready, idle, IDLE_TIMEOUT_S)
+
+                    if idle >= IDLE_TIMEOUT_S:
+                        w.scale_down()
+
+                except Exception as e:
+                    log.error("CHECK    %s/%s error: %s", w.ns, w.name, e)
+
+            time.sleep(POLL_INTERVAL_S)
+
+    # ── Wake API ──────────────────────────────────────────────────────────────
+
+    def _wake_group(group: str) -> list[str]:
+        """Scale up all workloads in a group. Returns list of names woken."""
+        woken = []
+        for w in _workloads:
+            if w.group == group:
+                spec = _get_spec_replicas(w.ns, w.name, w.kind)
+                if spec == 0:
+                    w.scale_up()
+                    woken.append(w.key())
+                else:
+                    woken.append(f"{w.key()} (already up)")
+        return woken
+
+    def _wake_one(ns: str, name: str) -> str:
+        key = f"{ns}/{name}"
+        w = _by_key.get(key)
+        if w is None:
+            return f"unknown: {key}"
+        spec = _get_spec_replicas(w.ns, w.name, w.kind)
+        if spec == 0:
+            w.scale_up()
+            return f"woken: {key}"
+        return f"already up: {key} (replicas={spec})"
+
+    def _scale_down_group(group: str) -> list[str]:
+        done = []
+        for w in _workloads:
+            if w.group == group:
+                spec = _get_spec_replicas(w.ns, w.name, w.kind)
+                if spec and spec > 0:
+                    w.scale_down()
+                    done.append(w.key())
+                else:
+                    done.append(f"{w.key()} (already 0)")
+        return done
+
+    def _status() -> list[dict]:
+        rows = []
+        for w in _workloads:
+            spec  = _get_spec_replicas(w.ns, w.name, w.kind)
+            ready = _get_ready_replicas(w.ns, w.name, w.kind) if (spec or 0) > 0 else 0
+            rows.append({
+                "namespace": w.ns,
+                "name":      w.name,
+                "kind":      w.kind,
+                "group":     w.group,
+                "orig_rep":  w.orig_rep,
+                "spec_rep":  spec,
+                "ready_rep": ready,
+                "idle_s":    round(w.idle_seconds()),
+                "state":     "DORMANT" if (spec or 0) == 0
+                             else ("IDLE" if w.idle_seconds() >= IDLE_TIMEOUT_S else "ACTIVE"),
+            })
+        return rows
+
+    class ApiHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass  # suppress default access log noise
+
+        def _send(self, code: int, body: object):
+            data = json.dumps(body, indent=2).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(data))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path == "/status" or self.path == "/":
+                self._send(200, _status())
+            elif self.path == "/healthz":
+                self._send(200, {"ok": True})
+            else:
+                self._send(404, {"error": "not found"})
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length) or b"{}") if length else {}
+
+            if self.path == "/wake":
+                group = body.get("group")
+                name  = body.get("name")
+                ns    = body.get("namespace", "prod")
+                if group:
+                    result = _wake_group(group)
+                    self._send(200, {"woken": result})
+                elif name:
+                    result = _wake_one(ns, name)
+                    self._send(200, {"result": result})
+                else:
+                    self._send(400, {"error": "provide 'group' or 'name'"})
+
+            elif self.path == "/sleep":
+                group = body.get("group")
+                name  = body.get("name")
+                ns    = body.get("namespace", "prod")
+                if group:
+                    result = _scale_down_group(group)
+                    self._send(200, {"scaled_down": result})
+                elif name:
+                    key = f"{ns}/{name}"
+                    w   = _by_key.get(key)
+                    if w:
+                        w.scale_down()
+                        self._send(200, {"result": f"scaled down: {key}"})
+                    else:
+                        self._send(404, {"error": f"unknown workload: {key}"})
+                else:
+                    self._send(400, {"error": "provide 'group' or 'name'"})
+
+            else:
+                self._send(404, {"error": "not found"})
+
+    def _run_api():
+        server = http.server.HTTPServer(("0.0.0.0", API_PORT), ApiHandler)
+        log.info("REST API  http://0.0.0.0:%d  (GET /status  POST /wake  POST /sleep)", API_PORT)
+        server.serve_forever()
+
+    # ── Main ──────────────────────────────────────────────────────────────────
+
+    def main():
+        log.info("cluster-idle-scaler  idle=%ds  poll=%ds  dry=%s  api_port=%d",
+                 IDLE_TIMEOUT_S, POLL_INTERVAL_S, DRY_RUN, API_PORT)
+        _init_orig_replicas()
+        threading.Thread(target=_run_api, daemon=True).start()
+        _watch_loop()
+
+    if __name__ == "__main__":
+        main()
+
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-idle-scaler
+  namespace: prod
+  labels:
+    app: cluster-idle-scaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-idle-scaler
+  template:
+    metadata:
+      labels:
+        app: cluster-idle-scaler
+    spec:
+      serviceAccountName: cluster-idle-scaler
+      # Pin to the lightly-loaded worker7 (6% CPU, 3% mem)
+      nodeSelector:
+        kubernetes.io/hostname: worker7.local
+      containers:
+        - name: scaler
+          # spark-gluten-velox is in the private registry and has Python 3
+          image: 192.168.1.50:30500/spark-gluten-velox:3.5.1-35
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/scripts/scaler.py"]
+          env:
+            # Scale down after 15 minutes of no ready pods
+            - name: IDLE_TIMEOUT_S
+              value: "900"
+            # Poll every 60 seconds
+            - name: POLL_INTERVAL_S
+              value: "60"
+            # Set to "1" to log only — never actually patch
+            - name: DRY_RUN
+              value: "0"
+            - name: API_PORT
+              value: "8090"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          ports:
+            - containerPort: 8090
+              name: api
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: script
+          configMap:
+            name: cluster-idle-scaler-script
+            defaultMode: 0755

@@ -122,6 +122,12 @@ spec:
               command: [mongosh, --quiet, --eval, "db.adminCommand('ping')"]
             initialDelaySeconds: 30
             periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [mongosh, --quiet, --eval, "db.adminCommand('ping')"]
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 5
       volumes:
         - name: mongodb-storage
           persistentVolumeClaim:

@@ -40,13 +40,22 @@ Rules (evaluated every scan, in priority order)
 Worker autoscaling (Rule S)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Scale UP:  any WAITING app + zero ALIVE workers → scale to WORKER_REPLICAS
-             immediately (no grace period — a waiting job needs a worker now).
+  Applies to the BATCH worker Deployment (spark-worker) only.
+  kafka-to-iceberg streaming apps run on a dedicated spark-worker-streaming
+  node (pinned to worker2.local) — they are fully excluded from all scale
+  decisions here so the batch worker can be scaled to 0 independently.
 
-  Scale DOWN: no active apps AND no ALIVE workers doing work AND
+  Scale UP:  any non-streaming WAITING app + zero ALIVE batch workers
+             → scale spark-worker to WORKER_REPLICAS immediately.
+
+  Scale DOWN: no non-streaming apps AND no ALIVE batch workers AND
               cluster has been continuously idle for SCALE_DOWN_IDLE_S seconds
-              → scale worker Deployment back to 0.
+              → scale spark-worker back to 0.
               Default SCALE_DOWN_IDLE_S = 120 s (2 min after last job finishes).
+
+  "Alive batch workers" = Spark master workers whose hostname is NOT worker2.local
+  (the streaming-only node).  Both worker pools register with the same master,
+  so the guardian must filter by hostname to count only batch workers.
 
   Workers are scaled via the Kubernetes Deployments API (PATCH replicas).
   Requires the pod's ServiceAccount to have:
@@ -72,6 +81,11 @@ Environment variables
   WORKER_REPLICAS          Replicas to set on scale-up           default: 3
   SCALE_DOWN_IDLE_S        Idle seconds before scale-to-0        default: 120
   AUTOSCALE                0 = disable autoscaling entirely       default: 1
+  STREAMING_WORKER_HOST    Hostname of the dedicated streaming    default: worker2.local
+                           worker node — used to exclude its
+                           workers from the alive-batch-workers
+                           count so the streaming node never
+                           blocks batch scale-down.
 """
 from __future__ import annotations
 
@@ -97,11 +111,20 @@ IDLE_SINCE_S           = int(os.environ.get("IDLE_SINCE_S",            "300"))
 DRY_RUN                = os.environ.get("DRY_RUN", "0") == "1"
 
 # Worker autoscaling
-WORKER_DEPLOYMENT  = os.environ.get("WORKER_DEPLOYMENT",  "spark-worker")
-WORKER_NAMESPACE   = os.environ.get("WORKER_NAMESPACE",   "prod")
-WORKER_REPLICAS    = int(os.environ.get("WORKER_REPLICAS",    "3"))
-SCALE_DOWN_IDLE_S  = int(os.environ.get("SCALE_DOWN_IDLE_S",  "120"))
-AUTOSCALE          = os.environ.get("AUTOSCALE", "1") == "1"
+WORKER_DEPLOYMENT      = os.environ.get("WORKER_DEPLOYMENT",      "spark-worker")
+WORKER_NAMESPACE       = os.environ.get("WORKER_NAMESPACE",       "prod")
+WORKER_REPLICAS        = int(os.environ.get("WORKER_REPLICAS",        "3"))
+SCALE_DOWN_IDLE_S      = int(os.environ.get("SCALE_DOWN_IDLE_S",      "120"))
+AUTOSCALE              = os.environ.get("AUTOSCALE", "1") == "1"
+# App name prefix identifying streaming jobs that are fully exempt from
+# all guardian rules (kill + autoscale).  These run on spark-worker-streaming
+# (a dedicated node pinned to STREAMING_WORKER_HOST) and are designed to run
+# indefinitely — kill rules must not apply to them.
+STREAMING_APP_PREFIX   = os.environ.get("STREAMING_APP_PREFIX",   "kafka-to-iceberg")
+# Hostname of the dedicated streaming worker node.  Workers registered from
+# this host are excluded from the alive-batch-workers count so they never
+# prevent the batch spark-worker from scaling to 0.
+STREAMING_WORKER_HOST  = os.environ.get("STREAMING_WORKER_HOST",  "worker2.local")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -278,6 +301,16 @@ def _evaluate(app: dict, now_s: float) -> str | None:
     name       = app.get("name", "unknown")
     age_s      = now_s - start_ms / 1000.0
 
+    # Streaming apps are long-lived by design — skip ALL kill rules for them.
+    # They run on spark-worker-streaming and reconnect through Kafka triggers;
+    # cores==0 between micro-batches is expected, not a failure.
+    if name.startswith(STREAMING_APP_PREFIX):
+        if app_id not in _last_active_s:
+            _last_active_s[app_id] = now_s
+        log.debug("STREAM %s '%s' — exempt from kill rules, age=%.0fs cores=%d",
+                  app_id, name, age_s, cores)
+        return None
+
     if app_id not in _last_active_s:
         _last_active_s[app_id]       = now_s
         _last_completed_jobs[app_id] = 0
@@ -360,45 +393,57 @@ def _gc_state(active_ids: set[str]) -> None:
 
 def _autoscale(apps: list[dict], alive_workers: int, now_s: float) -> None:
     """
-    Rule S — scale workers up or down based on cluster demand.
+    Rule S — autoscale the BATCH worker Deployment (spark-worker) only.
 
-    Scale UP:   there are WAITING apps but zero alive workers.
-    Scale DOWN: no apps at all AND zero alive workers doing work AND
-                cluster has been idle for SCALE_DOWN_IDLE_S seconds.
+    Streaming apps (kafka-to-iceberg-*) run on a dedicated spark-worker-streaming
+    Deployment pinned to worker2.  They are excluded from all scale decisions here
+    so the batch worker can be scaled to 0 independently of whether streaming is
+    running.
+
+    Scale UP:   a non-streaming WAITING app + zero alive workers on the batch
+                worker → scale spark-worker to WORKER_REPLICAS immediately.
+
+    Scale DOWN: no non-streaming apps AND batch worker has been idle for
+                SCALE_DOWN_IDLE_S seconds → scale spark-worker to 0.
     """
     global _cluster_idle_since, _workers_at_zero
 
     if not AUTOSCALE:
         return
 
-    waiting_apps = [a for a in apps if a.get("state") == "WAITING"]
-    running_apps = [a for a in apps if a.get("state") == "RUNNING"]
-    has_any_apps = bool(apps)
+    # Partition: streaming apps run on their own dedicated worker — ignore them
+    # for batch worker scaling decisions.
+    def _is_streaming(a: dict) -> bool:
+        return a.get("name", "").startswith(STREAMING_APP_PREFIX)
+
+    batch_waiting = [a for a in apps if a.get("state") == "WAITING" and not _is_streaming(a)]
+    batch_running = [a for a in apps if a.get("state") == "RUNNING" and not _is_streaming(a)]
+    has_batch     = bool(batch_waiting or batch_running)
 
     # ── Scale UP ──────────────────────────────────────────────────────────────
-    # Waiting app + no alive workers → scale up immediately.
-    if waiting_apps and alive_workers == 0:
+    # Non-streaming WAITING app + no alive workers → scale up immediately.
+    if batch_waiting and alive_workers == 0:
         current = _get_worker_replicas()
         if current == 0:
             _scale_workers(
                 WORKER_REPLICAS,
-                f"{len(waiting_apps)} app(s) WAITING, 0 alive workers",
+                f"{len(batch_waiting)} batch app(s) WAITING, 0 alive workers",
             )
-        _cluster_idle_since = 0.0  # reset idle clock — cluster is active
-        _workers_at_zero    = False
-        return
-
-    # ── Idle clock management ─────────────────────────────────────────────────
-    # Reset idle clock whenever there is any activity.
-    if has_any_apps or alive_workers > 0:
         _cluster_idle_since = 0.0
         _workers_at_zero    = False
         return
 
-    # No apps, no alive workers — start (or continue) idle countdown.
+    # ── Idle clock management ─────────────────────────────────────────────────
+    # Reset idle clock while any batch work is in progress.
+    if has_batch or alive_workers > 0:
+        _cluster_idle_since = 0.0
+        _workers_at_zero    = False
+        return
+
+    # No batch apps, no batch workers — start (or continue) idle countdown.
     if _cluster_idle_since == 0.0:
         _cluster_idle_since = now_s
-        log.info("IDLE   cluster empty — starting %.0fs scale-down countdown.", SCALE_DOWN_IDLE_S)
+        log.info("IDLE   no batch apps — starting %.0fs scale-down countdown.", SCALE_DOWN_IDLE_S)
         return
 
     idle_for = now_s - _cluster_idle_since
@@ -407,12 +452,12 @@ def _autoscale(apps: list[dict], alive_workers: int, now_s: float) -> None:
     if idle_for >= SCALE_DOWN_IDLE_S and not _workers_at_zero:
         current = _get_worker_replicas()
         if current is not None and current > 0:
-            _scale_workers(0, f"cluster idle for {idle_for:.0f}s >= {SCALE_DOWN_IDLE_S}s")
+            _scale_workers(0, f"no batch jobs for {idle_for:.0f}s >= {SCALE_DOWN_IDLE_S}s")
         _workers_at_zero = True
         return
 
     if not _workers_at_zero:
-        log.info("IDLE   cluster empty for %.0fs / %ds — waiting to scale down …",
+        log.info("IDLE   no batch jobs for %.0fs / %ds — waiting to scale down …",
                  idle_for, SCALE_DOWN_IDLE_S)
 
 
@@ -428,6 +473,15 @@ def _scan_once() -> None:
     now_s         = time.time()
     workers       = data.get("workers", [])
     alive_workers = [w for w in workers if w.get("state") == "ALIVE"]
+
+    # Batch workers only — exclude the dedicated streaming node (worker2.local).
+    # Both worker pools register with the same Spark master, so we must filter
+    # by hostname to avoid the streaming worker blocking batch scale-down.
+    alive_batch_workers = [
+        w for w in alive_workers
+        if STREAMING_WORKER_HOST not in w.get("host", "")
+    ]
+
     free_mem_mb   = sum(w.get("memoryfree", 0) for w in alive_workers)
     free_cores    = sum(w.get("coresfree",  0) for w in alive_workers)
 
@@ -464,8 +518,8 @@ def _scan_once() -> None:
 
     _gc_state(active_ids)
 
-    # Rule S — autoscale workers.
-    _autoscale(apps, len(alive_workers), now_s)
+    # Rule S — autoscale batch workers (streaming node excluded via alive_batch_workers).
+    _autoscale(apps, len(alive_batch_workers), now_s)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -484,8 +538,10 @@ def main() -> None:
     )
     if AUTOSCALE:
         log.info(
-            "Autoscale ON | worker=%s ns=%s target_replicas=%d scale_down_idle=%ds",
+            "Autoscale ON | worker=%s ns=%s target_replicas=%d scale_down_idle=%ds"
+            " | streaming_prefix='%s' streaming_node='%s' (excluded from kill+scale)",
             WORKER_DEPLOYMENT, WORKER_NAMESPACE, WORKER_REPLICAS, SCALE_DOWN_IDLE_S,
+            STREAMING_APP_PREFIX, STREAMING_WORKER_HOST,
         )
     else:
         log.info("Autoscale DISABLED (AUTOSCALE=0).")

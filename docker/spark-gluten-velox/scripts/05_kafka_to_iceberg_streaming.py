@@ -138,6 +138,16 @@ DRY_RUN     = os.environ.get("DRY_RUN", "0") == "1"
 WRITE_MODE  = os.environ.get("WRITE_MODE", _WRITE_MODE_STANDARD).lower()
 _SOURCE_FILTER = os.environ.get("SOURCE", "").lower()
 
+# Optional per-table allow-list — comma-separated "schema.table" values.
+# When set, only topics whose table portion matches an entry are processed.
+# Empty string (default) = process all tables.
+# Example: TABLE_FILTER=cache_testing.customers,cache_testing.orders
+_TABLE_FILTER_RAW = os.environ.get("TABLE_FILTER", "").strip()
+_TABLE_FILTER: set[str] = (
+    {t.strip().lower() for t in _TABLE_FILTER_RAW.split(",") if t.strip()}
+    if _TABLE_FILTER_RAW else set()
+)
+
 # Optional namespace override — when set, ALL topics from ALL sources are written
 # into this Iceberg namespace instead of the namespace derived from the Kafka topic.
 # Use-case: E2E testing — set TARGET_NAMESPACE=e2e_testing so that
@@ -752,6 +762,16 @@ def _write_micro_batch(
             namespace  = _topic_to_namespace(topic, source)
             if not table_name:
                 continue
+
+            # ── Per-table filter (TABLE_FILTER env var) ───────────────────────
+            # Check against both "schema.table" and plain "table" forms so the
+            # filter works regardless of whether the user includes the namespace.
+            if _TABLE_FILTER:
+                _tname_lower = table_name.lower()
+                _ns_lower    = (namespace or "").lower()
+                _qualified   = f"{_ns_lower}.{_tname_lower}"
+                if _tname_lower not in _TABLE_FILTER and _qualified not in _TABLE_FILTER:
+                    continue
 
             # ── Decode Debezium envelope ──────────────────────────────────────
             env_df = topic_df.select(

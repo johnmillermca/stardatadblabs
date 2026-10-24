@@ -1,0 +1,487 @@
+# =============================================================================
+# mcp-idle-scaler.yaml
+#
+# Scale-to-zero + wake-on-demand controller for all MCP server Deployments.
+#
+# WHAT IT DOES
+# ─────────────────────────────────────────────────────────────────────────────
+# Each MCP server (mcp-doris, mcp-kafka, mcp-kestra, mcp-opensearch,
+# mcp-spark, mcp-sqlmesh) is a stateless HTTP proxy with no persistent state.
+# This controller:
+#
+#   SCALE DOWN  — When an MCP deployment has had no ready endpoints for
+#                 IDLE_TIMEOUT_S seconds (default 900 = 15 min), the
+#                 Deployment is patched to replicas=0 AND the K8s Service
+#                 selector is redirected to this scaler pod (which runs a
+#                 tiny wake-proxy on each port).
+#
+#   SCALE UP    — The wake proxy accepts the first inbound connection,
+#                 immediately patches the Deployment to replicas=1, waits
+#                 until the pod is Ready (up to WAKE_TIMEOUT_S), restores the
+#                 Service selector back to the original MCP pod, then
+#                 transparently forwards the connection.  The client sees a
+#                 brief cold-start pause but no error.
+#
+# SERVICE SELECTOR SWAP (how traffic is intercepted)
+# ─────────────────────────────────────────────────────────────────────────────
+#   DORMANT state:  Service selector → app=mcp-idle-scaler  (wake proxy)
+#   ACTIVE  state:  Service selector → app=mcp-<name>       (real MCP pod)
+#
+#   The scaler pod runs a TCP listener on each MCP port (3100–3105).
+#   When the deployment is at 0 the Service routes here; when the real
+#   pod is up the selector is restored and traffic goes directly to it.
+#
+# IDLE DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+#   The controller tracks the last time each MCP deployment had ≥1 ready
+#   endpoint.  "Active" = readyReplicas ≥ 1.  When replicas=0, the idle
+#   clock is irrelevant (already down).  After IDLE_TIMEOUT_S seconds of
+#   replicas≥1 but the service receiving no wake calls, scale down.
+#
+#   NOTE: while the deployment is up, ANY inbound connection resets the idle
+#   clock (the wake proxy records_traffic() on every accepted connection, and
+#   so does the idle watcher on every poll where endpoints > 0).  Scale-down
+#   only fires when the idle clock has not been reset for IDLE_TIMEOUT_S.
+#
+# APPLY
+# ─────────────────────────────────────────────────────────────────────────────
+#   kubectl apply -f manifests/mcp/mcp-idle-scaler.yaml
+#
+# LOGS
+# ─────────────────────────────────────────────────────────────────────────────
+#   kubectl logs -n prod -l app=mcp-idle-scaler -f
+#
+# TUNE
+# ─────────────────────────────────────────────────────────────────────────────
+#   IDLE_TIMEOUT_S   — seconds idle before scale-down  (default 900 = 15 min)
+#   WAKE_TIMEOUT_S   — max seconds to wait for pod ready on wake (default 60)
+#   POLL_INTERVAL_S  — how often to check each service  (default 30)
+#   DRY_RUN          — "1" = log decisions, never patch  (default 0)
+# =============================================================================
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-idle-scaler
+  namespace: prod
+  labels:
+    app: mcp-idle-scaler
+
+---
+# ── ClusterRole ───────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-idle-scaler
+  labels:
+    app: mcp-idle-scaler
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "endpoints", "services"]
+    verbs: ["get", "list", "patch"]
+
+---
+# ── ClusterRoleBinding ────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-idle-scaler
+  labels:
+    app: mcp-idle-scaler
+subjects:
+  - kind: ServiceAccount
+    name: mcp-idle-scaler
+    namespace: prod
+roleRef:
+  kind: ClusterRole
+  name: mcp-idle-scaler
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── ConfigMap — controller script ─────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-idle-scaler-script
+  namespace: prod
+  labels:
+    app: mcp-idle-scaler
+data:
+  scaler.py: |
+    #!/usr/bin/env python3
+    """
+    mcp-idle-scaler — scale MCP deployments to 0 when idle, wake on demand.
+
+    State machine per MCP service:
+      ACTIVE  : replicas >= 1, Service selector → real MCP pod
+      DORMANT : replicas  = 0, Service selector → this scaler pod (wake proxy)
+
+    Transitions:
+      ACTIVE  → DORMANT : idle for IDLE_TIMEOUT_S seconds → scale=0, swap selector
+      DORMANT → ACTIVE  : wake proxy receives connection   → scale=1, restore selector
+    """
+    from __future__ import annotations
+    import json, logging, os, socket, ssl, sys, threading, time, urllib.request, urllib.error
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    IDLE_TIMEOUT_S  = int(os.environ.get("IDLE_TIMEOUT_S",  "900"))
+    WAKE_TIMEOUT_S  = int(os.environ.get("WAKE_TIMEOUT_S",  "60"))
+    POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", "30"))
+    DRY_RUN         = os.environ.get("DRY_RUN", "0") == "1"
+    NS              = os.environ.get("K8S_NAMESPACE", "prod")
+    MY_APP_LABEL    = "mcp-idle-scaler"   # label on THIS pod — used for selector swap
+
+    # name → container port
+    MCP_SERVICES: dict[str, int] = {
+        "mcp-doris":       3101,
+        "mcp-kafka":       3104,
+        "mcp-kestra":      3105,
+        "mcp-opensearch":  3102,
+        "mcp-spark":       3103,
+        "mcp-sqlmesh":     3100,
+    }
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [mcp-scaler] %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stdout,
+    )
+    log = logging.getLogger("mcp-idle-scaler")
+
+    # ── K8s API helpers ───────────────────────────────────────────────────────
+    _K8S  = "https://kubernetes.default.svc"
+    _TOK  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    _CA   = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+    def _ssl():
+        ctx = ssl.create_default_context()
+        try:    ctx.load_verify_locations(_CA)
+        except: ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    def _k8s(method: str, path: str, body: dict | None = None, ct: str | None = None):
+        token = open(_TOK).read().strip()
+        if ct is None:
+            ct = "application/strategic-merge-patch+json" if method == "PATCH" else "application/json"
+        data = json.dumps(body).encode() if body else None
+        req  = urllib.request.Request(
+            f"{_K8S}{path}", data=data, method=method,
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": ct, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, context=_ssl(), timeout=10) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            log.warning("K8s %s %s → %d: %s", method, path, e.code, e.read()[:120])
+            return None
+        except Exception as e:
+            log.warning("K8s %s %s error: %s", method, path, e)
+            return None
+
+    def _get_deploy(name: str) -> dict | None:
+        return _k8s("GET", f"/apis/apps/v1/namespaces/{NS}/deployments/{name}")
+
+    def _set_replicas(name: str, n: int, reason: str):
+        if DRY_RUN:
+            log.warning("DRY-RUN scale %s → %d  (%s)", name, n, reason)
+            return
+        _k8s("PATCH", f"/apis/apps/v1/namespaces/{NS}/deployments/{name}",
+             {"spec": {"replicas": n}})
+        log.warning("SCALE    %s → %d replicas  (%s)", name, n, reason)
+
+    def _ready_replicas(name: str) -> int:
+        d = _get_deploy(name)
+        return (d or {}).get("status", {}).get("readyReplicas") or 0
+
+    def _get_spec_replicas(name: str) -> int | None:
+        d = _get_deploy(name)
+        if d is None: return None
+        return d.get("spec", {}).get("replicas", 0)
+
+    def _patch_service_selector(svc_name: str, selector: dict):
+        """Replace the Service's spec.selector with the given dict."""
+        if DRY_RUN:
+            log.warning("DRY-RUN selector %s → %s", svc_name, selector)
+            return
+        _k8s("PATCH", f"/api/v1/namespaces/{NS}/services/{svc_name}",
+             {"spec": {"selector": selector}},
+             ct="application/strategic-merge-patch+json")
+        log.info("SELECTOR %s → %s", svc_name, selector)
+
+    def _get_service_selector(svc_name: str) -> dict:
+        r = _k8s("GET", f"/api/v1/namespaces/{NS}/services/{svc_name}")
+        return (r or {}).get("spec", {}).get("selector") or {}
+
+    def _ready_endpoints(svc_name: str) -> int:
+        r = _k8s("GET", f"/api/v1/namespaces/{NS}/endpoints/{svc_name}")
+        count = 0
+        for sub in ((r or {}).get("subsets") or []):
+            count += len(sub.get("addresses") or [])
+        return count
+
+    # ── Per-service state ─────────────────────────────────────────────────────
+
+    class Svc:
+        """Tracks state for one MCP service."""
+        def __init__(self, name: str, port: int):
+            self.name          = name
+            self.port          = port
+            self._lock         = threading.Lock()
+            self.last_active   = time.time()   # last time we knew traffic was happening
+            # Original Service selector (populated on first observation)
+            self._orig_selector: dict | None = None
+
+        # ── selector management ───────────────────────────────────────────────
+        def _ensure_orig_selector(self):
+            if self._orig_selector is None:
+                sel = _get_service_selector(self.name)
+                # The real selector always has "app=mcp-<name>" — if we already
+                # swapped to the scaler label, don't treat that as original.
+                if sel.get("app") != MY_APP_LABEL:
+                    self._orig_selector = sel
+                    log.info("LEARNED  %s original selector: %s", self.name, sel)
+
+        def route_to_scaler(self):
+            """Redirect the K8s Service to this pod (wake proxy)."""
+            self._ensure_orig_selector()
+            _patch_service_selector(self.name, {"app": MY_APP_LABEL})
+
+        def route_to_app(self):
+            """Restore the K8s Service to the real MCP pod."""
+            self._ensure_orig_selector()
+            if self._orig_selector:
+                _patch_service_selector(self.name, self._orig_selector)
+
+        def selector_is_scaler(self) -> bool:
+            sel = _get_service_selector(self.name)
+            return sel.get("app") == MY_APP_LABEL
+
+        # ── idle clock ───────────────────────────────────────────────────────
+        def record_traffic(self):
+            with self._lock:
+                self.last_active = time.time()
+
+        def idle_seconds(self) -> float:
+            with self._lock:
+                return time.time() - self.last_active
+
+    _svcs: dict[str, Svc] = {n: Svc(n, p) for n, p in MCP_SERVICES.items()}
+
+    # ── Wake proxy ────────────────────────────────────────────────────────────
+
+    def _pipe(src: socket.socket, dst: socket.socket):
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data: break
+                dst.sendall(data)
+        except Exception:
+            pass
+        finally:
+            try: src.close()
+            except: pass
+            try: dst.close()
+            except: pass
+
+    def _handle_wake(svc: Svc, conn: socket.socket, peer: tuple):
+        """
+        Wake-up handler: runs in a daemon thread.
+        1. Scale deployment to 1.
+        2. Restore Service selector → real MCP pod.
+        3. Wait for ready.
+        4. Pipe the connection through.
+        """
+        log.info("WAKE     %s  ← %s:%s", svc.name, *peer)
+        svc.record_traffic()
+
+        # Scale up if still at 0
+        if _get_spec_replicas(svc.name) == 0:
+            _set_replicas(svc.name, 1, f"wake by {peer[0]}")
+
+        # Restore real selector so K8s routes to the MCP pod once ready
+        svc.route_to_app()
+
+        # Wait for pod ready
+        deadline = time.time() + WAKE_TIMEOUT_S
+        while time.time() < deadline:
+            if _ready_replicas(svc.name) >= 1:
+                log.info("READY    %s  pod is up — forwarding connection", svc.name)
+                break
+            time.sleep(2)
+        else:
+            log.warning("WAKE     %s  timed out waiting for ready pod — dropping", svc.name)
+            conn.close()
+            return
+
+        # Connect to the now-live upstream and splice
+        svc_host = f"{svc.name}.{NS}.svc.cluster.local"
+        try:
+            upstream = socket.create_connection((svc_host, svc.port), timeout=10)
+        except Exception as e:
+            log.warning("WAKE     %s  upstream connect failed: %s", svc.name, e)
+            conn.close()
+            return
+
+        t1 = threading.Thread(target=_pipe, args=(conn,     upstream), daemon=True)
+        t2 = threading.Thread(target=_pipe, args=(upstream, conn),     daemon=True)
+        t1.start(); t2.start()
+        t1.join();  t2.join()
+
+    def _listen(svc: Svc):
+        """TCP accept loop — runs in a daemon thread forever."""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", svc.port))
+        srv.listen(32)
+        log.info("WakeProxy  port=%d  service=%s", svc.port, svc.name)
+        while True:
+            try:
+                conn, peer = srv.accept()
+                threading.Thread(
+                    target=_handle_wake, args=(svc, conn, peer), daemon=True
+                ).start()
+            except Exception as e:
+                log.warning("WakeProxy %s accept error: %s", svc.name, e)
+                time.sleep(1)
+
+    # ── Idle watcher ──────────────────────────────────────────────────────────
+
+    def _watch_loop():
+        log.info("IdleWatcher  idle=%ds  poll=%ds  dry=%s",
+                 IDLE_TIMEOUT_S, POLL_INTERVAL_S, DRY_RUN)
+        while True:
+            for svc in _svcs.values():
+                try:
+                    spec_rep = _get_spec_replicas(svc.name)
+                    if spec_rep is None:
+                        continue
+
+                    if spec_rep == 0:
+                        # Already dormant — ensure the Service selector points to scaler
+                        if not svc.selector_is_scaler():
+                            log.info("REPAIR   %s  selector not on scaler — fixing", svc.name)
+                            svc.route_to_scaler()
+                        log.info("DORMANT  %s  replicas=0  (wake proxy active)", svc.name)
+                        continue
+
+                    # Deployment is up — check endpoints
+                    eps = _ready_endpoints(svc.name)
+                    if eps > 0:
+                        # Live traffic is possible — keep idle clock alive
+                        svc.record_traffic()
+
+                    idle = svc.idle_seconds()
+                    log.info(
+                        "ACTIVE   %s  replicas=%d  endpoints=%d  idle=%.0fs/%ds",
+                        svc.name, spec_rep, eps, idle, IDLE_TIMEOUT_S,
+                    )
+
+                    if idle >= IDLE_TIMEOUT_S:
+                        log.info("IDLE     %s  %.0fs >= %ds — scaling to 0",
+                                 svc.name, idle, IDLE_TIMEOUT_S)
+                        _set_replicas(svc.name, 0,
+                                      f"idle {idle:.0f}s >= {IDLE_TIMEOUT_S}s")
+                        svc.route_to_scaler()
+                        svc.record_traffic()   # reset so we don't re-fire immediately
+
+                except Exception as e:
+                    log.error("WATCH    %s error: %s", svc.name, e)
+
+            time.sleep(POLL_INTERVAL_S)
+
+    # ── Main ──────────────────────────────────────────────────────────────────
+
+    def main():
+        log.info(
+            "mcp-idle-scaler  services=%s  idle=%ds  wake=%ds  poll=%ds  dry=%s",
+            list(MCP_SERVICES), IDLE_TIMEOUT_S, WAKE_TIMEOUT_S, POLL_INTERVAL_S, DRY_RUN,
+        )
+        # Start one wake-proxy listener thread per MCP port
+        for svc in _svcs.values():
+            threading.Thread(target=_listen, args=(svc,), daemon=True).start()
+        # Idle watcher runs in the main thread
+        _watch_loop()
+
+    if __name__ == "__main__":
+        main()
+
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-idle-scaler
+  namespace: prod
+  labels:
+    app: mcp-idle-scaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-idle-scaler
+  template:
+    metadata:
+      labels:
+        app: mcp-idle-scaler
+    spec:
+      serviceAccountName: mcp-idle-scaler
+      # Pin to a lightly loaded node — worker7–10 have <10% CPU/mem requests
+      nodeSelector:
+        kubernetes.io/hostname: worker7.local
+      containers:
+        - name: scaler
+          image: python:3.12-slim
+          command: ["/bin/sh", "-c", "exec python3 /scripts/scaler.py"]
+          env:
+            - name: IDLE_TIMEOUT_S
+              value: "900"
+            - name: WAKE_TIMEOUT_S
+              value: "60"
+            - name: POLL_INTERVAL_S
+              value: "30"
+            - name: DRY_RUN
+              value: "0"
+            - name: K8S_NAMESPACE
+              value: "prod"
+          ports:
+            - containerPort: 3100
+              name: mcp-sqlmesh
+            - containerPort: 3101
+              name: mcp-doris
+            - containerPort: 3102
+              name: mcp-opensearch
+            - containerPort: 3103
+              name: mcp-spark
+            - containerPort: 3104
+              name: mcp-kafka
+            - containerPort: 3105
+              name: mcp-kestra
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            tcpSocket:
+              port: 3100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: script
+          configMap:
+            name: mcp-idle-scaler-script
+            defaultMode: 0755

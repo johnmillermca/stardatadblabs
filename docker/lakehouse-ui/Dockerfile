@@ -17,6 +17,7 @@ ENV PORT=3000 \
     DEBEZIUM_ORACLE_URL=http://debezium-connect-oracle.prod.svc.cluster.local:8083 \
     DEBEZIUM_MONGODB_URL=http://debezium-connect-mongodb.prod.svc.cluster.local:8083 \
     KAFKA_BOOTSTRAP=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 \
+    KSQLDB_URL=http://ksqldb.prod.svc.cluster.local:8088 \
     K8S_NAMESPACE=prod
 
 EXPOSE 3000

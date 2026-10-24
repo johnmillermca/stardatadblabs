@@ -1,6 +1,6 @@
 # =============================================================================
 # Oracle XE 21c — PVC + Init Container + Deployment + Service
-# Namespace : databases
+# Namespace : prod
 # Node      : master.local
 # Access    : jdbc:oracle:thin:@192.168.1.50:30521/XEPDB1
 # Secret    : oracle-credentials  (key: oracle-password)
