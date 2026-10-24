@@ -17,7 +17,7 @@ spec:
     path: k8s-platform/manifests/polaris
   destination:
     server: https://kubernetes.default.svc
-    namespace: catalog
+    namespace: prod
   syncPolicy:
     automated:
       prune: true

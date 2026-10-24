@@ -60,6 +60,10 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
+        - key: "workload"
+          operator: "Equal"
+          value: "master"
+          effect: "NoSchedule"
       containers:
         - name: polaris
           image: 192.168.1.50:30500/apache-polaris:1.6.0-r2
@@ -104,12 +108,14 @@ spec:
               memory: 1Gi
               cpu: "1"
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /api/catalog/v1/healthcheck
               port: 8181
             initialDelaySeconds: 30
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /api/catalog/v1/healthcheck
               port: 8181
             initialDelaySeconds: 60
             periodSeconds: 15

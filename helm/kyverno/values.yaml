@@ -1,0 +1,65 @@
+# =============================================================================
+# Kyverno — Kubernetes Policy Engine
+# Namespace   : kyverno
+# Node        : master.local (pinned — keeps admission webhook latency minimal
+#               since the API server itself runs on master.local)
+# Chart       : kyverno/kyverno  v3.3.x
+# ArgoCD app  : argocd-apps/app-kyverno.yaml
+# =============================================================================
+
+# Single replica for each component (single control-plane homelab cluster).
+# All components are pinned to master.local which carries two NoSchedule taints:
+#   node-role.kubernetes.io/control-plane:NoSchedule
+#   workload=master:NoSchedule
+
+admissionController:
+  replicas: 1
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: master
+      effect: NoSchedule
+
+backgroundController:
+  replicas: 1
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: master
+      effect: NoSchedule
+
+cleanupController:
+  replicas: 1
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: master
+      effect: NoSchedule
+
+reportsController:
+  replicas: 1
+  nodeSelector:
+    kubernetes.io/hostname: master.local
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: workload
+      operator: Equal
+      value: master
+      effect: NoSchedule

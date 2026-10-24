@@ -1,0 +1,78 @@
+# =============================================================================
+# ArgoCD Applications — Kyverno Policy Engine + Platform Policies
+#
+# Wave -5 : kyverno operator (must be Ready before policies are applied)
+# Wave  0 : platform-policies (ClusterPolicy resources)
+#
+# Why sync-wave -5?
+#   Kyverno registers a MutatingWebhookConfiguration during install. If policies
+#   are applied before the webhook is ready the API server will reject them.
+#   Wave -5 ensures Kyverno is fully healthy before ArgoCD applies wave 0.
+# =============================================================================
+
+# ── Kyverno Operator (Helm) ───────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: platform
+  sources:
+    - repoURL: https://kyverno.github.io/kyverno/
+      chart: kyverno
+      targetRevision: "3.3.3"
+      helm:
+        releaseName: kyverno
+        valueFiles:
+          - $values/helm/kyverno/values.yaml
+    - repoURL: https://github.com/johnmillermca/stardatadblabs
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+
+# ── Platform Policies ─────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno-policies
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: k8s-platform/manifests/kyverno
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

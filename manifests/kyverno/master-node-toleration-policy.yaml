@@ -1,0 +1,58 @@
+# =============================================================================
+# Kyverno ClusterPolicy — Auto-inject master.local tolerations
+# =============================================================================
+# Problem this solves:
+#   master.local carries TWO NoSchedule taints:
+#     1. node-role.kubernetes.io/control-plane:NoSchedule  (standard)
+#     2. workload=master:NoSchedule                        (custom)
+#
+#   Manifests that pin pods via nodeSelector (kubernetes.io/hostname: master.local)
+#   must tolerate BOTH taints or the pod stays Pending forever.
+#   The second taint is easy to forget, as proven by the Polaris outage.
+#
+# What this policy does:
+#   Any Pod (or pod-template in Deployment/StatefulSet/DaemonSet/Job/CronJob)
+#   that has nodeSelector kubernetes.io/hostname=master.local gets the
+#   workload=master:NoSchedule toleration injected automatically at admission
+#   time — even if the manifest omits it.
+#
+# Effect: this class of bug cannot happen again regardless of who writes
+#         a future manifest.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: inject-master-node-toleration
+  annotations:
+    policies.kyverno.io/title: Inject master.local workload toleration
+    policies.kyverno.io/category: Scheduling
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      master.local carries a custom taint workload=master:NoSchedule in addition
+      to the standard control-plane taint. Any pod pinned to master.local via
+      nodeSelector must tolerate both. This policy automatically injects the
+      workload=master:NoSchedule toleration at admission time so pods never get
+      stuck Pending due to the missing toleration.
+spec:
+  rules:
+    - name: inject-workload-master-toleration
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      preconditions:
+        all:
+          # Only act when the pod is pinned to master.local
+          - key: "{{ request.object.spec.nodeSelector.\"kubernetes.io/hostname\" }}"
+            operator: Equals
+            value: master.local
+      mutate:
+        patchStrategicMerge:
+          spec:
+            tolerations:
+              # Use $patch:merge so existing tolerations are preserved
+              - key: workload
+                operator: Equal
+                value: master
+                effect: NoSchedule

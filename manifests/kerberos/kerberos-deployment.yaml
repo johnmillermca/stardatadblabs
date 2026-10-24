@@ -117,6 +117,10 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
+        - key: "workload"
+          operator: "Equal"
+          value: "master"
+          effect: "NoSchedule"
       # Recreate strategy: kerberos-data is RWO — only one pod can hold it.
       terminationGracePeriodSeconds: 60
       # NO init container needed — krb5 packages are baked into the image.

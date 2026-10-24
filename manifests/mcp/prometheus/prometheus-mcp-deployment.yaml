@@ -65,6 +65,10 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
+        - key: "workload"
+          operator: "Equal"
+          value: "master"
+          effect: "NoSchedule"
 ---
 apiVersion: v1
 kind: Service

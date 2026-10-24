@@ -22,6 +22,7 @@ spec:
     - "https://grafana.github.io/helm-charts"
     # Private OCI registry as Helm chart source
     - "oci://192.168.1.50:30500/charts"
+    - "https://kyverno.github.io/kyverno/"
 
   destinations:
     - namespace: "prod"
@@ -39,6 +40,8 @@ spec:
     - namespace: "kube-system"
       server: https://kubernetes.default.svc
     - namespace: "local-path-storage"
+      server: https://kubernetes.default.svc
+    - namespace: "kyverno"
       server: https://kubernetes.default.svc
 
   clusterResourceWhitelist:

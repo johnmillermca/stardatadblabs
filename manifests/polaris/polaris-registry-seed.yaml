@@ -35,6 +35,10 @@ spec:
             - key: node-role.kubernetes.io/control-plane
               operator: Exists
               effect: NoSchedule
+            - key: workload
+              operator: Equal
+              value: master
+              effect: NoSchedule
           hostPID: false
           volumes:
             - name: containerd-sock
@@ -62,7 +66,7 @@ spec:
                 - |
                   REGISTRY="192.168.1.50:30500"
                   IMAGE="apache-polaris"
-                  TAG="1.6.0"
+                  TAG="1.6.0-r2"
                   FULL="${REGISTRY}/${IMAGE}:${TAG}"
 
                   # Check if image already present in registry using tags/list
