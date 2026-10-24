@@ -345,3 +345,635 @@ spec:
     retention.ms: "604800000"
     retention.bytes: "-1"
     compression.type: lz4
+
+# =============================================================================
+# TableFlow derived topics — _sd (soft-delete) and _hist (history tracking)
+# =============================================================================
+#
+# _sd  topics: compact+delete, 7 day retention
+#   ksqlDB CSAS streams partition by PK_ID — Kafka compaction keeps latest
+#   row per key, so the topic always reflects current soft-delete state.
+#
+# _hist topics: delete only, 30 day retention
+#   Append-only — every CDC event is a new message.  No compaction.
+#
+# These topics are auto-created by ksqlDB when the CSAS stream is first
+# created.  These CRs reconcile the topic config to enforce the correct
+# cleanup policy and retention.
+# =============================================================================
+
+# ── postgres derived tableflow topics ──────────────────────────────────────────
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-customers-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.customers_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-customers-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.customers_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-orders-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.orders_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-orders-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.orders_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-products-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.products_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-products-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.products_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-order-items-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.order_items_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-order-items-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.order_items_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-inventory-events-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.inventory_events_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-inventory-events-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.inventory_events_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-product-reviews-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.product_reviews_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-product-reviews-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: postgres.cache_testing.product_reviews_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+# ── oracle derived tableflow topics ──────────────────────────────────────────
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-customers-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.customers_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-customers-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.customers_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-orders-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.orders_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-orders-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.orders_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-products-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.products_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-products-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.products_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-order-items-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.order_items_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-order-items-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.order_items_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-inventory-events-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.inventory_events_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-inventory-events-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.inventory_events_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-product-reviews-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.product_reviews_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: oracle-cache-testing-product-reviews-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: oracle.cache_testing.product_reviews_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+# ── mongodb derived tableflow topics ──────────────────────────────────────────
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-customers-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.customers_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-customers-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.customers_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-orders-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.orders_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-orders-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.orders_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-products-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.products_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-products-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.products_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-order-items-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.order_items_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-order-items-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.order_items_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-inventory-events-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.inventory_events_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-inventory-events-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.inventory_events_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-product-reviews-sd
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.product_reviews_sd
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: "604800000"
+    segment.ms: "86400000"
+
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: mongodb-cache-testing-product-reviews-hist
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  topicName: mongodb.cache_testing.product_reviews_hist
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "2592000000"
+    segment.ms: "86400000"
+

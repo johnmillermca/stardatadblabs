@@ -78,10 +78,10 @@ spec:
 
               wait_ready()
 
-              # ksqlDB 7.9.10 supports CLEANUP_POLICY and RETENTION_MS in CSAS
-              # WITH clauses.  _sd topics use compact+delete (7 day retention)
-              # so the compacted topic always holds the latest row per PK.
-              # _hist topics use delete-only with 30 day retention for full history.
+              # ksqlDB never allows CLEANUP_POLICY in CSAS WITH clauses — it
+              # is always auto-inferred (STREAM=delete, TABLE=compact).
+              # We set compaction + retention via Kafka AdminClient after stream
+              # creation so _sd topics behave like compacted CDC topics.
               SOURCES = {
                   "postgres": {
                       "stream_pfx": "POSTGRES_CACHE_TESTING",
@@ -128,8 +128,7 @@ spec:
                       # ── SD stream ──────────────────────────────────────────
                       sd_sql = (
                           f"CREATE STREAM IF NOT EXISTS {sd_stream} "
-                          f"WITH (KAFKA_TOPIC='{sd_topic}', PARTITIONS=3, REPLICAS=1, "
-                          f"VALUE_FORMAT='JSON', CLEANUP_POLICY='compact,delete', RETENTION_MS=604800000) "
+                          f"WITH (KAFKA_TOPIC='{sd_topic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') "
                           f"AS SELECT "
                           f"CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' "
                           f"  THEN EXTRACTJSONFIELD(PAYLOAD,'{pkb}') "
@@ -153,8 +152,7 @@ spec:
                       # ── HIST stream ────────────────────────────────────────
                       ht_sql = (
                           f"CREATE STREAM IF NOT EXISTS {ht_stream} "
-                          f"WITH (KAFKA_TOPIC='{ht_topic}', PARTITIONS=3, REPLICAS=1, "
-                          f"VALUE_FORMAT='JSON', CLEANUP_POLICY='delete', RETENTION_MS=2592000000) "
+                          f"WITH (KAFKA_TOPIC='{ht_topic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') "
                           f"AS SELECT "
                           f"EXTRACTJSONFIELD(PAYLOAD,'{pka}') AS PK_ID, "
                           f"EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, "
@@ -175,5 +173,6 @@ spec:
 
               print(f"\n{'='*60}")
               print(f"Setup complete — errors: {errors}")
+              print("Retention/compaction managed by Strimzi KafkaTopic CRs in kafka-topics.yaml")
               if errors:
                   sys.exit(1)
