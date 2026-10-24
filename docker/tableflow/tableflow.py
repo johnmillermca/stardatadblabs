@@ -79,6 +79,10 @@ BATCH_SIZE     = int(os.environ.get("BATCH_SIZE",     "500"))
 FLUSH_INTERVAL = int(os.environ.get("FLUSH_INTERVAL", "10"))
 DRY_RUN        = os.environ.get("DRY_RUN", "0") == "1"
 BAO_ADDR       = os.environ.get("BAO_ADDR", "")
+# When the Polaris catalog's STS credential vending is unavailable (e.g. no
+# AWS STS endpoint or self-hosted S3), set to "none" to pass S3 keys directly.
+# Set to "vended-credentials" if the catalog should vend temporary STS creds.
+ICEBERG_ACCESS_DELEGATION = os.environ.get("ICEBERG_ACCESS_DELEGATION", "none")
 
 _VALID_SOURCES = ("postgres", "oracle", "mongodb")
 if SOURCE not in _VALID_SOURCES:
@@ -158,6 +162,7 @@ def make_catalog(creds: dict) -> RestCatalog:
             "s3.endpoint":          s3["endpoint"],
             "s3.region":            s3.get("region", "us-east-2"),
             "s3.path-style-access": "true",
+            "header.X-Iceberg-Access-Delegation": ICEBERG_ACCESS_DELEGATION,
         },
     )
 
@@ -277,16 +282,18 @@ def flatten_hist(msg: dict) -> dict | None:
     if after_json:
         try:
             after = json.loads(after_json) if isinstance(after_json, str) else after_json
-            for k, v in after.items():
-                row[f"after_{k.lower()}"] = v
+            if isinstance(after, dict):
+                for k, v in after.items():
+                    row[f"after_{k.lower()}"] = v
         except (json.JSONDecodeError, TypeError):
             pass
 
     if before_json:
         try:
             before = json.loads(before_json) if isinstance(before_json, str) else before_json
-            for k, v in before.items():
-                row[f"before_{k.lower()}"] = v
+            if isinstance(before, dict):
+                for k, v in before.items():
+                    row[f"before_{k.lower()}"] = v
         except (json.JSONDecodeError, TypeError):
             pass
 
