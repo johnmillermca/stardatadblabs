@@ -76,7 +76,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.1
+          image: 192.168.1.50:30500/tableflow:1.0.2
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -133,7 +133,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.1
+          image: 192.168.1.50:30500/tableflow:1.0.2
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -190,7 +190,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.1
+          image: 192.168.1.50:30500/tableflow:1.0.2
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
