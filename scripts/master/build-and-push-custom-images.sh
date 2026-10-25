@@ -41,7 +41,7 @@ declare -A IMAGE_TAG=(
   [sqlmesh]="${REGISTRY}/sqlmesh:0.99.0"
   [jupyter-spark]="${REGISTRY}/jupyter-spark:latest"
   [lakehouse-ui]="${REGISTRY}/lakehouse-ui:latest"
-  [tableflow]="${REGISTRY}/tableflow:1.0.13"
+  [tableflow]="${REGISTRY}/tableflow:1.0.14"
 )
 
 # =============================================================================

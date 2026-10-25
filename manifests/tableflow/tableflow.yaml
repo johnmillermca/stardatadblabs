@@ -30,7 +30,7 @@
 #   GET  /healthz         — liveness/readiness probe
 #
 # Image:
-#   192.168.1.50:30500/tableflow:1.0.13
+#   192.168.1.50:30500/tableflow:1.0.14
 #   Built from docker/tableflow/Dockerfile
 # =============================================================================
 
@@ -99,7 +99,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.13
+          image: 192.168.1.50:30500/tableflow:1.0.14
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -186,7 +186,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.13
+          image: 192.168.1.50:30500/tableflow:1.0.14
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -273,7 +273,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.13
+          image: 192.168.1.50:30500/tableflow:1.0.14
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

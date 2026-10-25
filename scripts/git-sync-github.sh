@@ -118,14 +118,31 @@ fi
 log "Staging all changes..."
 git add -A
 STATUS=$(git status --short)
-if [[ -z "${STATUS}" ]]; then
-  log "Nothing to commit — working tree clean."
+
+# Check for commits that are ahead of the remote (committed but not yet pushed)
+AHEAD=$(git rev-list --count origin/${BRANCH}..HEAD 2>/dev/null || echo "0")
+
+if [[ -z "${STATUS}" && "${AHEAD}" == "0" ]]; then
+  log "Nothing to commit and nothing to push — working tree clean."
   CURRENT_REMOTE=$(git remote get-url origin)
   echo ""
   echo "  Repository is up to date."
   echo "  Remote : ${CURRENT_REMOTE}"
   echo "  Branch : ${BRANCH}"
   echo "  Tip    : $(git log --oneline -1 2>/dev/null || echo 'no commits')"
+  exit 0
+fi
+
+if [[ -z "${STATUS}" && "${AHEAD}" != "0" ]]; then
+  log "${AHEAD} commit(s) already staged but not yet pushed — pushing now..."
+  PUSH_REMOTE=$(git remote get-url origin)
+  log "Pushing to ${PUSH_REMOTE} (branch: ${BRANCH})..."
+  git push -u origin "${BRANCH}" 2>&1 && ok "pushed ${AHEAD} commit(s) to GitHub" || \
+    die "Push failed. Check credentials."
+  echo ""
+  echo "  Remote : $(git remote get-url origin)"
+  echo "  Branch : ${BRANCH}"
+  echo "  Tip    : $(git log --oneline -1 2>/dev/null)"
   exit 0
 fi
 
