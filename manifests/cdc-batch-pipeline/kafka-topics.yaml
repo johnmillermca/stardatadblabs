@@ -23,16 +23,52 @@
 #   schema-changes.oracle-cache-testing — oracle-cache-testing-cdc
 #   schema-changes.mongodb              — mongodb-cache-testing-cdc
 #
-# IMPORTANT: schema history topics MUST use cleanup.policy=delete.
+# IMPORTANT: schema history topics MUST use cleanup.policy=delete + retention.ms=-1.
 #   Debezium KafkaSchemaHistory writes records without a message key.
-#   Kafka's log compaction requires every message to have a key and will
-#   reject keyless messages with InvalidRecordException, crashing the
-#   connector task. Use delete + retention.ms=-1 (infinite) instead.
+#   Kafka log compaction requires every message to have a key and will reject
+#   keyless messages with InvalidRecordException, crashing the connector task.
+#   These topics must NEVER be given a finite retention — Debezium replays the
+#   full schema history on every connector restart.  Truncating them causes an
+#   immediate, unrecoverable connector failure.
+#
+# ── Per-tier retention design (safe — no accessibility impact) ────────────────
+#
+# Tier 1 — Raw Debezium CDC topics  (cleanup: delete, retention: 7 days)
+#   e.g. postgres.cache_testing.customers
+#   7 days gives a safe replay window for connector pause/restart.  Reducing
+#   below this risks losing unflushed events if a connector is offline >N days.
+#   tableflow flushes to Iceberg within FLUSH_INTERVAL (10 s); Iceberg is the
+#   durable store.  The 7-day window is a safety buffer, NOT the primary store.
+#
+# Tier 2 — _sd topics  (cleanup: compact,delete, retention: 7 days, segment: 1 day)
+#   e.g. postgres.cache_testing.customers_sd
+#   compact+delete preserves the latest row per PK key regardless of retention.
+#   The 7-day window covers replay for a tableflow pod restart.
+#
+# Tier 3 — _hist topics  (cleanup: delete, retention: 30 days, segment: 1 day)
+#   e.g. postgres.cache_testing.customers_hist
+#   Append-only audit log.  30 days intentional — reducing would destroy history
+#   that has not yet been queried via ksqlDB or replayed to Iceberg.
+#
+# Tier 4 — _TBL materialised table backing topics  (cleanup: delete, retention: 2 days)
+#   e.g. POSTGRES_CACHE_TESTING_CUSTOMERS_TBL  (ksqlDB RocksDB CSAS output)
+#   Purpose: ksqlDB pull queries for the compare-table use-case.
+#   RETENTION_MS=172800000 (2 days) + SEGMENT_MS=86400000 (1 day).
+#   SEGMENT_MS is mandatory — without it the default 7-day segment roll prevents
+#   Kafka from freeing segments even after retention.ms expires.
+#   Safety guarantee: no Debezium connector and no tableflow consumer holds a
+#   Kafka offset on _TBL topics.  ksqlDB materialises the table state in RocksDB
+#   continuously; the backing topic is only used for RocksDB state restoration
+#   after a ksqlDB restart.  2-day retention fully covers any ksqlDB pod restart
+#   scenario and causes zero data loss or pipeline interruption.
+#   These topics are auto-created by ksqlDB CSAS and are NOT declared here as
+#   KafkaTopic CRs — their config is set via the ksqlDB WITH clause.
+#
+# Tier 5 — Schema-history topics  (cleanup: delete, retention: infinite)
+#   MUST NOT be changed.  See note above.
 #
 # Partitions: 3 per data topic (parallelism for Spark Structured Streaming)
 # Replicas: 1 (single-broker cluster)
-# Retention: 7 days (168 hours) for data topics; infinite for schema-history topics
-# Cleanup policy: delete for all topics
 # =============================================================================
 
 # ── Schema-change topics (delete policy — Debezium requirement) ─────────────
@@ -214,6 +250,46 @@ spec:
   config:
     cleanup.policy: delete
     retention.ms: "604800000"
+    retention.bytes: "-1"
+    compression.type: lz4
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-testing
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+    pipeline.source: postgres
+    pipeline.database: cache_testing
+spec:
+  topicName: "postgres.cache_testing.testing"
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "604800000"      # 7 days
+    retention.bytes: "-1"
+    compression.type: lz4
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: postgres-cache-testing-testing2
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+    pipeline.source: postgres
+    pipeline.database: cache_testing
+spec:
+  topicName: "postgres.cache_testing.testing2"
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: "604800000"      # 7 days
     retention.bytes: "-1"
     compression.type: lz4
 
