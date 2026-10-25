@@ -32,12 +32,16 @@ declare -A IMAGE_CONTEXT=(
   [polaris]="docker/polaris"
   [sqlmesh]="docker/sqlmesh"
   [jupyter-spark]="docker/jupyter-spark"
+  [lakehouse-ui]="docker/lakehouse-ui"
+  [tableflow]="docker/tableflow"
 )
 
 declare -A IMAGE_TAG=(
   [polaris]="${REGISTRY}/apache-polaris:1.6.0"
   [sqlmesh]="${REGISTRY}/sqlmesh:0.99.0"
   [jupyter-spark]="${REGISTRY}/jupyter-spark:latest"
+  [lakehouse-ui]="${REGISTRY}/lakehouse-ui:latest"
+  [tableflow]="${REGISTRY}/tableflow:1.0.13"
 )
 
 # =============================================================================
@@ -76,7 +80,7 @@ build_image() {
 if [[ $# -gt 0 ]]; then
   TARGETS=("$@")
 else
-  TARGETS=("polaris" "sqlmesh" "jupyter-spark")
+  TARGETS=("polaris" "sqlmesh" "jupyter-spark" "lakehouse-ui" "tableflow")
 fi
 
 log "=== Building ${#TARGETS[@]} custom image(s) ==="

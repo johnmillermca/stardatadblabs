@@ -616,9 +616,9 @@ select.kv-input optgroup{background:#0d1117;color:#586374;font-size:11px}
   </div>
 
   <div class="nav-section">
-    <div class="nav-label">Streaming Jobs</div>
-    <div class="nav-item" onclick="navigate('streaming')" id="nav-streaming">
-      <span class="nav-icon">🌊</span> Kafka → Iceberg
+    <div class="nav-label">StarFlow</div>
+    <div class="nav-item" onclick="navigate('starflow')" id="nav-starflow">
+      <span class="nav-icon">⭐</span> StarFlow
     </div>
   </div>
 
@@ -669,7 +669,6 @@ const SOURCE_ICON   = { postgres:'🐘', oracle:'🔶', mongodb:'🍃' };
 let currentPage = 'dashboard';
 let currentSource = 'postgres';
 let allConnectors = {};   // { source: [{name,status},...] }
-let allStreamings = [];
 let kafkaTopics = [];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -715,7 +714,7 @@ function navigate(page) {
     'connector-new': 'New Connector',
     topics: 'Kafka Topics',
     ksql: 'Kafka Query (ksqlDB)',
-    streaming: 'Kafka → Iceberg Streaming Jobs',
+    starflow: 'StarFlow — CDC to Iceberg',
     'query-space': 'Query Space',
     'compare-job': 'Compare Jobs',
     'compare-dashboard': 'Compare History',
@@ -750,7 +749,7 @@ function renderPage(page, prevPage) {
   else if (page === 'connector-new') renderConnectorNew();
   else if (page === 'topics')     renderTopics();
   else if (page === 'ksql')       renderKSQL();
-  else if (page === 'streaming')  renderStreaming();
+  else if (page === 'starflow')   renderStarFlow();
   else if (page === 'query-space') renderQuerySpace();
   else if (page === 'compare-job') renderCompareJob();
   else if (page === 'compare-dashboard') renderCompareDashboard();
@@ -821,11 +820,11 @@ async function renderDashboard() {
     </div>
     <div class="stat-card">
       <div class="stat-value">${deploys.length}</div>
-      <div class="stat-label">Streaming Jobs</div>
+      <div class="stat-label">StarFlow Pods</div>
     </div>
     <div class="stat-card">
       <div class="stat-value" style="color:#2ea043">${streamRunning}</div>
-      <div class="stat-label">Jobs Running</div>
+      <div class="stat-label">Pods Running</div>
     </div>
   </div>`;
 
@@ -919,7 +918,7 @@ async function renderDashboard() {
           <button class="btn btn-secondary btn-sm"
             onclick="currentSource='${src}';navigate('connectors')">🔌 Connectors</button>
           <button class="btn btn-secondary btn-sm"
-            onclick="navigate('streaming')">🌊 Jobs</button>
+            onclick="navigate('starflow')">⭐ StarFlow</button>
         </div>
       </div>
       <table class="data-table">
@@ -3513,698 +3512,494 @@ function toggleMsgDetail(idx) {
 function toggleMsg(el) { el.classList.toggle('expanded'); }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  STREAMING JOBS
+//  STARFLOW PAGE
+//  Displays the pipeline status per source, lets the user choose which
+//  modes (standard / soft-delete / history-tracking) to enable per table,
+//  provisions ksqlDB streams + Kafka topics + Iceberg tables, restarts the
+//  tableflow pod immediately, and shows the combined pipeline log viewer.
 // ═══════════════════════════════════════════════════════════════════════════
-// Ordered write-mode keys for the streaming page tabs
-const STREAM_MODES = ['standard', 'soft-delete', 'history-tracking'];
-const STREAM_MODE_LABELS = {
-  'standard':         'Standard',
-  'soft-delete':      'Soft Delete',
-  'history-tracking': 'History Tracking',
-};
-let currentStreamingMode = 'standard';
 
-async function renderStreaming() {
+let _sfSource = 'postgres';           // active source tab
+let _sfLogTimer = null;               // auto-refresh handle for log panel
+let _sfLogTail = 500;                 // current tail line count
+let _sfSelectedPod = null;            // selected tableflow deployment for logs
+
+async function renderStarFlow() {
   const c = document.getElementById('content');
   c.innerHTML = `<div style="color:#586374;padding:40px;text-align:center">Loading…</div>`;
 
-  const r = await apiGet('/api/streaming/deployments');
-  const deploys = r.data?.items || [];
-
-  if (!deploys.length) {
-    c.innerHTML = `<div class="card" style="text-align:center;color:#586374;padding:32px">No streaming deployments found.</div>`;
-    return;
-  }
-
-  // Group deployments by pipeline.write-mode label
-  const groups = {};
+  // Fetch deployments to show live pod state per source
+  const depR = await apiGet('/api/streaming/deployments');
+  const deploys = depR.data?.items || [];
+  const depBySource = {};
   for (const d of deploys) {
-    const mode = (d.metadata.labels || {})['pipeline.write-mode'] || 'other';
-    if (!groups[mode]) groups[mode] = [];
-    groups[mode].push(d);
+    const src = (d.metadata?.labels || {})['tableflow/source'] || (d.metadata?.name || '').replace('tableflow-', '');
+    depBySource[src] = d;
   }
 
-  // Determine which tab to show — default to 'standard', or first available
-  const availableModes = STREAM_MODES.filter(m => groups[m]);
-  if (!availableModes.length) availableModes.push(...Object.keys(groups));
-  if (!groups[currentStreamingMode]) currentStreamingMode = availableModes[0] || 'standard';
-
-  function buildStreamingRows(mode) {
-    const modeDeploys = groups[mode] || [];
-    if (!modeDeploys.length) {
-      return `<tr><td colspan="5" style="text-align:center;color:#586374;padding:24px">
-        No streaming jobs found for ${STREAM_MODE_LABELS[mode] || mode}.
-      </td></tr>`;
-    }
-    return modeDeploys.map(d => {
-      const name    = d.metadata.name;
-      const labels  = d.metadata.labels || {};
-      const src     = labels['pipeline.source'] || '—';
-      const ready   = d.status?.readyReplicas || 0;
-      const desired = d.spec?.replicas || 0;
-      const st = desired === 0 ? 'STOPPED' : ready > 0 ? 'RUNNING' : 'STARTING';
-      return `<tr id="row-${name}">
-        <td><code style="font-size:12px;color:#c9d1d9">${escHtml(name)}</code></td>
-        <td>${stateBadge(st)}</td>
-        <td style="color:#586374;font-size:11px">${ready}/${desired} pods</td>
-        <td>
-          <div class="btn-group">
-            ${desired === 0
-              ? `<button class="btn btn-success btn-sm" onclick="scaleJob('${escHtml(name)}',1)">▶ Start</button>`
-              : `<button class="btn btn-danger btn-sm" onclick="scaleJob('${escHtml(name)}',0)">⏹ Stop</button>`}
-            <button class="btn btn-warn btn-sm" onclick="restartJob('${escHtml(name)}')">↻ Restart</button>
-            <button class="btn btn-secondary btn-sm" onclick="showJobLogs('${escHtml(name)}')">📋 Logs</button>
-          </div>
-        </td>
-        <td>
-          <button class="btn btn-secondary btn-sm" onclick="openJobConfig('${escHtml(name)}')">⚙ Configure</button>
-        </td>
-      </tr>`;
-    }).join('');
-  }
-
-  function buildStreamingTabs() {
-    return availableModes.map(mode => {
-      const modeDeploys = groups[mode] || [];
-      const anyFailed  = modeDeploys.some(d => {
-        const desired = d.spec?.replicas || 0;
-        const ready   = d.status?.readyReplicas || 0;
-        return desired > 0 && ready === 0;
-      });
-      const allStopped = modeDeploys.every(d => (d.spec?.replicas || 0) === 0);
-      const dotColor = allStopped ? '#586374' : anyFailed ? '#e3b341' : '#2ea043';
-      return `<div class="src-tab ${mode===currentStreamingMode?'active':''}"
-                   onclick="switchStreamingMode('${mode}')">
-        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
-                     background:${dotColor};margin-right:4px;vertical-align:middle"></span>
-        ${STREAM_MODE_LABELS[mode] || mode}
-        <span style="font-size:10px;color:#586374;margin-left:4px">(${modeDeploys.length})</span>
-      </div>`;
-    }).join('');
-  }
-
-  c.innerHTML = `
-    <div class="source-tabs" id="streaming-mode-tabs">${buildStreamingTabs()}</div>
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">🌊 ${STREAM_MODE_LABELS[currentStreamingMode] || currentStreamingMode} Jobs</div>
-        <div class="btn-group">
-          <button class="btn btn-secondary btn-sm" onclick="renderStreaming()">↻ Refresh</button>
-          <button class="btn btn-success btn-sm" onclick="scaleModeJobs(currentStreamingMode,1)">▶ Start All</button>
-          <button class="btn btn-danger btn-sm" onclick="scaleModeJobs(currentStreamingMode,0)">⏹ Stop All</button>
-        </div>
-      </div>
-      <table class="data-table">
-        <thead><tr><th>Deployment</th><th>Status</th><th>Pods</th><th>Actions</th><th>Config</th></tr></thead>
-        <tbody id="streaming-body">${buildStreamingRows(currentStreamingMode)}</tbody>
-      </table>
-    </div>
-    <div id="log-panel"></div>`;
-
-  // store groups for tab switching without re-fetching
-  window._streamingGroups = groups;
-}
-
-function switchStreamingMode(mode) {
-  currentStreamingMode = mode;
-  const groups = window._streamingGroups || {};
-  const tabsEl = document.getElementById('streaming-mode-tabs');
-  if (tabsEl) {
-    tabsEl.innerHTML = STREAM_MODES.filter(m => groups[m]).map(m => {
-      const modeDeploys = groups[m] || [];
-      const anyFailed  = modeDeploys.some(d => (d.spec?.replicas||0) > 0 && (d.status?.readyReplicas||0) === 0);
-      const allStopped = modeDeploys.every(d => (d.spec?.replicas||0) === 0);
-      const dotColor = allStopped ? '#586374' : anyFailed ? '#e3b341' : '#2ea043';
-      return `<div class="src-tab ${m===mode?'active':''}" onclick="switchStreamingMode('${m}')">
-        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
-                     background:${dotColor};margin-right:4px;vertical-align:middle"></span>
-        ${STREAM_MODE_LABELS[m] || m}
-        <span style="font-size:10px;color:#586374;margin-left:4px">(${modeDeploys.length})</span>
-      </div>`;
-    }).join('');
-  }
-  const titleEl = document.querySelector('#streaming-mode-tabs ~ .card .card-title');
-  if (titleEl) titleEl.textContent = `🌊 ${STREAM_MODE_LABELS[mode] || mode} Jobs`;
-  const bodyEl = document.getElementById('streaming-body');
-  if (!bodyEl) return;
-  const modeDeploys = groups[mode] || [];
-  if (!modeDeploys.length) {
-    bodyEl.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#586374;padding:24px">
-      No streaming jobs found for ${STREAM_MODE_LABELS[mode] || mode}.
-    </td></tr>`;
-    return;
-  }
-  bodyEl.innerHTML = modeDeploys.map(d => {
-    const name    = d.metadata.name;
-    const labels  = d.metadata.labels || {};
+  function podStatusBadge(src) {
+    const d = depBySource[src];
+    if (!d) return `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>NO POD</span>`;
     const ready   = d.status?.readyReplicas || 0;
     const desired = d.spec?.replicas || 0;
-    const st = desired === 0 ? 'STOPPED' : ready > 0 ? 'RUNNING' : 'STARTING';
-    return `<tr id="row-${name}">
-      <td><code style="font-size:12px;color:#c9d1d9">${escHtml(name)}</code></td>
-      <td>${stateBadge(st)}</td>
-      <td style="color:#586374;font-size:11px">${ready}/${desired} pods</td>
-      <td>
-        <div class="btn-group">
-          ${desired === 0
-            ? `<button class="btn btn-success btn-sm" onclick="scaleJob('${escHtml(name)}',1)">▶ Start</button>`
-            : `<button class="btn btn-danger btn-sm" onclick="scaleJob('${escHtml(name)}',0)">⏹ Stop</button>`}
-          <button class="btn btn-warn btn-sm" onclick="restartJob('${escHtml(name)}')">↻ Restart</button>
-          <button class="btn btn-secondary btn-sm" onclick="showJobLogs('${escHtml(name)}')">📋 Logs</button>
-        </div>
-      </td>
-      <td><button class="btn btn-secondary btn-sm" onclick="openJobConfig('${escHtml(name)}')">⚙ Configure</button></td>
-    </tr>`;
-  }).join('');
-}
-
-async function scaleModeJobs(mode, replicas) {
-  const groups = window._streamingGroups || {};
-  const deps   = groups[mode] || [];
-  if (!deps.length) return toast(`No streaming jobs for ${STREAM_MODE_LABELS[mode] || mode}`, 'warn');
-  await Promise.all(deps.map(d => apiPost(`/api/streaming/${d.metadata.name}/scale`, { replicas })));
-  toast(`All ${STREAM_MODE_LABELS[mode] || mode} jobs scaled to ${replicas}`, 'success');
-  setTimeout(renderStreaming, 1500);
-}
-
-async function scaleJob(name, replicas) {
-  const r = await apiPost(`/api/streaming/${name}/scale`, { replicas });
-  toast(r.ok ? `${name} scaled to ${replicas}` : `Scale failed: ${JSON.stringify(r.data).slice(0,80)}`,
-        r.ok ? 'success' : 'error');
-  setTimeout(renderStreaming, 1500);
-}
-async function restartJob(name) {
-  const r = await apiPost(`/api/streaming/${name}/restart`);
-  toast(r.ok ? `${name} restarted` : `Restart failed`, r.ok ? 'success' : 'error');
-  setTimeout(renderStreaming, 1500);
-}
-async function scaleAll(replicas) {
-  const r = await apiGet('/api/streaming/deployments');
-  const deploys = r.data?.items || [];
-  await Promise.all(deploys.map(d => apiPost(`/api/streaming/${d.metadata.name}/scale`, { replicas })));
-  toast(`All jobs scaled to ${replicas}`, 'success');
-  setTimeout(renderStreaming, 1500);
-}
-// ── Job Configure Modal ───────────────────────────────────────────────────────
-// All known ConfigMap parameters with descriptions
-const JOB_PARAMS = [
-  { key:'TRIGGER_INTERVAL',        label:'Trigger Interval',          desc:'Spark micro-batch interval (e.g. "2 seconds", "30 seconds")',       type:'text' },
-  { key:'MAX_OFFSETS_PER_TRIGGER', label:'Max Offsets Per Trigger',   desc:'Max Kafka messages consumed per micro-batch per partition',         type:'number' },
-  { key:'MERGE_PARALLELISM',       label:'Merge Parallelism',         desc:'Spark parallelism for MERGE operations',                           type:'number' },
-  { key:'COALESCE_BEFORE_MERGE',   label:'Coalesce Before Merge',     desc:'Coalesce partitions before merge (1=yes, 0=no)',                   type:'number' },
-  { key:'ADAPTIVE_COALESCE_TARGET',label:'Adaptive Coalesce Target',  desc:'Target bytes per output file (default 67108864 = 64 MB)',          type:'number' },
-  { key:'EXECUTOR_INSTANCES',      label:'Executor Instances',        desc:'Initial Spark executor count',                                    type:'number' },
-  { key:'EXECUTOR_CORES',          label:'Executor Cores',            desc:'Cores per Spark executor',                                        type:'number' },
-  { key:'EXECUTOR_MEMORY',         label:'Executor Memory',           desc:'Heap memory per executor (e.g. "450m", "2g")',                    type:'text'   },
-  { key:'EXECUTOR_OFFHEAP',        label:'Executor Off-Heap',         desc:'Off-heap memory per executor in bytes (0 = disabled)',            type:'number' },
-  { key:'MAX_EXECUTORS',           label:'Max Executors',             desc:'Max executors for dynamic allocation',                            type:'number' },
-  { key:'BURST_BACKLOG_TIMEOUT_S', label:'Burst Backlog Timeout (s)', desc:'Seconds to hold extra executors after burst before releasing',    type:'number' },
-  { key:'MAX_RESTART_ATTEMPTS',    label:'Max Restart Attempts',      desc:'Max guardian restart attempts (0 = unlimited)',                   type:'number' },
-  { key:'RESTART_BACKOFF_BASE_S',  label:'Restart Backoff Base (s)',  desc:'Initial back-off seconds between restarts',                      type:'number' },
-  { key:'RESTART_BACKOFF_MAX_S',   label:'Restart Backoff Max (s)',   desc:'Maximum back-off seconds between restarts',                      type:'number' },
-  { key:'DRY_RUN',                 label:'Dry Run',                   desc:'1 = log actions without writing to Iceberg (0 = normal)',        type:'number' },
-  { key:'TARGET_NAMESPACE',        label:'Target Namespace',          desc:'Override Iceberg namespace for all tables (blank = auto)',        type:'text'   },
-];
-
-// Per-job direct env var overrides (set directly on the Deployment, not via ConfigMap)
-const JOB_DIRECT_ENV = [
-  { key:'WRITE_MODE',            label:'Write Mode',          desc:'standard | soft_delete | history_tracking',            type:'text', readonly:true },
-  { key:'SOURCE',                label:'Source Filter',       desc:'postgres | oracle | mongodb | (blank = all sources)',   type:'text' },
-  { key:'DISABLE_GLUTEN',        label:'Disable Gluten',      desc:'1 = disable Gluten/Velox native execution (0 = use)',   type:'number' },
-  { key:'HEALTH_PORT',           label:'Health Port',         desc:'HTTP health check port inside the container',           type:'number', readonly:true },
-];
-
-let _jobConfigName = '';
-let _jobConfigTab  = 'tables';   // 'tables' | 'params'
-
-async function openJobConfig(name) {
-  _jobConfigName = name;
-  _jobConfigTab  = 'tables';
-
-  // Create overlay
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.id = 'job-config-overlay';
-  overlay.innerHTML = `
-  <div class="modal" style="width:760px;max-width:96vw">
-    <div class="modal-header">
-      <div class="modal-title">⚙ Configure: <code style="color:#4fc3f7">${escHtml(name)}</code></div>
-      <button class="modal-close" onclick="document.getElementById('job-config-overlay').remove()">✕</button>
-    </div>
-
-    <!-- Tabs -->
-    <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid #1c2a3a;padding-bottom:0">
-      <button id="jctab-tables" onclick="jcSwitchTab('tables')"
-        style="padding:7px 18px;border:none;background:rgba(79,195,247,.15);border-bottom:2px solid #4fc3f7;
-               color:#4fc3f7;font-size:13px;font-weight:600;cursor:pointer;border-radius:6px 6px 0 0">
-        📋 Tables
-      </button>
-      <button id="jctab-params" onclick="jcSwitchTab('params')"
-        style="padding:7px 18px;border:none;background:transparent;border-bottom:2px solid transparent;
-               color:#8b949e;font-size:13px;font-weight:600;cursor:pointer;border-radius:6px 6px 0 0">
-        ⚙ Parameters
-      </button>
-    </div>
-
-    <div id="jc-body">
-      <div style="color:#586374;padding:30px;text-align:center">⏳ Loading…</div>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-
-  await jcLoadTab('tables');
-}
-
-function jcSwitchTab(tab) {
-  _jobConfigTab = tab;
-  ['tables','params'].forEach(t => {
-    const btn = document.getElementById('jctab-' + t);
-    if (!btn) return;
-    const active = t === tab;
-    btn.style.background    = active ? 'rgba(79,195,247,.15)' : 'transparent';
-    btn.style.borderBottom  = active ? '2px solid #4fc3f7' : '2px solid transparent';
-    btn.style.color         = active ? '#4fc3f7' : '#8b949e';
-  });
-  jcLoadTab(tab);
-}
-
-async function jcLoadTab(tab) {
-  const body = document.getElementById('jc-body');
-  if (!body) return;
-  if (tab === 'tables') {
-    await jcRenderTables(body);
-  } else {
-    await jcRenderParams(body);
-  }
-}
-
-// ── Tables tab ────────────────────────────────────────────────────────────────
-// Shows Kafka topics for this job. When TABLE_FILTER is blank the job processes
-// ALL topics — user can pin specific ones. When a filter is set, shows active
-// (pinned) topics with a remove button, and a dropdown to add more from the pool.
-// Saves by patching TABLE_FILTER env var on the deployment — NO restart triggered.
-// Changes take effect on next Stop/Start.
-
-let _jcTopicData = null; // { topics, tableFilter, sources } cached per modal open
-
-async function jcRenderTables(body) {
-  body.innerHTML = `<div style="color:#586374;padding:20px;text-align:center">⏳ Loading topics…</div>`;
-
-  const r = await apiGet(`/api/streaming/${_jobConfigName}/topics`);
-  if (!r.ok) {
-    body.innerHTML = `<div style="color:#ff7b72;padding:20px;text-align:center">Failed to load topics: ${escHtml(r.data?.error||'unknown')}</div>`;
-    return;
+    if (desired === 0) return `<span class="s-badge s-stopped"><span class="status-dot dot-gray"></span>STOPPED</span>`;
+    if (ready > 0)    return `<span class="s-badge s-running"><span class="status-dot dot-green"></span>RUNNING</span>`;
+    return              `<span class="s-badge s-paused"><span class="status-dot dot-yellow"></span>STARTING</span>`;
   }
 
-  _jcTopicData = r.data; // { topics: string[], tableFilter: string[], sources: string[] }
-  _jcRedrawTopics(body);
-}
+  function buildSourceTabs() {
+    return SOURCES.map(s => `
+      <div class="src-tab ${s === _sfSource ? 'active' : ''}" onclick="sfSwitchSource('${s}')">
+        <span class="src-badge ${SOURCE_BADGE[s]}"></span>
+        ${SOURCE_ICON[s]} ${SOURCE_LABELS[s]}
+        <span style="margin-left:6px">${podStatusBadge(s)}</span>
+      </div>`).join('');
+  }
 
-function _jcRedrawTopics(body) {
-  const { topics, tableFilter } = _jcTopicData;
-  const filterActive = tableFilter.length > 0;
-
-  // Topics currently active = filterActive ? only those in tableFilter : all topics
-  const activeTopic  = filterActive ? topics.filter(t => tableFilter.includes(t)) : [...topics];
-  // Topics available to add  = all topics not already active
-  const available    = topics.filter(t => !activeTopic.includes(t));
-
-  const srcColors = { postgres:'#79c0ff', oracle:'#ff7b72', mongodb:'#56d364' };
-  const getSrcColor = t => {
-    for (const [src, col] of Object.entries(srcColors)) if (t.startsWith(src+'.')) return col;
-    return '#8b949e';
+  const modeDescriptions = {
+    standard: 'Raw Debezium events → ksqlDB source stream → RocksDB materialised table (2-day TTL). Queryable via ksqlDB pull queries for compare-table use-case.',
+    'soft-delete': 'ksqlDB CSAS → <em>_sd</em> Kafka topic → tableflow UPSERT into Iceberg. Maintains current row state with soft-delete flag per PK.',
+    'history-tracking': 'ksqlDB CSAS → <em>_hist</em> Kafka topic → tableflow APPEND into Iceberg. Full row-level audit trail of every CDC event.',
   };
 
-  const activeRows = activeTopic.map(t => {
-    const tablePart = t.split('.').slice(2).join('.') || t;
-    const col = getSrcColor(t);
-    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;
-                 background:#06090f;border:1px solid #1c2a3a;border-radius:6px;margin-bottom:4px"
-                 id="jct-row-${escHtml(t)}">
-      <span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></span>
-      <code style="font-size:12px;color:#c9d1d9;flex:1">${escHtml(t)}</code>
-      <span style="font-size:10px;color:#586374;margin-right:6px">→ <b style="color:#8b949e">${escHtml(tablePart)}</b></span>
-      <button onclick="jcRemoveTopic('${escHtml(t)}')"
-              style="padding:2px 8px;font-size:11px;border:1px solid #3d1f1f;border-radius:4px;
-                     background:#1f0d0d;color:#ff7b72;cursor:pointer">✕ Remove</button>
-    </div>`;
-  }).join('');
+  c.innerHTML = `
+  <div class="source-tabs" id="sf-src-tabs">${buildSourceTabs()}</div>
 
-  const addDropdown = available.length ? `
-    <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
-      <select id="jct-add-sel" style="flex:1;padding:6px 10px;background:#0d1117;border:1px solid #30363d;
-              border-radius:6px;color:#c9d1d9;font-size:12px;font-family:'Fira Code',monospace">
-        <option value="">— select topic to add —</option>
-        ${available.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('')}
-      </select>
-      <button onclick="jcAddTopic()"
-              style="padding:6px 14px;background:#1a3a1a;border:1px solid #1a4429;border-radius:6px;
-                     color:#56d364;font-size:12px;cursor:pointer;white-space:nowrap">➕ Add</button>
-    </div>` : `<div style="font-size:12px;color:#586374;margin-top:12px">All available topics are already active.</div>`;
-
-  const infoMsg = filterActive
-    ? `<b style="color:#e3b341">Filtered mode:</b> only the ${activeTopic.length} topic(s) below are processed by this job.
-       Remove all to revert to <b>ALL topics</b> mode.`
-    : `<b style="color:#4fc3f7">All topics mode:</b> this job processes <b>all ${topics.length}</b> Kafka topic(s) for its source(s).
-       Add a topic below to switch to filtered mode (only listed topics will be processed).`;
-
-  body.innerHTML = `
-  <div style="margin-bottom:14px;padding:10px 14px;background:#0d1a2e;border:1px solid #1c2a3a;
-              border-radius:6px;font-size:12px;color:#8b949e;line-height:1.7">
-    ${infoMsg}
-  </div>
-
-  <div style="font-size:11px;font-weight:700;color:#4fc3f7;text-transform:uppercase;
-              letter-spacing:.5px;margin-bottom:8px">
-    Active Topics (${activeTopic.length})
-  </div>
-
-  <div id="jct-active-list">
-    ${activeRows || `<div style="color:#586374;font-size:12px;padding:8px 0">No topics active — job is in ALL-topics mode.</div>`}
-  </div>
-
-  ${addDropdown}
-
-  <div style="display:flex;gap:10px;justify-content:flex-end;padding-top:16px;margin-top:8px;border-top:1px solid #1c2a3a">
-    <button class="btn btn-secondary" onclick="document.getElementById('job-config-overlay').remove()">Cancel</button>
-    <button class="btn btn-primary" onclick="jcSaveTopics()">💾 Save  <span style="font-size:10px;opacity:.7">(takes effect on next Stop/Start)</span></button>
-  </div>`;
-}
-
-function jcAddTopic() {
-  const sel = document.getElementById('jct-add-sel');
-  const topic = sel?.value;
-  if (!topic) return;
-  // If currently in all-topics mode, seed the filter with ALL existing topics
-  // first — this is what makes Remove work correctly afterward too.
-  if (_jcTopicData.tableFilter.length === 0) {
-    _jcTopicData.tableFilter = [..._jcTopicData.topics];
-  }
-  if (!_jcTopicData.tableFilter.includes(topic)) {
-    _jcTopicData.tableFilter.push(topic);
-  }
-  const body = document.getElementById('jc-body');
-  if (body) _jcRedrawTopics(body);
-}
-
-function jcRemoveTopic(topic) {
-  if (!_jcTopicData) return;
-  // In all-topics mode (tableFilter empty), seed the filter with ALL topics
-  // first so removing one actually switches us into filtered mode.
-  if (_jcTopicData.tableFilter.length === 0) {
-    _jcTopicData.tableFilter = [..._jcTopicData.topics];
-  }
-  _jcTopicData.tableFilter = _jcTopicData.tableFilter.filter(t => t !== topic);
-  const body = document.getElementById('jc-body');
-  if (body) _jcRedrawTopics(body);
-}
-
-async function jcSaveTopics() {
-  if (!_jcTopicData) return;
-  const filterVal = _jcTopicData.tableFilter.join(',');
-  const r = await fetch(`/api/streaming/${_jobConfigName}/env`, {
-    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      set: [{ name: 'TABLE_FILTER', value: filterVal }],
-      del: filterVal ? [] : ['TABLE_FILTER'],
-    }),
-  });
-  if (!r.ok) { toast('Failed to save table filter', 'error'); return; }
-  const msg = filterVal
-    ? `✓ Table filter saved — ${_jcTopicData.tableFilter.length} topic(s) pinned. Takes effect on next Stop/Start.`
-    : `✓ Table filter cleared — job will process ALL topics on next Stop/Start.`;
-  toast(msg, 'success');
-  document.getElementById('job-config-overlay')?.remove();
-}
-
-// ── Parameters tab ────────────────────────────────────────────────────────────
-// Two sections:
-//   • Shared ConfigMap params — apply to ALL jobs (dropdown to add, delete row)
-//   • Job-specific env overrides — apply to this job only (same UX)
-// Save writes to k8s immediately but does NOT restart — changes take effect on
-// next Stop/Start of the job.
-
-// Working copies for the params tab (mutated in-memory, flushed on Save)
-let _jcCmRows  = [];  // [{ key, value }]  shared ConfigMap entries being edited
-let _jcEnvRows = [];  // [{ key, value }]  job-specific env entries being edited
-
-async function jcRenderParams(body) {
-  body.innerHTML = `<div style="color:#586374;padding:20px;text-align:center">⏳ Loading parameters…</div>`;
-
-  const [cfR, envR] = await Promise.all([
-    apiGet('/api/streaming/configmap'),
-    apiGet(`/api/streaming/${_jobConfigName}/env`),
-  ]);
-
-  const cmData  = cfR.data?.data  || {};
-  const envVars = envR.data?.env  || [];
-
-  // Seed working copies from live data
-  _jcCmRows  = JOB_PARAMS
-    .filter(p => cmData[p.key] !== undefined && cmData[p.key] !== '')
-    .map(p => ({ key: p.key, value: cmData[p.key] }));
-
-  const directEnv = {};
-  for (const e of envVars) { if (e.value !== undefined) directEnv[e.name] = e.value; }
-  _jcEnvRows = JOB_DIRECT_ENV
-    .filter(p => directEnv[p.key] !== undefined && directEnv[p.key] !== '')
-    .map(p => ({ key: p.key, value: directEnv[p.key] }));
-
-  _jcRedrawParams(body);
-}
-
-function _jcRedrawParams(body) {
-  const cmRowsHtml = _jcCmRows.map((r, i) => {
-    const meta = JOB_PARAMS.find(p => p.key === r.key) || { label: r.key, desc: '', type: 'text' };
-    return `<tr id="jcp-cm-row-${i}">
-      <td style="padding:6px 10px;font-size:12px;color:#e6edf3;font-weight:600;white-space:nowrap">
-        ${escHtml(meta.label)}<br><code style="font-size:10px;color:#586374">${escHtml(r.key)}</code></td>
-      <td style="padding:6px 10px">
-        <input class="form-input" style="font-size:12px;font-family:'Fira Code',monospace" type="text"
-               value="${escHtml(r.value)}" placeholder="${escHtml(meta.desc)}"
-               oninput="_jcCmRows[${i}].value=this.value"/>
-      </td>
-      <td style="padding:6px 10px;font-size:11px;color:#586374">${escHtml(meta.desc)}</td>
-      <td style="padding:6px 10px">
-        <button onclick="_jcDeleteCmRow(${i})"
-                style="padding:2px 8px;font-size:11px;border:1px solid #3d1f1f;border-radius:4px;
-                       background:#1f0d0d;color:#ff7b72;cursor:pointer">✕</button>
-      </td>
-    </tr>`;
-  }).join('');
-
-  // Dropdown: only params not already in the list
-  const usedCmKeys = new Set(_jcCmRows.map(r => r.key));
-  const cmAddOptions = JOB_PARAMS
-    .filter(p => !usedCmKeys.has(p.key))
-    .map(p => `<option value="${escHtml(p.key)}">${escHtml(p.label)} — ${escHtml(p.desc)}</option>`)
-    .join('');
-
-  const envRowsHtml = _jcEnvRows.map((r, i) => {
-    const meta = JOB_DIRECT_ENV.find(p => p.key === r.key) || { label: r.key, desc: '', readonly: false };
-    const ro   = meta.readonly ? 'readonly style="opacity:.5;cursor:not-allowed"' : '';
-    return `<tr id="jcp-env-row-${i}">
-      <td style="padding:6px 10px;font-size:12px;color:#e6edf3;font-weight:600;white-space:nowrap">
-        ${escHtml(meta.label)}<br><code style="font-size:10px;color:#586374">${escHtml(r.key)}</code></td>
-      <td style="padding:6px 10px">
-        <input class="form-input" style="font-size:12px;font-family:'Fira Code',monospace" type="text"
-               value="${escHtml(r.value)}" placeholder="${escHtml(meta.desc)}" ${ro}
-               oninput="_jcEnvRows[${i}].value=this.value"/>
-      </td>
-      <td style="padding:6px 10px;font-size:11px;color:#586374">${escHtml(meta.desc)}</td>
-      <td style="padding:6px 10px">
-        ${meta.readonly ? '' : `<button onclick="_jcDeleteEnvRow(${i})"
-                style="padding:2px 8px;font-size:11px;border:1px solid #3d1f1f;border-radius:4px;
-                       background:#1f0d0d;color:#ff7b72;cursor:pointer">✕</button>`}
-      </td>
-    </tr>`;
-  }).join('');
-
-  const usedEnvKeys = new Set(_jcEnvRows.map(r => r.key));
-  const envAddOptions = JOB_DIRECT_ENV
-    .filter(p => !p.readonly && !usedEnvKeys.has(p.key))
-    .map(p => `<option value="${escHtml(p.key)}">${escHtml(p.label)} — ${escHtml(p.desc)}</option>`)
-    .join('');
-
-  body.innerHTML = `
-  <div style="margin-bottom:14px;padding:10px 14px;background:#0d1a2e;border:1px solid #1c2a3a;border-radius:6px;font-size:12px;color:#8b949e;line-height:1.6">
-    <b style="color:#4fc3f7">Shared</b> parameters (ConfigMap) apply to <b>all</b> jobs. &nbsp;
-    <b style="color:#d29922">Job-specific</b> overrides apply only to <b>${escHtml(_jobConfigName)}</b>.<br>
-    Changes are saved immediately but take effect on the <b>next Stop/Start</b> of the job.
-  </div>
-
-  <!-- Shared ConfigMap params -->
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-    <div style="font-size:11px;font-weight:700;color:#4fc3f7;text-transform:uppercase;letter-spacing:.5px">
-      Shared Parameters — all jobs (${_jcCmRows.length})
-    </div>
-  </div>
-  <table style="width:100%;border-collapse:collapse;margin-bottom:8px">
-    <thead><tr style="border-bottom:1px solid #1c2a3a">
-      <th style="text-align:left;padding:5px 10px;font-size:10px;color:#586374;text-transform:uppercase">Parameter</th>
-      <th style="text-align:left;padding:5px 10px;font-size:10px;color:#586374;text-transform:uppercase">Value</th>
-      <th style="text-align:left;padding:5px 10px;font-size:10px;color:#586374;text-transform:uppercase">Description</th>
-      <th style="width:36px"></th>
-    </tr></thead>
-    <tbody id="jcp-cm-tbody">
-      ${cmRowsHtml || `<tr><td colspan="4" style="padding:12px 10px;color:#586374;font-size:12px">No shared parameters set — add one below.</td></tr>`}
-    </tbody>
-  </table>
-  ${cmAddOptions ? `
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:20px">
-    <select id="jcp-cm-add-sel" style="flex:1;padding:6px 10px;background:#0d1117;border:1px solid #30363d;
-            border-radius:6px;color:#c9d1d9;font-size:12px">
-      <option value="">— pick a shared parameter to add —</option>
-      ${cmAddOptions}
-    </select>
-    <button onclick="_jcAddCmRow()"
-            style="padding:6px 14px;background:#1a3a1a;border:1px solid #1a4429;border-radius:6px;
-                   color:#56d364;font-size:12px;cursor:pointer;white-space:nowrap">➕ Add</button>
-  </div>` : `<div style="font-size:12px;color:#586374;margin-bottom:20px">All shared parameters are already configured.</div>`}
-
-  <!-- Job-specific env overrides -->
-  <div style="font-size:11px;font-weight:700;color:#d29922;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
-    Job-Specific Overrides — ${escHtml(_jobConfigName)} only (${_jcEnvRows.length})
-  </div>
-  <table style="width:100%;border-collapse:collapse;margin-bottom:8px">
-    <thead><tr style="border-bottom:1px solid #1c2a3a">
-      <th style="text-align:left;padding:5px 10px;font-size:10px;color:#586374;text-transform:uppercase">Env Var</th>
-      <th style="text-align:left;padding:5px 10px;font-size:10px;color:#586374;text-transform:uppercase">Value</th>
-      <th style="text-align:left;padding:5px 10px;font-size:10px;color:#586374;text-transform:uppercase">Description</th>
-      <th style="width:36px"></th>
-    </tr></thead>
-    <tbody id="jcp-env-tbody">
-      ${envRowsHtml || `<tr><td colspan="4" style="padding:12px 10px;color:#586374;font-size:12px">No job-specific overrides set — add one below.</td></tr>`}
-    </tbody>
-  </table>
-  ${envAddOptions ? `
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:20px">
-    <select id="jcp-env-add-sel" style="flex:1;padding:6px 10px;background:#0d1117;border:1px solid #30363d;
-            border-radius:6px;color:#c9d1d9;font-size:12px">
-      <option value="">— pick a job-specific parameter to add —</option>
-      ${envAddOptions}
-    </select>
-    <button onclick="_jcAddEnvRow()"
-            style="padding:6px 14px;background:#1a3a1a;border:1px solid #1a4429;border-radius:6px;
-                   color:#56d364;font-size:12px;cursor:pointer;white-space:nowrap">➕ Add</button>
-  </div>` : ''}
-
-  <div style="display:flex;gap:10px;justify-content:flex-end;padding-top:12px;border-top:1px solid #1c2a3a">
-    <button class="btn btn-secondary" onclick="document.getElementById('job-config-overlay').remove()">Cancel</button>
-    <button class="btn btn-primary" onclick="jcSaveParams()">💾 Save  <span style="font-size:10px;opacity:.7">(takes effect on next Stop/Start)</span></button>
-  </div>`;
-}
-
-function _jcDeleteCmRow(i) {
-  _jcCmRows.splice(i, 1);
-  const body = document.getElementById('jc-body');
-  if (body) _jcRedrawParams(body);
-}
-function _jcAddCmRow() {
-  const sel = document.getElementById('jcp-cm-add-sel');
-  const key = sel?.value; if (!key) return;
-  _jcCmRows.push({ key, value: '' });
-  const body = document.getElementById('jc-body');
-  if (body) _jcRedrawParams(body);
-}
-function _jcDeleteEnvRow(i) {
-  _jcEnvRows.splice(i, 1);
-  const body = document.getElementById('jc-body');
-  if (body) _jcRedrawParams(body);
-}
-function _jcAddEnvRow() {
-  const sel = document.getElementById('jcp-env-add-sel');
-  const key = sel?.value; if (!key) return;
-  _jcEnvRows.push({ key, value: '' });
-  const body = document.getElementById('jc-body');
-  if (body) _jcRedrawParams(body);
-}
-
-async function jcSaveParams() {
-  let ok = true;
-
-  // 1. Patch shared ConfigMap — send current _jcCmRows
-  const cmPatch = {};
-  for (const r of _jcCmRows) {
-    if (r.value.trim() !== '') cmPatch[r.key] = r.value.trim();
-  }
-  // Also determine which JOB_PARAMS keys were removed (existed before, not in list now)
-  // We don't null-out ConfigMap keys for safety — only update present ones.
-  if (Object.keys(cmPatch).length) {
-    const r = await fetch('/api/streaming/configmap', {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: cmPatch }),
-    });
-    if (!r.ok) { toast('ConfigMap update failed', 'error'); ok = false; }
-  }
-
-  // 2. Patch deployment env vars — set all _jcEnvRows, delete removed non-readonly ones
-  if (ok) {
-    const envSet = _jcEnvRows
-      .filter(r => !JOB_DIRECT_ENV.find(p => p.key === r.key)?.readonly)
-      .map(r => ({ name: r.key, value: r.value.trim() }));
-
-    // Keys in JOB_DIRECT_ENV that are not readonly and not in current list = deleted
-    const envDel = JOB_DIRECT_ENV
-      .filter(p => !p.readonly && !_jcEnvRows.find(r => r.key === p.key))
-      .map(p => p.key);
-
-    if (envSet.length || envDel.length) {
-      const r = await fetch(`/api/streaming/${_jobConfigName}/env`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ set: envSet, del: envDel }),
-      });
-      if (!r.ok) { toast('Env update failed', 'error'); ok = false; }
-    }
-  }
-
-  if (ok) {
-    toast(`✓ Parameters saved for ${_jobConfigName}. Takes effect on next Stop/Start.`, 'success');
-    document.getElementById('job-config-overlay')?.remove();
-  }
-}
-
-async function showJobLogs(name) {
-  document.getElementById('log-panel').innerHTML = `<div class="card"><div style="color:#586374;padding:12px">⏳ Loading logs for <code>${name}</code>…</div></div>`;
-  const r = await apiGet(`/api/streaming/${name}/logs`);
-  if (!r.ok || r.data?.error) {
-    document.getElementById('log-panel').innerHTML = `<div class="card">
-      <div style="color:#da3633;padding:12px">Error: ${r.data?.error || 'Failed to load logs'}</div></div>`;
-    return;
-  }
-  const logs = r.data?.logs || 'No logs';
-  const podName = r.data?.podName || '';
-  // colour-code log lines by level
-  const lines = logs.split('\n').slice(-150).map(l => {
-    if (!l.trim()) return '';
-    const cls = /ERROR|EXCEPTION|Exception/i.test(l) ? 'color:#da3633' :
-                /WARN/i.test(l)  ? 'color:#d29922' :
-                /INFO.*batch=.*written|upsert|delete/i.test(l) ? 'color:#2ea043' :
-                /INFO/i.test(l)  ? 'color:#8b949e' : 'color:#c9d1d9';
-    return `<span style="${cls}">${escHtml(l)}</span>`;
-  }).filter(Boolean).join('\n');
-
-  document.getElementById('log-panel').innerHTML = `
-  <div class="card" style="margin-top:16px">
+  <!-- ── Pipeline status card ─────────────────────────────────────────── -->
+  <div class="card">
     <div class="card-header">
       <div>
-        <div class="card-title">📋 Logs: <code style="color:#4fc3f7;font-size:13px">${name}</code></div>
-        ${podName ? `<div class="card-subtitle">Pod: ${podName}</div>` : ''}
+        <div class="card-title">⭐ StarFlow — ${SOURCE_LABELS[_sfSource]} Pipeline</div>
+        <div class="card-subtitle">Provision modes per table · auto-creates Kafka topics, ksqlDB streams, Iceberg tables</div>
       </div>
       <div class="btn-group">
-        <button class="btn btn-secondary btn-sm" onclick="showJobLogs('${name}')">↻ Refresh</button>
-        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('log-panel').innerHTML=''">✕ Close</button>
+        <button class="btn btn-secondary btn-sm" onclick="renderStarFlow()">↻ Refresh</button>
+        <button class="btn btn-warn btn-sm" onclick="sfRestartPod('tableflow-${_sfSource}')">↻ Restart Pod</button>
       </div>
     </div>
-    <pre style="background:#06090f;border:1px solid #1c2a3a;border-radius:6px;padding:14px;
-      font-size:11px;font-family:'Fira Code','Courier New',monospace;
-      overflow:auto;max-height:480px;white-space:pre-wrap;word-break:break-all;line-height:1.5">${lines}</pre>
+
+    <!-- mode selector -->
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:#586374;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px">
+        Select modes to provision for a table:
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap" id="sf-mode-pills">
+        ${['standard','soft-delete','history-tracking'].map(m => `
+          <div style="display:flex;align-items:flex-start;gap:10px;padding:12px 16px;
+                      border-radius:8px;border:2px solid #1c2a3a;background:#06090f;
+                      cursor:pointer;transition:border-color .15s;min-width:220px;flex:1"
+               id="sf-mode-${m}" onclick="sfToggleMode('${m}')">
+            <input type="checkbox" id="sf-chk-${m}"
+                   ${m === 'standard' ? 'checked' : ''}
+                   onclick="event.stopPropagation();sfToggleMode('${m}')"
+                   style="margin-top:3px;accent-color:#4fc3f7;cursor:pointer;flex-shrink:0"/>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:4px">
+                ${m === 'standard' ? '📋 Standard' : m === 'soft-delete' ? '🔄 Soft Delete' : '📜 History Tracking'}
+              </div>
+              <div style="font-size:11px;color:#8b949e;line-height:1.5">${modeDescriptions[m]}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <!-- table picker dropdown -->
+    <div style="margin-bottom:12px">
+      <div style="font-size:11px;font-weight:700;color:#586374;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">
+        Table name to provision:
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="sf-table-select" class="form-input"
+                style="max-width:380px;font-family:'Fira Code','Courier New',monospace;font-size:13px;min-width:280px">
+          <option value="">⏳ Loading tables…</option>
+        </select>
+        <button class="btn btn-primary" onclick="sfProvision()">⚡ Provision</button>
+        <button class="btn btn-secondary" onclick="sfProvisionAll()">⚡ Provision All Unprovisioned</button>
+      </div>
+      <div id="sf-table-hint" style="font-size:11px;color:#586374;margin-top:6px">
+        Tables missing STD, SD or HIST Iceberg streams appear first. Fully active tables are also selectable.
+        Click <b style="color:#e6edf3">Provision All Unprovisioned</b> to auto-provision every table missing STD+SD+HIST at once.
+      </div>
+    </div>
+
+    <!-- result area -->
+    <div id="sf-result"></div>
+  </div>
+
+  <!-- ── Pipeline Log Viewer ───────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-header">
+      <div style="flex:1;min-width:0">
+        <div class="card-title">📋 Pipeline Logs</div>
+        <div class="card-subtitle" style="margin-top:4px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <span style="display:inline-flex;align-items:center;gap:6px">
+            <span style="width:8px;height:8px;border-radius:50%;background:#f80000;display:inline-block"></span>
+            Debezium — CDC replication events
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px">
+            <span style="width:8px;height:8px;border-radius:50%;background:#4fc3f7;display:inline-block"></span>
+            StarFlow — Kafka→Iceberg flush &amp; heartbeat
+          </span>
+        </div>
+        <!-- tableflow pod selector -->
+        <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:11px;color:#586374;font-weight:600;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">
+            TableFlow Pod:
+          </span>
+          <select id="sf-pod-select" class="form-input"
+                  style="min-width:240px;padding:4px 8px;font-size:12px;font-family:'Fira Code','Courier New',monospace"
+                  onchange="_sfSelectedPod=this.value;sfLoadLogs(_sfLogTail,true)">
+            <option value="">⏳ Loading pods…</option>
+          </select>
+        </div>
+      </div>
+      <div class="btn-group" style="flex-shrink:0;align-self:flex-start">
+        <button class="btn btn-secondary btn-sm" onclick="sfLoadLogs(_sfLogTail,true)" id="sf-log-refresh-btn">↻ Refresh</button>
+        <select id="sf-log-tail" class="form-input" style="width:90px;padding:4px 8px;font-size:12px"
+                onchange="_sfLogTail=parseInt(this.value);sfLoadLogs(_sfLogTail,true)">
+          <option value="100">100</option>
+          <option value="200">200</option>
+          <option value="500" selected>500</option>
+          <option value="1000">1000</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#8b949e;cursor:pointer">
+          <input type="checkbox" id="sf-log-autorefresh" checked onchange="sfToggleAutoRefresh(this.checked)"
+                 style="accent-color:#4fc3f7"/>
+          Auto
+        </label>
+      </div>
+    </div>
+    <div id="sf-log-panel" style="background:#06090f;border:1px solid #1c2a3a;border-radius:6px;
+         font-size:11px;font-family:'Fira Code','Courier New',monospace;
+         line-height:1.6;max-height:520px;overflow-y:auto;padding:12px">
+      <div style="color:#586374">Loading logs…</div>
+    </div>
   </div>`;
-  // scroll to bottom of log
-  const pre = document.querySelector('#log-panel pre');
-  if (pre) pre.scrollTop = pre.scrollHeight;
+
+  // Highlight active mode checkboxes on load
+  ['standard','soft-delete','history-tracking'].forEach(m => sfRefreshModeStyle(m));
+
+  // Populate table dropdown and pod selector in parallel
+  sfLoadTableDropdown();
+  sfLoadPodDropdown();
+
+  // Load logs immediately
+  sfLoadLogs(_sfLogTail, false);
 }
+
+// Populate the TABLE NAME TO PROVISION dropdown.
+// A table needs provisioning if it is missing the SD or HIST Iceberg streams
+// (Standard _TBL is auto-created by the background poller, so it is not used
+// as the "provisioned" gate — only SD and HIST matter for Iceberg flow).
+// Tables missing any of the user-selected modes are shown first; fully active
+// tables (SD+HIST both present) are shown at the bottom but remain selectable
+// so users can re-provision or add an individual mode they deselected earlier.
+async function sfLoadTableDropdown() {
+  const sel = document.getElementById('sf-table-select');
+  const hint = document.getElementById('sf-table-hint');
+  if (!sel) return;
+  sel.innerHTML = `<option value="">⏳ Loading…</option>`;
+  const r = await apiGet(`/api/starflow/available-tables?source=${_sfSource}`);
+  if (!r.ok) {
+    sel.innerHTML = `<option value="">⚠ Failed to load tables</option>`;
+    return;
+  }
+  const all = r.data?.available || [];
+
+  if (!all.length) {
+    sel.innerHTML = `<option value="">No Kafka topics found for ${SOURCE_LABELS[_sfSource]}</option>`;
+    if (hint) hint.innerHTML = `No Kafka topics detected yet for ${SOURCE_LABELS[_sfSource]}. Wait for Debezium to replicate a table (~5 min).`;
+    return;
+  }
+
+  // A table is "fully active for Iceberg" when all three modes exist.
+  const needsProvisioning = all.filter(t => !t.modes?.standard || !t.modes?.softDelete || !t.modes?.historyTracking);
+  const fullyActive       = all.filter(t =>  t.modes?.standard &&  t.modes?.softDelete &&  t.modes?.historyTracking);
+
+  // Helper: build a compact status tag showing which modes are present / missing
+  function statusTag(t) {
+    const m = t.modes || {};
+    const missing = [];
+    if (!m.standard)        missing.push('STD');
+    if (!m.softDelete)      missing.push('SD');
+    if (!m.historyTracking) missing.push('HIST');
+    if (missing.length) return ` [needs: ${missing.join('+')}]`;
+    return ' [STD+SD+HIST]';
+  }
+
+  let html = `<option value="">— Select a table —</option>`;
+  if (needsProvisioning.length) {
+    html += `<optgroup label="⚡ Needs provisioning (${needsProvisioning.length})">`;
+    for (const t of needsProvisioning) {
+      html += `<option value="${escHtml(t.table)}">${escHtml(t.table)}${escHtml(statusTag(t))}</option>`;
+    }
+    html += `</optgroup>`;
+  }
+  if (fullyActive.length) {
+    html += `<optgroup label="✓ Iceberg active (${fullyActive.length}) — STD+SD+HIST">`;
+    for (const t of fullyActive) {
+      html += `<option value="${escHtml(t.table)}">${escHtml(t.table)} ✓</option>`;
+    }
+    html += `</optgroup>`;
+  }
+  sel.innerHTML = html;
+
+  if (hint) {
+    hint.innerHTML = needsProvisioning.length
+      ? `<b style="color:#e6edf3">${needsProvisioning.length}</b> table${needsProvisioning.length===1?'':'s'} need Iceberg provisioning · <b style="color:#2ea043">${fullyActive.length}</b> already active (STD+SD+HIST)`
+      : `<span style="color:#2ea043">✓ All ${fullyActive.length} table${fullyActive.length===1?'':'s'} active in Iceberg (STD+SD+HIST)</span> — select a table to add or refresh a mode`;
+  }
+}
+
+// Populate the TableFlow pod selector dropdown
+async function sfLoadPodDropdown() {
+  const sel = document.getElementById('sf-pod-select');
+  if (!sel) return;
+  const depR = await apiGet('/api/streaming/deployments');
+  const deploys = depR.data?.items || [];
+
+  if (!deploys.length) {
+    sel.innerHTML = `<option value="">No tableflow pods found</option>`;
+    return;
+  }
+
+  let html = `<option value="">— Debezium + all pods —</option>`;
+  for (const d of deploys) {
+    const name    = d.metadata.name;
+    const src     = (d.metadata?.labels || {})['tableflow/source'] || name.replace('tableflow-', '');
+    const mode    = (d.metadata?.labels || {})['pipeline.write-mode'] || '';
+    const ready   = d.status?.readyReplicas || 0;
+    const desired = d.spec?.replicas || 0;
+    const state   = desired === 0 ? '⏹ stopped' : ready > 0 ? '● running' : '○ starting';
+    const label   = `${name}  [${src}${mode ? ' · ' + mode : ''}]  ${state}`;
+    const selected = _sfSelectedPod === name ? ' selected' : '';
+    html += `<option value="${escHtml(name)}"${selected}>${escHtml(label)}</option>`;
+  }
+  sel.innerHTML = html;
+  if (!_sfSelectedPod && deploys.length) {
+    // auto-select first pod matching current source
+    const match = deploys.find(d =>
+      ((d.metadata?.labels||{})['tableflow/source'] || d.metadata.name).includes(_sfSource)
+    );
+    if (match) {
+      _sfSelectedPod = match.metadata.name;
+      sel.value = _sfSelectedPod;
+    }
+  }
+}
+
+function sfSwitchSource(src) {
+  _sfSource = src;
+  // stop old auto-refresh timer before re-rendering
+  if (_sfLogTimer) { clearInterval(_sfLogTimer); _sfLogTimer = null; }
+  renderStarFlow();
+}
+
+function sfToggleMode(m) {
+  // checkbox is inside the label — toggle manually since onclick fires on label
+  const chk = document.getElementById(`sf-chk-${m}`);
+  if (!chk) return;
+  chk.checked = !chk.checked;
+  sfRefreshModeStyle(m);
+}
+
+function sfRefreshModeStyle(m) {
+  const lbl = document.getElementById(`sf-mode-${m}`);
+  const chk = document.getElementById(`sf-chk-${m}`);
+  if (!lbl || !chk) return;
+  lbl.style.borderColor = chk.checked ? '#4fc3f7' : '#1c2a3a';
+  lbl.style.background  = chk.checked ? 'rgba(79,195,247,.07)' : '#06090f';
+}
+
+function sfGetSelectedModes() {
+  return ['standard','soft-delete','history-tracking'].filter(m => {
+    const chk = document.getElementById(`sf-chk-${m}`);
+    return chk && chk.checked;
+  });
+}
+
+async function sfProvision() {
+  const table  = (document.getElementById('sf-table-select')?.value || '').trim().toLowerCase();
+  const modes  = sfGetSelectedModes();
+  if (!table)  return toast('Select a table from the dropdown', 'warn');
+  if (!modes.length) return toast('Select at least one mode', 'warn');
+  await _sfRunProvision(_sfSource, table, modes);
+  sfLoadTableDropdown();   // refresh — provisioned table moves to "already active" group
+}
+
+async function sfProvisionAll() {
+  const modes = sfGetSelectedModes();
+  if (!modes.length) return toast('Select at least one mode', 'warn');
+
+  const resultEl = document.getElementById('sf-result');
+  resultEl.innerHTML = `<div style="color:#d29922;font-size:12px;padding:8px 0">⏳ Loading unprovisioned tables…</div>`;
+
+  // Use available-tables API — only provision tables not yet active
+  const r = await apiGet(`/api/starflow/available-tables?source=${_sfSource}`);
+  if (!r.ok) {
+    resultEl.innerHTML = `<div style="color:#f85149;font-size:12px;padding:8px 0">⚠ Failed to load table list</div>`;
+    return;
+  }
+  // "Needs provisioning" = missing STD, SD or HIST
+  const tables = (r.data?.available || []).filter(t => !t.modes?.standard || !t.modes?.softDelete || !t.modes?.historyTracking).map(t => t.table);
+  if (!tables.length) {
+    resultEl.innerHTML = `<div style="color:#2ea043;font-size:12px;padding:8px 0">✓ All tables already active in Iceberg (STD+SD+HIST) for ${SOURCE_LABELS[_sfSource]}</div>`;
+    return;
+  }
+  resultEl.innerHTML = `<div style="color:#4fc3f7;font-size:12px;padding:8px 0">⏳ Provisioning ${tables.length} unprovisioned tables: ${tables.join(', ')}…</div>`;
+
+  let totalOk = 0, totalErr = 0;
+  for (const tbl of tables) {
+    const res = await _sfRunProvision(_sfSource, tbl, modes, true /* silent */);
+    if (res) totalOk++; else totalErr++;
+  }
+  resultEl.innerHTML = `
+    <div style="padding:10px 14px;border-radius:6px;
+         background:${totalErr ? '#2a1500' : '#0f2a1a'};
+         border:1px solid ${totalErr ? '#4a2800' : '#1a4429'};font-size:12px">
+      <span style="color:${totalErr ? '#d29922' : '#2ea043'};font-weight:600">
+        ${totalErr ? '⚠' : '✓'} Provision All complete
+      </span>
+      <span style="color:#8b949e;margin-left:8px">${totalOk} tables OK · ${totalErr} errors</span>
+    </div>`;
+  sfLoadTableDropdown();   // refresh dropdown
+}
+
+async function _sfRunProvision(source, table, modes, silent = false) {
+  const resultEl = document.getElementById('sf-result');
+  if (!silent) {
+    resultEl.innerHTML = `<div style="color:#d29922;font-size:12px;padding:8px 0">⏳ Provisioning <b style="color:#e6edf3">${escHtml(table)}</b> [${modes.join(', ')}]…</div>`;
+  }
+  const r = await apiPost('/api/starflow/provision', { source, table, modes });
+  if (!r.ok) {
+    if (!silent) resultEl.innerHTML = `<div style="color:#f85149;font-size:12px;margin-top:6px">⚠ ${escHtml((r.data?.error||'Provision failed').slice(0,200))}</div>`;
+    return false;
+  }
+  const steps = r.data?.results || [];
+  const errors = steps.filter(s => s.status === 'error');
+  if (!silent) {
+    const html = `
+      <div style="background:#06090f;border:1px solid #1c2a3a;border-radius:6px;padding:12px;margin-top:8px">
+        <div style="font-size:12px;font-weight:600;color:${errors.length ? '#d29922' : '#2ea043'};margin-bottom:8px">
+          ${errors.length ? '⚠ Provisioned with errors' : '✓ Provisioned successfully'} — <code style="color:#4fc3f7">${escHtml(table)}</code>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:'Fira Code','Courier New',monospace">
+          ${steps.map(s => `<tr style="border-bottom:1px solid #0d1a2e">
+            <td style="padding:4px 8px;color:#8b949e">${escHtml(s.step)}</td>
+            <td style="padding:4px 8px;color:${s.status==='ok'?'#2ea043':s.status==='exists'?'#4fc3f7':'#f85149'};font-weight:600">${escHtml(s.status)}</td>
+            <td style="padding:4px 8px;color:#586374">${escHtml(s.topic||s.detail||'')}</td>
+          </tr>`).join('')}
+        </table>
+        ${steps.some(s => s.step.startsWith('restart/')) ? `
+          <div style="font-size:11px;color:#2ea043;margin-top:8px">
+            ↻ tableflow-${escHtml(source)} pod restarted — new topics will be subscribed within 60 s
+          </div>` : ''}
+      </div>`;
+    resultEl.innerHTML = html;
+  }
+  return !errors.length;
+}
+
+async function sfRestartPod(depName) {
+  const r = await apiPost(`/api/streaming/${depName}/restart`);
+  toast(r.ok ? `${depName} restarted ✓` : `Restart failed`, r.ok ? 'success' : 'error');
+}
+
+// ── Log viewer ────────────────────────────────────────────────────────────────
+// Colour rules for log lines:
+//   Debezium origin  : CDC events (Snapshot/INSERT/UPDATE/DELETE), connector state
+//   StarFlow origin  : flush lines, heartbeat (.alive), Iceberg snapshot commits
+
+const SF_LOG_COLOURS = {
+  // Debezium — replication events
+  debezium: {
+    snapshot:  { re: /Snapshot|snapshot/,            colour: '#79c0ff' },
+    insert:    { re: /INSERT|insert|op.*=.*c/i,       colour: '#56d364' },
+    update:    { re: /UPDATE|update|op.*=.*u/i,       colour: '#4fc3f7' },
+    delete_:   { re: /DELETE|delete|op.*=.*d/i,       colour: '#f85149' },
+    connector: { re: /CONNECT|connector|task|worker/i,colour: '#d29922' },
+    error:     { re: /ERROR|Exception|FAILED/,        colour: '#f85149' },
+    warn:      { re: /WARN/,                          colour: '#d29922' },
+    default:   {                                       colour: '#c9d1d9' },
+  },
+  starflow: {
+    flush:     { re: /flushed|flush|Iceberg snapshot|snapshot committed/i, colour: '#56d364' },
+    heartbeat: { re: /tableflow\.alive|heartbeat/i,   colour: '#4fc3f7' },
+    new_topic: { re: /New topics detected|re-subscribing|Subscribing/i,   colour: '#c084fc' },
+    discover:  { re: /Kafka discovery|discovery found/i,                   colour: '#79c0ff' },
+    iceberg:   { re: /Created Iceberg|Schema evolved|ensure_table/i,      colour: '#2ea043' },
+    error:     { re: /ERROR|Exception/,               colour: '#f85149' },
+    warn:      { re: /WARN|warning/i,                 colour: '#d29922' },
+    default:   {                                       colour: '#8b949e' },
+  },
+};
+
+function sfColourLine(line, origin) {
+  const rules = SF_LOG_COLOURS[origin] || SF_LOG_COLOURS.starflow;
+  for (const [, rule] of Object.entries(rules)) {
+    if (rule.re && rule.re.test(line)) return rule.colour;
+  }
+  return rules.default.colour;
+}
+
+async function sfLoadLogs(tail, isRefresh) {
+  const panel = document.getElementById('sf-log-panel');
+  if (!panel) return;
+  if (!isRefresh) panel.innerHTML = `<div style="color:#586374">Loading…</div>`;
+
+  // If a specific tableflow pod is selected, fetch only that pod's logs.
+  // Otherwise fall back to the combined Debezium + all-pods view.
+  const selectedPod = _sfSelectedPod || (document.getElementById('sf-pod-select')?.value || '');
+  const url = selectedPod
+    ? `/api/starflow/pipeline-logs?source=${_sfSource}&tail=${tail}&deployment=${encodeURIComponent(selectedPod)}`
+    : `/api/starflow/pipeline-logs?source=${_sfSource}&tail=${tail}`;
+
+  const r = await apiGet(url);
+  if (!r.ok) {
+    panel.innerHTML = `<div style="color:#f85149">⚠ ${escHtml(r.data?.error || 'Failed to load logs')}</div>`;
+    return;
+  }
+
+  const sections = r.data?.sections || [];
+  if (!sections.length) {
+    panel.innerHTML = `<div style="color:#586374">No pods found for ${escHtml(SOURCE_LABELS[_sfSource])}. Ensure Debezium and tableflow are deployed.</div>`;
+    return;
+  }
+
+  let html = '';
+  for (const sec of sections) {
+    const origin      = sec.origin;   // 'debezium' | 'starflow'
+    const dotColour   = origin === 'debezium' ? '#f80000' : '#4fc3f7';
+    const originLabel = origin === 'debezium' ? 'Debezium CDC' : 'StarFlow';
+    html += `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;margin-top:${html?'16px':'0'}">
+        <span style="width:8px;height:8px;border-radius:50%;background:${dotColour};flex-shrink:0;display:inline-block"></span>
+        <span style="font-size:10px;font-weight:700;color:#586374;text-transform:uppercase;letter-spacing:.6px">${originLabel}</span>
+        <span style="font-size:10px;color:#30363d">pod: ${escHtml(sec.pod || '?')}</span>
+        <span style="font-size:10px;color:#30363d;margin-left:auto">${sec.lines.length} lines</span>
+      </div>`;
+    for (const line of sec.lines) {
+      const colour = sfColourLine(line, origin);
+      html += `<div style="color:${colour};white-space:pre-wrap;word-break:break-all">${escHtml(line)}</div>`;
+    }
+  }
+  panel.innerHTML = html || `<div style="color:#586374">(no log output)</div>`;
+
+  // Auto-scroll to bottom so latest lines are visible
+  panel.scrollTop = panel.scrollHeight;
+
+  // Start auto-refresh if enabled and not already running
+  const autoOn = document.getElementById('sf-log-autorefresh')?.checked !== false;
+  if (autoOn && !_sfLogTimer) {
+    _sfLogTimer = setInterval(() => sfLoadLogs(_sfLogTail, true), 10000);
+  }
+}
+
+function sfToggleAutoRefresh(on) {
+  if (_sfLogTimer) { clearInterval(_sfLogTimer); _sfLogTimer = null; }
+  if (on) _sfLogTimer = setInterval(() => sfLoadLogs(_sfLogTail, true), 10000);
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  UTILITIES

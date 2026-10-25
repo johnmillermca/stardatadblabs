@@ -4848,73 +4848,325 @@ app.post('/api/ksql/check-pks', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  STARFLOW — mode provisioning + pipeline logs
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Source config: topic prefix, PK fields, ksqlDB stream prefix
+const STARFLOW_SOURCES = {
+  // pkField: the primary-key field name inside the after/before object.
+  // PK extraction uses two-level EXTRACTJSONFIELD because ksqlDB cannot
+  // traverse nested JSON objects with dot-notation in a single call:
+  //   EXTRACTJSONFIELD(EXTRACTJSONFIELD(PAYLOAD,'$.after'),'$.<pkField>')
+  postgres: { streamPfx: 'POSTGRES_CACHE_TESTING', topicPfx: 'postgres.cache_testing', pkField: 'id'  },
+  oracle:   { streamPfx: 'ORACLE_CACHE_TESTING',   topicPfx: 'oracle.cache_testing',   pkField: 'ID'  },
+  mongodb:  { streamPfx: 'MONGODB_CACHE_TESTING',  topicPfx: 'mongodb.cache_testing',  pkField: '_id' },
+};
+
+// GET /api/starflow/available-tables?source=postgres
+// Returns raw CDC topics for the source with per-mode provisioning status.
+// "provisioned" = table has BOTH _SD (soft-delete) AND _HIST (history) ksqlDB
+// streams, meaning it is fully wired into the tableflow Iceberg pipeline.
+// A table that only has a _TBL (standard/RocksDB mat table) is NOT considered
+// provisioned — it still needs _SD/_HIST streams to flow data into Iceberg.
+// The dropdown shows only unprovisioned tables; fully active ones are grayed out.
+app.get('/api/starflow/available-tables', async (req, res) => {
+  try {
+    const source = (req.query.source || 'postgres').toLowerCase();
+    const cfg    = STARFLOW_SOURCES[source];
+    if (!cfg) return res.status(400).json({ error: `unknown source: ${source}` });
+
+    const { topicPfx, streamPfx } = cfg;
+
+    // 1. All raw CDC Kafka topics for this source (exclude _sd/_hist/_TBL topics)
+    const ksqlTopicsBody = await ksqlStatement('SHOW TOPICS;');
+    const allTopics = ((Array.isArray(ksqlTopicsBody) ? ksqlTopicsBody[0]?.topics : ksqlTopicsBody?.topics) || [])
+      .map(t => t.name || t)
+      .filter(t =>
+        t.startsWith(topicPfx + '.') &&
+        !t.endsWith('_sd')       && !t.endsWith('_SD')       &&
+        !t.endsWith('_hist')     && !t.endsWith('_HIST')     &&
+        !t.endsWith('_standard') && !t.endsWith('_STANDARD') &&
+        !/[A-Z0-9_]+_TBL$/.test(t)
+      );
+
+    // 2. Existing ksqlDB streams — used to detect _SD and _HIST per table
+    const ksqlStreamsBody = await ksqlStatement('SHOW STREAMS;');
+    const existingStreams = new Set(
+      ((Array.isArray(ksqlStreamsBody) ? ksqlStreamsBody[0]?.streams : ksqlStreamsBody?.streams) || [])
+        .map(s => (s.name || s).toUpperCase())
+    );
+
+    // 3. Existing ksqlDB materialised tables — detect standard _TBL
+    const ksqlTablesBody = await ksqlStatement('SHOW TABLES;');
+    const existingTbls = new Set(
+      ((Array.isArray(ksqlTablesBody) ? ksqlTablesBody[0]?.tables : ksqlTablesBody?.tables) || [])
+        .map(t => (t.name || t).toUpperCase())
+    );
+
+    // 4. Per-topic: check which modes are already provisioned
+    const available = [];
+    for (const topic of allTopics) {
+      const tableName = topic.slice(topicPfx.length + 1);          // e.g. "testing"
+      const tblUpper  = tableName.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase();
+      const baseName  = `${streamPfx}_${tblUpper}`;
+
+      // Standard is fully provisioned when BOTH the _STANDARD Iceberg CSAS stream
+      // AND the _TBL RocksDB table exist.
+      const hasStandard = existingStreams.has(`${baseName}_STANDARD`) && existingTbls.has(`${baseName}_TBL`);
+      const hasSd       = existingStreams.has(`${baseName}_SD`);
+      const hasHist     = existingStreams.has(`${baseName}_HIST`);
+
+      // "provisioned" = all three tableflow modes exist (fully in Iceberg pipeline)
+      const provisioned = hasStandard && hasSd && hasHist;
+
+      available.push({
+        topic,
+        table:      tableName,
+        provisioned,
+        modes: {
+          standard: hasStandard,
+          softDelete: hasSd,
+          historyTracking: hasHist,
+        },
+        matTable: `${baseName}_TBL`,
+      });
+    }
+
+    res.json({ available });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/starflow/provision
+// Body: { source, table, modes: ['standard','soft-delete','history-tracking'] }
+// For each mode requested:
+//   standard       → raw topic is enough; ensure ksqlDB source stream + RocksDB mat table
+//   soft-delete    → ensure <src>_sd ksqlDB CSAS stream → Kafka _sd topic (tableflow writes Iceberg)
+//   history-tracking → ensure <src>_hist ksqlDB CSAS stream → Kafka _hist topic
+// Idempotent — CREATE IF NOT EXISTS throughout.
+app.post('/api/starflow/provision', async (req, res) => {
+  try {
+    const { source, table, modes = ['standard'] } = req.body;
+    if (!source || !table) return res.status(400).json({ error: 'source and table required' });
+    const cfg = STARFLOW_SOURCES[source.toLowerCase()];
+    if (!cfg) return res.status(400).json({ error: `unknown source: ${source}` });
+
+    const { streamPfx, topicPfx, pkField } = cfg;
+    const TBL        = table.toUpperCase();
+    const rawTopic   = `${topicPfx}.${table}`;
+    const srcStream  = `${streamPfx}_${TBL}`;
+    const results    = [];
+
+    // Two-level PK extraction: ksqlDB cannot traverse nested JSON objects with
+    // dot-notation, so we extract after/before as a JSON string first, then
+    // extract the PK field from that string.
+    const pkFromAfter  = `EXTRACTJSONFIELD(EXTRACTJSONFIELD(PAYLOAD,'$.after'),'$.${pkField}')`;
+    const pkFromBefore = `EXTRACTJSONFIELD(EXTRACTJSONFIELD(PAYLOAD,'$.before'),'$.${pkField}')`;
+    const pkExpr       = `CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN ${pkFromBefore} ELSE ${pkFromAfter} END`;
+
+    // Step 0 — always ensure the source stream exists (reads the raw Debezium topic)
+    const srcSql = `CREATE STREAM IF NOT EXISTS ${srcStream} (ROWKEY STRING KEY, PAYLOAD STRING) ` +
+      `WITH (KAFKA_TOPIC='${rawTopic}', VALUE_FORMAT='JSON', WRAP_SINGLE_VALUE=false);`;
+    try {
+      await ksqlStatement(srcSql);
+      results.push({ step: `source-stream/${srcStream}`, status: 'ok' });
+    } catch (e) {
+      if (!/already exists/i.test(e.message))
+        results.push({ step: `source-stream/${srcStream}`, status: 'error', detail: e.message });
+      else results.push({ step: `source-stream/${srcStream}`, status: 'exists' });
+    }
+
+    // Standard mode — two artefacts:
+    //   1. CSAS stream → <topicPfx>.<table>_standard Kafka topic (tableflow writes Iceberg)
+    //   2. CTAS materialised RocksDB table for ksqlDB pull queries (compare-table use-case)
+    if (modes.includes('standard')) {
+      const stdStream = `${streamPfx}_${TBL}_STANDARD`;
+      const stdTopic  = `${topicPfx}.${table}_standard`;
+
+      // 1. Drop any orphaned persistent query for _standard so IF NOT EXISTS
+      //    works cleanly even if ksqlDB has a stale query referencing the stream.
+      //    We intentionally ignore errors (stream may not exist yet).
+      try { await ksqlStatement(`DROP STREAM IF EXISTS ${stdStream};`); } catch (_) { /* ok */ }
+
+      // 2. _standard CSAS stream → Iceberg via tableflow
+      const stdSql =
+        `CREATE STREAM ${stdStream} ` +
+        `WITH (KAFKA_TOPIC='${stdTopic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') AS SELECT ` +
+        `${pkExpr} AS PK_ID, ` +
+        `EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, EXTRACTJSONFIELD(PAYLOAD,'$.before') AS BEFORE_JSON, ` +
+        `EXTRACTJSONFIELD(PAYLOAD,'$.op') AS CDC_OP, CAST(ROWTIME AS BIGINT) AS CDC_TS ` +
+        `FROM ${srcStream} WHERE EXTRACTJSONFIELD(PAYLOAD,'$.op') IS NOT NULL ` +
+        `PARTITION BY ${pkExpr} EMIT CHANGES;`;
+      try {
+        await ksqlStatement(stdSql);
+        results.push({ step: `standard-stream/${stdStream}`, status: 'ok', topic: stdTopic });
+      } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        results.push({ step: `standard-stream/${stdStream}`, status: /already exists/i.test(msg) ? 'exists' : 'error', detail: msg });
+      }
+
+      // 3. RocksDB materialised table for ksqlDB pull queries
+      const matName = `${srcStream}_TBL`;
+      try {
+        await ksqlStatement(
+          `CREATE TABLE IF NOT EXISTS ${matName} ` +
+          `WITH (KAFKA_TOPIC='${matName}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') AS ` +
+          `SELECT ROWKEY, LATEST_BY_OFFSET(PAYLOAD) AS PAYLOAD FROM ${srcStream} GROUP BY ROWKEY EMIT CHANGES;`
+        );
+        results.push({ step: `ksql-table/${matName}`, status: 'ok' });
+      } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        results.push({ step: `ksql-table/${matName}`, status: /already exists/i.test(msg) ? 'exists' : 'error', detail: msg });
+      }
+    }
+
+    // Soft-delete mode — CSAS → <topicPfx>.<table>_sd (tableflow handles Iceberg upsert)
+    if (modes.includes('soft-delete')) {
+      const sdStream = `${streamPfx}_${TBL}_SD`;
+      const sdTopic  = `${topicPfx}.${table}_sd`;
+      try { await ksqlStatement(`DROP STREAM IF EXISTS ${sdStream};`); } catch (_) { /* ok */ }
+      const sdSql = `CREATE STREAM ${sdStream} ` +
+        `WITH (KAFKA_TOPIC='${sdTopic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') AS SELECT ` +
+        `${pkExpr} AS PK_ID, ` +
+        `EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, EXTRACTJSONFIELD(PAYLOAD,'$.before') AS BEFORE_JSON, ` +
+        `CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN 'true' ELSE 'false' END AS IS_DELETED, ` +
+        `CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN CAST(ROWTIME AS VARCHAR) ELSE NULL END AS DELETED_AT, ` +
+        `EXTRACTJSONFIELD(PAYLOAD,'$.op') AS CDC_OP, CAST(ROWTIME AS BIGINT) AS CDC_TS ` +
+        `FROM ${srcStream} WHERE EXTRACTJSONFIELD(PAYLOAD,'$.op') IS NOT NULL ` +
+        `PARTITION BY ${pkExpr} EMIT CHANGES;`;
+      try {
+        await ksqlStatement(sdSql);
+        results.push({ step: `sd-stream/${sdStream}`, status: 'ok', topic: sdTopic });
+      } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        results.push({ step: `sd-stream/${sdStream}`, status: /already exists/i.test(msg) ? 'exists' : 'error', detail: msg });
+      }
+    }
+
+    // History-tracking mode — CSAS → <topicPfx>.<table>_hist (tableflow appends to Iceberg)
+    if (modes.includes('history-tracking')) {
+      const htStream = `${streamPfx}_${TBL}_HIST`;
+      const htTopic  = `${topicPfx}.${table}_hist`;
+      try { await ksqlStatement(`DROP STREAM IF EXISTS ${htStream};`); } catch (_) { /* ok */ }
+      const htSql = `CREATE STREAM ${htStream} ` +
+        `WITH (KAFKA_TOPIC='${htTopic}', PARTITIONS=3, REPLICAS=1, VALUE_FORMAT='JSON') AS SELECT ` +
+        `ROWKEY, ${pkFromAfter} AS PK_ID, ` +
+        `EXTRACTJSONFIELD(PAYLOAD,'$.after') AS AFTER_JSON, EXTRACTJSONFIELD(PAYLOAD,'$.before') AS BEFORE_JSON, ` +
+        `CASE WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='c' THEN 'INSERT' ` +
+        `  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='u' THEN 'UPDATE' ` +
+        `  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='d' THEN 'DELETE' ` +
+        `  WHEN EXTRACTJSONFIELD(PAYLOAD,'$.op')='r' THEN 'READ' ` +
+        `  ELSE EXTRACTJSONFIELD(PAYLOAD,'$.op') END AS CDC_OP, ` +
+        `CAST(ROWTIME AS BIGINT) AS CDC_TS ` +
+        `FROM ${srcStream} WHERE EXTRACTJSONFIELD(PAYLOAD,'$.op') IS NOT NULL EMIT CHANGES;`;
+      try {
+        await ksqlStatement(htSql);
+        results.push({ step: `hist-stream/${htStream}`, status: 'ok', topic: htTopic });
+      } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        results.push({ step: `hist-stream/${htStream}`, status: /already exists/i.test(msg) ? 'exists' : 'error', detail: msg });
+      }
+    }
+
+    // Signal the tableflow pod to immediately re-discover and re-subscribe to
+    // any new _sd/_hist topics — no pod restart needed.  The pod exposes a
+    // lightweight HTTP signal server on port 8090 (POST /refresh-topics).
+    // We resolve the pod IP via the K8s API rather than a fixed service ClusterIP
+    // so this works even if no headless service exists for the tableflow pod.
+    const depName   = `tableflow-${source.toLowerCase()}`;
+    const svcName   = depName;   // Service name matches deployment name
+    const signalUrl = `http://${svcName}.${K8S_NAMESPACE}.svc.cluster.local:8090/refresh-topics`;
+    try {
+      const sigR = await fetch(signalUrl, { method: 'POST', signal: AbortSignal.timeout(5000) });
+      results.push({ step: `signal/${depName}`, status: sigR.ok ? 'ok' : 'warn',
+                     detail: sigR.ok ? 'tableflow re-subscribed immediately' : `HTTP ${sigR.status}` });
+    } catch (e) {
+      // Signal failed (pod not ready, port not open yet) — fall back to rolling restart
+      try {
+        await k8sFetch(
+          `/apis/apps/v1/namespaces/${K8S_NAMESPACE}/deployments/${depName}`,
+          { method: 'PATCH', headers: { 'Content-Type': 'application/strategic-merge-patch+json' },
+            body: JSON.stringify({ spec: { template: { metadata: { annotations:
+              { 'kubectl.kubernetes.io/restartedAt': new Date().toISOString() } } } } }) }
+        );
+        results.push({ step: `signal/${depName}`, status: 'warn',
+                       detail: `signal unreachable (${e.message}) — fell back to pod restart` });
+      } catch (e2) {
+        results.push({ step: `signal/${depName}`, status: 'warn', detail: e2.message });
+      }
+    }
+
+    res.json({ ok: true, results });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/starflow/pipeline-logs?source=postgres&tail=500[&deployment=tableflow-postgres]
+// Returns combined log lines: Debezium connector logs + tableflow pod logs,
+// each line annotated with its origin so the UI can colour-code them.
+// When `deployment` is specified, only that specific tableflow deployment's
+// pod logs are returned — used by the pod-selector dropdown in the UI.
+app.get('/api/starflow/pipeline-logs', async (req, res) => {
+  try {
+    const source     = (req.query.source || 'postgres').toLowerCase();
+    const tail       = Math.min(parseInt(req.query.tail || '500', 10), 1000);
+    const deployment = (req.query.deployment || '').trim();   // optional specific deployment
+    const sections   = [];
+
+    // ── 1. Debezium Connect pod logs ─────────────────────────────────────────
+    const dbzLabel = `app=debezium-connect-${source}`;
+    try {
+      const pr = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods?labelSelector=${encodeURIComponent(dbzLabel)}`);
+      const pb = await pr.json();
+      const pod = (pb.items || [])[0];
+      if (pod) {
+        const lr = await k8sFetch(
+          `/api/v1/namespaces/${K8S_NAMESPACE}/pods/${pod.metadata.name}/log?tailLines=${tail}&timestamps=true`
+        );
+        const raw = await lr.text();
+        sections.push({ origin: 'debezium', pod: pod.metadata.name, lines: raw.split('\n').filter(Boolean) });
+      }
+    } catch { /* pod not found — skip */ }
+
+    // ── 2. StarFlow (tableflow) pod logs ─────────────────────────────────────
+    // When a specific deployment is requested, find its pods by ownerReference RS name.
+    // Otherwise list all tableflow pods for this source via label selector.
+    try {
+      let pods = [];
+      if (deployment) {
+        // Fetch all tableflow pods and filter by ReplicaSet owner → deployment name
+        const pr = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods?labelSelector=${encodeURIComponent('app=tableflow')}`);
+        const pb = await pr.json();
+        pods = (pb.items || []).filter(p =>
+          (p.metadata?.ownerReferences || []).some(o =>
+            o.kind === 'ReplicaSet' && o.name.startsWith(deployment + '-')
+          )
+        );
+      } else {
+        const tfLabel = `app=tableflow,tableflow/source=${source}`;
+        const pr = await k8sFetch(`/api/v1/namespaces/${K8S_NAMESPACE}/pods?labelSelector=${encodeURIComponent(tfLabel)}`);
+        const pb = await pr.json();
+        pods = pb.items || [];
+      }
+      for (const pod of pods) {
+        const lr = await k8sFetch(
+          `/api/v1/namespaces/${K8S_NAMESPACE}/pods/${pod.metadata.name}/log?tailLines=${tail}&timestamps=true`
+        );
+        const raw = await lr.text();
+        sections.push({ origin: 'starflow', pod: pod.metadata.name, lines: raw.split('\n').filter(Boolean) });
+      }
+    } catch { /* pod not found — skip */ }
+
+    res.json({ sections });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Catch-all: serve SPA ───────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  AUTO-TABLE POLLER
-//  Every 60 s: for every new Kafka topic that has no materialised table yet,
-//  create a ksqlDB STREAM + TABLE (backed by RocksDB).
-//  Pull queries against the TABLE are instant — no topic scanning.
-// ═══════════════════════════════════════════════════════════════════════════
-const TOPIC_SKIP_RE = /^(__|_confluent|debezium|schema|oracle$|st\.|[A-Z0-9_]+_TBL$)/;
-
-async function autoEnsureTables() {
-  try {
-    // 1. List all Kafka topics
-    const stdout = await kafkaExec(
-      `/kafka/bin/kafka-topics.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --list --command-config ${SASL_CFG_FILE}`,
-      25000
-    );
-    const topics = stdout.split('\n')
-      .map(t => t.trim())
-      .filter(t => t && !TOPIC_SKIP_RE.test(t) && !t.startsWith('SLF4J'));
-
-    // 2. Get existing tables from ksqlDB
-    let existingTables = new Set();
-    try {
-      const body = await ksqlStatement('LIST TABLES;');
-      const tables = (Array.isArray(body) ? body[0]?.tables : body?.tables) || [];
-      tables.forEach(t => existingTables.add(t.name));
-    } catch { /* ksqlDB unreachable — skip */ return; }
-
-    // 3. For each topic without a table: create stream + materialised table
-    for (const topic of topics) {
-      const streamName = topic.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
-      const tableName  = streamName + '_TBL';
-      if (existingTables.has(tableName)) continue;
-
-      try {
-        // Step A: ensure stream exists (idempotent)
-        await ksqlStatement(
-          `CREATE STREAM IF NOT EXISTS ${streamName}` +
-          ` (ROWKEY VARCHAR KEY, payload VARCHAR)` +
-          ` WITH (KAFKA_TOPIC='${topic}', VALUE_FORMAT='JSON', WRAP_SINGLE_VALUE=false);`
-        );
-        // Step B: create materialised RocksDB table (idempotent)
-        await ksqlStatement(
-          `CREATE TABLE IF NOT EXISTS ${tableName} AS` +
-          ` SELECT ROWKEY, LATEST_BY_OFFSET(payload) AS payload` +
-          ` FROM ${streamName} GROUP BY ROWKEY EMIT CHANGES;`
-        );
-        console.log(`[auto-table] Created stream+table for new topic: ${topic} → ${tableName}`);
-      } catch (e) {
-        if (!/already exists/i.test(e.message))
-          console.warn(`[auto-table] Failed for topic ${topic}: ${e.message}`);
-      }
-    }
-  } catch (e) {
-    console.warn('[auto-table] Poller error:', e.message);
-  }
-}
-
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Lakehouse UI listening on http://0.0.0.0:${PORT}`);
-  // Run once at startup, then every 60 s
-  autoEnsureTables();
-  setInterval(autoEnsureTables, 60_000);
 });
