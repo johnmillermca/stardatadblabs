@@ -1,9 +1,8 @@
 # =============================================================================
 # prod namespace — ALL platform workloads
 #   databases (postgresql, mongodb, oracle), kerberos, openbao,
-#   streaming (kafka/strimzi, schema-registry, debezium),
-#   search (opensearch, opensearch-dashboards),
-#   analytics (doris, spark, jupyterhub, sqlmesh),
+#   streaming (kafka/strimzi, schema-registry),
+#   analytics (doris, jupyterhub, sqlmesh),
 #   catalog (polaris), orchestration (kestra),
 #   registry, MCP servers
 #

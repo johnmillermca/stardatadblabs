@@ -259,10 +259,8 @@ spec:
       transaction.state.log.min.isr: "1"
       default.replication.factor: "1"
       min.insync.replicas: "1"
-      # Enable auto-create so Debezium can produce to CDC topics without requiring
-      # every topic to be pre-declared as a KafkaTopic CR.
-      # Debezium creates topics dynamically (postgres.cache_testing.customers etc.)
-      # and cannot function when the broker rejects unknown topics.
+      # Enable auto-create so producers can create topics dynamically without
+      # requiring every topic to be pre-declared as a KafkaTopic CR.
       auto.create.topics.enable: "true"
       # ── Durability: flush to disk before OS page-cache writeback ─────────────
       # Flush every 10 000 messages OR every 1 000ms — whichever comes first.
@@ -361,18 +359,6 @@ spec:
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
 metadata:
-  name: debezium-user
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-spec:
-  authentication:
-    type: scram-sha-512
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaUser
-metadata:
   name: schema-registry-user
   namespace: prod
   labels:
@@ -380,48 +366,6 @@ metadata:
 spec:
   authentication:
     type: scram-sha-512
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: debezium-offsets
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-spec:
-  partitions: 1
-  replicas: 1
-  config:
-    cleanup.policy: compact
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: debezium-configs
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-spec:
-  partitions: 1
-  replicas: 1
-  config:
-    cleanup.policy: compact
-
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaTopic
-metadata:
-  name: debezium-statuses
-  namespace: prod
-  labels:
-    strimzi.io/cluster: strimzi-kafka
-spec:
-  partitions: 1
-  replicas: 1
-  config:
-    cleanup.policy: compact
 
 ---
 # _schemas is the internal topic used by Confluent Schema Registry to store

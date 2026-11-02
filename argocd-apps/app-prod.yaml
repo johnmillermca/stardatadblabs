@@ -290,29 +290,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── Debezium CDC ──────────────────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: debezium
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "5"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/debezium
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── Apache Polaris (Iceberg catalog) ──────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1

@@ -6,7 +6,7 @@ metadata:
   name: lakehouse-ui
   namespace: prod
 ---
-# Role — read deployments, pods, logs; manage configmaps; read debezium-credentials secret
+# Role — read deployments, pods, logs; manage configmaps
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -28,10 +28,6 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get","list","create","update","patch","delete"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["debezium-credentials"]
-    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -79,12 +75,6 @@ spec:
               value: "3000"
             - name: K8S_NAMESPACE
               value: "prod"
-            - name: DEBEZIUM_POSTGRES_URL
-              value: "http://debezium-connect-postgres.prod.svc.cluster.local:8083"
-            - name: DEBEZIUM_ORACLE_URL
-              value: "http://debezium-connect-oracle.prod.svc.cluster.local:8083"
-            - name: DEBEZIUM_MONGODB_URL
-              value: "http://debezium-connect-mongodb.prod.svc.cluster.local:8083"
             - name: KAFKA_BOOTSTRAP
               value: "strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092"
           resources:

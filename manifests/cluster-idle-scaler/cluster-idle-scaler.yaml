@@ -6,16 +6,15 @@
 #
 # ── ALWAYS-ON (never touched) ────────────────────────────────────────────────
 #  (a) Doris          — doris-fe, doris-be, doris-write-proxy, doris-cache-manager
-#  (b) Kafka/Debezium — strimzi-*, strimzi-kafka-*, debezium-connect-*,
-#                       schema-registry, kafka-to-iceberg-*
-#  (d) ArgoCD         — entire argocd namespace
-#  (e) Lakehouse UI   — lakehouse-ui
+#  (b) Kafka          — strimzi-*, strimzi-kafka-*, schema-registry
+#  (c) ArgoCD         — entire argocd namespace
+#  (d) Lakehouse UI   — lakehouse-ui
 #
 # ── INFRASTRUCTURE (never touched — cluster would break) ────────────────────
 #      kube-system/*, local-path-storage/*, registry/*
 #      prod/openbao, prod/openbao-agent-injector   (secrets engine)
 #      prod/kerberos-kdc                           (Kerberos auth)
-#      prod/postgresql, prod/mongodb               (source DBs for CDC)
+#      prod/postgresql, prod/mongodb               (source DBs)
 #      prod/oracle-xe                              (source DB)
 #      prod/redis                                  (session store for hub/kestra)
 #      prod/proxy                                  (JupyterHub proxy)
