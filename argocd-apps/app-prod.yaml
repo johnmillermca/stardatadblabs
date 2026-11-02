@@ -1,7 +1,7 @@
 # ArgoCD Applications — all prod namespace apps
 # Each component deploys into: namespace: prod
 # ArgoCD auto-syncs from: https://github.com/johnmillermca/stardatadblabs
-# Secrets: read from openbao (namespace: prod), seeded by 12-seed-openbao-secrets.sh
+# Secrets: stored as plain K8s Opaque secrets in namespace: prod
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Prod Namespaces manifest ──────────────────────────────────────────────────
@@ -25,69 +25,6 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── OpenBao (secrets engine) ──────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: openbao
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "-10"
-spec:
-  project: platform
-  source:
-    repoURL: https://openbao.github.io/openbao-helm
-    chart: openbao
-    targetRevision: "*"
-    helm:
-      releaseName: openbao
-      values: |
-        global:
-          tlsDisable: true
-        server:
-          standalone:
-            enabled: true
-          service:
-            type: NodePort
-            nodePort: 30820
-          nodeSelector:
-            kubernetes.io/hostname: master.local
-          tolerations:
-            - key: node-role.kubernetes.io/control-plane
-              operator: Exists
-              effect: NoSchedule
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, Replace=true]
-
-# ── OpenBao auto-unseal CronJob ───────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: openbao-unseal
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "-9"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/openbao
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
