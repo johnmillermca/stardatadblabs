@@ -45,12 +45,10 @@ _SEM = asyncio.Semaphore(10)
 # ── Adapter registry ───────────────────────────────────────
 
 def _get_adapter(service_name: str):
-    from ..adapters import doris, kafka, opensearch, spark
+    from ..adapters import doris, kafka
     return {
-        "doris":       doris.DorisAdapter(),
-        "kafka":       kafka.KafkaAdapter(),
-        "opensearch":  opensearch.OpenSearchAdapter(),
-        "spark":       spark.SparkAdapter(),
+        "doris": doris.DorisAdapter(),
+        "kafka": kafka.KafkaAdapter(),
     }.get(service_name)
 
 

@@ -6,9 +6,7 @@
 #
 # ── ALWAYS-ON (never touched) ────────────────────────────────────────────────
 #  (a) Doris          — doris-fe, doris-be, doris-write-proxy, doris-cache-manager
-#  (b) Spark          — spark-master, spark-worker*, starpump-incremental
-#                       + all kafka-to-iceberg-* streaming jobs
-#  (c) Kafka/Debezium — strimzi-*, strimzi-kafka-*, debezium-connect-*,
+#  (b) Kafka/Debezium — strimzi-*, strimzi-kafka-*, debezium-connect-*,
 #                       schema-registry, kafka-to-iceberg-*
 #  (d) ArgoCD         — entire argocd namespace
 #  (e) Lakehouse UI   — lakehouse-ui
@@ -27,9 +25,7 @@
 #
 # ── SCALEABLE (scaled to 0 when idle, restored on wake) ─────────────────────
 #      prod/kestra, prod/hub
-#      prod/mcp-doris, prod/mcp-kafka, prod/mcp-kestra,
-#      prod/mcp-opensearch, prod/mcp-spark, prod/mcp-sqlmesh
-#      prod/opensearch-cluster-master, prod/opensearch-dashboards
+#      prod/mcp-doris, prod/mcp-kafka, prod/mcp-kestra, prod/mcp-sqlmesh
 #      prod/sqlmesh
 #      prod/star-knowledge-catalog
 #      monitoring/grafana, monitoring/mcp-grafana, monitoring/mcp-prometheus
@@ -167,11 +163,11 @@ data:
     # ── Workload registry ─────────────────────────────────────────────────────
     # Each entry: (namespace, name, kind, group, original_replicas)
     # kind: "Deployment" or "StatefulSet"
-    # group: logical label for bulk wake (e.g. "monitoring", "opensearch")
+    # group: logical label for bulk wake (e.g. "monitoring")
     # original_replicas: what to restore to on wake (fetched at startup)
     #
     # PINNED groups (never touched):
-    #   doris, spark, kafka, argocd, lakehouse-ui, infrastructure
+    #   doris, kafka, argocd, lakehouse-ui, infrastructure
 
     SCALEABLE = [
         # ── JupyterHub ────────────────────────────────────────────────────────
@@ -182,12 +178,7 @@ data:
         ("prod", "mcp-doris",                             "Deployment",  "mcp"),
         ("prod", "mcp-kafka",                             "Deployment",  "mcp"),
         ("prod", "mcp-kestra",                            "Deployment",  "mcp"),
-        ("prod", "mcp-opensearch",                        "Deployment",  "mcp"),
-        ("prod", "mcp-spark",                             "Deployment",  "mcp"),
         ("prod", "mcp-sqlmesh",                           "Deployment",  "mcp"),
-        # ── OpenSearch ───────────────────────────────────────────────────────
-        ("prod", "opensearch-cluster-master",             "StatefulSet", "opensearch"),
-        ("prod", "opensearch-dashboards",                 "Deployment",  "opensearch"),
         # ── SQLMesh ──────────────────────────────────────────────────────────
         ("prod", "sqlmesh",                               "Deployment",  "sqlmesh"),
         # ── Star knowledge catalog ────────────────────────────────────────────

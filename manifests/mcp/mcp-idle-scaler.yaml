@@ -5,8 +5,8 @@
 #
 # WHAT IT DOES
 # ─────────────────────────────────────────────────────────────────────────────
-# Each MCP server (mcp-doris, mcp-kafka, mcp-kestra, mcp-opensearch,
-# mcp-spark, mcp-sqlmesh) is a stateless HTTP proxy with no persistent state.
+# Each MCP server (mcp-doris, mcp-kafka, mcp-kestra, mcp-sqlmesh) is a
+# stateless HTTP proxy with no persistent state.
 # This controller:
 #
 #   SCALE DOWN  — When an MCP deployment has had no ready endpoints for
@@ -140,12 +140,10 @@ data:
 
     # name → container port
     MCP_SERVICES: dict[str, int] = {
-        "mcp-doris":       3101,
-        "mcp-kafka":       3104,
-        "mcp-kestra":      3105,
-        "mcp-opensearch":  3102,
-        "mcp-spark":       3103,
-        "mcp-sqlmesh":     3100,
+        "mcp-doris":   3101,
+        "mcp-kafka":   3104,
+        "mcp-kestra":  3105,
+        "mcp-sqlmesh": 3100,
     }
 
     # ── Logging ───────────────────────────────────────────────────────────────
@@ -457,10 +455,6 @@ spec:
               name: mcp-sqlmesh
             - containerPort: 3101
               name: mcp-doris
-            - containerPort: 3102
-              name: mcp-opensearch
-            - containerPort: 3103
-              name: mcp-spark
             - containerPort: 3104
               name: mcp-kafka
             - containerPort: 3105

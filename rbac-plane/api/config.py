@@ -77,22 +77,6 @@ class Settings(BaseSettings):
     # "Simple authorization ACL rules are configured but not supported" error.
     kafka_acl_supported: bool = False
 
-    # ── OpenSearch adapter ─────────────────────────────────
-    opensearch_host: str = "opensearch-cluster-master.prod.svc.cluster.local"
-    opensearch_port: int = 9200
-    opensearch_admin_user: str = "admin"
-    opensearch_admin_password: str = ""
-    opensearch_verify_ssl: bool = False     # self-signed in-cluster cert
-    # TLS client cert for the Security API (bypasses HTTP auth when Kerberos is active)
-    opensearch_admin_cert: str = ""         # path to admin.pem
-    opensearch_admin_key: str = ""          # path to admin-key.pem
-    opensearch_ca_cert: str = ""            # path to root-ca.pem
-
-    # ── Spark adapter ──────────────────────────────────────
-    # Allowlist is a K8s ConfigMap — updated via Kubernetes API
-    spark_allowlist_cm: str = "spark-rbac-allowlist"
-    spark_namespace: str = "prod"
-
 
 @lru_cache
 def get_settings() -> Settings:

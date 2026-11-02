@@ -48,7 +48,7 @@ class RolePermissionIn(BaseModel):
         ...,
         description=(
             "Permission to grant, in 'service:NAME' format. "
-            "Example: 'doris:SELECT', 'kafka:CONSUME', 'opensearch:INDEX_READ'."
+            "Example: 'doris:SELECT', 'kafka:CONSUME'."
         ),
         pattern=r"^[a-z0-9_\-]+:[A-Z0-9_]+$",
     )

@@ -231,8 +231,8 @@ async def delete_role_by_name(
              summary="Add a permission to a role",
              description=(
                  "Grant a permission to a role using human-readable names. "
-                 "`service_name` is one of `doris`, `kafka`, `opensearch`, `spark`. "
-                 "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`, `INDEX_READ`."
+                 "`service_name` is one of `doris`, `kafka`. "
+                 "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`."
              ))
 async def add_permission_to_role(
     role_id: int,
@@ -271,8 +271,8 @@ async def add_permission_to_role(
              summary="Add a permission to a role by name",
              description=(
                  "Grant a permission to a role addressed by its slug name. "
-                 "`service_name` is one of `doris`, `kafka`, `opensearch`, `spark`. "
-                 "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`, `INDEX_READ`."
+                 "`service_name` is one of `doris`, `kafka`. "
+                 "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`."
              ))
 async def add_permission_to_role_by_name(
     role_name: str,
@@ -309,8 +309,8 @@ async def add_permission_to_role_by_name(
                summary="Remove a permission from a role",
                description=(
                    "Revoke a permission from a role using human-readable names. "
-                   "`service_name` is one of `doris`, `kafka`, `opensearch`, `spark`. "
-                   "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`, `INDEX_READ`."
+                   "`service_name` is one of `doris`, `kafka`. "
+                   "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`."
                ))
 async def remove_permission_from_role(
     role_id: int,
@@ -344,8 +344,8 @@ async def remove_permission_from_role(
                summary="Remove a permission from a role by name",
                description=(
                    "Revoke a permission from a role addressed by its slug name. "
-                   "`service_name` is one of `doris`, `kafka`, `opensearch`, `spark`. "
-                   "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`, `INDEX_READ`."
+                   "`service_name` is one of `doris`, `kafka`. "
+                   "`permission_name` is the permission token, e.g. `SELECT`, `CONSUME`."
                ))
 async def remove_permission_from_role_by_name(
     role_name: str,
