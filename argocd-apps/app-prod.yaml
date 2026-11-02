@@ -313,66 +313,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── OpenSearch (3-node HA cluster) ────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: opensearch
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "5"
-spec:
-  project: platform
-  sources:
-    - repoURL: https://opensearch-project.github.io/helm-charts/
-      chart: opensearch
-      targetRevision: "3.7.0"
-      helm:
-        releaseName: opensearch
-        valueFiles:
-          - $values/helm/opensearch/values.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── OpenSearch Dashboards ─────────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: opensearch-dashboards
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "6"
-spec:
-  project: platform
-  sources:
-    - repoURL: https://opensearch-project.github.io/helm-charts/
-      chart: opensearch-dashboards
-      targetRevision: "3.7.0"
-      helm:
-        releaseName: opensearch-dashboards
-        valueFiles:
-          - $values/helm/opensearch-dashboards/values.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── Apache Polaris (Iceberg catalog) ──────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -415,52 +355,6 @@ spec:
     directory:
       recurse: true
       exclude: "setup/*.sql"  # SQL DDL files are not K8s manifests — applied manually
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── Apache Spark (HA: 1 master + 3 workers) ──────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: spark
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "7"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/spark
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── Spark App Cleanup CronJob ─────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: spark-app-cleanup
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "8"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/spark-app-cleanup
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
@@ -581,48 +475,6 @@ spec:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/mcp/doris
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: mcp-opensearch
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "9"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/mcp/opensearch
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: mcp-spark
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "9"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/mcp/spark
   destination:
     server: https://kubernetes.default.svc
     namespace: prod

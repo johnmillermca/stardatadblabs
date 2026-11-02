@@ -5,7 +5,7 @@
 # Deps  : pyiceberg[s3] confluent-kafka pyarrow
 #
 # Built as:
-#   192.168.1.50:30500/tableflow:1.0.7   ← HTTP signal server on port 8090
+#   192.168.1.50:30500/tableflow:1.0.15  ← dynamic Polaris token auto-refresh
 # =============================================================================
 FROM python:3.11-slim
 

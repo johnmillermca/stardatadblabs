@@ -30,7 +30,7 @@
 #   GET  /healthz         — liveness/readiness probe
 #
 # Image:
-#   192.168.1.50:30500/tableflow:1.0.14
+#   192.168.1.50:30500/tableflow:1.0.15
 #   Built from docker/tableflow/Dockerfile
 # =============================================================================
 
@@ -48,6 +48,10 @@ data:
   BATCH_SIZE:                    "500"
   FLUSH_INTERVAL:                "10"
   TOPIC_REFRESH_INTERVAL:        "60"
+  # Rebuild the Polaris RestCatalog (re-authenticate) every 3000 s — safely
+  # within the 3600 s Polaris OAuth token TTL.  A reactive rebuild also fires
+  # immediately whenever a 401 is detected, so no writes are permanently lost.
+  CATALOG_REFRESH_INTERVAL:      "3000"
   DRY_RUN:                       "0"
   S3_BUCKET:                     "xdatatoiceberg1"
   ICEBERG_ACCESS_DELEGATION:     "none"
@@ -99,7 +103,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.14
+          image: 192.168.1.50:30500/tableflow:1.0.15
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -186,7 +190,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.14
+          image: 192.168.1.50:30500/tableflow:1.0.15
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -273,7 +277,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: tableflow
-          image: 192.168.1.50:30500/tableflow:1.0.14
+          image: 192.168.1.50:30500/tableflow:1.0.15
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

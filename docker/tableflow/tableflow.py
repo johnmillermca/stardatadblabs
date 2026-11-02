@@ -96,6 +96,10 @@ SIGNAL_PORT            = int(os.environ.get("SIGNAL_PORT", "8090"))
 # AWS STS endpoint or self-hosted S3), set to "none" to pass S3 keys directly.
 # Set to "vended-credentials" if the catalog should vend temporary STS creds.
 ICEBERG_ACCESS_DELEGATION = os.environ.get("ICEBERG_ACCESS_DELEGATION", "none")
+# Polaris OAuth tokens expire after 3600 s.  Proactively rebuild the catalog
+# every CATALOG_REFRESH_INTERVAL seconds so the token never expires mid-run.
+# Default 3000 s (50 min) — safely inside the 3600 s Polaris token TTL.
+CATALOG_REFRESH_INTERVAL = int(os.environ.get("CATALOG_REFRESH_INTERVAL", "3000"))
 
 _VALID_SOURCES = ("postgres", "oracle", "mongodb")
 if SOURCE not in _VALID_SOURCES:
@@ -805,11 +809,43 @@ class TableFlow:
         self._buffers:  dict[str, list[dict]] = {}
         self._offsets:  dict[tuple, int] = {}   # (topic, partition) → offset
         self._last_flush = time.monotonic()
-        self._last_topic_refresh = time.monotonic()
+        self._last_topic_refresh   = time.monotonic()
+        self._last_catalog_refresh = time.monotonic()
 
     def _stop(self, *_: Any) -> None:
         log.info("Shutdown signal received.")
         self._running = False
+
+    def _rebuild_catalog(self, reason: str = "scheduled") -> None:
+        """
+        Re-authenticate with Polaris by constructing a brand-new RestCatalog.
+
+        PyIceberg's RestCatalog fetches an OAuth2 token during __init__ and
+        caches it internally for the lifetime of the object.  Polaris tokens
+        expire after 3600 s.  Rather than patching PyIceberg internals, we
+        simply replace self.catalog with a fresh instance — this forces a new
+        OAuth handshake and a fresh token with zero downtime.
+
+        Called in two situations:
+          1. Proactively every CATALOG_REFRESH_INTERVAL seconds (default 3000 s)
+             so the token never silently expires between flushes.
+          2. Reactively when _flush() catches a RESTError 401 — the bad catalog
+             is swapped out immediately so the next retry succeeds.
+        """
+        log.info("[catalog] Rebuilding RestCatalog (reason=%s) …", reason)
+        try:
+            creds = load_credentials()
+            self.catalog  = make_catalog(creds)
+            self._creds   = creds
+            self._last_catalog_refresh = time.monotonic()
+            log.info("[catalog] RestCatalog rebuilt successfully — fresh token obtained.")
+        except Exception as exc:
+            log.error("[catalog] Rebuild failed: %s — will retry on next cycle.", exc)
+
+    def _refresh_catalog_if_needed(self) -> None:
+        """Proactively rebuild the catalog before the Polaris token expires."""
+        if time.monotonic() - self._last_catalog_refresh >= CATALOG_REFRESH_INTERVAL:
+            self._rebuild_catalog(reason="scheduled")
 
     def _discover_topics_from_kafka(self) -> list[str]:
         """
@@ -909,7 +945,16 @@ class TableFlow:
                 written = write_hist_batch(self.catalog, table_id, rows)
             log.info("[%s/%s] flushed %d rows → Iceberg snapshot committed", SOURCE, table_id, written)
         except Exception as exc:
-            log.error("[%s/%s] write failed: %s — will retry on next batch", SOURCE, table_id, exc)
+            err_str = str(exc)
+            # ── 401 Unauthorized: Polaris token has expired ───────────────────
+            # Rebuild the catalog immediately so the next flush cycle succeeds
+            # without waiting for the proactive CATALOG_REFRESH_INTERVAL timer.
+            if "401" in err_str:
+                log.warning("[%s/%s] 401 detected — rebuilding catalog for fresh token …",
+                            SOURCE, table_id)
+                self._rebuild_catalog(reason="401-reactive")
+            else:
+                log.error("[%s/%s] write failed: %s — will retry on next batch", SOURCE, table_id, exc)
             return   # do NOT clear buffer or commit offsets on failure
 
         self._buffers[topic] = []
@@ -949,6 +994,9 @@ class TableFlow:
                     open("/tmp/tableflow.alive", "w").close()
                 except Exception:
                     pass
+
+            # Proactive catalog token refresh — before Polaris token expires
+            self._refresh_catalog_if_needed()
 
             # Periodic new-table discovery — re-subscribe if new topics appeared
             self._refresh_topics_if_needed()

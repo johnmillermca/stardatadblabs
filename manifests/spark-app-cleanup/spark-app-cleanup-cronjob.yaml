@@ -1,26 +1,16 @@
----
 # =============================================================================
-# Spark Orphan App Cleanup — RBAC
-# =============================================================================
+# spark-cleanup ServiceAccount + RBAC
+# =====================================
+# The spark-cleanup ServiceAccount is shared by several non-Spark workloads:
+#   - tableflow pods       (OpenBao credential lookups via K8s SA JWT)
+#   - ksqldb-new-table-watcher CronJob
+#   - polaris-bootstrap Job
 #
-# spark-guardian sidecar (spark-master pod) handles all cleanup dynamically —
-# polls localhost:8080/json/ every 15s, evicts stalled apps, and autoscales
-# the spark-worker Deployment up/down via the K8s API.
-#
-# Two ServiceAccounts:
-#   spark-cleanup   — kept for the manual ad-hoc kill tool (kubectl exec)
-#   spark-guardian  — used by the spark-master pod; needs deployment scale RBAC
-#
-# Manual one-shot kill (ad-hoc)
-# ----------------------------------------------------------------
-#   SPARK_POD=$(kubectl get pods -n prod -l app=spark,component=master \
-#     --no-headers -o custom-columns=NAME:.metadata.name | head -1)
-#   kubectl exec -n prod $SPARK_POD -c spark-master -- \
-#     /usr/local/bin/spark-app-cleanup
-#
+# Spark has been removed from the platform; this manifest retains only the
+# ServiceAccount and its minimal RBAC so those workloads continue to function.
 # =============================================================================
 
-# ── spark-cleanup: manual ad-hoc kill tool ───────────────────────────────────
+# ── spark-cleanup ServiceAccount ─────────────────────────────────────────────
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -52,37 +42,4 @@ subjects:
 roleRef:
   kind: Role
   name: spark-cleanup
-  apiGroup: rbac.authorization.k8s.io
-
-# ── spark-guardian: used by spark-master pod ─────────────────────────────────
-# Needs to GET and PATCH the spark-worker Deployment replicas for autoscaling.
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: spark-guardian
-  namespace: prod
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: spark-guardian
-  namespace: prod
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: spark-guardian
-  namespace: prod
-subjects:
-  - kind: ServiceAccount
-    name: spark-guardian
-    namespace: prod
-roleRef:
-  kind: Role
-  name: spark-guardian
   apiGroup: rbac.authorization.k8s.io
