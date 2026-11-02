@@ -6,67 +6,16 @@
 #
 # Listeners   :
 #   INTERNAL port 9092 — SCRAM-SHA-512, in-cluster only
-#             Used exclusively by Strimzi operators (topic/user operator).
-#             NOT exposed to end-users.
-#   KRB      port 9093 — GSSAPI/Kerberos, in-cluster
-#             THE ONLY USER-FACING LISTENER.
-#             Requires a valid Kerberos TGT (kinit / keytab).
-#             No KDC principal = no ticket = connection refused at SASL handshake.
+#             Used by Strimzi operators (topic/user operator) and applications.
 #
-# NOTE: External SCRAM NodePort (9094/30093) has been REMOVED.
-#       Users must authenticate via Kerberos on port 9093.
-#
-# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092 (operators)
-#               strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093 (users/GSSAPI)
+# Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
 # Kafka ver   : 4.2.0 (matches installed Strimzi operator)
 # PVC         : 250Gi on /home (worker5.local) — reclaimPolicy: Retain
 #               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
 #               hostPath: /home/local-path-provisioner/
 #                 pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
-# Kerberos    : GSSAPI listener (port 9093) — active, KDC-enforced.
-#               Principal: svc/kafka@STARDATADBLABS.LOCAL (secret: kafka-keytab)
-#               Stripped username (alice, not alice@STARDATADBLABS.LOCAL)
-#               because sasl.kerberos.principal.to.local.rules: DEFAULT strips realm.
-#               Inter-broker protocol: SCRAM-SHA-512 on port 9092 (overrides Strimzi
-#               auto-detection which would otherwise set GSSAPI and crash the broker).
 # =============================================================================
 
----
-# ── Kafka GSSAPI JAAS configuration (kerberos.enabled=true) ────────────────
-# Kafka requires a server-side JAAS file with a 'KafkaServer' stanza when any
-# listener uses GSSAPI. The KRB listener config supplies the client-facing JAAS
-# via listenerConfig, but the JVM still requires java.security.auth.login.config
-# to point at a file containing a KafkaServer entry.
-# This ConfigMap is mounted at /mnt/kafka-jaas/jaas.conf.
-# The KAFKA_OPTS env var must include:
-#   -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
-#   -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
-# Principal: svc/kafka@STARDATADBLABS.LOCAL, keytab: /mnt/kafka-keytab/keytab
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kafka-gssapi-jaas
-  namespace: prod
-  labels:
-    argocd.argoproj.io/instance: strimzi-kafka
-data:
-  jaas.conf: |
-    KafkaServer {
-      com.sun.security.auth.module.Krb5LoginModule required
-      useKeyTab=true
-      storeKey=true
-      keyTab="/mnt/kafka-keytab/keytab"
-      principal="svc/kafka@STARDATADBLABS.LOCAL"
-      isInitiator=false;
-    };
-
-    KafkaClient {
-      com.sun.security.auth.module.Krb5LoginModule required
-      useKeyTab=true
-      storeKey=true
-      keyTab="/mnt/kafka-keytab/keytab"
-      principal="svc/kafka@STARDATADBLABS.LOCAL";
-    };
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
@@ -135,41 +84,6 @@ spec:
       # on the next boot, widening the window where the operator races controller
       # election and stamps NotReady on the Kafka CR.
       terminationGracePeriodSeconds: 120
-      volumes:
-        # ── krb5.conf — always present ─────────────────────────────────────
-        - name: krb5-conf
-          configMap:
-            name: kerberos-integration-config
-            items:
-              - key: krb5.conf
-                path: krb5.conf
-        # ── Kerberos volumes (active) ──────────────────────────────────────
-        - name: kafka-keytab
-          secret:
-            secretName: kafka-keytab
-        - name: kafka-jaas
-          configMap:
-            name: kafka-gssapi-jaas
-    kafkaContainer:
-      env:
-        # JAAS config is required so the JVM can find the KafkaServer entry
-        # for GSSAPI. Without this flag the broker crashes with:
-        #   "Could not find a 'KafkaServer' entry in the JAAS configuration"
-        - name: KAFKA_OPTS
-          value: >-
-            -Djava.security.krb5.conf=/mnt/krb5-conf/cluster.conf
-            -Djava.security.auth.login.config=/mnt/kafka-jaas/jaas.conf
-      volumeMounts:
-        # krb5.conf — always mounted (harmless when Kerberos disabled)
-        - name: krb5-conf
-          mountPath: /mnt/krb5-conf/cluster.conf
-          subPath: krb5.conf
-        # ── Kerberos keytab + JAAS mounts (active) ─────────────────────────
-        - name: kafka-keytab
-          mountPath: /mnt/kafka-keytab
-        - name: kafka-jaas
-          mountPath: /mnt/kafka-jaas
-
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: Kafka
@@ -185,43 +99,14 @@ spec:
     metadataVersion: "4.2-IV1"
     image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
     listeners:
-      # ── Internal SCRAM listener — operators ONLY ──────────────────────────
-      # Strimzi topic/user operators use this listener.
-      # Users MUST NOT connect here. KDC enforcement is on port 9093 (krb).
+      # ── Internal SCRAM listener ────────────────────────────────────────────
+      # Used by Strimzi operators and in-cluster applications.
       - name: plain
         port: 9092
         type: internal
         tls: false
         authentication:
           type: scram-sha-512
-      # ── Kerberos GSSAPI listener — USER-FACING, KDC-enforced ─────────────
-      # This is the ONLY listener users connect to. A valid Kerberos TGT is
-      # required. No KDC principal → kinit fails → no ticket → SASL rejected.
-      # Inter-broker protocol is overridden to SCRAM-SHA-512 (see config below)
-      # so adding this GSSAPI listener does NOT break broker-to-broker comms.
-      # Client config:
-      #   security.protocol=SASL_PLAINTEXT
-      #   sasl.mechanism=GSSAPI
-      #   sasl.kerberos.service.name=svc
-      #   bootstrap.servers=strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9093
-      - name: krb
-        port: 9093
-        type: internal
-        tls: false
-        authentication:
-          type: custom
-          sasl: true
-          listenerConfig:
-            sasl.enabled.mechanisms: GSSAPI
-            sasl.kerberos.service.name: svc
-            listener.name.krb.gssapi.sasl.jaas.config: >-
-              com.sun.security.auth.module.Krb5LoginModule required
-              useKeyTab=true
-              storeKey=true
-              keyTab="/mnt/kafka-keytab/keytab"
-              principal="svc/kafka@STARDATADBLABS.LOCAL"
-              isInitiator=false;
-            sasl.kerberos.principal.to.local.rules: DEFAULT
     # ── Broker readiness / liveness probes ────────────────────────────────────
     # Strimzi 1.x does not expose startupProbe on spec.kafka — use a generous
     # initialDelaySeconds on readinessProbe instead to give KRaft enough time
@@ -245,13 +130,6 @@ spec:
       failureThreshold: 5       # allow up to 2.5 min of GC/compaction without restart
     config:
       allow.everyone.if.no.acl.found: "true"
-      # ── Inter-broker protocol override — CRITICAL for GSSAPI listener ────
-      # When Strimzi detects any GSSAPI listener it auto-sets inter-broker
-      # protocol to GSSAPI, which breaks broker comms (no inter-broker keytab
-      # for GSSAPI). Explicitly setting SCRAM-SHA-512 here overrides that
-      # auto-detection and keeps inter-broker traffic on the plain:9092 SCRAM
-      # listener. This is the fix for the previous crash:
-      #   "sasl.mechanism.inter.broker.protocol=GSSAPI but no KafkaServer entry"
       sasl.mechanism.inter.broker.protocol: SCRAM-SHA-512
       inter.broker.listener.name: plain
       offsets.topic.replication.factor: "1"

@@ -5,7 +5,7 @@
 # and restores them to their original replica count on demand via a REST API.
 #
 # ── ALWAYS-ON (never touched) ────────────────────────────────────────────────
-#  (a) Doris          — doris-fe, doris-be, doris-write-proxy, doris-cache-manager
+#  (a) Doris          — doris-fe, doris-be
 #  (b) Kafka          — strimzi-*, strimzi-kafka-*, schema-registry
 #  (c) ArgoCD         — entire argocd namespace
 #  (d) Lakehouse UI   — lakehouse-ui
@@ -13,18 +13,13 @@
 # ── INFRASTRUCTURE (never touched — cluster would break) ────────────────────
 #      kube-system/*, local-path-storage/*, registry/*
 #      prod/openbao, prod/openbao-agent-injector   (secrets engine)
-#      prod/kerberos-kdc                           (Kerberos auth)
 #      prod/postgresql, prod/mongodb               (source DBs)
 #      prod/oracle-xe                              (source DB)
-#      prod/redis                                  (session store for hub/kestra)
-#      prod/proxy                                  (JupyterHub proxy)
-#      prod/rbac-plane                             (auth plane)
 #      prod/polaris, prod/polaris-auth-proxy,
 #      prod/polaris-tls-proxy                      (Iceberg REST catalog)
 #
 # ── SCALEABLE (scaled to 0 when idle, restored on wake) ─────────────────────
-#      prod/kestra, prod/hub
-#      prod/mcp-doris, prod/mcp-kafka, prod/mcp-kestra, prod/mcp-sqlmesh
+#      prod/mcp-doris, prod/mcp-kafka, prod/mcp-sqlmesh
 #      prod/sqlmesh
 #      prod/star-knowledge-catalog
 #      monitoring/grafana, monitoring/mcp-grafana, monitoring/mcp-prometheus
@@ -34,7 +29,7 @@
 #
 # ── WAKE-UP API ──────────────────────────────────────────────────────────────
 # POST http://cluster-idle-scaler.prod.svc.cluster.local:8090/wake
-#      body: {"group": "monitoring"}   or  {"name": "kestra", "namespace": "prod"}
+#      body: {"group": "monitoring"}   or  {"name": "sqlmesh", "namespace": "prod"}
 #
 # GET  http://cluster-idle-scaler.prod.svc.cluster.local:8090/status
 #      returns JSON list of all tracked workloads with state + idle seconds
@@ -169,14 +164,9 @@ data:
     #   doris, kafka, argocd, lakehouse-ui, infrastructure
 
     SCALEABLE = [
-        # ── JupyterHub ────────────────────────────────────────────────────────
-        ("prod", "hub",                                   "Deployment",  "jupyterhub"),
-        # ── Kestra ───────────────────────────────────────────────────────────
-        ("prod", "kestra",                                "Deployment",  "kestra"),
         # ── MCP servers ──────────────────────────────────────────────────────
         ("prod", "mcp-doris",                             "Deployment",  "mcp"),
         ("prod", "mcp-kafka",                             "Deployment",  "mcp"),
-        ("prod", "mcp-kestra",                            "Deployment",  "mcp"),
         ("prod", "mcp-sqlmesh",                           "Deployment",  "mcp"),
         # ── SQLMesh ──────────────────────────────────────────────────────────
         ("prod", "sqlmesh",                               "Deployment",  "sqlmesh"),

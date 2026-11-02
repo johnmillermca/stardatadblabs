@@ -1,6 +1,6 @@
 # =============================================================================
 # MCP Servers — single ArgoCD Application syncing all MCP server manifests
-# Covers: sqlmesh-mcp, doris-mcp, kafka-mcp, kestra-mcp
+# Covers: sqlmesh-mcp, kafka-mcp
 # Each is in its own subdirectory under manifests/mcp/
 # =============================================================================
 ---
@@ -30,29 +30,6 @@ spec:
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: mcp-doris
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/mcp/doris
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: analytics
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-      - ServerSideApply=true
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
   name: mcp-kafka
   namespace: argocd
   finalizers: [resources-finalizer.argocd.io]
@@ -65,29 +42,6 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: streaming
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-      - ServerSideApply=true
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: mcp-kestra
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/mcp/kestra
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
   syncPolicy:
     automated:
       prune: true

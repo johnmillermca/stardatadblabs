@@ -3,34 +3,9 @@
 # Namespace : prod
 # Node      : worker1.local
 # Access    : http://192.168.1.50:30030 (HTTP/WebUI)
-#             jdbc:mysql://192.168.1.50:30090 (MySQL — routes through krb-doris-guard)
+#             jdbc:mysql://192.168.1.50:30090 (MySQL — port 9030)
 # Secret    : doris-credentials  (key: admin-password)
 # PVC       : 100Gi on /home (worker1.local)
-#
-# Kerberos enforcement — krb-doris-guard sidecar:
-#   Doris 4.0.x has no native Kerberos/GSSAPI. The krb-doris-guard sidecar
-#   implements KDC enforcement at the MySQL protocol layer.
-#
-#   Architecture:
-#     Client → :19030 (guard) → KDC check → :9030 (Doris FE)
-#
-#   The guard:
-#     1. Intercepts the MySQL HandshakeResponse and extracts the username.
-#     2. Runs:  kadmin -kt <KADMIN_KEYTAB> -p kadmin/admin@REALM getprinc <user>@REALM
-#        Direct admin lookup — no password exchange, no anonymous PKINIT, no
-#        allow_anonymous required in KDC config. Keytab mounted from K8s secret
-#        'kadmin-keytab' (created from KDC's /var/kerberos/krb5kdc/kadm5.keytab).
-#     3. If the principal does NOT exist → MySQL ERR_Packet 1045 (Access denied).
-#     4. If the principal DOES exist → transparent proxy to Doris :9030.
-#        Doris validates the password; Doris enforces authorization natively.
-#
-#   The Service routes port 9030 → guard port 19030 (not Doris port 9030).
-#   Doris FE is only accessible via the guard; port 9030 is not exposed directly.
-#   root is exempt (EXEMPT_USERS=root) so admin operations are unaffected.
-#
-#   Doris SQL users and passwords:
-#     alice (analyst)    — password stored in OpenBao: secret/doris/users/alice
-#     bob   (data_admin) — password stored in OpenBao: secret/doris/users/bob
 # =============================================================================
 ---
 apiVersion: v1
@@ -107,53 +82,6 @@ spec:
             - name: fe-config-rw
               mountPath: /config-rw
       containers:
-        # ── krb-doris-guard sidecar ──────────────────────────────────────────
-        # Listens on :19030, validates KDC principal, proxies to Doris :9030.
-        # Built from docker/krb-doris-guard/ — see build-and-push.sh.
-        - name: krb-doris-guard
-          image: 192.168.1.50:30500/krb-doris-guard:1.0.1
-          env:
-            - name: KDC_REALM
-              value: "STARDATADBLABS.LOCAL"
-            - name: KRB5_CONFIG
-              value: "/etc/krb5.conf.d/cluster.conf"
-            - name: KADMIN_KEYTAB
-              value: "/etc/security/keytabs/kadmin.keytab"
-            - name: KADMIN_PRINCIPAL
-              value: "kadmin/admin@STARDATADBLABS.LOCAL"
-            - name: DORIS_HOST
-              value: "127.0.0.1"
-            - name: DORIS_PORT
-              value: "9030"
-            - name: LISTEN_PORT
-              value: "19030"
-            - name: EXEMPT_USERS
-              value: "root"
-            - name: LOG_LEVEL
-              value: "INFO"
-          ports:
-            - name: guard-mysql
-              containerPort: 19030
-          volumeMounts:
-            - name: krb5-conf
-              mountPath: /etc/krb5.conf.d/cluster.conf
-              subPath: krb5.conf
-            - name: kadmin-keytab
-              mountPath: /etc/security/keytabs/kadmin.keytab
-              subPath: keytab
-          resources:
-            requests:
-              memory: 64Mi
-              cpu: 50m
-            limits:
-              memory: 128Mi
-              cpu: 200m
-          readinessProbe:
-            tcpSocket:
-              port: 19030
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
         # ── Doris FE ─────────────────────────────────────────────────────────
         - name: doris-fe
           image: 192.168.1.50:30500/apache/doris:fe-4.0.7-ranger
@@ -181,17 +109,6 @@ spec:
               subPath: fe.conf
             - name: fe-meta
               mountPath: /opt/apache-doris/fe/doris-meta
-            # ── Kerberos (Phase 1 — prep, no auth change) ────────────────────
-            # krb5.conf included by /etc/krb5.conf via includedir — gives JVM
-            # JAAS the correct KDC address when Kerberos is later enabled.
-            - name: krb5-conf
-              mountPath: /etc/krb5.conf.d/cluster.conf
-              subPath: krb5.conf
-            # doris-keytab is pre-staged; used when LDAP/SPNEGO auth is enabled
-            # (Phase 5 — requires FreeIPA or 389-DS LDAP server).
-            - name: doris-keytab
-              mountPath: /etc/security/keytabs/doris.service.keytab
-              subPath: keytab
           resources:
             requests:
               memory: 512Mi
@@ -215,16 +132,3 @@ spec:
         - name: fe-meta
           persistentVolumeClaim:
             claimName: doris-fe-meta
-        # ── Kerberos volumes ─────────────────────────────────────────────────
-        - name: krb5-conf
-          configMap:
-            name: kerberos-integration-config
-            items:
-              - key: krb5.conf
-                path: krb5.conf
-        - name: doris-keytab
-          secret:
-            secretName: doris-keytab
-        - name: kadmin-keytab
-          secret:
-            secretName: kadmin-keytab

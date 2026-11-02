@@ -115,29 +115,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── Kerberos KDC ──────────────────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: kerberos
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/kerberos
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -339,36 +316,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── JupyterHub ────────────────────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: jupyterhub
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "8"
-spec:
-  project: platform
-  sources:
-    - repoURL: https://hub.jupyter.org/helm-chart/
-      chart: jupyterhub
-      targetRevision: "4.4.0"
-      helm:
-        releaseName: jupyterhub
-        valueFiles:
-          - $values/helm/jupyterhub/values.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── SQLMesh ───────────────────────────────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -392,29 +339,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── Kestra (HA: 2 replicas) ───────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: kestra
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "8"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/kestra
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── MCP Servers (shared — accessible from prod namespace) ─────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -431,27 +355,6 @@ spec:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/mcp/sqlmesh
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: mcp-doris
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "9"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/mcp/doris
   destination:
     server: https://kubernetes.default.svc
     namespace: prod

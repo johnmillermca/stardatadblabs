@@ -1,9 +1,9 @@
 # =============================================================================
 # prod namespace — ALL platform workloads
-#   databases (postgresql, mongodb, oracle), kerberos, openbao,
+#   databases (postgresql, mongodb, oracle), openbao,
 #   streaming (kafka/strimzi, schema-registry),
-#   analytics (doris, jupyterhub, sqlmesh),
-#   catalog (polaris), orchestration (kestra),
+#   analytics (doris, sqlmesh),
+#   catalog (polaris),
 #   registry, MCP servers
 #
 # HA sizing: 60 CPU req / 120 CPU lim  |  120 Gi mem req / 240 Gi lim

@@ -12,7 +12,7 @@
 #   - reach etcd via 127.0.0.1:2379
 #   - read /etc/kubernetes/pki
 #   - read /home/local-path-provisioner PV directories
-#   - exec into prod pods (postgresql, kerberos-kdc) via kubectl
+#   - exec into prod pods (postgresql) via kubectl
 #
 # APPLY
 # -----
