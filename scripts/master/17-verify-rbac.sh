@@ -30,7 +30,7 @@ if [[ -z "${KDC_POD}" ]]; then
   fail "KDC pod not found — skipping Kerberos checks"
 else
   for principal in \
-      "svc/doris" "svc/spark" "svc/sqlmesh" "svc/kestra" \
+      "svc/stardata" "svc/spark" "svc/sqlmesh" "svc/kestra" \
       "svc/kafka" "svc/schema-registry" "svc/debezium" "svc/opensearch" \
       "platform_admin" \
       "caching_admin_user" "caching_dev_user" \
@@ -50,7 +50,7 @@ fi
 # 2. Keytab secrets exist
 # ─────────────────────────────────────────────────────────────────────────────
 log "=== Checking Keytab Secrets ==="
-for secret in doris-keytab spark-keytab sqlmesh-keytab kestra-keytab \
+for secret in stardata-keytab spark-keytab sqlmesh-keytab kestra-keytab \
               kafka-keytab schema-registry-keytab debezium-keytab \
               opensearch-keytab polaris-keytab; do
   if kubectl get secret "${secret}" -n ${NAMESPACE} -o name \
@@ -62,25 +62,25 @@ for secret in doris-keytab spark-keytab sqlmesh-keytab kestra-keytab \
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Doris access check — caching_dev can connect
+# 3. Stardata access check — caching_dev can connect
 # ─────────────────────────────────────────────────────────────────────────────
-log "=== Checking Doris Access (functional) ==="
+log "=== Checking Stardata Access (functional) ==="
 DEV_PASS_RAW=$(kubectl get secret rbac-users -n ${NAMESPACE} \
   -o jsonpath='{.data.caching_dev_user-password}' | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
 
 if [[ -z "${DEV_PASS_RAW}" ]]; then
-  fail "Cannot read caching_dev_user password from rbac-users secret — skipping Doris check"
+  fail "Cannot read caching_dev_user password from rbac-users secret — skipping Stardata check"
 else
-  FE_POD=$(kubectl get pod -n ${NAMESPACE} -l app=doris-fe \
+  FE_POD=$(kubectl get pod -n ${NAMESPACE} -l app=stardata-fe \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
   if [[ -z "${FE_POD}" ]]; then
-    fail "Doris FE pod not found — skipping Doris functional check"
+    fail "Stardata FE pod not found — skipping Stardata functional check"
   else
-    DORIS_ADMIN_PASS=$(kubectl get secret doris-credentials -n ${NAMESPACE} \
+    STARDATA_ADMIN_PASS=$(kubectl get secret stardata-credentials -n ${NAMESPACE} \
       -o jsonpath='{.data.admin-password}' | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
 
     kubectl exec -n ${NAMESPACE} ${FE_POD} -- \
-      mysql -h 127.0.0.1 -P 9030 -u root -p"${DORIS_ADMIN_PASS}" \
+      mysql -h 127.0.0.1 -P 9030 -u root -p"${STARDATA_ADMIN_PASS}" \
         -e "CREATE USER IF NOT EXISTS 'caching_dev_user'@'%' IDENTIFIED BY '${DEV_PASS_RAW}';" \
         > /dev/null 2>&1 || true
 
@@ -88,9 +88,9 @@ else
       mysql -h 127.0.0.1 -P 9030 -u caching_dev_user -p"${DEV_PASS_RAW}" \
         -e "SHOW DATABASES;" 2>&1 || true)
     if echo "${SELECT_RESULT}" | grep -qi "error 1045\|Access denied"; then
-      fail "Doris: caching_dev_user cannot connect — check user creation or password"
+      fail "Stardata: caching_dev_user cannot connect — check user creation or password"
     else
-      pass "Doris: caching_dev_user can connect and list databases"
+      pass "Stardata: caching_dev_user can connect and list databases"
     fi
   fi
 fi

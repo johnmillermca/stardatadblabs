@@ -577,7 +577,7 @@ print("  df = catalog.load_table((ns, tbl)).scan(snapshot_id=<id>).to_arrow().to
 # Cell 9 — Append rows (INSERT)
 #
 # Writes a new snapshot directly to S3.
-# Spark / Doris see it on their next read — no catalog update needed.
+# Spark / Stardata see it on their next read — no catalog update needed.
 # =============================================================================
 
 import pyarrow as pa

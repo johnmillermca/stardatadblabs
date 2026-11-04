@@ -54,13 +54,13 @@ class Settings(BaseSettings):
     # Master bootstrap token accepted as admin without a user record
     master_token: str = "changeme-catalog-master-token"
 
-    # ── Apache Doris ────────────────────────────────────────
-    doris_host: str = "doris-fe.prod.svc.cluster.local"
-    doris_port: int = 9030
-    doris_admin_user: str = "root"
-    doris_admin_password: str = ""
-    # The Doris database that contains the governance demo tables
-    doris_demo_database: str = "governance_demo"
+    # ── Apache Stardata ────────────────────────────────────────
+    stardata_host: str = "stardata-fe.prod.svc.cluster.local"
+    stardata_port: int = 9030
+    stardata_admin_user: str = "root"
+    stardata_admin_password: str = ""
+    # The Stardata database that contains the governance demo tables
+    stardata_demo_database: str = "governance_demo"
     # Suffix appended to every base table name to form the masked view name
     masked_view_suffix: str = "_masked"
 

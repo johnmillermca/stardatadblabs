@@ -1,0 +1,185 @@
+# =============================================================================
+# Apache Stardata BE (Backend) — ConfigMap + Headless Service + StatefulSet
+# Namespace : prod
+# Nodes     : worker2.local, worker3.local, worker4.local (dedicated, exclusive)
+# Replicas  : 3  (data replication factor 3 — one shard copy per BE node)
+# Connects  : to FE via headless FQDN stardata-fe-headless.prod.svc.cluster.local
+# PVCs      : stardata-be-storage-stardata-be-{0,1,2} — 400Gi each on /home
+#             provisioned via volumeClaimTemplates + static PVs in pv-retain.yaml
+#
+# With 3 BE nodes and replication_num = 3, every tablet has a copy on every BE.
+# This means the cluster tolerates the loss of any single BE node with no data
+# loss and no query degradation.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stardata-be-config
+  namespace: prod
+data:
+  be.conf: |
+    sys_log_level = INFO
+    be_port = 9060
+    webserver_port = 8040
+    heartbeat_service_port = 9050
+    brpc_port = 8060
+
+    # ── Storage ─────────────────────────────────────────────────────────────────
+    # Each BE pod has its own PVC (400Gi) mounted at /opt/apache-doris/be/storage.
+    storage_root_path = /opt/apache-doris/be/storage
+
+    # ── Segment (File) Cache — Stardata 4.2 ─────────────────────────────────────
+    # Local segment cache reduces repeated remote reads for hot tablet data.
+    #   total_size  — 200 GB per BE node
+    #   query_limit — max bytes a single query may pin (50 GB)
+    enable_file_cache = true
+    file_cache_path = [{"path":"/opt/apache-doris/be/storage/segment_cache","total_size":214748364800,"query_limit":53687091200}]
+
+    JAVA_OPTS = "-Xmx1024m -DlogPath=$STARDATA_HOME/log/jni.log"
+---
+# Headless service — required by StatefulSet for stable per-pod DNS
+# (stardata-be-0.stardata-be-headless, -1, -2)
+apiVersion: v1
+kind: Service
+metadata:
+  name: stardata-be-headless
+  namespace: prod
+  labels:
+    app: stardata-be
+    component: be
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: stardata-be
+    component: be
+  ports:
+    - name: heartbeat
+      port: 9050
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stardata-be
+  namespace: prod
+  labels:
+    app: stardata-be
+    component: be
+spec:
+  replicas: 3
+  serviceName: stardata-be-headless
+  podManagementPolicy: Parallel   # All 3 BEs start concurrently — FE handles registration
+  selector:
+    matchLabels:
+      app: stardata-be
+  template:
+    metadata:
+      labels:
+        app: stardata-be
+        component: be
+    spec:
+      # ── Tolerate the dedicated=stardata taint on worker2/3/4 ───────────────
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "stardata"
+          effect: "NoSchedule"
+      # ── Spread pods across worker2, worker3, worker4 ───────────────────────
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: stardata
+                    operator: In
+                    values: ["true"]
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: stardata-be
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: copy-be-config
+          image: 192.168.1.50:30500/busybox:1.36
+          command: ["sh", "-c", "cp /config-ro/be.conf /config-rw/be.conf"]
+          volumeMounts:
+            - name: be-config
+              mountPath: /config-ro
+            - name: be-config-rw
+              mountPath: /config-rw
+      containers:
+        - name: stardata-be
+          image: 192.168.1.50:30500/apache/stardata:be-4.2
+          command:
+            - sh
+            - -c
+            - |
+              ulimit -n 524288
+              exec /opt/apache-doris/be_entrypoint.sh stardata-fe-headless.prod.svc.cluster.local
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: BE_ADDR
+              value: "$(POD_IP):9050"
+          ports:
+            - name: be-port
+              containerPort: 9060
+            - name: webserver
+              containerPort: 8040
+            - name: heartbeat
+              containerPort: 9050
+            - name: brpc
+              containerPort: 8060
+          volumeMounts:
+            - name: be-config-rw
+              mountPath: /opt/apache-doris/be/conf/be.conf
+              subPath: be.conf
+            - name: be-storage
+              mountPath: /opt/apache-doris/be/storage
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: "2"
+          # ── Probes ─────────────────────────────────────────────────────────
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8040
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 20   # 30 + 20×15 = 330s max startup window
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8040
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 5    # 5×15 = 75s tolerance for transient failures
+      volumes:
+        - name: be-config
+          configMap:
+            name: stardata-be-config
+        - name: be-config-rw
+          emptyDir: {}
+  # ── volumeClaimTemplates — each BE pod gets its own 400Gi storage PVC ──────
+  # PVs must be pre-created in pv-retain.yaml with matching claimRef names:
+  #   stardata-be-storage-stardata-be-0  → worker2.local /home/...
+  #   stardata-be-storage-stardata-be-1  → worker3.local /home/...
+  #   stardata-be-storage-stardata-be-2  → worker4.local /home/...
+  volumeClaimTemplates:
+    - metadata:
+        name: be-storage
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 400Gi

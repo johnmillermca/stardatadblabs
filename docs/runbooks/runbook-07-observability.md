@@ -18,7 +18,7 @@
 │  │  kube-state-metrics  node-exporter (all nodes)                 │     │
 │  │  kestra (orchestration)    kafka JMX (streaming)               │     │
 │  │  opensearch (search)       postgresql (databases)              │     │
-│  │  doris-fe (analytics)      spark (analytics)                   │     │
+│  │  stardata-fe (analytics)      spark (analytics)                   │     │
 │  │  openbao (prod)            argocd (argocd)                     │     │
 │  │  mcp-prometheus  mcp-grafana                                   │     │
 │  └──────────────────────────┬─────────────────────────────────────┘     │
@@ -44,7 +44,7 @@
 │  │  mcp-grafana     Port 3201 / NodePort 30321  (Dashboard tools)  │    │
 │  │  mcp-kafka       Port 3202 / NodePort 30322  (Topic tools)      │    │
 │  │  mcp-opensearch  Port 3203 / NodePort 30323  (Search tools)     │    │
-│  │  mcp-doris       Port 3204 / NodePort 30324  (SQL tools)        │    │
+│  │  mcp-stardata       Port 3204 / NodePort 30324  (SQL tools)        │    │
 │  │  mcp-kestra      Port 3205 / NodePort 30325  (Flow tools)       │    │
 │  │  mcp-spark       Port 3206 / NodePort 30326  (Job tools)        │    │
 │  │  mcp-sqlmesh     Port 3207 / NodePort 30310  (Transform tools)  │    │
@@ -338,7 +338,7 @@ Model Context Protocol (MCP) servers expose platform APIs as **structured tools*
 | **mcp-grafana** | `http://192.168.1.50:30321/mcp` | `list_dashboards`, `get_dashboard`, `search_dashboards`, `list_datasources`, `query_datasource` |
 | **mcp-kafka** | `http://192.168.1.50:30322/mcp` | `list_topics`, `describe_topic`, `list_consumer_groups`, `get_consumer_lag` |
 | **mcp-opensearch** | `http://192.168.1.50:30323/mcp` | `search`, `get_index_stats`, `list_indices`, `get_cluster_health` |
-| **mcp-doris** | `http://192.168.1.50:30324/mcp` | `execute_sql`, `list_databases`, `describe_table`, `get_query_profile` |
+| **mcp-stardata** | `http://192.168.1.50:30324/mcp` | `execute_sql`, `list_databases`, `describe_table`, `get_query_profile` |
 | **mcp-kestra** | `http://192.168.1.50:30325/mcp` | `list_flows`, `trigger_execution`, `get_execution_status`, `get_logs` |
 | **mcp-spark** | `http://192.168.1.50:30326/mcp` | `submit_job`, `list_applications`, `get_job_status`, `get_stages` |
 | **mcp-sqlmesh** | `http://192.168.1.50:30310/mcp` | `sqlmesh_plan`, `sqlmesh_run`, `sqlmesh_audit`, `sqlmesh_list_models`, `sqlmesh_fetchdf` |
@@ -350,7 +350,7 @@ bash docker/mcp-prometheus/build-and-push.sh
 bash docker/mcp-grafana/build-and-push.sh
 bash docker/mcp-kafka/build-and-push.sh
 bash docker/mcp-opensearch/build-and-push.sh
-bash docker/mcp-doris/build-and-push.sh
+bash docker/mcp-stardata/build-and-push.sh
 bash docker/mcp-kestra/build-and-push.sh
 bash docker/mcp-spark/build-and-push.sh
 bash docker/mcp-sqlmesh/build-and-push.sh

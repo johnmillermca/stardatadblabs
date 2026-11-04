@@ -6,7 +6,7 @@ The platform ships five custom MCP (Model Context Protocol) servers that expose 
 | Server | Image | Port | NodePort | Namespace | Tools |
 |---|---|---|---|---|---|
 | SQLMesh MCP | `mcp-sqlmesh:1.0.0` | 3100 | 30310 | `analytics` | plan, run, audit, list_models, dag, test, fetchdf |
-| Doris MCP | `mcp-doris:1.0.0` | 3101 | 30311 | `analytics` | query, list_databases, list_tables, describe_table, cluster_status, running_queries |
+| Stardata MCP | `mcp-stardata:1.0.0` | 3101 | 30311 | `analytics` | query, list_databases, list_tables, describe_table, cluster_status, running_queries |
 | OpenSearch MCP | `mcp-opensearch:1.0.0` | 3102 | 30312 | `search` | search, list_indices, index_mapping, cluster_health, index_document, delete_index |
 | Spark MCP | `mcp-spark:1.0.0` | 3103 | 30313 | `analytics` | cluster_status, list_applications, submit_pi, kill_application, gluten_config, worker_status |
 | Kafka MCP | `mcp-kafka:1.0.0` | 3104 | 30314 | `streaming` | list_topics, create_topic, delete_topic, produce, consume, list_consumer_groups, cluster_metadata |
@@ -19,7 +19,7 @@ http://192.168.1.50:<nodeport>/sse
 
 ## Build All MCP Images
 ```bash
-for svc in mcp-sqlmesh mcp-doris mcp-opensearch mcp-spark mcp-kafka; do
+for svc in mcp-sqlmesh mcp-stardata mcp-opensearch mcp-spark mcp-kafka; do
   bash docker/${svc}/build-and-push.sh
 done
 ```
@@ -43,7 +43,7 @@ Add to your `claude_desktop_config.json`:
     "opensearch": {
       "url": "http://192.168.1.50:30312/sse"
     },
-    "doris": {
+    "stardata": {
       "url": "http://192.168.1.50:30311/sse"
     },
     "sqlmesh": {
@@ -61,12 +61,12 @@ Add to your `claude_desktop_config.json`:
 from langchain_mcp import MCPToolkit
 from langchain_anthropic import ChatAnthropic
 
-toolkit = MCPToolkit(server_url="http://192.168.1.50:30311/sse")  # Doris
+toolkit = MCPToolkit(server_url="http://192.168.1.50:30311/sse")  # Stardata
 tools = toolkit.get_tools()
 
 llm = ChatAnthropic(model="claude-3-5-sonnet-20241022")
 agent = create_react_agent(llm, tools)
-result = agent.invoke({"input": "How many rows are in the analytics.sales table in Doris?"})
+result = agent.invoke({"input": "How many rows are in the analytics.sales table in Stardata?"})
 ```
 
 ## SQLMesh MCP — Tool Reference
@@ -81,16 +81,16 @@ result = agent.invoke({"input": "How many rows are in the analytics.sales table 
 | `sqlmesh_test(model)` | Run unit tests |
 | `sqlmesh_fetchdf(sql)` | Execute SQL and return results |
 
-## Doris MCP — Tool Reference
+## Stardata MCP — Tool Reference
 | Tool | Description |
 |---|---|
-| `doris_query(sql, database)` | Execute SQL query |
-| `doris_list_databases()` | List all databases |
-| `doris_list_tables(database)` | List tables in a database |
-| `doris_describe_table(table, database)` | Describe table schema |
-| `doris_cluster_status()` | Show backend node status |
-| `doris_table_stats(table, database)` | Get row count |
-| `doris_running_queries()` | List running queries |
+| `stardata_query(sql, database)` | Execute SQL query |
+| `stardata_list_databases()` | List all databases |
+| `stardata_list_tables(database)` | List tables in a database |
+| `stardata_describe_table(table, database)` | Describe table schema |
+| `stardata_cluster_status()` | Show backend node status |
+| `stardata_table_stats(table, database)` | Get row count |
+| `stardata_running_queries()` | List running queries |
 
 ## OpenSearch MCP — Tool Reference
 | Tool | Description |
@@ -125,7 +125,7 @@ result = agent.invoke({"input": "How many rows are in the analytics.sales table 
 
 ## Secrets
 MCP servers reuse existing product secrets:
-- Doris MCP: `doris-credentials` (key: `admin-password`)
+- Stardata MCP: `stardata-credentials` (key: `admin-password`)
 - OpenSearch MCP: `opensearch-credentials` (keys: `opensearch-user`, `opensearch-password`)
 - Kafka MCP: `akhq-credentials` (keys: `kafka-sasl-username`, `kafka-sasl-password`)
 - SQLMesh MCP: `sqlmesh-credentials` (keys: `db-user`, `db-password`)

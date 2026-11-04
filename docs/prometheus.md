@@ -27,7 +27,7 @@
 │  │  NodePort 30990  │            │  - kafka JMX (streaming)          │ │
 │  └───────┬──────────┘            │  - opensearch (search)            │ │
 │          │ alerts                │  - postgresql (databases)         │ │
-│  ┌───────▼──────────┐            │  - doris-fe (analytics)           │ │
+│  ┌───────▼──────────┐            │  - stardata-fe (analytics)           │ │
 │  │  Alertmanager    │            │  - mcp-prometheus (monitoring)    │ │
 │  │  (port 9093)     │            │  - mcp-grafana (monitoring)       │ │
 │  │  NodePort 30993  │            │  - node-exporter (all nodes)      │ │

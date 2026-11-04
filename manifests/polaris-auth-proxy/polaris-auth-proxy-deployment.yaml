@@ -10,12 +10,12 @@
 #   • Streams Polaris responses back to callers unchanged
 #
 # Port mapping (matches legacy nginx contract — no catalog changes needed):
-#   :8282  — doris-writer principal  (read + write)
-#   :8283  — doris-reader principal  (read-only)
+#   :8282  — stardata-writer principal  (read + write)
+#   :8283  — stardata-reader principal  (read-only)
 #
 # Credentials: read from OpenBao at startup via polaris-token-refresher SA.
 #   OpenBao path: secret/data/platform/polaris
-#   Keys used: doris_writer_id, doris_writer_secret, doris_reader_id, doris_reader_secret
+#   Keys used: stardata_writer_id, stardata_writer_secret, stardata_reader_id, stardata_reader_secret
 # =============================================================================
 ---
 apiVersion: apps/v1

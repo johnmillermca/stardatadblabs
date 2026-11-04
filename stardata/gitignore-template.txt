@@ -1,0 +1,19 @@
+# Build artifacts
+target/
+*.class
+*.jar
+!doris-patch/**
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Doris build output
+output/
+be/build/
+be/ut/

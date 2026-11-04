@@ -114,9 +114,9 @@ log "=== Analytics ==="
 # Apache Spark (bitnami chart uses bitnami/spark — custom image is handled separately)
 push_image "docker.io/apache/spark:3.5.1"                         "apache/spark:3.5.1"
 
-# Doris FE + BE
-push_image "docker.io/apache/doris:2.1.0-fe-x86_64"              "apache/doris:2.1.0-fe"
-push_image "docker.io/apache/doris:2.1.0-be-x86_64"              "apache/doris:2.1.0-be"
+# Stardata FE + BE
+push_image "docker.io/apache/stardata:2.1.0-fe-x86_64"              "apache/stardata:2.1.0-fe"
+push_image "docker.io/apache/stardata:2.1.0-be-x86_64"              "apache/stardata:2.1.0-be"
 
 log "=== Orchestration ==="
 

@@ -34,7 +34,7 @@ class RBACClient:
           {
             "username": "alice",
             "roles": ["analyst"],
-            "permissions": [{"service": "doris", "permission": "MASKED_SELECT", ...}],
+            "permissions": [{"service": "stardata", "permission": "MASKED_SELECT", ...}],
             "cached": true
           }
         Returns an empty structure on error so callers get safe defaults.

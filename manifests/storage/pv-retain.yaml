@@ -14,7 +14,7 @@
 #
 # Data locations by node:
 #   master.local  — OpenBao, Kerberos, PostgreSQL, MongoDB, Oracle, Registry
-#   worker1.local — Doris FE, Doris BE
+#   worker1.local — Stardata FE, Stardata BE
 #   worker2.local — Kestra, SQLMesh, Debezium, Alertmanager
 #   worker3.local — OpenSearch
 #   worker4.local — Kafka, Grafana, JupyterHub, Prometheus
@@ -132,7 +132,7 @@ spec:
               values:
                 - worker2.local
 ---
-# PVC 'doris-be-storage' (prod) on worker1.local
+# PVC 'stardata-be-storage' (prod) on worker1.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -145,10 +145,10 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
   hostPath:
-    path: /home/local-path-provisioner/pvc-485b1e96-35e5-4bd2-9cab-4d564afcdb6e_prod_doris-be-storage
+    path: /home/local-path-provisioner/pvc-485b1e96-35e5-4bd2-9cab-4d564afcdb6e_prod_stardata-be-storage
     type: DirectoryOrCreate
   claimRef:
-    name: doris-be-storage
+    name: stardata-be-storage
     namespace: prod
   nodeAffinity:
     required:
@@ -159,7 +159,7 @@ spec:
               values:
                 - worker1.local
 ---
-# PVC 'doris-fe-meta' (prod) on worker1.local
+# PVC 'stardata-fe-meta' (prod) on worker1.local
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -172,10 +172,10 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
   hostPath:
-    path: /home/local-path-provisioner/pvc-e1dd8491-c675-4bdd-b3a9-ba56fb5266a8_prod_doris-fe-meta
+    path: /home/local-path-provisioner/pvc-e1dd8491-c675-4bdd-b3a9-ba56fb5266a8_prod_stardata-fe-meta
     type: DirectoryOrCreate
   claimRef:
-    name: doris-fe-meta
+    name: stardata-fe-meta
     namespace: prod
   nodeAffinity:
     required:
@@ -506,6 +506,179 @@ spec:
     type: DirectoryOrCreate
   claimRef:
     name: data-strimzi-kafka-combined-0
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker4.local
+
+# =============================================================================
+# Stardata FE meta PVs — worker2/3/4, 100Gi each, /home
+# PVC names match volumeClaimTemplates in stardata-fe-deployment.yaml:
+#   fe-meta-stardata-fe-{0,1,2}
+# =============================================================================
+---
+# PVC 'fe-meta-stardata-fe-0' — worker2.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: stardata-fe-meta-worker2
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/stardata-fe-meta-stardata-fe-0_prod
+    type: DirectoryOrCreate
+  claimRef:
+    name: fe-meta-stardata-fe-0
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker2.local
+---
+# PVC 'fe-meta-stardata-fe-1' — worker3.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: stardata-fe-meta-worker3
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/stardata-fe-meta-stardata-fe-1_prod
+    type: DirectoryOrCreate
+  claimRef:
+    name: fe-meta-stardata-fe-1
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker3.local
+---
+# PVC 'fe-meta-stardata-fe-2' — worker4.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: stardata-fe-meta-worker4
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/stardata-fe-meta-stardata-fe-2_prod
+    type: DirectoryOrCreate
+  claimRef:
+    name: fe-meta-stardata-fe-2
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker4.local
+# =============================================================================
+# Stardata BE storage PVs — worker2/3/4, 400Gi each, /home
+# PVC names match volumeClaimTemplates in stardata-be-deployment.yaml:
+#   be-storage-stardata-be-{0,1,2}
+# =============================================================================
+---
+# PVC 'be-storage-stardata-be-0' — worker2.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: stardata-be-storage-worker2
+spec:
+  capacity:
+    storage: 400Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/stardata-be-storage-stardata-be-0_prod
+    type: DirectoryOrCreate
+  claimRef:
+    name: be-storage-stardata-be-0
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker2.local
+---
+# PVC 'be-storage-stardata-be-1' — worker3.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: stardata-be-storage-worker3
+spec:
+  capacity:
+    storage: 400Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/stardata-be-storage-stardata-be-1_prod
+    type: DirectoryOrCreate
+  claimRef:
+    name: be-storage-stardata-be-1
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker3.local
+---
+# PVC 'be-storage-stardata-be-2' — worker4.local
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: stardata-be-storage-worker4
+spec:
+  capacity:
+    storage: 400Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/local-path-provisioner/stardata-be-storage-stardata-be-2_prod
+    type: DirectoryOrCreate
+  claimRef:
+    name: be-storage-stardata-be-2
     namespace: prod
   nodeAffinity:
     required:

@@ -17,7 +17,7 @@ alembic==1.14.0
 # Cache
 redis[hiredis]==5.2.1
 
-# Doris / MySQL protocol (for masking engine + classifier)
+# Stardata / MySQL protocol (for masking engine + classifier)
 aiomysql==0.2.0
 
 # HTTP client (RBAC Control Plane API calls)

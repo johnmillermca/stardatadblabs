@@ -15,15 +15,15 @@ This directory contains detailed operational runbooks for every application depl
 | [02](runbook-02-argocd-kubernetes.md) | **ArgoCD & Kubernetes Core** | ArgoCD 2.11, Helm, kubeadm | UI: 30443 |
 | [03](runbook-03-data-streaming.md) | **Data Streaming** | Kafka 4.0, Strimzi 1.1/Kafka 3.9, Schema Registry 7.9, Debezium 2.7, AKHQ 0.27 | 30092, 30093, 30810, 30083, 30808 |
 | [04](runbook-04-databases.md) | **Databases** | PostgreSQL 17, MongoDB 8.0, Oracle XE 21c | 30532, 30017, 30521 |
-| [05](runbook-05-analytics-search.md) | **Analytics & Search** | Apache Doris 2.1, OpenSearch 3.7, Apache Spark 3.5+Gluten+Velox, Apache Iceberg 1.9.2, Apache Polaris | 30030, 30090, 30920, 30601, 30707, 30181 |
+| [05](runbook-05-analytics-search.md) | **Analytics & Search** | Apache Stardata 2.1, OpenSearch 3.7, Apache Spark 3.5+Gluten+Velox, Apache Iceberg 1.9.2, Apache Polaris | 30030, 30090, 30920, 30601, 30707, 30181 |
 | [06](runbook-06-orchestration.md) | **Orchestration & Workflow** | Apache Kestra 0.22, SQLMesh 0.99 | 30880, 30883 |
 | [07](runbook-07-observability.md) | **Observability** | Prometheus (kube-prometheus-stack 60.4), Grafana 8.4, 8× MCP Servers | 30990, 30993, 30300, 30320–30326 |
 | [08](runbook-08-security-access.md) | **Security & Access** | Kerberos KDC, Private Registry | 30500 |
-| [09](runbook-09-incident-postmortem.md) | **Incident Post-Mortem** | Post-reboot degraded platform — root causes & permanent fixes for OpenBao, Strimzi/Kafka, Schema Registry, Debezium, Doris FE/BE, Polaris, ArgoCD | — |
-| [11](runbook-11-kerberos-integration.md) | **Kerberos Client Auth Integration** | MIT Kerberos KDC — platform toggle, adding users, enabling GSSAPI on Kafka/OpenSearch/Spark, Doris identity alignment | 88 (KDC), 749 (kadmin) |
-| [12](runbook-12-rbac-new-user-testing.md) | **RBAC New User Setup & Verification** | RBAC Control Plane — add users, bind roles, sync to Doris/Kafka/OpenSearch/Spark, verify access, offboard users | 30850 |
+| [09](runbook-09-incident-postmortem.md) | **Incident Post-Mortem** | Post-reboot degraded platform — root causes & permanent fixes for OpenBao, Strimzi/Kafka, Schema Registry, Debezium, Stardata FE/BE, Polaris, ArgoCD | — |
+| [11](runbook-11-kerberos-integration.md) | **Kerberos Client Auth Integration** | MIT Kerberos KDC — platform toggle, adding users, enabling GSSAPI on Kafka/OpenSearch/Spark, Stardata identity alignment | 88 (KDC), 749 (kadmin) |
+| [12](runbook-12-rbac-new-user-testing.md) | **RBAC New User Setup & Verification** | RBAC Control Plane — add users, bind roles, sync to Stardata/Kafka/OpenSearch/Spark, verify access, offboard users | 30850 |
 | [13](runbook-13-user-groups-and-access-testing.md) | **User Groups, Role Binding & Access Testing** | Kerberos onboarding, `platform_admin` / `data_engineer` / `account_admin` user groups, end-to-end access tests, negative test (no KDC principal) | 30850, 88 |
-| [16](runbook-16-data-governance-masking.md) | **Data Governance & Automatic Column Masking** | Star Knowledge Catalog — data classifications, business glossary, masking algorithms, auto column tagging, Doris masked views, role-aware query routing, performance validation | 30860, 30090 |
+| [16](runbook-16-data-governance-masking.md) | **Data Governance & Automatic Column Masking** | Star Knowledge Catalog — data classifications, business glossary, masking algorithms, auto column tagging, Stardata masked views, role-aware query routing, performance validation | 30860, 30090 |
 | [17](runbook-17-star-catalog-e2e-testing.md) | **Star Knowledge Catalog: End-to-End Testing** | 52 ordered tests across 16 phases — infrastructure checks, auth, CRUD, auto-classify, masked view apply, role-routing, negative tests, performance, idempotency, and smoke-test one-liner | 30860, 30090, 30850 |
 | [20](runbook-20-databricks-customer-parquet-view.md) | **Databricks customer Table — Iceberg Write & Parquet View** | Spark Gluten (k8s) → Iceberg `databricks.lakehouse_db.customer` on S3 `stardata-databricks` → Databricks Unity Catalog view `lakehouse.lakehouse_db.vw_customer_latest`; 1 000-row seed, latest-snapshot auto-resolve, idle-session CronJob | 30888 (JupyterHub), 30707 (Spark UI) |
 | [27](runbook-27-cdc-batch-pipeline-e2e-testing.md) | **CDC Batch Pipeline E2E Testing** | kafka-to-iceberg batch pipeline end-to-end validation — all three sources | 30888, 30707 |
@@ -55,8 +55,8 @@ This directory contains detailed operational runbooks for every application depl
 | Oracle | 192.168.1.50:30521 | `databases` |
 | OpenSearch | http://192.168.1.50:30920 | `search` |
 | OpenSearch Dashboards | http://192.168.1.50:30601 | `search` |
-| Apache Doris Web UI | http://192.168.1.50:30030 | `analytics` |
-| Apache Doris MySQL | 192.168.1.50:30090 | `analytics` |
+| Apache Stardata Web UI | http://192.168.1.50:30030 | `analytics` |
+| Apache Stardata MySQL | 192.168.1.50:30090 | `analytics` |
 | Apache Spark UI | http://192.168.1.50:30707 | `analytics` |
 | Apache Spark RPC | spark://192.168.1.50:30777 | `analytics` |
 | Apache Polaris REST | http://192.168.1.50:30181 | `catalog` |
@@ -70,7 +70,7 @@ This directory contains detailed operational runbooks for every application depl
 | MCP Grafana | http://192.168.1.50:30321/mcp | `monitoring` |
 | MCP Kafka | http://192.168.1.50:30322/mcp | `streaming` |
 | MCP OpenSearch | http://192.168.1.50:30323/mcp | `search` |
-| MCP Doris | http://192.168.1.50:30324/mcp | `analytics` |
+| MCP Stardata | http://192.168.1.50:30324/mcp | `analytics` |
 | MCP Kestra | http://192.168.1.50:30325/mcp | `orchestration` |
 | MCP Spark | http://192.168.1.50:30326/mcp | `analytics` |
 | MCP SQLMesh | http://192.168.1.50:30310/mcp | `analytics` |
@@ -90,7 +90,7 @@ All application credentials are stored in OpenBao at these paths:
 | Kafka | `secret/data/kafka/credentials` |
 | OpenSearch | `secret/data/opensearch/credentials` |
 | Kestra | `secret/data/kestra/credentials` |
-| Apache Doris | `secret/data/doris/credentials` |
+| Apache Stardata | `secret/data/stardata/credentials` |
 | Kerberos | `secret/data/kerberos/credentials` |
 | SQLMesh | `secret/data/sqlmesh/credentials` |
 | Apache Polaris | `secret/data/polaris/credentials` |
@@ -109,7 +109,7 @@ Wave -20 : storage (local-path StorageClass)
 Wave -15 : namespaces (prod/test quotas)
 Wave -10 : openbao, strimzi-operator, kerberos
 Wave  -5 : private-registry
-Wave   0 : prometheus, strimzi-kafka, postgresql, mongodb, opensearch, spark, doris, polaris
+Wave   0 : prometheus, strimzi-kafka, postgresql, mongodb, opensearch, spark, stardata, polaris
 Wave   2 : grafana
 Wave   5 : schema-registry
 Wave  10 : kestra, debezium

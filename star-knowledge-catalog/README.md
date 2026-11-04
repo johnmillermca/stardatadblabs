@@ -8,10 +8,10 @@ Star Knowledge Catalog is a standalone FastAPI microservice that provides:
 |---|---|
 | **Data Classifications** | Sensitivity tiers — PII, PCI, PHI, CONFIDENTIAL, PUBLIC |
 | **Business Glossary** | Curated terms with keyword patterns for auto-detection |
-| **Masking Algorithms** | Named Doris-native SQL masking expressions |
+| **Masking Algorithms** | Named Stardata-native SQL masking expressions |
 | **Masking Policies** | Bind classifications / glossary terms → algorithms |
-| **Column Tags** | Auto-scan or manually tag every Doris column |
-| **Masked Views** | Auto-generated Doris views with masking at query time |
+| **Column Tags** | Auto-scan or manually tag every Stardata column |
+| **Masked Views** | Auto-generated Stardata views with masking at query time |
 | **Role Routing** | Integrates with RBAC Control Plane — analyst → masked view, admin → base table |
 
 ---
@@ -38,8 +38,8 @@ Star Knowledge Catalog is a standalone FastAPI microservice that provides:
 │                      │                                   │
 │  ┌───────────────────▼──────────────────────────────┐    │
 │  │           Masking Engine                          │    │
-│  │  Generates CREATE OR REPLACE VIEW DDL in Doris    │    │
-│  │  Doris vectorised engine handles masking natively │    │
+│  │  Generates CREATE OR REPLACE VIEW DDL in Stardata    │    │
+│  │  Stardata vectorised engine handles masking natively │    │
 │  └───────────────────┬──────────────────────────────┘    │
 │                      │                                   │
 │  ┌───────────────────▼──────────────────────────────┐    │
@@ -50,7 +50,7 @@ Star Knowledge Catalog is a standalone FastAPI microservice that provides:
 │  └──────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
          ↕                           ↕
-  PostgreSQL                      Apache Doris
+  PostgreSQL                      Apache Stardata
   (star_catalog DB)               (governance_demo DB)
 ```
 
@@ -73,18 +73,18 @@ psql -h 192.168.1.50 -p 30532 -U star_catalog -d star_catalog \
   -f migrations/001_schema_and_seed.sql
 ```
 
-### 2. Bootstrap Doris
+### 2. Bootstrap Stardata
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u root \
-  < doris/001_create_schema.sql
+  < stardata/001_create_schema.sql
 
 mysql -h 192.168.1.50 -P 30090 -u root \
-  < doris/002_seed_data.sql
+  < stardata/002_seed_data.sql
 
 # Optional — pre-built views (or let the API generate them)
 mysql -h 192.168.1.50 -P 30090 -u root \
-  < doris/003_masked_views.sql
+  < stardata/003_masked_views.sql
 ```
 
 ### 3. Deploy to Kubernetes
@@ -97,7 +97,7 @@ bash docker/build-and-push.sh 1.0.0
 kubectl create secret generic star-catalog-credentials \
   --namespace prod \
   --from-literal=PG_PASSWORD=changeme \
-  --from-literal=DORIS_ADMIN_PASSWORD='' \
+  --from-literal=STARDATA_ADMIN_PASSWORD='' \
   --from-literal=MASTER_TOKEN=changeme-catalog-master-token \
   --from-literal=JWT_SECRET=changeme-catalog-jwt-secret-min-32-chars! \
   --from-literal=RBAC_PLANE_TOKEN=changeme-rbac-master-token
@@ -111,7 +111,7 @@ API available at: `http://192.168.1.50:30860/docs`
 
 ## Core Workflows
 
-### Auto-classify a Doris database
+### Auto-classify a Stardata database
 
 ```bash
 # Get a JWT
@@ -123,7 +123,7 @@ TOKEN=$(curl -s -X POST http://192.168.1.50:30860/api/v1/auth/token \
 curl -s -X POST http://192.168.1.50:30860/api/v1/columns/scan \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false}' | jq .
+  -d '{"stardata_database":"governance_demo","dry_run":false}' | jq .
 ```
 
 ### Apply masked views
@@ -132,7 +132,7 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/columns/scan \
 curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false}' | jq .
+  -d '{"stardata_database":"governance_demo","dry_run":false}' | jq .
 ```
 
 ### Get role-aware query for a user
@@ -143,8 +143,8 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/query \
   -H 'Content-Type: application/json' \
   -d '{
     "username": "alice",
-    "doris_database": "governance_demo",
-    "doris_table": "customers",
+    "stardata_database": "governance_demo",
+    "stardata_table": "customers",
     "limit": 100
   }' | jq .
 ```
@@ -187,11 +187,11 @@ star-knowledge-catalog/
 │   │   └── exceptions.py       CRUD /exceptions
 │   └── engine/
 │       ├── classifier.py    Auto column classification (pattern matching)
-│       ├── masking.py       Doris DDL generator + view applicator
+│       ├── masking.py       Stardata DDL generator + view applicator
 │       └── rbac_client.py   RBAC Control Plane HTTP client
 ├── migrations/
 │   └── 001_schema_and_seed.sql  PostgreSQL schema + all seed data
-├── doris/
+├── stardata/
 │   ├── 001_create_schema.sql   governance_demo database + tables
 │   ├── 002_seed_data.sql       20 customers, 40 orders, 40 payments, 10 products
 │   └── 003_masked_views.sql    Pre-built masked views (bootstrap reference)
@@ -215,11 +215,11 @@ star-knowledge-catalog/
 | `PG_PASSWORD` | *(secret)* | PostgreSQL password |
 | `REDIS_URL` | `redis://redis.prod.svc.cluster.local:6379/1` | Redis (DB index 1) |
 | `CACHE_TTL` | `60` | Cache TTL in seconds |
-| `DORIS_HOST` | `doris-fe.prod.svc.cluster.local` | Doris FE host |
-| `DORIS_PORT` | `9030` | Doris MySQL port |
-| `DORIS_ADMIN_USER` | `root` | Doris admin user |
-| `DORIS_ADMIN_PASSWORD` | *(secret)* | Doris admin password |
-| `DORIS_DEMO_DATABASE` | `governance_demo` | Doris database to govern |
+| `STARDATA_HOST` | `stardata-fe.prod.svc.cluster.local` | Stardata FE host |
+| `STARDATA_PORT` | `9030` | Stardata MySQL port |
+| `STARDATA_ADMIN_USER` | `root` | Stardata admin user |
+| `STARDATA_ADMIN_PASSWORD` | *(secret)* | Stardata admin password |
+| `STARDATA_DEMO_DATABASE` | `governance_demo` | Stardata database to govern |
 | `MASKED_VIEW_SUFFIX` | `_masked` | Suffix for masked view names |
 | `RBAC_PLANE_URL` | `http://rbac-plane.prod.svc.cluster.local:8080` | RBAC Control Plane base URL |
 | `RBAC_PLANE_TOKEN` | *(secret)* | Token for RBAC API calls |
@@ -239,8 +239,8 @@ star-knowledge-catalog/
 | `GET/POST/PATCH/DELETE` | `/api/v1/algorithms` | Masking algorithm CRUD |
 | `GET/POST/PATCH/DELETE` | `/api/v1/policies` | Masking policy CRUD |
 | `GET/POST/DELETE` | `/api/v1/columns` | Column tag CRUD |
-| `POST` | `/api/v1/columns/scan` | Auto-classify columns in a Doris database |
-| `POST` | `/api/v1/masking/apply` | Generate and apply masked Doris views |
+| `POST` | `/api/v1/columns/scan` | Auto-classify columns in a Stardata database |
+| `POST` | `/api/v1/masking/apply` | Generate and apply masked Stardata views |
 | `GET` | `/api/v1/masking/views` | List applied view manifests |
 | `POST` | `/api/v1/masking/query` | Role-aware SELECT planner |
 | `GET/POST/DELETE` | `/api/v1/exceptions` | Role masking exception CRUD |

@@ -1,0 +1,17 @@
+# =============================================================================
+# Apache Stardata — TESTING reference stub
+# Namespace: prod
+# NodePort FE: 32030
+# =============================================================================
+fe:
+  image: apache/stardata:fe-4.2
+  replicas: 1
+  storage: 2Gi
+  service:
+    type: NodePort
+    queryPort: 32030
+be:
+  image: apache/stardata:be-4.2
+  replicas: 1
+  storage: 5Gi
+existingSecret: stardata-credentials

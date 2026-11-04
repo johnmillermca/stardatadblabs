@@ -4,8 +4,8 @@ polaris_auth_proxy.py
 Auto-refreshing OAuth2 token injector proxy for Apache Polaris REST catalog.
 
 Replaces the nginx hardcoded-token approach.  Listens on two ports:
-  :8282  — doris-writer principal  (read + write access)
-  :8283  — doris-reader principal  (read-only access)
+  :8282  — stardata-writer principal  (read + write access)
+  :8283  — stardata-reader principal  (read-only access)
 
 For every incoming HTTP request the proxy:
   1. Checks whether the current OAuth2 token for that port's principal is
@@ -25,8 +25,8 @@ Environment variables
   BAO_ADDR              OpenBao address  (default: http://openbao.prod.svc.cluster.local:8200)
   BAO_ROLE              OpenBao K8s auth role  (default: platform-secrets-read)
   TOKEN_REFRESH_BUFFER_S  Refresh token this many seconds before expiry  (default: 300)
-  PORT_WRITER           Port for doris-writer principal  (default: 8282)
-  PORT_READER           Port for doris-reader principal  (default: 8283)
+  PORT_WRITER           Port for stardata-writer principal  (default: 8282)
+  PORT_READER           Port for stardata-reader principal  (default: 8283)
 """
 from __future__ import annotations
 
@@ -184,8 +184,8 @@ class _TokenManager:
 # One global token manager per principal
 # ─────────────────────────────────────────────────────────────────────────────
 
-_WRITER_TOKENS = _TokenManager("writer", "doris_writer_id", "doris_writer_secret")
-_READER_TOKENS = _TokenManager("reader", "doris_reader_id", "doris_reader_secret")
+_WRITER_TOKENS = _TokenManager("writer", "stardata_writer_id", "stardata_writer_secret")
+_READER_TOKENS = _TokenManager("reader", "stardata_reader_id", "stardata_reader_secret")
 
 # Maps listen port → token manager
 _PORT_TOKEN_MAP: dict[int, _TokenManager] = {

@@ -1,0 +1,176 @@
+# =============================================================================
+# Apache Stardata FE (Frontend) — ConfigMap + StatefulSet
+# Namespace : prod
+# Nodes     : worker2.local, worker3.local, worker4.local (dedicated, exclusive)
+# Replicas  : 3  (BdbJE quorum — requires all 3 for leader election)
+# Access    : http://192.168.1.50:30030 (HTTP/WebUI)
+#             jdbc:mysql://192.168.1.50:30090 (MySQL — port 9030)
+# Secret    : stardata-credentials  (key: admin-password)
+# PVCs      : stardata-fe-meta-stardata-fe-{0,1,2} — 100Gi each on /home
+#             provisioned via volumeClaimTemplates + static PVs in pv-retain.yaml
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stardata-fe-config
+  namespace: prod
+data:
+  fe.conf: |
+    LOG_DIR = ${DORIS_HOME}/log
+    sys_log_level = INFO
+    meta_dir = /opt/apache-doris/fe/doris-meta
+    http_port = 8030
+    rpc_port = 9020
+    query_port = 9030
+    edit_log_port = 9010
+    jdbc_drivers_dir = /opt/apache-doris/fe/jdbc_drivers
+    JAVA_OPTS = "-Xmx4096m -XX:+UseMembar -XX:SurvivorRatio=8"
+    JAVA_OPTS_FOR_JDK_17 = "-Xmx4096m -XX:SurvivorRatio=8 --add-opens=java.base/java.nio=ALL-UNNAMED"
+
+    # ── Stable FQDN identity (BdbJE HA) ─────────────────────────────────────
+    # Each FE pod advertises its own stable StatefulSet FQDN so BdbJE membership
+    # records survive pod restarts and rescheduling.
+    enable_fqdn_mode = true
+    priority_networks = 10.244.0.0/16
+
+    # ── FE peers for BdbJE election ──────────────────────────────────────────
+    # All 3 FE FQDNs are listed so any pod can bootstrap the quorum.
+    # stardata-fe-0 is the initial MASTER; -1 and -2 join as FOLLOWERs.
+    election_timeout_ms = 10000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stardata-fe
+  namespace: prod
+  labels:
+    app: stardata-fe
+    component: fe
+spec:
+  replicas: 3
+  serviceName: stardata-fe-headless
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: stardata-fe
+  template:
+    metadata:
+      labels:
+        app: stardata-fe
+        component: fe
+    spec:
+      # ── Tolerate the dedicated=stardata taint on worker2/3/4 ───────────────
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "stardata"
+          effect: "NoSchedule"
+      # ── Spread pods across worker2, worker3, worker4 ───────────────────────
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: stardata
+                    operator: In
+                    values: ["true"]
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: stardata-fe
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        # ── 1. Copy ConfigMap (read-only) into a writable emptyDir ────────────
+        - name: copy-fe-config
+          image: 192.168.1.50:30500/busybox:1.36
+          command: ["sh", "-c", "cp /config-ro/fe.conf /config-rw/fe.conf"]
+          volumeMounts:
+            - name: fe-config
+              mountPath: /config-ro
+            - name: fe-config-rw
+              mountPath: /config-rw
+        # ── 2. Patch advertised_address with this pod's own stable FQDN ───────
+        # Each FE pod must advertise itself — not a fixed hostname — so BdbJE
+        # stores the correct FQDN (stardata-fe-0 / -1 / -2) in its membership.
+        - name: patch-fe-advertise
+          image: 192.168.1.50:30500/busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              FQDN="${POD_NAME}.stardata-fe-headless.prod.svc.cluster.local"
+              echo "advertised_address = ${FQDN}" >> /config-rw/fe.conf
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: fe-config-rw
+              mountPath: /config-rw
+      containers:
+        # ── Stardata FE ────────────────────────────────────────────────────────
+        - name: stardata-fe
+          image: 192.168.1.50:30500/apache/stardata:fe-4.2
+          imagePullPolicy: Always
+          command:
+            - /opt/apache-doris/fe_entrypoint.sh
+            - stardata-fe-headless.prod.svc.cluster.local
+          env:
+            - name: STARDATA_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stardata-credentials
+                  key: admin-password
+          ports:
+            - name: http
+              containerPort: 8030
+            - name: rpc
+              containerPort: 9020
+            - name: query
+              containerPort: 9030
+            - name: edit-log
+              containerPort: 9010
+          volumeMounts:
+            - name: fe-config-rw
+              mountPath: /opt/apache-doris/fe/conf/fe.conf
+              subPath: fe.conf
+            - name: fe-meta
+              mountPath: /opt/apache-doris/fe/doris-meta
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /api/bootstrap
+              port: 8030
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
+      volumes:
+        - name: fe-config
+          configMap:
+            name: stardata-fe-config
+        - name: fe-config-rw
+          emptyDir: {}
+  # ── volumeClaimTemplates — each FE pod gets its own 100Gi meta PVC ─────────
+  # PVs must be pre-created in pv-retain.yaml with matching claimRef names:
+  #   stardata-fe-meta-stardata-fe-0  → worker2.local /home/...
+  #   stardata-fe-meta-stardata-fe-1  → worker3.local /home/...
+  #   stardata-fe-meta-stardata-fe-2  → worker4.local /home/...
+  volumeClaimTemplates:
+    - metadata:
+        name: fe-meta
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 100Gi

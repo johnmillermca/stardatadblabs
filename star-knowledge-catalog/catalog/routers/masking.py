@@ -1,6 +1,6 @@
 """
 Star Knowledge Catalog — Masking Views router.
-Apply and inspect Doris masked views.
+Apply and inspect Stardata masked views.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from ..database import db_session
 from ..middleware.auth import require_read, require_write
-from ..models import ColumnTag, DorisViewManifest
+from ..models import ColumnTag, StardataViewManifest
 from ..schemas import (
     ApplyMaskingRequest, ApplyMaskingResponse, ApplyMaskingResult,
     MaskedQueryRequest, MaskedQueryResponse,
@@ -25,28 +25,28 @@ router = APIRouter(prefix="/masking", tags=["Masking Views"])
 # ── Apply masked views ────────────────────────────────────────────────────────
 
 @router.post("/apply", response_model=ApplyMaskingResponse,
-             summary="Build and apply masked Doris views")
+             summary="Build and apply masked Stardata views")
 async def apply_masking(
     body: ApplyMaskingRequest,
     principal: dict = Depends(require_write),
 ):
     """
-    Generates and applies CREATE OR REPLACE VIEW DDL in Doris for every
+    Generates and applies CREATE OR REPLACE VIEW DDL in Stardata for every
     tagged table in the given database (or a single table).
 
     The view replaces sensitive columns with masking expressions derived
-    from active masking policies. All Doris query optimisations (vectorised
+    from active masking policies. All Stardata query optimisations (vectorised
     execution, partition pruning, predicate push-down) apply to views, so
     sub-second performance is preserved.
     """
-    if body.doris_table:
-        tables = [body.doris_table]
+    if body.stardata_table:
+        tables = [body.stardata_table]
     else:
         # Discover all tables with column tags in this database
         async with db_session() as session:
             result = await session.execute(
-                select(ColumnTag.doris_table)
-                .where(ColumnTag.doris_database == body.doris_database)
+                select(ColumnTag.stardata_table)
+                .where(ColumnTag.stardata_database == body.stardata_database)
                 .distinct()
             )
             tables = [r[0] for r in result.all()]
@@ -54,15 +54,15 @@ async def apply_masking(
     results: list[ApplyMaskingResult] = []
     for table in tables:
         res = await masking.apply_masking_view(
-            database=body.doris_database,
+            database=body.stardata_database,
             table=table,
             dry_run=body.dry_run,
             force=body.force,
         )
         results.append(
             ApplyMaskingResult(
-                doris_database=body.doris_database,
-                doris_table=table,
+                stardata_database=body.stardata_database,
+                stardata_table=table,
                 view_name=res["view_name"],
                 columns_masked=res["columns_masked"],
                 action=res["action"],
@@ -84,16 +84,16 @@ async def list_view_manifests(
     principal: dict = Depends(require_read),
 ):
     async with db_session() as session:
-        stmt = select(DorisViewManifest).order_by(
-            DorisViewManifest.doris_database, DorisViewManifest.base_table
+        stmt = select(StardataViewManifest).order_by(
+            StardataViewManifest.stardata_database, StardataViewManifest.base_table
         )
         if database:
-            stmt = stmt.where(DorisViewManifest.doris_database == database)
+            stmt = stmt.where(StardataViewManifest.stardata_database == database)
         result = await session.execute(stmt)
         manifests = result.scalars().all()
     return [
         {
-            "doris_database": m.doris_database,
+            "stardata_database": m.stardata_database,
             "base_table": m.base_table,
             "view_name": m.view_name,
             "columns_masked": m.columns_masked,
@@ -113,11 +113,11 @@ async def plan_masked_query(
     principal: dict = Depends(require_read),
 ):
     """
-    Resolves which Doris object (base table or masked view) a user should
+    Resolves which Stardata object (base table or masked view) a user should
     query, then returns the complete SQL SELECT statement they should execute.
 
     The caller (analyst client, BI tool proxy, Jupyter notebook) runs the
-    returned SQL directly against Doris — no Python in the hot query path.
+    returned SQL directly against Stardata — no Python in the hot query path.
 
     Masking decisions:
       • roles with a RoleMaskingException for ALL classifications present in
@@ -135,8 +135,8 @@ async def plan_masked_query(
 
     resolution = await masking.resolve_query_target(
         username=body.username,
-        database=body.doris_database,
-        table=body.doris_table,
+        database=body.stardata_database,
+        table=body.stardata_table,
         roles=roles,
     )
 
@@ -152,12 +152,12 @@ async def plan_masked_query(
         cols_sql = "*"
 
     if target == "base_table":
-        from_obj = f"`{body.doris_database}`.`{body.doris_table}`"
+        from_obj = f"`{body.stardata_database}`.`{body.stardata_table}`"
         clear_cols = body.columns or ["*"]
         masked_cols = []
         note = f"Full access: role '{role}' has masking exception for all sensitive classifications in this table."
     else:
-        from_obj = f"`{body.doris_database}`.`{view_name}`"
+        from_obj = f"`{body.stardata_database}`.`{view_name}`"
         clear_cols = []
         note = (
             f"Masked access: role '{role}' is routed to view '{view_name}'. "

@@ -17,7 +17,7 @@
 #   streaming_admin, streaming_dev
 #
 # Service principals:
-#   svc/doris, svc/spark, svc/sqlmesh, svc/kestra,
+#   svc/stardata, svc/spark, svc/sqlmesh, svc/kestra,
 #   svc/kafka, svc/schema-registry, svc/debezium
 # =============================================================================
 set -euo pipefail
@@ -57,10 +57,10 @@ addprinc_if_missing() {
 
 # ── Helper: export keytab and store as Kubernetes Secret ─────────────────────
 export_keytab() {
-  local principal="$1"      # e.g. svc/doris
-  local secret_name="$2"    # e.g. doris-keytab
+  local principal="$1"      # e.g. svc/stardata
+  local secret_name="$2"    # e.g. stardata-keytab
   local secret_ns="${3:-${NAMESPACE}}"
-  local safe_name="${principal//\//-}"   # svc/doris → svc-doris
+  local safe_name="${principal//\//-}"   # svc/stardata → svc-stardata
 
   local keytab_path="/tmp/${safe_name}.keytab"
 
@@ -90,7 +90,7 @@ get_pass() {
 
 # ── 1. Service principals (randkey — auth via keytab only) ────────────────────
 log "=== Creating service principals ==="
-for svc in doris spark sqlmesh kestra kafka schema-registry debezium opensearch polaris; do
+for svc in stardata spark sqlmesh kestra kafka schema-registry debezium opensearch polaris; do
   addprinc_if_missing "svc/${svc}" "-randkey"
 done
 
@@ -123,7 +123,7 @@ done
 
 # ── 3. Export service keytabs into Kubernetes Secrets ─────────────────────────
 log "=== Exporting service keytabs ==="
-export_keytab "svc/doris"           "doris-keytab"           "${NAMESPACE}"
+export_keytab "svc/stardata"           "stardata-keytab"           "${NAMESPACE}"
 export_keytab "svc/spark"           "spark-keytab"           "${NAMESPACE}"
 export_keytab "svc/sqlmesh"         "sqlmesh-keytab"         "${NAMESPACE}"
 export_keytab "svc/kestra"          "kestra-keytab"          "${NAMESPACE}"

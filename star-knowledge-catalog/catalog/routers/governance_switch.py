@@ -33,7 +33,7 @@ router = APIRouter(prefix="/governance-switch", tags=["Governance Switch"])
 
 class GovernanceSwitchOut(BaseModel):
     id: int
-    doris_database: str
+    stardata_database: str
     governance_enabled: bool
     disabled_reason: Optional[str]
     disabled_by: Optional[str]
@@ -55,16 +55,16 @@ class EnableRequest(BaseModel):
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-async def _get_or_create(session, doris_database: str) -> GovernanceDatabase:
+async def _get_or_create(session, stardata_database: str) -> GovernanceDatabase:
     result = await session.execute(
         select(GovernanceDatabase).where(
-            GovernanceDatabase.doris_database == doris_database
+            GovernanceDatabase.stardata_database == stardata_database
         )
     )
     row = result.scalar_one_or_none()
     if not row:
         row = GovernanceDatabase(
-            doris_database=doris_database,
+            stardata_database=stardata_database,
             governance_enabled=True,
         )
         session.add(row)
@@ -79,54 +79,54 @@ async def _get_or_create(session, doris_database: str) -> GovernanceDatabase:
 async def list_switches(principal: dict = Depends(require_read)):
     async with db_session() as session:
         result = await session.execute(
-            select(GovernanceDatabase).order_by(GovernanceDatabase.doris_database)
+            select(GovernanceDatabase).order_by(GovernanceDatabase.stardata_database)
         )
         return result.scalars().all()
 
 
-@router.get("/{doris_database}", response_model=GovernanceSwitchOut,
+@router.get("/{stardata_database}", response_model=GovernanceSwitchOut,
             summary="Get governance status for a specific database")
-async def get_switch(doris_database: str, principal: dict = Depends(require_read)):
+async def get_switch(stardata_database: str, principal: dict = Depends(require_read)):
     async with db_session() as session:
         result = await session.execute(
             select(GovernanceDatabase).where(
-                GovernanceDatabase.doris_database == doris_database
+                GovernanceDatabase.stardata_database == stardata_database
             )
         )
         row = result.scalar_one_or_none()
         if not row:
             raise HTTPException(
                 404,
-                f"Database '{doris_database}' not registered in governance switch. "
+                f"Database '{stardata_database}' not registered in governance switch. "
                 "Run a masking apply first, or POST /governance-switch/{db}/enable."
             )
         return row
 
 
-@router.post("/{doris_database}/disable", response_model=GovernanceSwitchOut,
-             summary="Disable masking for an entire Doris database (circuit breaker)")
+@router.post("/{stardata_database}/disable", response_model=GovernanceSwitchOut,
+             summary="Disable masking for an entire Stardata database (circuit breaker)")
 async def disable_governance(
-    doris_database: str,
+    stardata_database: str,
     body: DisableRequest,
     principal: dict = Depends(require_admin),
 ):
     """
-    Immediately disables governance for *doris_database*.
+    Immediately disables governance for *stardata_database*.
 
     Effect:
     - POST /api/v1/masking/apply  will skip this database.
     - POST /api/v1/masking/query  will route ALL users to base tables
       (equivalent to every role holding a masking exception).
 
-    Existing masked views in Doris are NOT dropped — they remain in place
+    Existing masked views in Stardata are NOT dropped — they remain in place
     so re-enabling is instant (no DDL re-apply needed).
     """
     async with db_session() as session:
-        row = await _get_or_create(session, doris_database)
+        row = await _get_or_create(session, stardata_database)
         if not row.governance_enabled:
             raise HTTPException(
                 409,
-                f"Database '{doris_database}' is already disabled. "
+                f"Database '{stardata_database}' is already disabled. "
                 f"Reason: {row.disabled_reason}"
             )
         row.governance_enabled = False
@@ -139,31 +139,31 @@ async def disable_governance(
         return row
 
 
-@router.post("/{doris_database}/enable", response_model=GovernanceSwitchOut,
-             summary="Re-enable masking for a Doris database")
+@router.post("/{stardata_database}/enable", response_model=GovernanceSwitchOut,
+             summary="Re-enable masking for a Stardata database")
 async def enable_governance(
-    doris_database: str,
+    stardata_database: str,
     body: EnableRequest,
     principal: dict = Depends(require_admin),
 ):
     """
-    Re-enables governance for *doris_database*.
+    Re-enables governance for *stardata_database*.
 
     Effect:
     - POST /api/v1/masking/apply  will include this database again.
     - POST /api/v1/masking/query  will resume role-based routing
       (analyst → masked view, admin → base table).
 
-    The existing masked views are already in Doris — users are immediately
+    The existing masked views are already in Stardata — users are immediately
     restricted back to their masked views without any DDL re-apply.
     If schema has changed since disabling, run masking/apply with force=true.
     """
     async with db_session() as session:
-        row = await _get_or_create(session, doris_database)
+        row = await _get_or_create(session, stardata_database)
         if row.governance_enabled:
             raise HTTPException(
                 409,
-                f"Database '{doris_database}' is already enabled."
+                f"Database '{stardata_database}' is already enabled."
             )
         row.governance_enabled = True
         row.disabled_reason = None

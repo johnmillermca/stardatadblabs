@@ -45,7 +45,7 @@ Data sources:          Data consumers:
 PostgreSQL ──► CDC     Kestra orchestration
 MongoDB ────► CDC     SQLMesh transformations
 Oracle ─────► CDC     OpenSearch (log ingestion)
-                       Apache Doris (real-time analytics)
+                       Apache Stardata (real-time analytics)
 ```
 
 ---

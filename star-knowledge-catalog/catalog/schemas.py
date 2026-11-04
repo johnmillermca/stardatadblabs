@@ -101,9 +101,9 @@ class AlgorithmCreate(BaseModel):
         ...,
         pattern=r"^(REDACT|HASH|PARTIAL_MASK|TOKENIZE|DATE_GENERALIZE|NULL_OUT|CUSTOM)$",
     )
-    doris_expression: str = Field(
+    stardata_expression: str = Field(
         ...,
-        description="Doris SQL expression with {col} placeholder, e.g. SHA2({col}, 256)",
+        description="Stardata SQL expression with {col} placeholder, e.g. SHA2({col}, 256)",
     )
     applicable_types: list[str] = Field(
         default_factory=lambda: ["VARCHAR", "TEXT", "STRING"]
@@ -113,7 +113,7 @@ class AlgorithmCreate(BaseModel):
 class AlgorithmUpdate(BaseModel):
     display_name: Optional[str] = None
     description: Optional[str] = None
-    doris_expression: Optional[str] = None
+    stardata_expression: Optional[str] = None
     applicable_types: Optional[list[str]] = None
 
 
@@ -123,7 +123,7 @@ class AlgorithmOut(BaseModel):
     display_name: str
     description: Optional[str]
     algorithm_type: str
-    doris_expression: str
+    stardata_expression: str
     applicable_types: list[str]
     created_at: datetime
 
@@ -177,8 +177,8 @@ class PolicyOut(BaseModel):
 # ── Column Tags ──────────────────────────────────────────────────────────────
 
 class ColumnTagCreate(BaseModel):
-    doris_database: str
-    doris_table: str
+    stardata_database: str
+    stardata_table: str
     column_name: str
     glossary_term_id: Optional[int] = None
     classification_id: Optional[int] = None
@@ -187,8 +187,8 @@ class ColumnTagCreate(BaseModel):
 
 class ColumnTagOut(BaseModel):
     id: int
-    doris_database: str
-    doris_table: str
+    stardata_database: str
+    stardata_table: str
     column_name: str
     glossary_term_id: Optional[int]
     glossary_term_name: Optional[str] = None
@@ -205,8 +205,8 @@ class ColumnTagOut(BaseModel):
 # ── Auto-classify scan ────────────────────────────────────────────────────────
 
 class ScanRequest(BaseModel):
-    doris_database: str = Field(..., description="Doris database to scan")
-    doris_table: Optional[str] = Field(
+    stardata_database: str = Field(..., description="Stardata database to scan")
+    stardata_table: Optional[str] = Field(
         None,
         description="If set, scan only this table. Omit to scan all tables in the database.",
     )
@@ -233,8 +233,8 @@ class ScanColumnResult(BaseModel):
 
 
 class ScanTableResult(BaseModel):
-    doris_database: str
-    doris_table: str
+    stardata_database: str
+    stardata_table: str
     columns_scanned: int
     columns_tagged: int
     results: list[ScanColumnResult]
@@ -248,8 +248,8 @@ class ScanResponse(BaseModel):
 # ── Masking view apply ────────────────────────────────────────────────────────
 
 class ApplyMaskingRequest(BaseModel):
-    doris_database: str
-    doris_table: Optional[str] = Field(
+    stardata_database: str
+    stardata_table: Optional[str] = Field(
         None,
         description="Apply to one table. Omit for all tagged tables in the database.",
     )
@@ -261,8 +261,8 @@ class ApplyMaskingRequest(BaseModel):
 
 
 class ApplyMaskingResult(BaseModel):
-    doris_database: str
-    doris_table: str
+    stardata_database: str
+    stardata_table: str
     view_name: str
     columns_masked: list[str]
     action: str   # "created" | "updated" | "unchanged" | "dry_run" | "error"
@@ -278,8 +278,8 @@ class ApplyMaskingResponse(BaseModel):
 
 class MaskedQueryRequest(BaseModel):
     username: str = Field(..., description="Username from RBAC Control Plane")
-    doris_database: str
-    doris_table: str
+    stardata_database: str
+    stardata_table: str
     columns: Optional[list[str]] = Field(
         None,
         description="Columns to select. Omit or use ['*'] for all.",

@@ -150,9 +150,9 @@ for APP in polaris; do
 done
 log_done "Security + catalog layer"
 
-# ── Step 13: Sync analytics layer (Doris, Spark HA, JupyterHub, SQLMesh) ─────
-log "Step 13: Sync analytics (doris, spark 1-master+3-workers, jupyterhub, sqlmesh)"
-for APP in doris spark jupyterhub sqlmesh; do
+# ── Step 13: Sync analytics layer (Stardata, Spark HA, JupyterHub, SQLMesh) ─────
+log "Step 13: Sync analytics (stardata, spark 1-master+3-workers, jupyterhub, sqlmesh)"
+for APP in stardata spark jupyterhub sqlmesh; do
   if kubectl get application "${APP}" -n argocd &>/dev/null 2>&1; then
     argocd app sync "${APP}" --prune --timeout 360 2>/dev/null || \
       echo "  ⚠  ${APP} sync non-fatal"
@@ -175,8 +175,8 @@ fi
 log_done "Orchestration layer"
 
 # ── Step 15: Sync data-platform MCP servers (in prod namespace) ───────────────
-log "Step 15: Sync MCP servers (mcp-sqlmesh, mcp-doris, mcp-opensearch, mcp-spark, mcp-kafka)"
-for APP in mcp-sqlmesh mcp-doris mcp-opensearch mcp-spark mcp-kafka; do
+log "Step 15: Sync MCP servers (mcp-sqlmesh, mcp-stardata, mcp-opensearch, mcp-spark, mcp-kafka)"
+for APP in mcp-sqlmesh mcp-stardata mcp-opensearch mcp-spark mcp-kafka; do
   if kubectl get application "${APP}" -n argocd &>/dev/null 2>&1; then
     argocd app sync "${APP}" --prune --timeout 120 2>/dev/null || \
       echo "  ⚠  ${APP} sync non-fatal"
@@ -231,8 +231,8 @@ echo "║  PROD NAMESPACE — Catalog                                           
 echo "║    Apache Polaris (REST):  http://192.168.1.50:30181                      ║"
 echo "╠═══════════════════════════════════════════════════════════════════════════╣"
 echo "║  PROD NAMESPACE — Analytics (HA)                                          ║"
-echo "║    Doris FE UI:            http://192.168.1.50:30030                      ║"
-echo "║    Doris FE MySQL:         jdbc:mysql://192.168.1.50:30090                ║"
+echo "║    Stardata FE UI:            http://192.168.1.50:30030                      ║"
+echo "║    Stardata FE MySQL:         jdbc:mysql://192.168.1.50:30090                ║"
 echo "║    Spark Master UI:        http://192.168.1.50:30707  (3 workers)         ║"
 echo "║    Spark RPC:              spark://192.168.1.50:30777                     ║"
 echo "║    JupyterHub:             http://192.168.1.50:30888                      ║"

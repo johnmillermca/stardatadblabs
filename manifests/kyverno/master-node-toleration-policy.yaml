@@ -17,7 +17,7 @@
 # Scoped to Pods only (auto-gen disabled) — the ReplicaSet controller creates
 # pods from the Deployment template, so intercepting Pod CREATE is sufficient
 # and avoids precondition failures on Deployments/StatefulSets that have no
-# nodeSelector at all (e.g. Strimzi, OpenSearch, Doris).
+# nodeSelector at all (e.g. Strimzi, OpenSearch, Stardata).
 # =============================================================================
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
@@ -30,7 +30,7 @@ metadata:
     policies.kyverno.io/subject: Pod
     # Disable auto-generation of rules for Deployment/StatefulSet/Job/CronJob.
     # We intercept Pod CREATE only — avoids JMESPath failures on resources
-    # (Strimzi, OpenSearch, Doris) whose pod templates have no nodeSelector.
+    # (Strimzi, OpenSearch, Stardata) whose pod templates have no nodeSelector.
     pod-policies.kyverno.io/autogen-controllers: none
     policies.kyverno.io/description: >-
       master.local carries a custom taint workload=master:NoSchedule in addition

@@ -1,0 +1,41 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iptables-setup
+  namespace: prod
+spec:
+  hostNetwork: true
+  hostPID: true
+  nodeSelector:
+    kubernetes.io/hostname: master2.local
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+  restartPolicy: Never
+  containers:
+    - name: iptables
+      image: registry.k8s.io/kube-proxy:v1.31.14
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: true
+      command:
+        - /bin/sh
+        - -c
+        - |
+          # Add PREROUTING rule (external traffic on port 80 → 30081)
+          iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 30081 2>/dev/null || \
+            iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 30081
+          # Add OUTPUT rule (local traffic on port 80 → 30081)
+          iptables -t nat -C OUTPUT -p tcp --dport 80 -j REDIRECT --to-port 30081 2>/dev/null || \
+            iptables -t nat -A OUTPUT -p tcp --dport 80 -j REDIRECT --to-port 30081
+          echo "Rules applied:"
+          iptables -t nat -L PREROUTING -n --line-numbers | grep 30081
+          iptables -t nat -L OUTPUT -n --line-numbers | grep 30081
+          # Persist via iptables-save
+          iptables-save > /proc/1/fd/1 2>&1 || true
+          sleep 5

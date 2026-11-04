@@ -5,7 +5,7 @@
 #
 # WHAT IT DOES
 # ─────────────────────────────────────────────────────────────────────────────
-# Each MCP server (mcp-doris, mcp-kafka, mcp-kestra, mcp-sqlmesh) is a
+# Each MCP server (mcp-stardata, mcp-kafka, mcp-kestra, mcp-sqlmesh) is a
 # stateless HTTP proxy with no persistent state.
 # This controller:
 #
@@ -140,7 +140,7 @@ data:
 
     # name → container port
     MCP_SERVICES: dict[str, int] = {
-        "mcp-doris":   3101,
+        "mcp-stardata":   3101,
         "mcp-kafka":   3104,
         "mcp-kestra":  3105,
         "mcp-sqlmesh": 3100,
@@ -454,7 +454,7 @@ spec:
             - containerPort: 3100
               name: mcp-sqlmesh
             - containerPort: 3101
-              name: mcp-doris
+              name: mcp-stardata
             - containerPort: 3104
               name: mcp-kafka
             - containerPort: 3105

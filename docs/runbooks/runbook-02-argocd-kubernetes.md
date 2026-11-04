@@ -44,7 +44,7 @@ All platform applications are defined in `argocd-apps/`:
 | `opensearch` | `search` | Helm chart | 0 |
 | `kestra` | `orchestration` | `manifests/kestra/` | 10 |
 | `spark` | `analytics` | `helm/spark/` | 0 |
-| `doris` | `analytics` | `manifests/doris/` | 0 |
+| `stardata` | `analytics` | `manifests/stardata/` | 0 |
 | `polaris` | `catalog` | `manifests/polaris/` | 0 |
 | `sqlmesh` | `analytics` | `manifests/sqlmesh/` | 15 |
 | `kerberos` | `kerberos` | `manifests/kerberos/` | -5 |

@@ -14,13 +14,13 @@ This runbook documents every degraded pod/service encountered after cluster rebo
 2. [Strimzi Kafka — PVC Wiped on Every ArgoCD Sync](#2-strimzi-kafka--pvc-wiped-on-every-argocd-sync)
 3. [Schema Registry — CrashLoopBackOff (SASL Credential Divergence)](#3-schema-registry--crashloopbackoff-sasl-credential-divergence)
 4. [Debezium Connect — CrashLoopBackOff (SASL Credential Divergence)](#4-debezium-connect--crashloopbackoff-sasl-credential-divergence)
-5. [Apache Doris FE — Degraded (BdbJE Peer Address Stale)](#5-apache-doris-fe--degraded-bdbje-peer-address-stale)
-6. [Apache Doris BE — CrashLoopBackOff (ulimit + Rolling Update)](#6-apache-doris-be--crashloopbackoff-ulimit--rolling-update)
+5. [Apache Stardata FE — Degraded (BdbJE Peer Address Stale)](#5-apache-stardata-fe--degraded-bdbje-peer-address-stale)
+6. [Apache Stardata BE — CrashLoopBackOff (ulimit + Rolling Update)](#6-apache-stardata-be--crashloopbackoff-ulimit--rolling-update)
 7. [Apache Polaris — ImagePullBackOff + Wrong Config Path](#7-apache-polaris--imagepullbackoff--wrong-config-path)
 8. [ArgoCD strimzi-kafka App — Perpetual OutOfSync](#8-argocd-strimzi-kafka-app--perpetual-outofsync)
 
 ### Session 2 — 2026-07-26 (Post-Reboot Follow-Up)
-9. [Doris BE — CrashLoopBackOff (vm.max_map_count Too Low)](#9-doris-be--crashloopbackoff-vmmax_map_count-too-low)
+9. [Stardata BE — CrashLoopBackOff (vm.max_map_count Too Low)](#9-stardata-be--crashloopbackoff-vmmax_map_count-too-low)
 10. [Oracle XE — CrashLoopBackOff (ORA-01081 Stale Lock Files)](#10-oracle-xe--crashloopbackoff-ora-01081-stale-lock-files)
 11. [Schema Registry — CrashLoopBackOff (_schemas Topic Wrong Retention Policy)](#11-schema-registry--crashloopbackoff-_schemas-topic-wrong-retention-policy)
 12. [Strimzi Kafka CR — NotReady After Reboot (KRaft Controller Race)](#12-strimzi-kafka-cr--notready-after-reboot-kraft-controller-race)
@@ -33,8 +33,8 @@ This runbook documents every degraded pod/service encountered after cluster rebo
 17. [Kafka Data Durability — Missing Disk Flush + auto.create.topics Race](#17-kafka-data-durability--missing-disk-flush--autocreatetopics-race)
 18. [Kafka PV Not in Git — Silent Rebuild Risk](#18-kafka-pv-not-in-git--silent-rebuild-risk)
 
-### Session 4 — 2026-09-10 (Doris FE PVC Journal Gap)
-19. [Doris FE — CrashLoop (BdbJE Journal Gap: key 1 missing after pruning)](#19-doris-fe--crashloop-bdbje-journal-gap-key-1-missing-after-pruning)
+### Session 4 — 2026-09-10 (Stardata FE PVC Journal Gap)
+19. [Stardata FE — CrashLoop (BdbJE Journal Gap: key 1 missing after pruning)](#19-stardata-fe--crashloop-bdbje-journal-gap-key-1-missing-after-pruning)
 
 ### Reference
 20. [Post-Reboot Recovery Checklist](#14-post-reboot-recovery-checklist)
@@ -149,40 +149,40 @@ All three SASL configs (main, producer, consumer) now reference the Strimzi-mana
 
 ---
 
-## 5. Apache Doris FE — Degraded (BdbJE Peer Address Stale)
+## 5. Apache Stardata FE — Degraded (BdbJE Peer Address Stale)
 
 ### Symptom
-Doris FE showed `feType:UNKNOWN` in `SHOW FRONTENDS`. BdbJE stored the pod's previous IP address and could not reach its own quorum peer.
+Stardata FE showed `feType:UNKNOWN` in `SHOW FRONTENDS`. BdbJE stored the pod's previous IP address and could not reach its own quorum peer.
 
 ### Root Cause
-Doris FE was a `Deployment` — ephemeral pod IPs change on restart. BdbJE's peer discovery stores the IP at initial cluster formation. After a reboot the new pod IP is unknown to BdbJE and the FE stays in UNKNOWN state indefinitely.
+Stardata FE was a `Deployment` — ephemeral pod IPs change on restart. BdbJE's peer discovery stores the IP at initial cluster formation. After a reboot the new pod IP is unknown to BdbJE and the FE stays in UNKNOWN state indefinitely.
 
 ### Permanent Fix
-**File:** [`manifests/doris/doris-fe-deployment.yaml`](../../manifests/doris/doris-fe-deployment.yaml)
+**File:** [`manifests/stardata/stardata-fe-deployment.yaml`](../../manifests/stardata/stardata-fe-deployment.yaml)
 
-1. `Deployment` → `StatefulSet` with `serviceName: doris-fe-headless`
-2. Headless Service added (`doris-fe-headless`, ClusterIP=None)
+1. `Deployment` → `StatefulSet` with `serviceName: stardata-fe-headless`
+2. Headless Service added (`stardata-fe-headless`, ClusterIP=None)
 3. `fe.conf` updated:
    ```properties
    enable_fqdn_mode = true
-   advertised_address = doris-fe-0.doris-fe-headless.prod.svc.cluster.local
+   advertised_address = stardata-fe-0.stardata-fe-headless.prod.svc.cluster.local
    priority_networks = 10.244.0.0/16
    ```
 4. Entrypoint changed to `fe_entrypoint.sh`
 
 ---
 
-## 6. Apache Doris BE — CrashLoopBackOff (ulimit + Rolling Update)
+## 6. Apache Stardata BE — CrashLoopBackOff (ulimit + Rolling Update)
 
 ### Symptom
-Doris BE `CrashLoopBackOff`. Two distinct errors: (1) `FLAGS_min_file_descriptor_number <= limit.rlim_cur` and (2) `Multi-Attach error for volume: volume is already exclusively used by another pod`.
+Stardata BE `CrashLoopBackOff`. Two distinct errors: (1) `FLAGS_min_file_descriptor_number <= limit.rlim_cur` and (2) `Multi-Attach error for volume: volume is already exclusively used by another pod`.
 
 ### Root Cause
-1. Node default soft `ulimit -n` was 1024; Doris BE requires ≥ 65536.
+1. Node default soft `ulimit -n` was 1024; Stardata BE requires ≥ 65536.
 2. `strategy: RollingUpdate` starts a new pod before terminating the old — two pods race for the same `ReadWriteOnce` PVC.
 
 ### Permanent Fix
-**File:** [`manifests/doris/doris-be-deployment.yaml`](../../manifests/doris/doris-be-deployment.yaml)
+**File:** [`manifests/stardata/stardata-be-deployment.yaml`](../../manifests/stardata/stardata-be-deployment.yaml)
 ```yaml
 strategy:
   type: Recreate     # terminate old pod before starting new (required for RWO PVC)
@@ -192,7 +192,7 @@ containers:
     - -c
     - |
       ulimit -n 524288   # set to node hard limit
-      exec /opt/apache-doris/be_entrypoint.sh ...
+      exec /opt/apache-stardata/be_entrypoint.sh ...
 ```
 
 ---
@@ -230,13 +230,13 @@ Both resources are created at runtime by the Strimzi operator, not in Git. With 
 
 ---
 
-## 9. Doris BE — CrashLoopBackOff (vm.max_map_count Too Low)
+## 9. Stardata BE — CrashLoopBackOff (vm.max_map_count Too Low)
 
 ### Pod
-`doris-be-6bf7f69f48-dkt47` — `prod` namespace — **112 restarts**
+`stardata-be-6bf7f69f48-dkt47` — `prod` namespace — **112 restarts**
 
 ### Symptom
-Doris BE exits immediately on every start with `Exit Code: 0`. Log message:
+Stardata BE exits immediately on every start with `Exit Code: 0`. Log message:
 ```
 Set kernel parameter 'vm.max_map_count' to a value greater than 2000000,
 example: 'sysctl -w vm.max_map_count=2000000'
@@ -252,7 +252,7 @@ Run on **every node** (master + all 4 workers) to apply immediately and persist 
 
 ```bash
 sysctl -w vm.max_map_count=2000000 && \
-echo 'vm.max_map_count=2000000' > /etc/sysctl.d/99-doris.conf && \
+echo 'vm.max_map_count=2000000' > /etc/sysctl.d/99-stardata.conf && \
 sysctl --system 2>&1 | grep max_map && \
 echo "Verified: $(cat /proc/sys/vm/max_map_count)"
 ```
@@ -269,7 +269,7 @@ echo "Verified: $(cat /proc/sys/vm/max_map_count)"
 
 ### Result
 ```
-Pod: doris-be-645759c54-rwcrn  Status: Running  Ready: 1/1  Restarts: 0
+Pod: stardata-be-645759c54-rwcrn  Status: Running  Ready: 1/1  Restarts: 0
 ```
 
 ### Verify After Any Reboot
@@ -603,12 +603,12 @@ ArgoCD prune:                       false — cannot delete PVCs again   ✅
 
 ---
 
-## 19. Doris FE — CrashLoop (BdbJE Journal Gap: key 1 missing after pruning)
+## 19. Stardata FE — CrashLoop (BdbJE Journal Gap: key 1 missing after pruning)
 
 ### Symptom
 
-Doris FE pod enters `CrashLoopBackOff` immediately after pod restart.  
-FE log (from `kubectl logs -n prod doris-fe-0 -c doris-fe --previous`) shows:
+Stardata FE pod enters `CrashLoopBackOff` immediately after pod restart.  
+FE log (from `kubectl logs -n prod stardata-fe-0 -c stardata-fe --previous`) shows:
 
 ```
 com.sleepycat.je.EnvironmentFailureException:
@@ -616,12 +616,12 @@ com.sleepycat.je.EnvironmentFailureException:
   Journals start at 657976; no image checkpoint found.
 ```
 
-`kubectl get pod -n prod doris-fe-0` shows `RESTARTS` incrementing on every attempt.
+`kubectl get pod -n prod stardata-fe-0` shows `RESTARTS` incrementing on every attempt.
 
 ### Root Cause
 
-BdbJE (Oracle Berkeley DB Java Edition) — the journal store embedded in Doris FE —
-keeps two kinds of persistent state in `meta_dir` (`/opt/apache-doris/fe/doris-meta`):
+BdbJE (Oracle Berkeley DB Java Edition) — the journal store embedded in Stardata FE —
+keeps two kinds of persistent state in `meta_dir` (`/opt/apache-stardata/fe/stardata-meta`):
 
 | File type | Purpose |
 |-----------|---------|
@@ -645,17 +645,17 @@ confirmed complete and correct; the FE crash is an independent PVC state problem
 
 ```bash
 # 1. Confirm the journal gap in the log
-kubectl logs -n prod doris-fe-0 -c doris-fe --previous 2>/dev/null \
+kubectl logs -n prod stardata-fe-0 -c stardata-fe --previous 2>/dev/null \
   | grep -E "key 1 missing|Journals start at|image checkpoint"
 
 # 2. Inspect the meta directory on the node
-# Find the PV host path for doris-fe-meta
+# Find the PV host path for stardata-fe-meta
 kubectl get pv \
-  -o jsonpath='{range .items[?(@.spec.claimRef.name=="doris-fe-meta")]}{.spec.hostPath.path}{"\n"}{end}'
+  -o jsonpath='{range .items[?(@.spec.claimRef.name=="stardata-fe-meta")]}{.spec.hostPath.path}{"\n"}{end}'
 
 # SSH to worker1.local (the node pinned in the StatefulSet nodeSelector)
 ssh root@worker1.local
-META_DIR=<hostPath from above>/fe/doris-meta    # e.g. /home/local-path-provisioner/pvc-…/fe/doris-meta
+META_DIR=<hostPath from above>/fe/stardata-meta    # e.g. /home/local-path-provisioner/pvc-…/fe/stardata-meta
 
 # Check what journal files and image files exist
 ls -lh "${META_DIR}/bdb/"
@@ -673,33 +673,33 @@ ls "${META_DIR}/image/" 2>/dev/null || echo "no image directory"
 
 ```bash
 # 1. Scale down FE to release the PVC
-kubectl scale statefulset doris-fe -n prod --replicas=0
-kubectl wait pod -n prod -l app=doris-fe --for=delete --timeout=120s
+kubectl scale statefulset stardata-fe -n prod --replicas=0
+kubectl wait pod -n prod -l app=stardata-fe --for=delete --timeout=120s
 
 # 2. Clear the corrupted meta directory (on worker1.local)
 META_HOST_PATH=$(kubectl get pv \
-  -o jsonpath='{range .items[?(@.spec.claimRef.name=="doris-fe-meta")]}{.spec.hostPath.path}{"\n"}{end}')
+  -o jsonpath='{range .items[?(@.spec.claimRef.name=="stardata-fe-meta")]}{.spec.hostPath.path}{"\n"}{end}')
 
-ssh root@worker1.local "rm -rf '${META_HOST_PATH}/fe/doris-meta'"
+ssh root@worker1.local "rm -rf '${META_HOST_PATH}/fe/stardata-meta'"
 
-# 3. Scale FE back up — Doris will create a fresh meta_dir on first boot
-kubectl scale statefulset doris-fe -n prod --replicas=1
-kubectl rollout status statefulset/doris-fe -n prod --timeout=300s
+# 3. Scale FE back up — Stardata will create a fresh meta_dir on first boot
+kubectl scale statefulset stardata-fe -n prod --replicas=1
+kubectl rollout status statefulset/stardata-fe -n prod --timeout=300s
 
 # 4. Wait for FE to become ready (readiness probe: /api/bootstrap port 8030)
-kubectl get pod -n prod doris-fe-0 -w
+kubectl get pod -n prod stardata-fe-0 -w
 
 # 5. Confirm FE is healthy
-DORIS_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
-  -o jsonpath='{.data.DORIS_ADMIN_PASSWORD}' | base64 -d)
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+STARDATA_PASS=$(kubectl get secret rbac-plane-credentials -n prod \
+  -o jsonpath='{.data.STARDATA_ADMIN_PASSWORD}' | base64 -d)
+mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}" \
   -e "SHOW FRONTENDS\G" 2>/dev/null | grep -E "feType|Alive"
 # feType=MASTER  Alive=true
 
 # 6. Re-register the BE (it loses its FE registration when FE is wiped)
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
-  -e "ALTER SYSTEM ADD BACKEND 'doris-be-svc.prod.svc.cluster.local:9050';"
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" \
+mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}" \
+  -e "ALTER SYSTEM ADD BACKEND 'stardata-be-svc.prod.svc.cluster.local:9050';"
+mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}" \
   -e "SHOW BACKENDS\G" 2>/dev/null | grep -E "Host|Alive"
 # Alive=true
 
@@ -713,7 +713,7 @@ key 1 is missing from an older run), a checkpoint can sometimes be forced:
 
 ```bash
 # Run DbRunAction to force a checkpoint inside the bdb/ directory
-# Requires the same JE version jar used by Doris FE
+# Requires the same JE version jar used by Stardata FE
 # This is rarely feasible in containerised environments — use Option A instead.
 ```
 
@@ -723,11 +723,11 @@ this cluster.
 ### Permanent Prevention
 
 The root cause is that BdbJE never wrote an image checkpoint to this PVC.
-Doris FE writes an image checkpoint automatically when it performs a clean
+Stardata FE writes an image checkpoint automatically when it performs a clean
 shutdown (i.e. receives SIGTERM with enough grace time).
 
 **`terminationGracePeriodSeconds: 120` is already set in
-[`manifests/doris/doris-fe-deployment.yaml`](../../manifests/doris/doris-fe-deployment.yaml)**
+[`manifests/stardata/stardata-fe-deployment.yaml`](../../manifests/stardata/stardata-fe-deployment.yaml)**
 per §15.8. This is correct and sufficient for normal shutdowns.
 
 The gap on this PVC pre-dates that fix and cannot be recovered without Option A.
@@ -742,22 +742,22 @@ all catalogs, metadata tables, and cache-manager state are restored:
 
 ```bash
 # Confirm FE + BE healthy
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW FRONTENDS\G"
-mysql -h 192.168.1.50 -P 30090 -u root -p"${DORIS_PASS}" -e "SHOW BACKENDS\G"
+mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}" -e "SHOW FRONTENDS\G"
+mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}" -e "SHOW BACKENDS\G"
 
 # Re-run catalog + cache_system setup (RB-25 §3.4 – §3.6)
-kubectl apply -f manifests/doris/setup/02_create_catalogs.sql   # via mysql client
-kubectl apply -f manifests/doris/setup/03_create_metadata_tables.sql
+kubectl apply -f manifests/stardata/setup/02_create_catalogs.sql   # via mysql client
+kubectl apply -f manifests/stardata/setup/03_create_metadata_tables.sql
 
-# Restart cache-manager so it reconnects with fresh Doris state
-kubectl rollout restart deployment/doris-cache-manager -n prod
-kubectl rollout status deployment/doris-cache-manager -n prod --timeout=60s
+# Restart cache-manager so it reconnects with fresh Stardata state
+kubectl rollout restart deployment/stardata-cache-manager -n prod
+kubectl rollout status deployment/stardata-cache-manager -n prod --timeout=60s
 ```
 
 ### Rule
 
 > **§15.18 — BdbJE requires a clean-shutdown image checkpoint to survive journal pruning.**
-> Any Doris FE PVC that has never had a clean shutdown will accumulate pruned
+> Any Stardata FE PVC that has never had a clean shutdown will accumulate pruned
 > journals with no image anchor. The FE cannot start after a forced restart.
 > Always allow `terminationGracePeriodSeconds ≥ 120` and never hard-kill the
 > FE pod. If the PVC state is already corrupt, Option A (wipe meta dir) is the
@@ -809,10 +809,10 @@ kubectl logs -n prod -l app=schema-registry --tail=5 | grep -iE "error|started|r
 kubectl get pod -n prod -l app=oracle-xe
 # Should be Running, 0 restarts (init containers handle stale locks)
 
-# ── Step 8: Doris BE ────────────────────────────────────────────────────────
-kubectl get pod -n prod -l app=doris-be
+# ── Step 8: Stardata BE ────────────────────────────────────────────────────────
+kubectl get pod -n prod -l app=stardata-be
 # Should be Running — if CrashLoopBackOff, check:
-kubectl logs -n prod -l app=doris-be --tail=5 | grep -i "max_map_count"
+kubectl logs -n prod -l app=stardata-be --tail=5 | grep -i "max_map_count"
 # If max_map_count error: sysctl file not loaded — re-run sysctl --system on worker1
 
 # ── Step 9: ArgoCD sync ──────────────────────────────────────────────────────
@@ -820,8 +820,8 @@ kubectl get application -n argocd \
   -o custom-columns="APP:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status"
 # All apps should reach Synced/Healthy within ~5 minutes of node Ready
 
-# ── Step 10: Verify Doris cluster ────────────────────────────────────────────
-kubectl exec -n prod -l app=doris-fe -- \
+# ── Step 10: Verify Stardata cluster ────────────────────────────────────────────
+kubectl exec -n prod -l app=stardata-fe -- \
   mysql -h 127.0.0.1 -P 9030 -u root --connect-timeout=5 \
   -e "SHOW FRONTENDS\G" 2>/dev/null | grep -E "feType|Alive"
 # feType=MASTER, Alive=true
@@ -853,7 +853,7 @@ Strimzi is the single owner of SCRAM-SHA-512 passwords. Any copy in another secr
 ```
 
 ### 15.3 Stateful Services Need Stable Network Identity
-Any service that stores its own address in persistent metadata (BdbJE/Doris FE, etcd, Kafka KRaft, OpenSearch) must use a `StatefulSet` + headless Service. A `Deployment` breaks on restart because the stored IP becomes unreachable.
+Any service that stores its own address in persistent metadata (BdbJE/Stardata FE, etcd, Kafka KRaft, OpenSearch) must use a `StatefulSet` + headless Service. A `Deployment` breaks on restart because the stored IP becomes unreachable.
 
 ### 15.4 Kernel Parameters Must Be Persisted
 `sysctl -w` changes are lost on reboot. Always persist to `/etc/sysctl.d/`:
@@ -875,7 +875,7 @@ Use endpoints that always return HTTP 200. `/v1/sys/health` in OpenBao returns H
 `terminationGracePeriodSeconds: 30` (Kubernetes default) is too short for stateful engines:
 - **Oracle XE** needs ≥ 120s to checkpoint and close data files cleanly (prevents ORA-01081)
 - **Kafka KRaft** needs ≥ 120s to flush the metadata log (prevents controller election race)
-- **Doris FE** (BdbJE) needs ≥ 60s to flush BdbJE journal cleanly
+- **Stardata FE** (BdbJE) needs ≥ 60s to flush BdbJE journal cleanly
 
 ### 15.9 KafkaTopic CR Names Must Be Valid RFC 1123 Subdomain Names
 Kubernetes `metadata.name` must match `[a-z0-9]([-a-z0-9]*[a-z0-9])?`. Topics with names starting with `_` (e.g. `_schemas`, `__consumer_offsets`) cannot be used as CR names. Use `spec.topicName` to decouple the CR name from the Kafka topic name:
@@ -886,9 +886,9 @@ spec:
   topicName: "_schemas"    # actual Kafka topic name
 ```
 
-### 15.10 Doris BE Probe Race on Startup
+### 15.10 Stardata BE Probe Race on Startup
 
-**Pattern**: `doris-be` pod stays `NotReady` (or restarts) after every node reboot.
+**Pattern**: `stardata-be` pod stays `NotReady` (or restarts) after every node reboot.
 
 **Root cause — 4 compounding factors**:
 
@@ -1020,8 +1020,8 @@ initContainers:
 
 | PVC | Size | Protection |
 |-----|------|-----------|
-| doris-be-storage | 400Gi | ✅ Retain |
-| doris-fe-meta | 100Gi | ✅ Retain |
+| stardata-be-storage | 400Gi | ✅ Retain |
+| stardata-fe-meta | 100Gi | ✅ Retain |
 | mongodb-data | 100Gi | ✅ Retain |
 | postgresql-data | 100Gi | ✅ Retain |
 | oracle-data | 200Gi | ✅ Retain |

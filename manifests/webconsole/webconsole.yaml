@@ -1,0 +1,65 @@
+---
+# Namespace label already exists in prod-namespace.yaml; this targets the prod namespace
+# Deployment — pinned to worker8.local
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webconsole
+  namespace: prod
+  labels:
+    app: webconsole
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webconsole
+  template:
+    metadata:
+      labels:
+        app: webconsole
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker8.local
+      containers:
+        - name: webconsole
+          image: 192.168.1.50:30500/webconsole:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+# Service — NodePort 30080 (accessible from any node in the cluster including masters)
+apiVersion: v1
+kind: Service
+metadata:
+  name: webconsole
+  namespace: prod
+  labels:
+    app: webconsole
+spec:
+  type: NodePort
+  selector:
+    app: webconsole
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30081

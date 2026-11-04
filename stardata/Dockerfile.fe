@@ -1,0 +1,14 @@
+# =============================================================================
+# Stardata FE — Apache Doris branch-4.2 upstream (no custom patch)
+#
+# NOTE: Apache Doris has not yet published a branch-4.2 release image on
+# Docker Hub. This Dockerfile uses `fe-latest` as a stand-in and will be
+# updated to `fe-4.2.x` once an official 4.2 release image is published.
+#
+# To build manually against a locally built branch-4.2 FE binary, replace
+# the FROM line with your locally tagged image before building.
+# =============================================================================
+FROM docker.io/apache/doris:fe-latest
+
+LABEL org.stardata.version="4.2"
+LABEL org.stardata.base="apache/doris:branch-4.2"

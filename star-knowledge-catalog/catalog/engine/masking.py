@@ -1,7 +1,7 @@
 """
 Star Knowledge Catalog — Masking View Builder.
 
-For each Doris table that has tagged columns this engine:
+For each Stardata table that has tagged columns this engine:
 
   1. Reads all ColumnTag rows for (database, table) from PostgreSQL.
   2. Resolves the applicable MaskingPolicy for each tagged column
@@ -9,19 +9,19 @@ For each Doris table that has tagged columns this engine:
   3. Generates a CREATE OR REPLACE VIEW DDL that:
        • replaces each sensitive column with the masking expression
        • passes all other columns through unchanged
-  4. Applies the DDL to Doris via the MySQL-protocol connector.
-  5. Grants SELECT on the masked view to the 'analyst'@'%' Doris user.
+  4. Applies the DDL to Stardata via the MySQL-protocol connector.
+  5. Grants SELECT on the masked view to the 'analyst'@'%' Stardata user.
   6. Persists the view manifest (DDL + checksum) to PostgreSQL.
 
 Performance guarantee
 ---------------------
-Masked views are pre-computed DDL in Doris — the masking expressions are
-evaluated at query time by the Doris vectorised engine exactly like any other
+Masked views are pre-computed DDL in Stardata — the masking expressions are
+evaluated at query time by the Stardata vectorised engine exactly like any other
 projection. There is no Python in the query path. Sub-second performance is
 preserved because:
   • The view definition only adds cheap scalar functions (SHA2, CONCAT, etc.).
-  • Vectorised execution is fully native in Doris 4.x (Apache Arrow / Velox).
-  • Predicate push-down, partition pruning, and all Doris optimisations apply.
+  • Vectorised execution is fully native in Stardata 4.x (Apache Arrow / Velox).
+  • Predicate push-down, partition pruning, and all Stardata optimisations apply.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from ..database import db_session, cache_invalidate_prefix, POLICY_CACHE_PREFIX
 from ..models import (
     ColumnTag,
     DataClassification,
-    DorisViewManifest,
+    StardataViewManifest,
     GlossaryTerm,
     MaskingAlgorithm,
     MaskingPolicy,
@@ -47,23 +47,23 @@ from ..models import (
 log = logging.getLogger(__name__)
 
 
-# ── Doris connection helper ──────────────────────────────────────────────────
+# ── Stardata connection helper ──────────────────────────────────────────────────
 
-async def _doris_conn() -> aiomysql.Connection:
+async def _stardata_conn() -> aiomysql.Connection:
     s = get_settings()
     return await aiomysql.connect(
-        host=s.doris_host,
-        port=s.doris_port,
-        user=s.doris_admin_user,
-        password=s.doris_admin_password,
+        host=s.stardata_host,
+        port=s.stardata_port,
+        user=s.stardata_admin_user,
+        password=s.stardata_admin_password,
         db="information_schema",
         connect_timeout=5,
         charset="utf8mb4",
     )
 
 
-async def _doris_execute(sql: str) -> None:
-    conn = await _doris_conn()
+async def _stardata_execute(sql: str) -> None:
+    conn = await _stardata_conn()
     try:
         async with conn.cursor() as cur:
             await cur.execute(sql)
@@ -72,11 +72,11 @@ async def _doris_execute(sql: str) -> None:
         conn.close()
 
 
-# ── Column metadata from Doris ───────────────────────────────────────────────
+# ── Column metadata from Stardata ───────────────────────────────────────────────
 
 async def _get_column_order(database: str, table: str) -> list[str]:
     """Return columns in their original ordinal order from information_schema."""
-    conn = await _doris_conn()
+    conn = await _stardata_conn()
     try:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -155,7 +155,7 @@ def _build_view_ddl(
     table: str,
     view_name: str,
     all_columns: list[str],
-    masked_columns: dict[str, str],  # column_name → doris_expression (with {col} filled)
+    masked_columns: dict[str, str],  # column_name → stardata_expression (with {col} filled)
 ) -> str:
     """
     Generate:
@@ -187,27 +187,27 @@ def _build_view_ddl(
 
 # ── Grant / revoke helpers ────────────────────────────────────────────────────
 
-async def _grant_view_to_user(database: str, view_name: str, doris_user: str) -> None:
-    """Grant SELECT on the masked view to *doris_user*@'%'."""
+async def _grant_view_to_user(database: str, view_name: str, stardata_user: str) -> None:
+    """Grant SELECT on the masked view to *stardata_user*@'%'."""
     sql = (
         f"GRANT SELECT_PRIV ON `{database}`.`{view_name}` "
-        f"TO '{doris_user}'@'%';"
+        f"TO '{stardata_user}'@'%';"
     )
     try:
-        await _doris_execute(sql)
-        log.debug("Masking: granted SELECT on %s.%s to %s", database, view_name, doris_user)
+        await _stardata_execute(sql)
+        log.debug("Masking: granted SELECT on %s.%s to %s", database, view_name, stardata_user)
     except Exception as exc:
         log.warning(
             "Masking: could not grant view %s.%s to %s: %s",
-            database, view_name, doris_user, exc,
+            database, view_name, stardata_user, exc,
         )
 
 
-async def _revoke_base_table_from_user(database: str, table: str, doris_user: str) -> None:
+async def _revoke_base_table_from_user(database: str, table: str, stardata_user: str) -> None:
     """
-    Revoke SELECT_PRIV on the base table from *doris_user*@'%'.
+    Revoke SELECT_PRIV on the base table from *stardata_user*@'%'.
 
-    This is called after a masked view is applied for every non-exempt Doris
+    This is called after a masked view is applied for every non-exempt Stardata
     user that held a broad grant (e.g. SELECT_PRIV ON *.*).  It ensures that
     no non-privileged user can bypass the masked view by querying the base
     table directly.
@@ -216,24 +216,24 @@ async def _revoke_base_table_from_user(database: str, table: str, doris_user: st
     """
     sql = (
         f"REVOKE SELECT_PRIV ON `{database}`.`{table}` "
-        f"FROM '{doris_user}'@'%';"
+        f"FROM '{stardata_user}'@'%';"
     )
     try:
-        await _doris_execute(sql)
+        await _stardata_execute(sql)
         log.info(
             "Masking: revoked base-table SELECT on %s.%s from %s",
-            database, table, doris_user,
+            database, table, stardata_user,
         )
     except Exception as exc:
         log.debug(
             "Masking: revoke base-table %s.%s from %s (ignored): %s",
-            database, table, doris_user, exc,
+            database, table, stardata_user, exc,
         )
 
 
-async def _get_doris_users_for_role(role_name: str) -> list[str]:
+async def _get_stardata_users_for_role(role_name: str) -> list[str]:
     """
-    Fetch all Doris usernames that correspond to a given RBAC role by
+    Fetch all Stardata usernames that correspond to a given RBAC role by
     querying the RBAC Control Plane.  Returns an empty list on error.
     """
     from .rbac_client import get_rbac_client
@@ -270,10 +270,10 @@ async def _enforce_base_table_lockdown(
 ) -> None:
     """
     After a masked view is created or updated, revoke direct SELECT_PRIV on
-    the base *table* from every Doris user that is NOT in an exempt role.
+    the base *table* from every Stardata user that is NOT in an exempt role.
 
     Strategy:
-      1. Fetch all Doris usernames from information_schema.user_privileges
+      1. Fetch all Stardata usernames from information_schema.user_privileges
          that currently hold SELECT_PRIV on this table (or on *.* / db.*).
       2. Skip users whose RBAC roles are in *exempt_roles* (they are allowed
          to see clear data — e.g. data_admin, platform_admin).
@@ -282,8 +282,8 @@ async def _enforce_base_table_lockdown(
 
     This is called once at apply-time — not at query time.
     """
-    # Fetch all non-system Doris users that hold any SELECT privilege
-    conn = await _doris_conn()
+    # Fetch all non-system Stardata users that hold any SELECT privilege
+    conn = await _stardata_conn()
     try:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -294,7 +294,7 @@ async def _enforce_base_table_lockdown(
             rows = await cur.fetchall()
         raw_users = [r[0].strip("'").split("'@'")[0] for r in rows]
     except Exception as exc:
-        log.warning("Masking: could not fetch Doris user list: %s", exc)
+        log.warning("Masking: could not fetch Stardata user list: %s", exc)
         return
     finally:
         conn.close()
@@ -305,25 +305,25 @@ async def _enforce_base_table_lockdown(
     from .rbac_client import get_rbac_client
     rbac = get_rbac_client()
 
-    for doris_user in raw_users:
+    for stardata_user in raw_users:
         # Resolve roles for this user from the RBAC Control Plane
-        roles = await rbac.role_names(doris_user)
+        roles = await rbac.role_names(stardata_user)
 
         # If user holds any exempt role → skip (they may read base table)
         if any(r in exempt_roles for r in roles):
             log.debug(
                 "Masking: lockdown — %s is exempt (roles: %s), skipping",
-                doris_user, roles,
+                stardata_user, roles,
             )
             continue
 
         # Non-exempt: revoke base table, re-confirm view grant
         view_name = f"{table}{get_settings().masked_view_suffix}"
-        await _revoke_base_table_from_user(database, table, doris_user)
-        await _grant_view_to_user(database, view_name, doris_user)
+        await _revoke_base_table_from_user(database, table, stardata_user)
+        await _grant_view_to_user(database, view_name, stardata_user)
         log.info(
             "Masking: lockdown — %s revoked from base %s.%s, granted %s",
-            doris_user, database, table, view_name,
+            stardata_user, database, table, view_name,
         )
 
 
@@ -338,7 +338,7 @@ async def _is_governance_enabled(database: str) -> bool:
     async with db_session() as session:
         result = await session.execute(
             select(GovernanceDatabase).where(
-                GovernanceDatabase.doris_database == database
+                GovernanceDatabase.stardata_database == database
             )
         )
         row = result.scalar_one_or_none()
@@ -381,8 +381,8 @@ async def apply_masking_view(
     async with db_session() as session:
         result = await session.execute(
             select(ColumnTag).where(
-                ColumnTag.doris_database == database,
-                ColumnTag.doris_table == table,
+                ColumnTag.stardata_database == database,
+                ColumnTag.stardata_table == table,
             )
         )
         tags: list[ColumnTag] = result.scalars().all()
@@ -403,7 +403,7 @@ async def apply_masking_view(
             log.debug("No active policy for %s.%s.%s — skipping", database, table, tag.column_name)
             continue
         # Substitute {col} placeholder with the backtick-quoted column name
-        expr = algo.doris_expression.replace("{col}", f"`{tag.column_name}`")
+        expr = algo.stardata_expression.replace("{col}", f"`{tag.column_name}`")
         masked_exprs[tag.column_name] = expr
 
     if not masked_exprs:
@@ -414,7 +414,7 @@ async def apply_masking_view(
             "detail": "Column tags found but no active masking policies matched",
         }
 
-    # Get full column order from Doris
+    # Get full column order from Stardata
     try:
         all_columns = await _get_column_order(database, table)
     except Exception as exc:
@@ -422,7 +422,7 @@ async def apply_masking_view(
             "view_name": view_name,
             "columns_masked": list(masked_exprs.keys()),
             "action": "error",
-            "detail": f"Could not fetch column metadata from Doris: {exc}",
+            "detail": f"Could not fetch column metadata from Stardata: {exc}",
         }
 
     # Generate DDL
@@ -440,9 +440,9 @@ async def apply_masking_view(
     # Check if view already exists and DDL hasn't changed
     async with db_session() as session:
         existing = await session.execute(
-            select(DorisViewManifest).where(
-                DorisViewManifest.doris_database == database,
-                DorisViewManifest.base_table == table,
+            select(StardataViewManifest).where(
+                StardataViewManifest.stardata_database == database,
+                StardataViewManifest.base_table == table,
             )
         )
         manifest = existing.scalar_one_or_none()
@@ -455,10 +455,10 @@ async def apply_masking_view(
             "detail": "DDL checksum matches — view is current",
         }
 
-    # Apply to Doris
+    # Apply to Stardata
     action = "updated" if manifest else "created"
     try:
-        await _doris_execute(ddl)
+        await _stardata_execute(ddl)
         log.info("Masking: %s view %s.%s", action, database, view_name)
     except Exception as exc:
         return {
@@ -482,7 +482,7 @@ async def apply_masking_view(
     # 1. Grant the masked view to the hardcoded 'analyst' user (demo bootstrap)
     await _grant_view_to_user(database, view_name, "analyst")
 
-    # 2. Scan all Doris users, revoke base-table access from non-exempt roles,
+    # 2. Scan all Stardata users, revoke base-table access from non-exempt roles,
     #    and re-confirm masked-view grant for each of them.
     #    This is the enforcement step that closes the "any user can bypass
     #    the view by querying the base table" gap.
@@ -497,8 +497,8 @@ async def apply_masking_view(
             session.add(manifest)
         else:
             session.add(
-                DorisViewManifest(
-                    doris_database=database,
+                StardataViewManifest(
+                    stardata_database=database,
                     base_table=table,
                     view_name=view_name,
                     view_ddl=ddl,
@@ -557,8 +557,8 @@ async def resolve_query_target(
     async with db_session() as session:
         tags_result = await session.execute(
             select(ColumnTag).where(
-                ColumnTag.doris_database == database,
-                ColumnTag.doris_table == table,
+                ColumnTag.stardata_database == database,
+                ColumnTag.stardata_table == table,
             )
         )
         tags: list[ColumnTag] = tags_result.scalars().all()
@@ -602,9 +602,9 @@ async def resolve_query_target(
     # Fetch columns_masked from manifest
     async with db_session() as session:
         manifest_result = await session.execute(
-            select(DorisViewManifest).where(
-                DorisViewManifest.doris_database == database,
-                DorisViewManifest.base_table == table,
+            select(StardataViewManifest).where(
+                StardataViewManifest.stardata_database == database,
+                StardataViewManifest.base_table == table,
             )
         )
         manifest = manifest_result.scalar_one_or_none()

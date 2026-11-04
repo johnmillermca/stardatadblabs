@@ -21,7 +21,7 @@ two consolidated Application files:
 ```
 app-akhq.yaml            → namespace: analytics  (old)
 app-debezium.yaml        → namespace: streaming   (old)
-app-doris.yaml           → namespace: analytics   (old)
+app-stardata.yaml           → namespace: analytics   (old)
 app-jupyterhub.yaml      → namespace: analytics   (old)
 app-kafka.yaml           → namespace: streaming   (old)
 app-kerberos.yaml        → namespace: kerberos    (old)

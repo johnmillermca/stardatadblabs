@@ -17,7 +17,7 @@
 #   opensearch-credentials      → prod
 #   kerberos-admin              → prod
 #   polaris-db-credentials      → prod
-#   doris-credentials           → prod
+#   stardata-credentials           → prod
 #   jupyterhub-credentials      → prod
 #   kestra-credentials          → prod
 #   sqlmesh-credentials         → prod
@@ -245,17 +245,17 @@ else
   ok "polaris-bootstrap-credentials"
 fi
 
-# ─── 12. Apache Doris ─────────────────────────────────────────────────────────
+# ─── 12. Apache Stardata ─────────────────────────────────────────────────────────
 ensure_ns prod
-if bao_secret_exists "secret/data/doris/credentials"; then
-  skip "doris-credentials"
+if bao_secret_exists "secret/data/stardata/credentials"; then
+  skip "stardata-credentials"
 else
-  DORIS_PASS=$(gen_password)
-  bao_write "secret/data/doris/credentials" \
-    "admin-password=${DORIS_PASS}"
-  kube_secret doris-credentials prod \
-    "admin-password=${DORIS_PASS}"
-  ok "doris-credentials"
+  STARDATA_PASS=$(gen_password)
+  bao_write "secret/data/stardata/credentials" \
+    "admin-password=${STARDATA_PASS}"
+  kube_secret stardata-credentials prod \
+    "admin-password=${STARDATA_PASS}"
+  ok "stardata-credentials"
 fi
 
 # ─── 13. JupyterHub ───────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ printf "  %-38s %-15s  %s\n" "opensearch-credentials"       "prod"            "s
 printf "  %-38s %-15s  %s\n" "kerberos-admin"               "prod"            "secret/data/kerberos/credentials"
 printf "  %-38s %-15s  %s\n" "polaris-db-credentials"        "prod"            "secret/data/polaris/credentials"
 printf "  %-38s %-15s  %s\n" "polaris-bootstrap-credentials"  "prod"            "secret/data/polaris/bootstrap"
-printf "  %-38s %-15s  %s\n" "doris-credentials"            "prod"            "secret/data/doris/credentials"
+printf "  %-38s %-15s  %s\n" "stardata-credentials"            "prod"            "secret/data/stardata/credentials"
 printf "  %-38s %-15s  %s\n" "jupyterhub-credentials"       "prod"            "secret/data/jupyterhub/credentials"
 printf "  %-38s %-15s  %s\n" "kestra-credentials"           "prod"            "secret/data/kestra/credentials"
 printf "  %-38s %-15s  %s\n" "sqlmesh-credentials"          "prod"            "secret/data/sqlmesh/credentials"

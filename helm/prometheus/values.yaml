@@ -153,10 +153,10 @@ additionalScrapeConfigs:
       - targets: ['postgresql-metrics.prod.svc.cluster.local:9187']
     scrape_interval: 30s
 
-  # Apache Doris FE
-  - job_name: 'doris-fe'
+  # Apache Stardata FE
+  - job_name: 'stardata-fe'
     static_configs:
-      - targets: ['doris-fe.prod.svc.cluster.local:8030']
+      - targets: ['stardata-fe.prod.svc.cluster.local:8030']
     metrics_path: /metrics
     scrape_interval: 30s
 
@@ -185,10 +185,10 @@ additionalScrapeConfigs:
       - targets: ['mcp-grafana.monitoring.svc.cluster.local:3201']
     scrape_interval: 30s
 
-  # MCP servers (prod namespace — doris/spark/opensearch/kestra/sqlmesh)
-  - job_name: 'mcp-doris'
+  # MCP servers (prod namespace — stardata/spark/opensearch/kestra/sqlmesh)
+  - job_name: 'mcp-stardata'
     static_configs:
-      - targets: ['mcp-doris.prod.svc.cluster.local:3101']
+      - targets: ['mcp-stardata.prod.svc.cluster.local:3101']
     scrape_interval: 30s
 
   - job_name: 'mcp-spark'

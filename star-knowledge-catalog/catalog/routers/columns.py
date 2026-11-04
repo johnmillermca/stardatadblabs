@@ -47,12 +47,12 @@ async def list_column_tags(
                 selectinload(ColumnTag.glossary_term),
                 selectinload(ColumnTag.classification),
             )
-            .order_by(ColumnTag.doris_database, ColumnTag.doris_table, ColumnTag.column_name)
+            .order_by(ColumnTag.stardata_database, ColumnTag.stardata_table, ColumnTag.column_name)
         )
         if database:
-            stmt = stmt.where(ColumnTag.doris_database == database)
+            stmt = stmt.where(ColumnTag.stardata_database == database)
         if table:
-            stmt = stmt.where(ColumnTag.doris_table == table)
+            stmt = stmt.where(ColumnTag.stardata_table == table)
         result = await session.execute(stmt)
         return [_enrich(t) for t in result.scalars().all()]
 
@@ -71,8 +71,8 @@ async def get_column_tag(
                 selectinload(ColumnTag.classification),
             )
             .where(
-                ColumnTag.doris_database == db,
-                ColumnTag.doris_table == table,
+                ColumnTag.stardata_database == db,
+                ColumnTag.stardata_table == table,
                 ColumnTag.column_name == column,
             )
         )
@@ -93,8 +93,8 @@ async def create_column_tag(
     async with db_session() as session:
         existing = await session.execute(
             select(ColumnTag).where(
-                ColumnTag.doris_database == body.doris_database,
-                ColumnTag.doris_table == body.doris_table,
+                ColumnTag.stardata_database == body.stardata_database,
+                ColumnTag.stardata_table == body.stardata_table,
                 ColumnTag.column_name == body.column_name,
             )
         )
@@ -114,13 +114,13 @@ async def create_column_tag(
                 return _enrich(existing_tag)
             raise HTTPException(
                 409,
-                f"Column {body.doris_database}.{body.doris_table}.{body.column_name} "
+                f"Column {body.stardata_database}.{body.stardata_table}.{body.column_name} "
                 "is already manually tagged. Use PATCH to update.",
             )
 
         tag = ColumnTag(
-            doris_database=body.doris_database,
-            doris_table=body.doris_table,
+            stardata_database=body.stardata_database,
+            stardata_table=body.stardata_table,
             column_name=body.column_name,
             glossary_term_id=body.glossary_term_id,
             classification_id=body.classification_id,
@@ -144,8 +144,8 @@ async def delete_column_tag(
     async with db_session() as session:
         result = await session.execute(
             select(ColumnTag).where(
-                ColumnTag.doris_database == db,
-                ColumnTag.doris_table == table,
+                ColumnTag.stardata_database == db,
+                ColumnTag.stardata_table == table,
                 ColumnTag.column_name == column,
             )
         )
@@ -190,7 +190,7 @@ async def scan_columns(
     principal: dict = Depends(require_write),
 ):
     """
-    Scans the given Doris database (or single table) and automatically
+    Scans the given Stardata database (or single table) and automatically
     tags columns by matching their names against glossary term patterns.
 
     Confidence-aware tagging rules
@@ -209,15 +209,15 @@ async def scan_columns(
 
     term_specs = await clf._load_term_specs()
 
-    if body.doris_table:
+    if body.stardata_table:
         tables_matches = {
-            body.doris_table: await clf.scan_table(
-                body.doris_database, body.doris_table, term_specs, threshold
+            body.stardata_table: await clf.scan_table(
+                body.stardata_database, body.stardata_table, term_specs, threshold
             )
         }
     else:
         tables_matches = await clf.scan_database(
-            body.doris_database, term_specs, threshold
+            body.stardata_database, term_specs, threshold
         )
 
     table_results: list[ScanTableResult] = []
@@ -288,8 +288,8 @@ async def scan_columns(
             async with db_session() as session:
                 existing = await session.execute(
                     select(ColumnTag).where(
-                        ColumnTag.doris_database == body.doris_database,
-                        ColumnTag.doris_table == table_name,
+                        ColumnTag.stardata_database == body.stardata_database,
+                        ColumnTag.stardata_table == table_name,
                         ColumnTag.column_name == m.column_name,
                     )
                 )
@@ -306,8 +306,8 @@ async def scan_columns(
                         action = "skipped"
                 else:
                     session.add(ColumnTag(
-                        doris_database=body.doris_database,
-                        doris_table=table_name,
+                        stardata_database=body.stardata_database,
+                        stardata_table=table_name,
                         column_name=m.column_name,
                         glossary_term_id=tag_term_id,
                         classification_id=tag_classification_id,
@@ -332,8 +332,8 @@ async def scan_columns(
             ))
 
         table_results.append(ScanTableResult(
-            doris_database=body.doris_database,
-            doris_table=table_name,
+            stardata_database=body.stardata_database,
+            stardata_table=table_name,
             columns_scanned=len(matches),
             columns_tagged=tagged,
             results=col_results,

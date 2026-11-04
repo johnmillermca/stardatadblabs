@@ -1,0 +1,22 @@
+# =============================================================================
+# Apache Stardata — raw manifest deployment (no stable Helm chart)
+# Namespace   : analytics
+# Access      : http://192.168.1.50:30030 (FE HTTP / Query)
+#               jdbc:mysql://192.168.1.50:30090 (FE MySQL protocol)
+# Secret      : stardata-credentials (seeded by 12-seed-openbao-secrets.sh)
+# =============================================================================
+# This file is a reference stub. Actual deployment is in:
+# manifests/stardata/stardata-fe-deployment.yaml
+# manifests/stardata/stardata-be-deployment.yaml
+# manifests/stardata/stardata-services.yaml
+# =============================================================================
+
+fe:
+  image: apache/stardata:fe-4.2
+  replicas: 1
+  storage: 10Gi
+
+be:
+  image: apache/stardata:be-4.2
+  replicas: 1
+  storage: 20Gi

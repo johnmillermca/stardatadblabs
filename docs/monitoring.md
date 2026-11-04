@@ -36,7 +36,7 @@ All components across the platform are scraped:
 | Kafka brokers (Strimzi) | `*:9404` JMX exporter | `kafka-jmx` |
 | OpenSearch | `*:9200/_prometheus/metrics` | `opensearch` |
 | PostgreSQL | `postgresql-metrics:9187` | `postgresql` |
-| Apache Doris FE | `doris-fe:8030/metrics` | `doris-fe` |
+| Apache Stardata FE | `stardata-fe:8030/metrics` | `stardata-fe` |
 | Prometheus MCP | `mcp-prometheus:3200` | `mcp-prometheus` |
 | Grafana MCP | `mcp-grafana:3201` | `mcp-grafana` |
 

@@ -12,7 +12,7 @@ This runbook is a single, ordered test script. Run every section from top to bot
 
 | # | Area | Test |
 |---|---|---|
-| T-01 | Infrastructure | Doris FE is reachable |
+| T-01 | Infrastructure | Stardata FE is reachable |
 | T-02 | Infrastructure | PostgreSQL is reachable |
 | T-03 | Infrastructure | Redis is reachable |
 | T-04 | Infrastructure | RBAC Control Plane is healthy |
@@ -32,33 +32,33 @@ This runbook is a single, ordered test script. Run every section from top to bot
 | T-18 | Algorithms | CRUD: create / delete a test algorithm |
 | T-19 | Policies | Seed data returns correct classification + term policies |
 | T-20 | Policies | Term-level policy has priority 200, class-level has 100 |
-| T-21 | Doris | governance_demo database exists with 4 tables |
-| T-22 | Doris | customers table has 20 rows |
-| T-23 | Doris | payments table has 40 rows |
+| T-21 | Stardata | governance_demo database exists with 4 tables |
+| T-22 | Stardata | customers table has 20 rows |
+| T-23 | Stardata | payments table has 40 rows |
 | T-24 | Auto-classify | Dry-run scan detects 8 PII/CONFIDENTIAL columns in customers |
 | T-25 | Auto-classify | Dry-run scan detects 2 PCI columns in payments |
 | T-26 | Auto-classify | Live scan persists column tags to PostgreSQL |
 | T-27 | Column tags | 10 column tags exist after scan |
 | T-28 | Column tags | Manual tag override works and is not overwritten by re-scan |
 | T-29 | Masking views | Apply dry-run returns correct DDL preview |
-| T-30 | Masking views | Live apply creates customers_masked and payments_masked in Doris |
+| T-30 | Masking views | Live apply creates customers_masked and payments_masked in Stardata |
 | T-31 | Masking views | Manifest records stored in PostgreSQL |
 | T-32 | Masking views | orders and products have no masked view (no sensitive columns) |
 | T-33 | Role routing | Query planner routes analyst to masked_view |
 | T-34 | Role routing | Query planner routes data_admin to base_table |
-| T-35 | Doris query — analyst | analyst can SELECT from customers_masked |
-| T-36 | Doris query — analyst | full_name is SHA-256 hashed |
-| T-37 | Doris query — analyst | email shows first 2 chars + domain only |
-| T-38 | Doris query — analyst | date_of_birth generalised to Jan 1 of year |
-| T-39 | Doris query — analyst | national_id is `****` |
-| T-40 | Doris query — analyst | ip_address last octet is zeroed |
-| T-41 | Doris query — analyst | salary is `****` |
-| T-42 | Doris query — analyst | card_number shows last 4 digits only |
-| T-43 | Doris query — analyst | credit_card_cvv is `****` |
-| T-44 | Doris query — analyst | non-sensitive columns (customer_tier, city) are clear |
+| T-35 | Stardata query — analyst | analyst can SELECT from customers_masked |
+| T-36 | Stardata query — analyst | full_name is SHA-256 hashed |
+| T-37 | Stardata query — analyst | email shows first 2 chars + domain only |
+| T-38 | Stardata query — analyst | date_of_birth generalised to Jan 1 of year |
+| T-39 | Stardata query — analyst | national_id is `****` |
+| T-40 | Stardata query — analyst | ip_address last octet is zeroed |
+| T-41 | Stardata query — analyst | salary is `****` |
+| T-42 | Stardata query — analyst | card_number shows last 4 digits only |
+| T-43 | Stardata query — analyst | credit_card_cvv is `****` |
+| T-44 | Stardata query — analyst | non-sensitive columns (customer_tier, city) are clear |
 | T-45 | Negative — analyst | analyst cannot SELECT from base customers table |
 | T-46 | Negative — analyst | analyst cannot SELECT from base payments table |
-| T-47 | Doris query — admin | data_admin_user sees raw unmasked data in customers |
+| T-47 | Stardata query — admin | data_admin_user sees raw unmasked data in customers |
 | T-48 | Masking exception | Grant exception to a new role, verify query planner routes to base_table |
 | T-49 | Policy update | Change algorithm for a policy, re-apply view, verify new masking expression |
 | T-50 | Performance | Masked view query completes in < 1 second |
@@ -107,7 +107,7 @@ curl -sf -X POST \
     \"pg-password\":\"${PG_PASSWORD}\",
     \"master-token\":\"${MASTER_TOKEN}\",
     \"jwt-secret\":\"${JWT_SECRET}\",
-    \"doris-admin-password\":\"\",
+    \"stardata-admin-password\":\"\",
     \"rbac-plane-token\":\"${RBAC_PLANE_TOKEN}\"
   }}" \
   "${BAO_ADDR}/v1/secret/data/star-catalog/credentials"
@@ -170,7 +170,7 @@ DATA=$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
 kubectl create secret generic star-catalog-credentials \
   --namespace prod \
   --from-literal=PG_PASSWORD=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['pg-password'])") \
-  --from-literal=DORIS_ADMIN_PASSWORD=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['doris-admin-password'])") \
+  --from-literal=STARDATA_ADMIN_PASSWORD=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['stardata-admin-password'])") \
   --from-literal=MASTER_TOKEN=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['master-token'])") \
   --from-literal=JWT_SECRET=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['jwt-secret'])") \
   --from-literal=RBAC_PLANE_TOKEN=$(echo $DATA | python3 -c "import json,sys; print(json.load(sys.stdin)['rbac-plane-token'])") \
@@ -242,18 +242,18 @@ Run these once at the top of your terminal session. Every test below references 
 
 ```bash
 # ── Connection details ───────────────────────────────────────
-export DORIS_HOST=192.168.1.50
-export DORIS_PORT=30090
+export STARDATA_HOST=192.168.1.50
+export STARDATA_PORT=30090
 export PG_HOST=192.168.1.50
 export PG_PORT=30532
 export CATALOG_URL=http://192.168.1.50:30860
 export RBAC_URL=http://192.168.1.50:30850
 
-# ── Doris root password ───────────────────────────────────────
-# Read from the K8s Secret 'doris-credentials' (seeded into OpenBao
+# ── Stardata root password ───────────────────────────────────────
+# Read from the K8s Secret 'stardata-credentials' (seeded into OpenBao
 # by 12-seed-openbao-secrets.sh during initial platform setup).
-# All Doris queries in this runbook run as root using this password.
-export DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod \
+# All Stardata queries in this runbook run as root using this password.
+export STARDATA_ROOT_PASS=$(kubectl get secret stardata-credentials -n prod \
   -o jsonpath='{.data.admin-password}' | base64 -d)
 
 # ── PostgreSQL star_catalog password ──────────────────────────
@@ -277,7 +277,7 @@ export RBAC_MASTER_TOKEN=$(kubectl get secret rbac-plane-credentials -n prod \
   -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 
 # ── Verify all four variables loaded ─────────────────────────
-echo "DORIS_ROOT_PASS      : ${DORIS_ROOT_PASS:0:6}...  (length: ${#DORIS_ROOT_PASS})"
+echo "STARDATA_ROOT_PASS      : ${STARDATA_ROOT_PASS:0:6}...  (length: ${#STARDATA_ROOT_PASS})"
 echo "PG_STAR_PASS         : ${PG_STAR_PASS:0:6}...  (length: ${#PG_STAR_PASS})"
 echo "CATALOG_MASTER_TOKEN : ${CATALOG_MASTER_TOKEN:0:16}...  (length: ${#CATALOG_MASTER_TOKEN})"
 echo "RBAC_MASTER_TOKEN    : ${RBAC_MASTER_TOKEN:0:16}...  (length: ${#RBAC_MASTER_TOKEN})"
@@ -285,7 +285,7 @@ echo "RBAC_MASTER_TOKEN    : ${RBAC_MASTER_TOKEN:0:16}...  (length: ${#RBAC_MAST
 
 > **If any value shows `length: 0`** the K8s Secret is missing or the key name is wrong. Run:
 > ```bash
-> kubectl get secret doris-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
+> kubectl get secret stardata-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
 > kubectl get secret star-catalog-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
 > kubectl get secret rbac-plane-credentials -n prod -o jsonpath='{.data}' | python3 -m json.tool
 > ```
@@ -295,17 +295,17 @@ echo "RBAC_MASTER_TOKEN    : ${RBAC_MASTER_TOKEN:0:16}...  (length: ${#RBAC_MAST
 
 ## Phase 1 — Infrastructure checks (T-01 to T-06)
 
-### T-01 · Doris FE reachable
+### T-01 · Stardata FE reachable
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
-  -e "SELECT 'doris_ok' AS status;" 2>&1
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
+  -e "SELECT 'stardata_ok' AS status;" 2>&1
 ```
 
-> **Note:** Using `MYSQL_PWD` suppresses the interactive password prompt when the root password is empty. The original `-p"$DORIS_ROOT_PASS"` form also works — it will show `Enter password:` but connects successfully when you press Enter.
+> **Note:** Using `MYSQL_PWD` suppresses the interactive password prompt when the root password is empty. The original `-p"$STARDATA_ROOT_PASS"` form also works — it will show `Enter password:` but connects successfully when you press Enter.
 
-✅ **Pass:** output contains `doris_ok`  
-❌ **Fail:** connection refused or access denied → check `kubectl get pods -n prod | grep doris-fe`
+✅ **Pass:** output contains `stardata_ok`  
+❌ **Fail:** connection refused or access denied → check `kubectl get pods -n prod | grep stardata-fe`
 
 ---
 
@@ -558,11 +558,11 @@ curl -sf $CATALOG_URL/api/v1/algorithms \
 
 ---
 
-### T-17 · EMAIL_PARTIAL doris_expression is correct
+### T-17 · EMAIL_PARTIAL stardata_expression is correct
 
 ```bash
 curl -sf $CATALOG_URL/api/v1/algorithms/EMAIL_PARTIAL \
-  -H "Authorization: Bearer $CATALOG_TOKEN" | jq '{name, algorithm_type, doris_expression}'
+  -H "Authorization: Bearer $CATALOG_TOKEN" | jq '{name, algorithm_type, stardata_expression}'
 ```
 
 ✅ **Pass:**
@@ -570,7 +570,7 @@ curl -sf $CATALOG_URL/api/v1/algorithms/EMAIL_PARTIAL \
 {
   "name": "EMAIL_PARTIAL",
   "algorithm_type": "PARTIAL_MASK",
-  "doris_expression": "CONCAT(LEFT({col},2), REPEAT('*',GREATEST(0,LOCATE('@',{col})-3)), SUBSTRING({col},LOCATE('@',{col})))"
+  "stardata_expression": "CONCAT(LEFT({col},2), REPEAT('*',GREATEST(0,LOCATE('@',{col})-3)), SUBSTRING({col},LOCATE('@',{col})))"
 }
 ```
 
@@ -584,7 +584,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/algorithms \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"TEST_ALGO","display_name":"Test Algo",
-       "algorithm_type":"REDACT","doris_expression":"'\''XXXXX'\''"}' | jq '{name, algorithm_type}'
+       "algorithm_type":"REDACT","stardata_expression":"'\''XXXXX'\''"}' | jq '{name, algorithm_type}'
 
 # Delete
 curl -sf -X DELETE $CATALOG_URL/api/v1/algorithms/TEST_ALGO \
@@ -626,12 +626,12 @@ curl -sf $CATALOG_URL/api/v1/policies \
 
 ---
 
-## Phase 7 — Doris sample data (T-21 to T-23)
+## Phase 7 — Stardata sample data (T-21 to T-23)
 
 ### T-21 · governance_demo has 4 base tables
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   -e "SELECT TABLE_NAME FROM information_schema.TABLES
       WHERE TABLE_SCHEMA='governance_demo' AND TABLE_TYPE='BASE TABLE'
       ORDER BY TABLE_NAME;" 2>/dev/null
@@ -645,7 +645,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 ### T-22 · customers has 20 rows
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   -e "SELECT COUNT(*) AS cnt FROM governance_demo.customers;" 2>/dev/null
 ```
 
@@ -656,7 +656,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 ### T-23 · payments has 40 rows
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   -e "SELECT COUNT(*) AS cnt FROM governance_demo.payments;" 2>/dev/null
 ```
 
@@ -696,8 +696,8 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 > curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
 >   -H "Authorization: Bearer $CATALOG_TOKEN" \
 >   -H 'Content-Type: application/json' \
->   -d '{"doris_database":"governance_demo","doris_table":"products","dry_run":false,"overwrite_existing":true}' | \
->   jq '.tables_results[0] | {table:.doris_table, columns_tagged}'
+>   -d '{"stardata_database":"governance_demo","stardata_table":"products","dry_run":false,"overwrite_existing":true}' | \
+>   jq '.tables_results[0] | {table:.stardata_table, columns_tagged}'
 > ```
 
 ### T-24 · Dry-run detects 8 sensitive columns in customers
@@ -706,8 +706,8 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","doris_table":"customers","dry_run":true}' | \
-  jq '.tables_results[0] | {table:.doris_table, columns_tagged,
+  -d '{"stardata_database":"governance_demo","stardata_table":"customers","dry_run":true}' | \
+  jq '.tables_results[0] | {table:.stardata_table, columns_tagged,
       hits: [.results[] | select(.score >= 0.7) | {col:.column_name, term:.matched_term, score:.score}]}'
 ```
 
@@ -721,8 +721,8 @@ curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
 curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","doris_table":"payments","dry_run":true}' | \
-  jq '.tables_results[0] | {table:.doris_table, columns_tagged,
+  -d '{"stardata_database":"governance_demo","stardata_table":"payments","dry_run":true}' | \
+  jq '.tables_results[0] | {table:.stardata_table, columns_tagged,
       hits: [.results[] | select(.score >= 0.7) | {col:.column_name, term:.matched_term, score:.score}]}'
 ```
 
@@ -737,7 +737,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
 curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false,"overwrite_existing":false}' | \
+  -d '{"stardata_database":"governance_demo","dry_run":false,"overwrite_existing":false}' | \
   jq '{tables_scanned, total_tagged: [.tables_results[].columns_tagged] | add}'
 ```
 
@@ -758,7 +758,7 @@ Full tag listing:
 ```bash
 curl -sf "$CATALOG_URL/api/v1/columns?database=governance_demo" \
   -H "Authorization: Bearer $CATALOG_TOKEN" | \
-  jq -r '.[] | "\(.doris_table).\(.column_name)\t→ \(.glossary_term_name // "—")\t[\(.classification_name // "—")]\tscore:\(.detection_score)"' | \
+  jq -r '.[] | "\(.stardata_table).\(.column_name)\t→ \(.glossary_term_name // "—")\t[\(.classification_name // "—")]\tscore:\(.detection_score)"' | \
   column -t
 ```
 
@@ -774,7 +774,7 @@ PII_ID=$(curl -sf $CATALOG_URL/api/v1/classifications/PII \
 curl -sf -X POST $CATALOG_URL/api/v1/columns \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"doris_database\":\"governance_demo\",\"doris_table\":\"customers\",
+  -d "{\"stardata_database\":\"governance_demo\",\"stardata_table\":\"customers\",
        \"column_name\":\"city\",\"classification_id\":$PII_ID,
        \"override_reason\":\"Quasi-identifier under GDPR recital 26\"}" | jq '{column_name, auto_detected}'
 
@@ -782,7 +782,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/columns \
 curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false,"overwrite_existing":true}' > /dev/null
+  -d '{"stardata_database":"governance_demo","dry_run":false,"overwrite_existing":true}' > /dev/null
 
 # Verify city is still manual
 curl -sf $CATALOG_URL/api/v1/columns/governance_demo/customers/city \
@@ -801,7 +801,7 @@ curl -sf $CATALOG_URL/api/v1/columns/governance_demo/customers/city \
 curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","doris_table":"customers","dry_run":true}' | \
+  -d '{"stardata_database":"governance_demo","stardata_table":"customers","dry_run":true}' | \
   jq '.results[0] | {action, view_name, columns_masked}'
 ```
 
@@ -815,15 +815,15 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
 curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false,"force":false}' | \
-  jq '.results[] | {table:.doris_table, view:.view_name, action}'
+  -d '{"stardata_database":"governance_demo","dry_run":false,"force":false}' | \
+  jq '.results[] | {table:.stardata_table, view:.view_name, action}'
 ```
 
 ✅ **Pass:** `customers → customers_masked action:created`, `payments → payments_masked action:created`
 
-Confirm in Doris:
+Confirm in Stardata:
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   -e "SHOW TABLES IN governance_demo;" 2>/dev/null | sort
 ```
 
@@ -880,7 +880,7 @@ curl -s -X POST $RBAC_URL/api/v1/users \
 curl -s -X POST $RBAC_URL/api/v1/users/alice/bindings \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"role_name":"analyst","service_name":"doris"}' | jq '{role_name, service_name}' 2>/dev/null || true
+  -d '{"role_name":"analyst","service_name":"stardata"}' | jq '{role_name, service_name}' 2>/dev/null || true
 
 # bob = data_admin
 curl -s -X POST $RBAC_URL/api/v1/users \
@@ -891,7 +891,7 @@ curl -s -X POST $RBAC_URL/api/v1/users \
 curl -s -X POST $RBAC_URL/api/v1/users/bob/bindings \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"role_name":"data_admin","service_name":"doris"}' | jq '{role_name, service_name}' 2>/dev/null || true
+  -d '{"role_name":"data_admin","service_name":"stardata"}' | jq '{role_name, service_name}' 2>/dev/null || true
 
 echo "RBAC users ready"
 ```
@@ -911,7 +911,7 @@ echo "RBAC users ready"
 curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","doris_database":"governance_demo","doris_table":"customers","limit":10}' | \
+  -d '{"username":"alice","stardata_database":"governance_demo","stardata_table":"customers","limit":10}' | \
   jq '{username, role, target, columns_masked}'
 ```
 
@@ -925,7 +925,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"bob","doris_database":"governance_demo","doris_table":"customers","limit":10}' | \
+  -d '{"username":"bob","stardata_database":"governance_demo","stardata_table":"customers","limit":10}' | \
   jq '{username, role, target}'
 ```
 
@@ -933,7 +933,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 
 ---
 
-## Phase 11 — Doris masked query execution (T-35 to T-44)
+## Phase 11 — Stardata masked query execution (T-35 to T-44)
 
 > **How masking works in this setup**
 >
@@ -946,7 +946,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 > | `root` | `customers_masked` (view) | **Masked** — the view transforms the data for everyone |
 > | `root` | `customers` (base table) | **Raw** — root is a superuser, no grant restrictions |
 > | `alice` | `customers_masked` (view) | **Masked** — same view, same output as root |
-> | `alice` | `customers` (base table) | ❌ **Permission denied** — Doris grant restricts alice to views only |
+> | `alice` | `customers` (base table) | ❌ **Permission denied** — Stardata grant restricts alice to views only |
 > | `bob` | `customers` (base table) | **Raw** — bob has admin privs, queries base table directly |
 >
 > Tests T-35 to T-44 connect as **root querying the masked view** — root gets masked output
@@ -959,18 +959,18 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 > VAULT_TOKEN=$(kubectl get secret openbao-unseal-keys -n prod \
 >   -o jsonpath='{.data.root-token}' | base64 -d)
 > ALICE_PASS=$(kubectl exec -n prod openbao-0 -- \
->   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/alice")
+>   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/stardata/users/alice")
 > BOB_PASS=$(kubectl exec -n prod openbao-0 -- \
->   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/doris/users/bob")
+>   sh -c "VAULT_TOKEN=$VAULT_TOKEN vault kv get -field=password secret/stardata/users/bob")
 > ```
 >
-> The `krb-doris-guard` sidecar (port 19030) validates KDC principal existence via `kadmin -kt`
-> before forwarding any connection to Doris. `root` is always exempt from this check.
+> The `krb-stardata-guard` sidecar (port 19030) validates KDC principal existence via `kadmin -kt`
+> before forwarding any connection to Stardata. `root` is always exempt from this check.
 
 ### T-35 · customers_masked returns 20 rows (masking expressions verified via root)
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT COUNT(*) AS row_count FROM customers_masked;" 2>/dev/null
 ```
@@ -982,7 +982,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-36 · full_name is SHA-256 hashed (64 hex chars)
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT LENGTH(full_name) AS len FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -994,7 +994,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-37 · email shows first 2 chars + domain only
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT email FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1006,7 +1006,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-38 · date_of_birth generalised to Jan 1
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT date_of_birth FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1018,7 +1018,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-39 · national_id is `****`
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT national_id FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1030,7 +1030,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-40 · ip_address last octet zeroed
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT ip_address FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1042,7 +1042,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-41 · salary is `****`
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT salary FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1054,7 +1054,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-42 · card_number shows last 4 digits only
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT card_number FROM payments_masked WHERE payment_id=9001;" 2>/dev/null
 ```
@@ -1066,7 +1066,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-43 · credit_card_cvv is `****`
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT credit_card_cvv FROM payments_masked WHERE payment_id=9001;" 2>/dev/null
 ```
@@ -1078,7 +1078,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-44 · Non-sensitive columns pass through unchanged
 
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT customer_id, customer_tier, country_code, is_active
       FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
@@ -1097,7 +1097,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 ### T-45a · alice CAN SELECT from customers_masked — data is masked
 
 ```bash
-MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u alice governance_demo \
   -e "SELECT customer_id, full_name, email, national_id, salary
       FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1110,7 +1110,7 @@ MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_
 
 ❌ **Fail:** real values appear → alice still has catalog-level `SELECT_PRIV` — fix:
 ```bash
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   -e "REVOKE SELECT_PRIV ON *.* FROM 'alice'@'%';
       GRANT SELECT_PRIV ON governance_demo.customers_masked TO 'alice'@'%';
       GRANT SELECT_PRIV ON governance_demo.payments_masked  TO 'alice'@'%';
@@ -1123,7 +1123,7 @@ MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
 ### T-45b · alice CAN SELECT from payments_masked — card number is masked
 
 ```bash
-MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u alice governance_demo \
   -e "SELECT payment_id, card_number, credit_card_cvv, amount
       FROM payments_masked WHERE payment_id=9001;" 2>/dev/null
 ```
@@ -1138,10 +1138,10 @@ MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_
 ### T-45c · alice CAN SELECT from orders and products (no masking)
 
 ```bash
-MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u alice governance_demo \
   -e "SELECT order_id, customer_id, status FROM orders LIMIT 3;" 2>/dev/null
 
-MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u alice governance_demo \
   -e "SELECT product_id, product_name, price FROM products LIMIT 3;" 2>/dev/null
 ```
 
@@ -1151,15 +1151,15 @@ MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_
 
 ## Phase 13 — Negative tests (T-46 to T-47)
 
-> **These tests must connect as `alice` — not root.** Root is a Doris superuser and is never denied access.
-> Doris enforces table-level grants — `alice` has `SELECT_PRIV` only on the masked views, not base tables.
+> **These tests must connect as `alice` — not root.** Root is a Stardata superuser and is never denied access.
+> Stardata enforces table-level grants — `alice` has `SELECT_PRIV` only on the masked views, not base tables.
 >
 > Ensure `$ALICE_PASS` is set (see Phase 11 note above), then run directly against the NodePort:
 
 ### T-46 · alice (analyst) CANNOT SELECT base customers table
 
 ```bash
-MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u alice governance_demo \
   -e "SELECT full_name, salary FROM customers LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
@@ -1171,7 +1171,7 @@ MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_
 ### T-47 · alice (analyst) CANNOT SELECT base payments table
 
 ```bash
-MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_demo \
+MYSQL_PWD="$ALICE_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u alice governance_demo \
   -e "SELECT card_number FROM payments LIMIT 1;" 2>&1 | grep -i "denied\|ERROR"
 ```
 
@@ -1183,10 +1183,10 @@ MYSQL_PWD="$ALICE_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u alice governance_
 
 ### T-48 · bob (data_admin) sees raw unmasked data
 
-Connect as `bob` — this user has full admin privs in Doris (`Node_priv`, `Admin_priv`) and queries the base table directly with no masking:
+Connect as `bob` — this user has full admin privs in Stardata (`Node_priv`, `Admin_priv`) and queries the base table directly with no masking:
 
 ```bash
-MYSQL_PWD="$BOB_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u bob governance_demo \
+MYSQL_PWD="$BOB_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u bob governance_demo \
   -e "SELECT customer_id, full_name, email, date_of_birth, national_id, salary
       FROM customers WHERE customer_id=1001;" 2>/dev/null
 ```
@@ -1214,13 +1214,13 @@ curl -s -X POST $RBAC_URL/api/v1/roles \
 curl -s -X POST $RBAC_URL/api/v1/users/eve/bindings \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"role_name":"data_steward","service_name":"doris"}' | jq .role_name
+  -d '{"role_name":"data_steward","service_name":"stardata"}' | jq .role_name
 
 # Step 2 — Without exception, eve routes to masked_view
 curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"eve","doris_database":"governance_demo","doris_table":"customers","limit":5}' | \
+  -d '{"username":"eve","stardata_database":"governance_demo","stardata_table":"customers","limit":5}' | \
   jq '{role, target}'
 # Expected: target = "masked_view"
 
@@ -1242,7 +1242,7 @@ done
 curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"eve","doris_database":"governance_demo","doris_table":"customers","limit":5}' | \
+  -d '{"username":"eve","stardata_database":"governance_demo","stardata_table":"customers","limit":5}' | \
   jq '{role, target}'
 # Expected: target = "base_table"
 ```
@@ -1273,12 +1273,12 @@ curl -sf -X PATCH $CATALOG_URL/api/v1/policies/policy_term_salary \
 curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","doris_table":"customers","force":true}' | \
+  -d '{"stardata_database":"governance_demo","stardata_table":"customers","force":true}' | \
   jq '.results[0].action'
 # Expected: "updated"
 
 # Step 4 — Verify salary is now NULL
-MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT salary FROM customers_masked WHERE customer_id=1001;" 2>/dev/null
 # Expected: NULL
@@ -1295,7 +1295,7 @@ curl -sf -X PATCH $CATALOG_URL/api/v1/policies/policy_term_salary \
 curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","doris_table":"customers","force":true}' | \
+  -d '{"stardata_database":"governance_demo","stardata_table":"customers","force":true}' | \
   jq '.results[0].action'
 ```
 
@@ -1308,7 +1308,7 @@ curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
 ### T-50 · Masked view query < 1 second
 
 ```bash
-time MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
+time MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT \
   -u root governance_demo \
   -e "SELECT customer_tier, COUNT(*) FROM customers_masked GROUP BY customer_tier;" 2>/dev/null
 ```
@@ -1323,12 +1323,12 @@ time MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT \
 time curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","doris_database":"governance_demo","doris_table":"customers","limit":1}' > /dev/null
+  -d '{"username":"alice","stardata_database":"governance_demo","stardata_table":"customers","limit":1}' > /dev/null
 
 time curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","doris_database":"governance_demo","doris_table":"customers","limit":1}' > /dev/null
+  -d '{"username":"alice","stardata_database":"governance_demo","stardata_table":"customers","limit":1}' > /dev/null
 ```
 
 ✅ **Pass:** second call completes measurably faster (typically < 5 ms vs 20–100 ms)
@@ -1342,15 +1342,15 @@ time curl -sf -X POST $CATALOG_URL/api/v1/masking/query \
 curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false,"overwrite_existing":false}' | \
+  -d '{"stardata_database":"governance_demo","dry_run":false,"overwrite_existing":false}' | \
   jq '{tables_scanned, skipped: [.tables_results[].results[] | select(.action=="skipped")] | length}'
 
 # Re-apply — unchanged DDL must show action:"unchanged"
 curl -sf -X POST $CATALOG_URL/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":false,"force":false}' | \
-  jq '[.results[] | select(.action != "skipped") | {table:.doris_table, action}]'
+  -d '{"stardata_database":"governance_demo","dry_run":false,"force":false}' | \
+  jq '[.results[] | select(.action != "skipped") | {table:.stardata_table, action}]'
 ```
 
 ✅ **Pass:** scan → all tagged columns `action: skipped`, apply → all views `action: unchanged`
@@ -1370,7 +1370,7 @@ After completing all phases, fill in this table:
 | 4 — Glossary | T-13 to T-15 | ⬜ |
 | 5 — Algorithms | T-16 to T-18 | ⬜ |
 | 6 — Policies | T-19 to T-20 | ⬜ |
-| 7 — Doris data | T-21 to T-23 | ⬜ |
+| 7 — Stardata data | T-21 to T-23 | ⬜ |
 | 8 — Auto-classify | T-24 to T-28 | ⬜ |
 | 9 — Apply views | T-29 to T-32 | ⬜ |
 | 10 — Query planner | T-33 to T-34 | ⬜ |
@@ -1388,8 +1388,8 @@ After completing all phases, fill in this table:
 ```bash
 set -e
 export CATALOG_URL=http://192.168.1.50:30860
-export DORIS_HOST=192.168.1.50 DORIS_PORT=30090
-export DORIS_ROOT_PASS=$(kubectl get secret doris-credentials -n prod -o jsonpath='{.data.admin-password}' | base64 -d)
+export STARDATA_HOST=192.168.1.50 STARDATA_PORT=30090
+export STARDATA_ROOT_PASS=$(kubectl get secret stardata-credentials -n prod -o jsonpath='{.data.admin-password}' | base64 -d)
 export CATALOG_MASTER_TOKEN=$(kubectl get secret star-catalog-credentials -n prod -o jsonpath='{.data.MASTER_TOKEN}' | base64 -d)
 
 echo "==> Health"
@@ -1413,13 +1413,13 @@ echo "==> Algorithms"
 N=$(curl -sf $CATALOG_URL/api/v1/algorithms -H "Authorization: Bearer $TOK" | jq length)
 [ "$N" -eq 8 ] && echo "  PASS" || echo "  FAIL: got $N"
 
-echo "==> Doris: row count"
-N=$(MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+echo "==> Stardata: row count"
+N=$(MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   governance_demo -sN -e "SELECT COUNT(*) FROM customers_masked;" 2>/dev/null)
 [ "$N" -eq 20 ] && echo "  PASS" || echo "  FAIL: got $N"
 
-echo "==> Doris: salary masked"
-V=$(MYSQL_PWD="$DORIS_ROOT_PASS" mysql -h $DORIS_HOST -P $DORIS_PORT -u root \
+echo "==> Stardata: salary masked"
+V=$(MYSQL_PWD="$STARDATA_ROOT_PASS" mysql -h $STARDATA_HOST -P $STARDATA_PORT -u root \
   governance_demo -sN -e "SELECT salary FROM customers_masked WHERE customer_id=1001;" 2>/dev/null)
 [ "$V" = "****" ] && echo "  PASS" || echo "  FAIL: got $V"
 
@@ -1429,4 +1429,4 @@ echo "Smoke test complete."
 
 ---
 
-*Star Knowledge Catalog v1.0.0 · Runbook 17 · Doris 4.0.7 · RBAC Control Plane v1.0.0*
+*Star Knowledge Catalog v1.0.0 · Runbook 17 · Stardata 4.0.7 · RBAC Control Plane v1.0.0*

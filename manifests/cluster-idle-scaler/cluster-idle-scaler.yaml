@@ -5,7 +5,7 @@
 # and restores them to their original replica count on demand via a REST API.
 #
 # ── ALWAYS-ON (never touched) ────────────────────────────────────────────────
-#  (a) Doris          — doris-fe, doris-be
+#  (a) Stardata          — stardata-fe, stardata-be
 #  (b) Kafka          — strimzi-*, strimzi-kafka-*, schema-registry
 #  (c) ArgoCD         — entire argocd namespace
 #  (d) Lakehouse UI   — lakehouse-ui
@@ -19,7 +19,7 @@
 #      prod/polaris-tls-proxy                      (Iceberg REST catalog)
 #
 # ── SCALEABLE (scaled to 0 when idle, restored on wake) ─────────────────────
-#      prod/mcp-doris, prod/mcp-kafka, prod/mcp-sqlmesh
+#      prod/mcp-stardata, prod/mcp-kafka, prod/mcp-sqlmesh
 #      prod/sqlmesh
 #      prod/star-knowledge-catalog
 #      monitoring/grafana, monitoring/mcp-grafana, monitoring/mcp-prometheus
@@ -161,11 +161,11 @@ data:
     # original_replicas: what to restore to on wake (fetched at startup)
     #
     # PINNED groups (never touched):
-    #   doris, kafka, argocd, lakehouse-ui, infrastructure
+    #   stardata, kafka, argocd, lakehouse-ui, infrastructure
 
     SCALEABLE = [
         # ── MCP servers ──────────────────────────────────────────────────────
-        ("prod", "mcp-doris",                             "Deployment",  "mcp"),
+        ("prod", "mcp-stardata",                             "Deployment",  "mcp"),
         ("prod", "mcp-kafka",                             "Deployment",  "mcp"),
         ("prod", "mcp-sqlmesh",                           "Deployment",  "mcp"),
         # ── SQLMesh ──────────────────────────────────────────────────────────

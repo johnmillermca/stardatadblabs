@@ -11,7 +11,7 @@
 #   postgresql   — postgres superuser password
 #   polaris      — Polaris PostgreSQL user password
 #   kerberos     — Kerberos KDC master + admin passwords
-#   doris        — Doris admin password
+#   stardata        — Stardata admin password
 #   grafana      — Grafana admin password
 #   opensearch   — OpenSearch admin password
 #
@@ -170,24 +170,24 @@ rotate_kerberos() {
   log "NOTE: Kerberos pod restart not required — kadmin password is live-updated"
 }
 
-rotate_doris() {
-  log "=== Rotating Doris admin password ==="
+rotate_stardata() {
+  log "=== Rotating Stardata admin password ==="
   local NEW_PASS; NEW_PASS=$(gen_password)
 
-  # Update via Doris HTTP API
-  kubectl exec -n prod deployment/doris-fe -- \
+  # Update via Stardata HTTP API
+  kubectl exec -n prod deployment/stardata-fe -- \
     mysql -h 127.0.0.1 -P 9030 -u root -e \
     "ALTER USER 'admin' IDENTIFIED BY '${NEW_PASS}';" 2>/dev/null \
-    && ok "Doris admin password updated" \
-    || log "WARNING: could not update Doris live — update manually"
+    && ok "Stardata admin password updated" \
+    || log "WARNING: could not update Stardata live — update manually"
 
-  bao_write "secret/data/doris/credentials" \
+  bao_write "secret/data/stardata/credentials" \
     "admin-password=${NEW_PASS}"
-  ok "OpenBao secret/data/doris/credentials updated"
+  ok "OpenBao secret/data/stardata/credentials updated"
 
-  kube_secret_update doris-credentials prod \
+  kube_secret_update stardata-credentials prod \
     "admin-password=${NEW_PASS}"
-  ok "K8s secret doris-credentials updated"
+  ok "K8s secret stardata-credentials updated"
 }
 
 rotate_grafana() {
@@ -244,16 +244,16 @@ case "${SERVICE}" in
   postgresql)  rotate_postgresql ;;
   polaris)     rotate_polaris ;;
   kerberos)    rotate_kerberos ;;
-  doris)       rotate_doris ;;
+  stardata)       rotate_stardata ;;
   grafana)     rotate_grafana ;;
   opensearch)  rotate_opensearch ;;
   "")
     echo "Usage: bash scripts/master/rotate-secret.sh <service>"
-    echo "Supported: postgresql polaris kerberos doris grafana opensearch"
+    echo "Supported: postgresql polaris kerberos stardata grafana opensearch"
     exit 1
     ;;
   *)
-    die "Unknown service '${SERVICE}'. Supported: postgresql polaris kerberos doris grafana opensearch"
+    die "Unknown service '${SERVICE}'. Supported: postgresql polaris kerberos stardata grafana opensearch"
     ;;
 esac
 

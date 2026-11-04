@@ -355,7 +355,7 @@ def classify_columns(
 
     The `already_tagged` accumulator is built left-to-right through the column
     list, so Signal B (sibling context) benefits from earlier high-confidence
-    hits in the same table scan.  Column order is Doris ordinal position, so
+    hits in the same table scan.  Column order is Stardata ordinal position, so
     primary identifying columns (id, name, email) typically appear first and
     provide context for later ambiguous columns.
 
@@ -445,14 +445,14 @@ def classify_columns(
     return results
 
 
-# ── Doris metadata helpers ────────────────────────────────────────────────────
+# ── Stardata metadata helpers ────────────────────────────────────────────────────
 
-async def _get_doris_columns(database: str, table: str) -> list[str]:
-    """Fetch column names from Doris information_schema in ordinal order."""
+async def _get_stardata_columns(database: str, table: str) -> list[str]:
+    """Fetch column names from Stardata information_schema in ordinal order."""
     s = get_settings()
     conn = await aiomysql.connect(
-        host=s.doris_host, port=s.doris_port,
-        user=s.doris_admin_user, password=s.doris_admin_password,
+        host=s.stardata_host, port=s.stardata_port,
+        user=s.stardata_admin_user, password=s.stardata_admin_password,
         db="information_schema", connect_timeout=5, charset="utf8mb4",
     )
     try:
@@ -469,13 +469,13 @@ async def _get_doris_columns(database: str, table: str) -> list[str]:
         conn.close()
 
 
-async def _get_doris_tables(database: str) -> list[str]:
+async def _get_stardata_tables(database: str) -> list[str]:
     """Fetch all base table names (exclude views and masked views)."""
     s = get_settings()
     suffix = s.masked_view_suffix
     conn = await aiomysql.connect(
-        host=s.doris_host, port=s.doris_port,
-        user=s.doris_admin_user, password=s.doris_admin_password,
+        host=s.stardata_host, port=s.stardata_port,
+        user=s.stardata_admin_user, password=s.stardata_admin_password,
         db="information_schema", connect_timeout=5, charset="utf8mb4",
     )
     try:
@@ -502,7 +502,7 @@ async def scan_table(
     """Classify all columns in database.table. Returns one ColumnMatch per column."""
     if term_specs is None:
         term_specs = await _load_term_specs()
-    columns = await _get_doris_columns(database, table)
+    columns = await _get_stardata_columns(database, table)
     log.info("Classifier: scanning %s.%s — %d columns", database, table, len(columns))
     return classify_columns(columns, term_specs, threshold, table_name=table)
 
@@ -515,7 +515,7 @@ async def scan_database(
     """Classify all base tables in database. Returns {table: [ColumnMatch]}."""
     if term_specs is None:
         term_specs = await _load_term_specs()
-    tables = await _get_doris_tables(database)
+    tables = await _get_stardata_tables(database)
     results: dict[str, list[ColumnMatch]] = {}
     for table in tables:
         try:

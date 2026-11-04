@@ -53,15 +53,15 @@ been collapsed into `prod`.
 | JupyterHub | jupyterhub/jupyterhub | 4.x | 30888 | single |
 | Kestra | kestra-io/kestra | latest-lts | 30880 | 2 replicas |
 | SQLMesh | 192.168.1.50:30500/sqlmesh | 0.99.0 | 30883 | single |
-| Apache Doris FE | 192.168.1.50:30500/doris | 2.1.x | 30030 | single FE |
-| Apache Doris BE | 192.168.1.50:30500/doris | 2.1.x | — | 3 replicas |
+| Apache Stardata FE | 192.168.1.50:30500/stardata | 2.1.x | 30030 | single FE |
+| Apache Stardata BE | 192.168.1.50:30500/stardata | 2.1.x | — | 3 replicas |
 | Apache Polaris | 192.168.1.50:30500/apache-polaris | latest | 30882 | single |
 | Debezium | 192.168.1.50:30500/debezium | 2.5.x | 30083 | single |
 | Kerberos KDC | 192.168.1.50:30500/kerberos-kdc | — | 30088 | single |
 | Docker Registry | registry:2 | 2 | 30500 | single |
 | OpenBao | openbao/openbao | 2.2.x | 30820 | single |
 | MCP-Kafka | 192.168.1.50:30500/mcp-kafka | 1.0.0 | 30300 | single |
-| MCP-Doris | 192.168.1.50:30500/mcp-doris | 1.0.0 | 30301 | single |
+| MCP-Stardata | 192.168.1.50:30500/mcp-stardata | 1.0.0 | 30301 | single |
 | MCP-OpenSearch | 192.168.1.50:30500/mcp-opensearch | 1.0.0 | 30302 | single |
 | MCP-Spark | 192.168.1.50:30500/mcp-spark | 1.0.0 | 30303 | single |
 | MCP-SQLMesh | 192.168.1.50:30500/mcp-sqlmesh | 1.0.0 | 30304 | single |
@@ -97,7 +97,7 @@ Key DNS entries used across value files:
 | OpenSearch | `opensearch-cluster-master.prod.svc.cluster.local:9200` |
 | Kestra | `kestra.prod.svc.cluster.local:8080` |
 | SQLMesh | `sqlmesh.prod.svc.cluster.local:8001` |
-| Doris FE | `doris-fe.prod.svc.cluster.local:9030` |
+| Stardata FE | `stardata-fe.prod.svc.cluster.local:9030` |
 | OpenBao | `openbao.prod.svc.cluster.local:8200` |
 | Prometheus | `prometheus-prometheus.monitoring.svc.cluster.local:9090` |
 | Grafana | `grafana.monitoring.svc.cluster.local:3000` |

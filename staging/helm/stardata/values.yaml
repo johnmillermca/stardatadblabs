@@ -1,0 +1,17 @@
+# =============================================================================
+# Apache Stardata — STAGING reference stub
+# Namespace: prod
+# NodePort FE: 31030
+# =============================================================================
+fe:
+  image: apache/stardata:fe-4.2
+  replicas: 1
+  storage: 5Gi
+  service:
+    type: NodePort
+    queryPort: 31030
+be:
+  image: apache/stardata:be-4.2
+  replicas: 1
+  storage: 10Gi
+existingSecret: stardata-credentials

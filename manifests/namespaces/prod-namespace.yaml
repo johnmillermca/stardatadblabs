@@ -2,7 +2,7 @@
 # prod namespace — ALL platform workloads
 #   databases (postgresql, mongodb, oracle), openbao,
 #   streaming (kafka/strimzi, schema-registry),
-#   analytics (doris, sqlmesh),
+#   analytics (stardata, sqlmesh),
 #   catalog (polaris),
 #   registry, MCP servers
 #
@@ -29,7 +29,7 @@ spec:
     limits.cpu:              "120"
     requests.memory:         120Gi
     limits.memory:           240Gi
-    requests.storage:        2000Gi
+    requests.storage:        2500Gi
     persistentvolumeclaims:  "60"
     pods:                    "300"
     services:                "150"

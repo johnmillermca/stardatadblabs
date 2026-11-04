@@ -6,8 +6,8 @@
 sqlmesh:
   image: 192.168.1.50:30500/mcp-sqlmesh:1.0.0
   nodePort: 31310
-doris:
-  image: 192.168.1.50:30500/mcp-doris:1.0.0
+stardata:
+  image: 192.168.1.50:30500/mcp-stardata:1.0.0
   nodePort: 31311
 opensearch:
   image: 192.168.1.50:30500/mcp-opensearch:1.0.0

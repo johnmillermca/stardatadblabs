@@ -8,7 +8,7 @@
 
 ## Overview
 
-The classifier detects sensitive columns in Doris tables by comparing column names against glossary term patterns. It never reads table data — only `information_schema.COLUMNS` metadata is queried.
+The classifier detects sensitive columns in Stardata tables by comparing column names against glossary term patterns. It never reads table data — only `information_schema.COLUMNS` metadata is queried.
 
 Every column passes through **two stages**:
 
@@ -100,7 +100,7 @@ arb_score = 0.7 + Signal_A + Signal_B + Signal_D_boost
 
 **Why it matters:** A table that already contains confirmed `email` (HIGH) and `date_of_birth` (HIGH) PII columns is almost certainly a person-record table. An ambiguous `name` or `city` column in that table should lean toward being tagged. A table with no other sensitive columns should not.
 
-**How siblings are counted:** Columns are scanned in **Doris ordinal position order** (the order they were defined in `CREATE TABLE`). Confirmed HIGH/MEDIUM matches build up the sibling accumulator as the scan progresses left-to-right. This means columns defined later in the table (e.g. `description`, `notes`) benefit from earlier high-confidence hits (e.g. `email`, `phone_number`).
+**How siblings are counted:** Columns are scanned in **Stardata ordinal position order** (the order they were defined in `CREATE TABLE`). Confirmed HIGH/MEDIUM matches build up the sibling accumulator as the scan progresses left-to-right. This means columns defined later in the table (e.g. `description`, `notes`) benefit from earlier high-confidence hits (e.g. `email`, `phone_number`).
 
 **Configured by:** Built into the classifier engine. No user configuration.
 
@@ -254,7 +254,7 @@ The scan response includes the full signal breakdown per column. Use `arb_signal
 curl -sf -X POST $CATALOG_URL/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","doris_table":"customers","dry_run":true}' | \
+  -d '{"stardata_database":"governance_demo","stardata_table":"customers","dry_run":true}' | \
   jq '.tables_results[0].results[] | {col:.column_name, term:.matched_term,
       confidence, score:.score, arb_score:.arb_score, signals:.arb_signals}'
 ```

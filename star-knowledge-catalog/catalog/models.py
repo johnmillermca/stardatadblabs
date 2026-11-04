@@ -4,11 +4,11 @@ Star Knowledge Catalog — SQLAlchemy async models.
 Tables:
   data_classifications   — sensitivity tiers (PII, PCI, PHI, CONFIDENTIAL, PUBLIC)
   glossary_terms         — business glossary with auto-detection patterns
-  masking_algorithms     — named Doris SQL masking expressions
+  masking_algorithms     — named Stardata SQL masking expressions
   masking_policies       — binds classification / term → algorithm
-  column_tags            — maps Doris db.table.column → term + classification
+  column_tags            — maps Stardata db.table.column → term + classification
   role_masking_exceptions— roles that bypass masking for a classification
-  doris_masked_views     — audit trail of applied masked views in Doris
+  stardata_masked_views     — audit trail of applied masked views in Stardata
 """
 from __future__ import annotations
 
@@ -109,9 +109,9 @@ class MaskingAlgorithm(Base):
     display_name     = Column(Text, nullable=False)
     description      = Column(Text)
     algorithm_type   = Column(Text, nullable=False)
-    # Doris SQL expression; use {col} as the column placeholder
+    # Stardata SQL expression; use {col} as the column placeholder
     # e.g.  SHA2({col}, 256)   or   CONCAT(LEFT({col},2),'***')
-    doris_expression = Column(Text, nullable=False)
+    stardata_expression = Column(Text, nullable=False)
     applicable_types = Column(ARRAY(Text), nullable=False,
                               default=lambda: ["VARCHAR", "TEXT", "STRING"])
     created_at       = Column(DateTime(timezone=True), server_default=_now())
@@ -159,13 +159,13 @@ class MaskingPolicy(Base):
 class ColumnTag(Base):
     __tablename__ = "column_tags"
     __table_args__ = (
-        UniqueConstraint("doris_database", "doris_table", "column_name",
+        UniqueConstraint("stardata_database", "stardata_table", "column_name",
                          name="uq_column_tag"),
     )
 
     id                  = Column(Integer, primary_key=True)
-    doris_database      = Column(Text, nullable=False)
-    doris_table         = Column(Text, nullable=False)
+    stardata_database      = Column(Text, nullable=False)
+    stardata_table         = Column(Text, nullable=False)
     column_name         = Column(Text, nullable=False)
     glossary_term_id    = Column(Integer, ForeignKey("glossary_terms.id",
                                                      ondelete="SET NULL"))
@@ -211,14 +211,14 @@ class RoleMaskingException(Base):
 
 class GovernanceDatabase(Base):
     """
-    One row per Doris database.  When governance_enabled = False the masking
+    One row per Stardata database.  When governance_enabled = False the masking
     engine skips that database entirely and the query planner routes all users
     to base tables (circuit-breaker / maintenance mode).
     """
     __tablename__ = "governance_databases"
 
     id                 = Column(Integer, primary_key=True)
-    doris_database     = Column(Text, nullable=False, unique=True)
+    stardata_database     = Column(Text, nullable=False, unique=True)
     governance_enabled = Column(Boolean, nullable=False, default=True)
     disabled_reason    = Column(Text)
     disabled_by        = Column(Text)
@@ -229,21 +229,21 @@ class GovernanceDatabase(Base):
                                 onupdate=_now())
 
 
-# ── Doris Masked View Manifest ────────────────────────────────────────────────
+# ── Stardata Masked View Manifest ────────────────────────────────────────────────
 
-class DorisViewManifest(Base):
+class StardataViewManifest(Base):
     """
-    Records the last DDL applied to Doris for each (database, base_table) pair.
+    Records the last DDL applied to Stardata for each (database, base_table) pair.
     Used for drift detection — if the checksum changes the engine re-applies.
     """
-    __tablename__ = "doris_masked_views"
+    __tablename__ = "stardata_masked_views"
     __table_args__ = (
-        UniqueConstraint("doris_database", "base_table",
-                         name="uq_doris_view_manifest"),
+        UniqueConstraint("stardata_database", "base_table",
+                         name="uq_stardata_view_manifest"),
     )
 
     id              = Column(Integer, primary_key=True)
-    doris_database  = Column(Text, nullable=False)
+    stardata_database  = Column(Text, nullable=False)
     base_table      = Column(Text, nullable=False)
     view_name       = Column(Text, nullable=False)   # e.g. "customers_masked"
     view_ddl        = Column(Text, nullable=False)   # last CREATE OR REPLACE DDL

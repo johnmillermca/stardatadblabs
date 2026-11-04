@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS masking_algorithms (
                            'REDACT','HASH','PARTIAL_MASK','TOKENIZE',
                            'DATE_GENERALIZE','NULL_OUT','CUSTOM'
                        )),
-    doris_expression TEXT NOT NULL,
+    stardata_expression TEXT NOT NULL,
     applicable_types TEXT[] NOT NULL DEFAULT '{VARCHAR,TEXT,STRING}',
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -76,8 +76,8 @@ CREATE TABLE IF NOT EXISTS masking_policies (
 -- ── Column Tags ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS column_tags (
     id                SERIAL PRIMARY KEY,
-    doris_database    TEXT NOT NULL,
-    doris_table       TEXT NOT NULL,
+    stardata_database    TEXT NOT NULL,
+    stardata_table       TEXT NOT NULL,
     column_name       TEXT NOT NULL,
     glossary_term_id  INT REFERENCES glossary_terms(id) ON DELETE SET NULL,
     classification_id INT REFERENCES data_classifications(id) ON DELETE SET NULL,
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS column_tags (
     override_reason   TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (doris_database, doris_table, column_name)
+    UNIQUE (stardata_database, stardata_table, column_name)
 );
 
 -- ── Role Masking Exceptions ────────────────────────────────────────────────
@@ -99,22 +99,22 @@ CREATE TABLE IF NOT EXISTS role_masking_exceptions (
     UNIQUE (role_name, classification_id)
 );
 
--- ── Doris View Manifest ────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS doris_masked_views (
+-- ── Stardata View Manifest ────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS stardata_masked_views (
     id               SERIAL PRIMARY KEY,
-    doris_database   TEXT NOT NULL,
+    stardata_database   TEXT NOT NULL,
     base_table       TEXT NOT NULL,
     view_name        TEXT NOT NULL,
     view_ddl         TEXT NOT NULL,
     columns_masked   TEXT[] NOT NULL DEFAULT '{}',
     view_checksum    TEXT,
     last_applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (doris_database, base_table)
+    UNIQUE (stardata_database, base_table)
 );
 
 -- ── Indexes ────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_column_tags_db_table
-    ON column_tags(doris_database, doris_table);
+    ON column_tags(stardata_database, stardata_table);
 CREATE INDEX IF NOT EXISTS idx_column_tags_term
     ON column_tags(glossary_term_id);
 CREATE INDEX IF NOT EXISTS idx_column_tags_class
@@ -265,7 +265,7 @@ ON CONFLICT (name) DO NOTHING;
 
 -- ── Seed: Masking Algorithms ───────────────────────────────────────────────
 INSERT INTO masking_algorithms
-    (name, display_name, description, algorithm_type, doris_expression, applicable_types)
+    (name, display_name, description, algorithm_type, stardata_expression, applicable_types)
 VALUES
   ('FULL_REDACT',
    'Full Redaction',

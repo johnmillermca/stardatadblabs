@@ -16,7 +16,7 @@
 This runbook documents the end-to-end pipeline that copies all 24 tables from
 `SNOWFLAKE_SAMPLE_DATA.TPCDS_SF10TCL` (Snowflake) into Apache Iceberg tables
 managed by the Polaris REST catalog, stored on AWS S3, and queryable from both
-Apache Doris and JupyterHub.
+Apache Stardata and JupyterHub.
 
 ```
 Snowflake                     Spark (k8s)                  Polaris + S3
@@ -446,10 +446,10 @@ for o in resp.get('Contents', []):
 "
 ```
 
-### 6.4 Query from Doris
+### 6.4 Query from Stardata
 
 ```sql
--- Via Doris (iceberg_polaris catalog)
+-- Via Stardata (iceberg_polaris catalog)
 SELECT snap_timestamp, snap_id, c_customer_id
 FROM   iceberg_polaris.tpcds_sf10tcl.customer
 LIMIT  5;
@@ -565,12 +565,12 @@ ORDER  BY scheduled_time DESC;
 
 ---
 
-## 10. Doris Iceberg Catalog (Read + Warm-up)
+## 10. Stardata Iceberg Catalog (Read + Warm-up)
 
 ### 10.1 Verify read catalog
 
 ```sql
--- In Doris (port 9030)
+-- In Stardata (port 9030)
 SHOW CATALOGS;
 -- Expect: iceberg_polaris, iceberg_polaris_rw, internal
 
@@ -585,22 +585,22 @@ SHOW TABLES;
 
 ### 10.2 1-minute warm-up CronJob
 
-The `doris-iceberg-warmup` CronJob (already deployed) runs every minute and
+The `stardata-iceberg-warmup` CronJob (already deployed) runs every minute and
 queries `SELECT COUNT(*) FROM iceberg_polaris.tpcds_sf10tcl.customer` to keep
 metadata caches warm.
 
 ```bash
 # Check warm-up CronJob
-kubectl get cronjob doris-iceberg-warmup -n prod
-kubectl get jobs -n prod --selector=app=doris-iceberg-warmup \
+kubectl get cronjob stardata-iceberg-warmup -n prod
+kubectl get jobs -n prod --selector=app=stardata-iceberg-warmup \
   --sort-by=.metadata.creationTimestamp | tail -5
 
 # Enable
-kubectl patch cronjob doris-iceberg-warmup -n prod \
+kubectl patch cronjob stardata-iceberg-warmup -n prod \
   -p '{"spec":{"suspend":false}}'
 
 # Disable
-kubectl patch cronjob doris-iceberg-warmup -n prod \
+kubectl patch cronjob stardata-iceberg-warmup -n prod \
   -p '{"spec":{"suspend":true}}'
 ```
 
@@ -751,10 +751,10 @@ ALTER TABLE `polaris`.`tpcds_sf10tcl`.`<table>`
 | `rbac-plane/docs/iceberg-spark-setup/README.md` | Iceberg lakehouse runbook (initial setup) |
 | `rbac-plane/docs/iceberg-spark-setup/01_create_iceberg_table.py` | Initial Iceberg table creation script |
 | `rbac-plane/docs/iceberg-spark-setup/06_snowflake_iceberg_setup_and_refresh.sql` | Snowflake OBJECT_STORE table + task SQL |
-| `rbac-plane/docs/iceberg-spark-setup/05_doris_catalogs.sql` | Doris catalog DDL |
-| `rbac-plane/docs/iceberg-spark-setup/05b_doris_warmup_cronjob.yaml` | Doris warm-up CronJob manifest |
+| `rbac-plane/docs/iceberg-spark-setup/05_stardata_catalogs.sql` | Stardata catalog DDL |
+| `rbac-plane/docs/iceberg-spark-setup/05b_stardata_warmup_cronjob.yaml` | Stardata warm-up CronJob manifest |
 | `rbac-plane/docs/iceberg-spark-setup/07_polaris_token_refresh_cronjob.yaml` | Polaris token refresh CronJob |
-| `rbac-plane/migrations/005_iceberg_polaris_doris_snowflake.sql` | RBAC migration for Iceberg/Doris/Snowflake permissions |
+| `rbac-plane/migrations/005_iceberg_polaris_stardata_snowflake.sql` | RBAC migration for Iceberg/Stardata/Snowflake permissions |
 
 ---
 
@@ -826,9 +826,9 @@ ALTER TASK refresh_iceberg_tpcds_hourly SUSPEND;
 # Resume Snowflake refresh task
 ALTER TASK refresh_iceberg_tpcds_hourly RESUME;
 
-# Suspend Doris warm-up CronJob
-kubectl patch cronjob doris-iceberg-warmup -n prod -p '{"spec":{"suspend":true}}'
+# Suspend Stardata warm-up CronJob
+kubectl patch cronjob stardata-iceberg-warmup -n prod -p '{"spec":{"suspend":true}}'
 
-# Resume Doris warm-up CronJob
-kubectl patch cronjob doris-iceberg-warmup -n prod -p '{"spec":{"suspend":false}}'
+# Resume Stardata warm-up CronJob
+kubectl patch cronjob stardata-iceberg-warmup -n prod -p '{"spec":{"suspend":false}}'
 ```

@@ -227,12 +227,12 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── Apache Doris (HA: 1 FE + 3 BE) ───────────────────────────────────────────
+# ── Apache Stardata (HA: 1 FE + 3 BE) ───────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: doris
+  name: stardata
   namespace: argocd
   finalizers: [resources-finalizer.argocd.io]
   annotations:
@@ -242,7 +242,7 @@ spec:
   source:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
-    path: manifests/doris
+    path: manifests/stardata
     directory:
       recurse: true
       exclude: "setup/*.sql"  # SQL DDL files are not K8s manifests — applied manually

@@ -9,20 +9,20 @@
 
 ## Overview
 
-**Star Knowledge Catalog** is an IBM Knowledge Catalog-inspired governance layer for Apache Doris. It provides:
+**Star Knowledge Catalog** is an IBM Knowledge Catalog-inspired governance layer for Apache Stardata. It provides:
 
 - **Data Classifications** — sensitivity tiers (PII, PCI, PHI, CONFIDENTIAL, PUBLIC)
 - **Business Glossary** — curated terms with keyword patterns used for automatic column detection
-- **Masking Algorithms** — named Doris-native SQL expressions (SHA-256, email partial, credit card last-4, etc.)
+- **Masking Algorithms** — named Stardata-native SQL expressions (SHA-256, email partial, credit card last-4, etc.)
 - **Masking Policies** — bind a classification or glossary term to an algorithm
-- **Auto Column Tagger** — scans Doris table schemas and tags sensitive columns without manual intervention
-- **Masked Views** — generates `CREATE OR REPLACE VIEW` DDL in Doris; masking is applied natively by the Doris vectorised engine at query time (sub-second performance preserved)
+- **Auto Column Tagger** — scans Stardata table schemas and tags sensitive columns without manual intervention
+- **Masked Views** — generates `CREATE OR REPLACE VIEW` DDL in Stardata; masking is applied natively by the Stardata vectorised engine at query time (sub-second performance preserved)
 - **Role-Aware Query Router** — integrates with the RBAC Control Plane to route analyst users to masked views and privileged roles directly to base tables
 
 ### Data flow
 
 ```
-1. Data lands in Doris base tables (governance_demo.customers, .payments, ...)
+1. Data lands in Stardata base tables (governance_demo.customers, .payments, ...)
                   ↓
 2. Star Catalog scans column names → matches against Glossary Term patterns
                   ↓
@@ -30,11 +30,11 @@
                   ↓
 4. Masking Policies resolved (term-level priority > classification-level)
                   ↓
-5. Engine generates Doris VIEW DDL with masking expressions inline
+5. Engine generates Stardata VIEW DDL with masking expressions inline
                   ↓
-6. Views applied to Doris (CREATE OR REPLACE VIEW customers_masked)
+6. Views applied to Stardata (CREATE OR REPLACE VIEW customers_masked)
                   ↓
-7. analyst user → directed to customers_masked (masking at Doris vectorised layer)
+7. analyst user → directed to customers_masked (masking at Stardata vectorised layer)
    data_admin  → directed to customers           (full CLEAR access)
 ```
 
@@ -42,10 +42,10 @@
 
 | Layer | Technology | Latency |
 |---|---|---|
-| Masking expression evaluation | Doris native vectorised engine | Same as projection push-down — microseconds per row |
+| Masking expression evaluation | Stardata native vectorised engine | Same as projection push-down — microseconds per row |
 | Column tag / policy resolution | Redis → in-process LRU cache | < 1 ms (cached) |
 | Role routing decision | RBAC Control Plane (Redis-cached) | < 1 ms |
-| Full query execution on masked view | Doris MPP with partition pruning | Sub-second for typical analyst queries |
+| Full query execution on masked view | Stardata MPP with partition pruning | Sub-second for typical analyst queries |
 
 ---
 
@@ -53,7 +53,7 @@
 
 | Item | Requirement |
 |---|---|
-| Apache Doris | Running at `192.168.1.50:30090` (see [Doris doc](../doris.md)) |
+| Apache Stardata | Running at `192.168.1.50:30090` (see [Stardata doc](../stardata.md)) |
 | RBAC Control Plane | Running at `192.168.1.50:30850` (see [Runbook 12](runbook-12-rbac-new-user-testing.md)) |
 | PostgreSQL 17 | Running at `192.168.1.50:30532` |
 | Redis | Running at `192.168.1.50` port 6379 |
@@ -141,7 +141,7 @@ The Star Catalog deployment mounts this secret via `envFrom`. It must exist befo
 kubectl create secret generic star-catalog-credentials \
   --namespace prod \
   --from-literal=PG_PASSWORD=changeme \
-  --from-literal=DORIS_ADMIN_PASSWORD='' \
+  --from-literal=STARDATA_ADMIN_PASSWORD='' \
   --from-literal=MASTER_TOKEN=changeme-catalog-master-token \
   --from-literal=JWT_SECRET=changeme-catalog-jwt-secret-min-32-chars! \
   --from-literal=RBAC_PLANE_TOKEN=changeme-rbac-master-token
@@ -187,13 +187,13 @@ Expected:
 
 ---
 
-## Part B — Create Sample Doris Database
+## Part B — Create Sample Stardata Database
 
 ### B.1 — Create the governance_demo database and tables
 
 ```bash
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
-  < star-knowledge-catalog/doris/001_create_schema.sql
+  < star-knowledge-catalog/stardata/001_create_schema.sql
 ```
 
 This creates `governance_demo` with four tables:
@@ -209,7 +209,7 @@ This creates `governance_demo` with four tables:
 
 ```bash
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
-  < star-knowledge-catalog/doris/002_seed_data.sql
+  < star-knowledge-catalog/stardata/002_seed_data.sql
 ```
 
 This loads 20 customers, 40 orders, 40 payments, 10 products.
@@ -224,7 +224,7 @@ MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
 
 > **`MYSQL_PWD=""` note:** Passing `MYSQL_PWD` as an environment variable suppresses the interactive password prompt when the root password is empty. Use `MYSQL_PWD=<password>` if you have set a root password.
 
-### B.3 — Confirm Doris users were created
+### B.3 — Confirm Stardata users were created
 
 ```bash
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
@@ -235,7 +235,7 @@ MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
 
 ## Part C — Wire the analyst role in the RBAC Control Plane
 
-This section provisions the `alice` user with the `analyst` role and syncs her Doris account.
+This section provisions the `alice` user with the `analyst` role and syncs her Stardata account.
 
 ### C.1 — Get an RBAC API token
 
@@ -267,22 +267,22 @@ curl -s -X POST http://192.168.1.50:30850/api/v1/users/alice/bindings \
   -H 'Content-Type: application/json' \
   -d '{
     "role_name": "analyst",
-    "service_name": "doris"
+    "service_name": "stardata"
   }' | jq .
 ```
 
-### C.4 — Sync alice's role to Doris
+### C.4 — Sync alice's role to Stardata
 
 ```bash
 curl -s -X POST http://192.168.1.50:30850/api/v1/sync \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","service":"doris"}' | jq .
+  -d '{"username":"alice","service":"stardata"}' | jq .
 ```
 
-Expected: `{"results":[{"username":"alice","service":"doris","status":"synced"}],"errors":0}`
+Expected: `{"results":[{"username":"alice","service":"stardata","status":"synced"}],"errors":0}`
 
-### C.5 — Verify alice exists in Doris
+### C.5 — Verify alice exists in Stardata
 
 ```bash
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
@@ -309,9 +309,9 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "doris_database": "governance_demo",
+    "stardata_database": "governance_demo",
     "dry_run": true
-  }' | jq '.tables_results[] | {table: .doris_table, tagged: .columns_tagged, results: [.results[] | select(.score >= 0.7)]}'
+  }' | jq '.tables_results[] | {table: .stardata_table, tagged: .columns_tagged, results: [.results[] | select(.score >= 0.7)]}'
 ```
 
 **Expected output (excerpt):**
@@ -339,10 +339,10 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/columns/scan \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "doris_database": "governance_demo",
+    "stardata_database": "governance_demo",
     "dry_run": false,
     "overwrite_existing": false
-  }' | jq '{tables_scanned, results: [.tables_results[] | {table:.doris_table, tagged:.columns_tagged}]}'
+  }' | jq '{tables_scanned, results: [.tables_results[] | {table:.stardata_table, tagged:.columns_tagged}]}'
 ```
 
 ### D.4 — Review all column tags
@@ -350,7 +350,7 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/columns/scan \
 ```bash
 curl -s "http://192.168.1.50:30860/api/v1/columns?database=governance_demo" \
   -H "Authorization: Bearer $CATALOG_TOKEN" | \
-  jq '.[] | "\(.doris_table).\(.column_name)  →  \(.glossary_term_name // "—")  [\(.classification_name // "—")]  score:\(.detection_score)"'
+  jq '.[] | "\(.stardata_table).\(.column_name)  →  \(.glossary_term_name // "—")  [\(.classification_name // "—")]  score:\(.detection_score)"'
 ```
 
 Expected output (customers table columns, formatted):
@@ -367,17 +367,17 @@ Expected output (customers table columns, formatted):
 "payments.credit_card_cvv  →  credit_card_cvv  [PCI]  score:1.0"
 ```
 
-### D.5 — Apply masked views to Doris
+### D.5 — Apply masked views to Stardata
 
 ```bash
 curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "doris_database": "governance_demo",
+    "stardata_database": "governance_demo",
     "dry_run": false,
     "force": false
-  }' | jq '.results[] | {table:.doris_table, view:.view_name, action:.action, masked:.columns_masked}'
+  }' | jq '.results[] | {table:.stardata_table, view:.view_name, action:.action, masked:.columns_masked}'
 ```
 
 Expected:
@@ -390,7 +390,7 @@ Expected:
 ]
 ```
 
-### D.6 — Verify masked views exist in Doris
+### D.6 — Verify masked views exist in Stardata
 
 ```bash
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
@@ -415,8 +415,8 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/query \
   -H 'Content-Type: application/json' \
   -d '{
     "username": "alice",
-    "doris_database": "governance_demo",
-    "doris_table": "customers",
+    "stardata_database": "governance_demo",
+    "stardata_table": "customers",
     "limit": 5
   }' | jq .
 ```
@@ -434,7 +434,7 @@ Expected response:
 }
 ```
 
-### E.2 — Execute the query as alice in Doris
+### E.2 — Execute the query as alice in Stardata
 
 ```bash
 mysql -h 192.168.1.50 -P 30090 -u alice -panalyst_pass_demo \
@@ -473,8 +473,8 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/query \
   -H 'Content-Type: application/json' \
   -d '{
     "username": "bob",
-    "doris_database": "governance_demo",
-    "doris_table": "customers",
+    "stardata_database": "governance_demo",
+    "stardata_table": "customers",
     "limit": 5
   }' | jq '{role, target, note}'
 ```
@@ -522,8 +522,8 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/columns \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{
-    \"doris_database\": \"governance_demo\",
-    \"doris_table\": \"customers\",
+    \"stardata_database\": \"governance_demo\",
+    \"stardata_table\": \"customers\",
     \"column_name\": \"city\",
     \"classification_id\": $PII_ID,
     \"override_reason\": \"City is quasi-identifier under GDPR recital 26\"
@@ -537,8 +537,8 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "doris_database": "governance_demo",
-    "doris_table": "customers",
+    "stardata_database": "governance_demo",
+    "stardata_table": "customers",
     "force": true
   }' | jq .results[0]
 ```
@@ -560,7 +560,7 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/algorithms \
     "display_name": "City Generalisation",
     "description": "Replaces city name with its ISO country code. Reduces geo-precision for GDPR compliance.",
     "algorithm_type": "CUSTOM",
-    "doris_expression": "country_code",
+    "stardata_expression": "country_code",
     "applicable_types": ["VARCHAR","TEXT"]
   }' | jq .
 ```
@@ -641,8 +641,8 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/query \
   -H 'Content-Type: application/json' \
   -d '{
     "username": "eve",
-    "doris_database": "governance_demo",
-    "doris_table": "customers",
+    "stardata_database": "governance_demo",
+    "stardata_table": "customers",
     "limit": 10
   }' | jq '{role, target}'
 ```
@@ -662,7 +662,7 @@ time mysql -h 192.168.1.50 -P 30090 -u analyst -panalyst_pass_demo \
   -e "SELECT COUNT(*), customer_tier FROM customers_masked GROUP BY customer_tier;"
 ```
 
-Typical result on 20-row demo dataset: **< 10 ms**. For production-scale datasets (millions of rows) the masking expressions (SHA2, CONCAT, DATE_FORMAT) are vectorised by Doris — expect similar or better latency vs. an equivalent projection on the base table.
+Typical result on 20-row demo dataset: **< 10 ms**. For production-scale datasets (millions of rows) the masking expressions (SHA2, CONCAT, DATE_FORMAT) are vectorised by Stardata — expect similar or better latency vs. an equivalent projection on the base table.
 
 ### I.2 — Compare base vs masked view on the same query
 
@@ -701,7 +701,7 @@ Verify that the plan shows:
 ```bash
 curl -s "http://192.168.1.50:30860/api/v1/masking/views?database=governance_demo" \
   -H "Authorization: Bearer $CATALOG_TOKEN" | \
-  jq '.[] | {database:.doris_database, base_table, view_name, masked:.columns_masked, last_applied:.last_applied_at}'
+  jq '.[] | {database:.stardata_database, base_table, view_name, masked:.columns_masked, last_applied:.last_applied_at}'
 ```
 
 ### J.2 — Force re-apply all views (after policy changes)
@@ -711,10 +711,10 @@ curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
-    "doris_database": "governance_demo",
+    "stardata_database": "governance_demo",
     "dry_run": false,
     "force": true
-  }' | jq '.results[] | {table:.doris_table, action}'
+  }' | jq '.results[] | {table:.stardata_table, action}'
 ```
 
 ---
@@ -737,7 +737,7 @@ curl -s "http://192.168.1.50:30860/api/v1/glossary/email_address" \
 curl -s "http://192.168.1.50:30860/api/v1/columns/scan" \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","dry_run":true}' | \
+  -d '{"stardata_database":"governance_demo","dry_run":true}' | \
   jq '.tables_results[].results[] | select(.score > 0) | {column:.column_name, score, term:.matched_term}'
 ```
 
@@ -745,41 +745,41 @@ curl -s "http://192.168.1.50:30860/api/v1/columns/scan" \
 
 **Symptom:** Analyst user gets an error accessing the masked view.
 
-**Cause:** The masking engine has not yet applied the view to Doris.
+**Cause:** The masking engine has not yet applied the view to Stardata.
 
 **Fix:**
 ```bash
 curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","force":true}' | jq .
+  -d '{"stardata_database":"governance_demo","force":true}' | jq .
 ```
 
 ### T3 — `POST /api/v1/masking/apply` returns `action: error`
 
-**Symptom:** View apply fails with a Doris error in `detail`.
+**Symptom:** View apply fails with a Stardata error in `detail`.
 
 **Common causes:**
 
 | Error message | Fix |
 |---|---|
-| `Access denied for user 'root'@...` | Check `DORIS_ADMIN_PASSWORD` in the `star-catalog-credentials` secret |
+| `Access denied for user 'root'@...` | Check `STARDATA_ADMIN_PASSWORD` in the `star-catalog-credentials` secret |
 | `Unknown column 'xxx' in 'field list'` | Column was renamed or dropped; re-run scan with `overwrite_existing: true` |
-| `connect_timeout expired` | Doris FE is not reachable — check `kubectl get pods -n prod \| grep doris` |
+| `connect_timeout expired` | Stardata FE is not reachable — check `kubectl get pods -n prod \| grep stardata` |
 
-### T4 — alice cannot connect to Doris
+### T4 — alice cannot connect to Stardata
 
 **Symptom:** `mysql -u alice ...` returns `ERROR 1045 (28000): Access denied`.
 
-**Cause:** The RBAC Control Plane sync step was skipped or alice's Doris user was dropped.
+**Cause:** The RBAC Control Plane sync step was skipped or alice's Stardata user was dropped.
 
 **Fix:**
 ```bash
-# Force re-sync alice to Doris
+# Force re-sync alice to Stardata
 curl -s -X POST http://192.168.1.50:30850/api/v1/sync \
   -H "Authorization: Bearer $RBAC_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","service":"doris"}' | jq .
+  -d '{"username":"alice","service":"stardata"}' | jq .
 
 # Manually grant masked views if sync doesn't include view grants
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
@@ -818,7 +818,7 @@ curl -s "http://192.168.1.50:30850/api/v1/users/alice/roles" \
 curl -s -X POST http://192.168.1.50:30860/api/v1/masking/apply \
   -H "Authorization: Bearer $CATALOG_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"doris_database":"governance_demo","force":true}' | jq .
+  -d '{"stardata_database":"governance_demo","force":true}' | jq .
 ```
 
 ### T7 — `star-catalog-credentials` secret not found
@@ -852,16 +852,16 @@ kubectl exec -n prod postgresql-0 -- \
   -c "SELECT 'pg_ok' AS status;"
 ```
 
-### T9 — Doris `mysql` client prompts for password when `DORIS_ROOT_PASS` is empty
+### T9 — Stardata `mysql` client prompts for password when `STARDATA_ROOT_PASS` is empty
 
-**Symptom:** Running `mysql -h ... -u root -p"$DORIS_ROOT_PASS"` with an empty password shows `Enter password:`.
+**Symptom:** Running `mysql -h ... -u root -p"$STARDATA_ROOT_PASS"` with an empty password shows `Enter password:`.
 
 **Cause:** The `mysql` client treats `-p""` as "prompt interactively". Just press Enter to proceed — the connection succeeds with an empty password.
 
 **To suppress the prompt entirely**, use `MYSQL_PWD`:
 ```bash
 MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
-  -e "SELECT 'doris_ok' AS status;"
+  -e "SELECT 'stardata_ok' AS status;"
 ```
 
 ---
@@ -873,8 +873,8 @@ MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
 | Star Knowledge Catalog API | `http://192.168.1.50:30860` | NodePort 30860 |
 | Star Knowledge Catalog Docs | `http://192.168.1.50:30860/docs` | Swagger UI |
 | RBAC Control Plane API | `http://192.168.1.50:30850` | NodePort 30850 |
-| Apache Doris Web UI | `http://192.168.1.50:30030` | FE web console |
-| Apache Doris MySQL | `192.168.1.50:30090` | MySQL protocol |
+| Apache Stardata Web UI | `http://192.168.1.50:30030` | FE web console |
+| Apache Stardata MySQL | `192.168.1.50:30090` | MySQL protocol |
 | PostgreSQL | `192.168.1.50:30532` | Metadata store |
 
 ## OpenBao Secret Paths
@@ -882,7 +882,7 @@ MYSQL_PWD="" mysql -h 192.168.1.50 -P 30090 -u root \
 | Secret | Path | Notes |
 |---|---|---|
 | Star Catalog credentials | `secret/data/star-catalog/credentials` | Seeded by Part A.1 |
-| Doris credentials | `secret/data/doris/credentials` | Managed by `12-seed-openbao-secrets.sh` |
+| Stardata credentials | `secret/data/stardata/credentials` | Managed by `12-seed-openbao-secrets.sh` |
 | PostgreSQL credentials | `secret/data/postgresql/credentials` | Managed by `12-seed-openbao-secrets.sh` |
 
 Keys stored under `secret/data/star-catalog/credentials`:
@@ -893,7 +893,7 @@ Keys stored under `secret/data/star-catalog/credentials`:
 | `pg-user` | — | Always `star_catalog` |
 | `master-token` | `MASTER_TOKEN` | API bootstrap token — use as `CATALOG_MASTER_TOKEN` in tests |
 | `jwt-secret` | `JWT_SECRET` | JWT signing secret (min 32 chars) |
-| `doris-admin-password` | `DORIS_ADMIN_PASSWORD` | Doris root password (empty on first boot) |
+| `stardata-admin-password` | `STARDATA_ADMIN_PASSWORD` | Stardata root password (empty on first boot) |
 | `rbac-plane-token` | `RBAC_PLANE_TOKEN` | Must match RBAC Control Plane master token |
 
 To read the master token at any time:
@@ -909,7 +909,7 @@ curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
 
 ## Quick Reference: Masking Algorithms
 
-| Algorithm | Type | Doris Expression | Example: `john.doe@example.com` |
+| Algorithm | Type | Stardata Expression | Example: `john.doe@example.com` |
 |---|---|---|---|
 | `FULL_REDACT` | REDACT | `'****'` | `****` |
 | `SHA256_HASH` | HASH | `SHA2({col}, 256)` | `a94a8fe5ccb19ba6...` |
@@ -922,4 +922,4 @@ curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
 
 ---
 
-*Last updated: Star Knowledge Catalog v1.0.0 · Doris 4.0.7 · RBAC Control Plane v1.0.0*
+*Last updated: Star Knowledge Catalog v1.0.0 · Stardata 4.0.7 · RBAC Control Plane v1.0.0*
