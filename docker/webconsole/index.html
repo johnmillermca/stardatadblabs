@@ -415,7 +415,27 @@
       </div>
     </div>
 
-    <p class="page-footer">www.stardatadb.com &nbsp;&bull;&nbsp; StarDataLabs Platform</p>
+    <!-- Stargraph launch button -->
+    <a href="/stargraph.html" style="display:block;width:100%;max-width:400px;margin-top:20px;text-decoration:none">
+      <button style="
+        width:100%;padding:11px 0;border-radius:8px;font-size:14px;font-weight:700;
+        cursor:pointer;letter-spacing:.03em;border:1.5px solid rgba(139,92,246,0.5);
+        background:rgba(124,58,237,0.1);color:#a78bfa;
+        display:flex;align-items:center;justify-content:center;gap:10px;
+        transition:background .15s,border-color .15s;
+      "
+        onmouseover="this.style.background='rgba(124,58,237,0.22)';this.style.borderColor='#7c3aed'"
+        onmouseout="this.style.background='rgba(124,58,237,0.1)';this.style.borderColor='rgba(139,92,246,0.5)'"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>
+          <line x1="12" y1="7" x2="5" y2="17"/><line x1="12" y1="7" x2="19" y2="17"/><line x1="5" y1="19" x2="19" y2="19"/>
+        </svg>
+        Open Stargraph Console
+      </button>
+    </a>
+
+    <p class="page-footer" style="margin-top:16px">www.stardatadb.com &nbsp;&bull;&nbsp; StarDataLabs Platform</p>
 
   </div>
 

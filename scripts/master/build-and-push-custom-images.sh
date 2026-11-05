@@ -34,6 +34,8 @@ declare -A IMAGE_CONTEXT=(
   [jupyter-spark]="docker/jupyter-spark"
   [lakehouse-ui]="docker/lakehouse-ui"
   [tableflow]="docker/tableflow"
+  [duckdb]="docker/duckdb"
+  [webconsole]="docker/webconsole"
 )
 
 declare -A IMAGE_TAG=(
@@ -42,6 +44,8 @@ declare -A IMAGE_TAG=(
   [jupyter-spark]="${REGISTRY}/jupyter-spark:latest"
   [lakehouse-ui]="${REGISTRY}/lakehouse-ui:latest"
   [tableflow]="${REGISTRY}/tableflow:1.0.14"
+  [duckdb]="${REGISTRY}/duckdb:latest"
+  [webconsole]="${REGISTRY}/webconsole:latest"
 )
 
 # =============================================================================

@@ -1,0 +1,170 @@
+# =============================================================================
+# DuckDB on Worker8 — PersistentVolume + PVC + Deployment + Service
+# Namespace : prod
+# Node      : worker8.local (192.168.1.58)  — dedicated DuckDB analytics node
+# Image     : 192.168.1.50:30500/duckdb:latest  (build via Dockerfile.duckdb)
+# Access    : jdbc:duckdb via NodePort 30580 (HTTP/1.1 JSON API)
+# Catalog   : Apache Polaris REST — IcebergCatalog (xdatatoiceberg1 bucket)
+# Secrets   : platform-s3-credentials  (access_key / secret_key)
+# =============================================================================
+---
+# ── Persistent Volume — worker8.local /home/duckdb-data ────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: duckdb-worker8-pv
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  hostPath:
+    path: /home/duckdb-data
+    type: DirectoryOrCreate
+  claimRef:
+    name: duckdb-worker8-pvc
+    namespace: prod
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker8.local
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: duckdb-worker8-pvc
+  namespace: prod
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 200Gi
+---
+# ── ConfigMap — duckdb startup SQL ─────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: duckdb-init-sql
+  namespace: prod
+data:
+  init.sql: |
+    -- Install extensions once on first boot (cached to /home/duckdb/.duckdb/extensions)
+    INSTALL iceberg;
+    INSTALL httpfs;
+    LOAD iceberg;
+    LOAD httpfs;
+
+    -- AWS S3 HMAC credentials (injected from Secret at pod start via init script)
+    -- The actual SET statements are emitted by the entrypoint from env vars.
+---
+# ── Deployment ──────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: duckdb-worker8
+  namespace: prod
+  labels:
+    app: duckdb-worker8
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: duckdb-worker8
+  template:
+    metadata:
+      labels:
+        app: duckdb-worker8
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker8.local
+      containers:
+        - name: duckdb
+          # Built from manifests/duckdb/Dockerfile.duckdb — installs latest DuckDB CLI
+          # and runs duckdb-http-server (duck-server) for SQL-over-HTTP access.
+          image: 192.168.1.50:30500/duckdb:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8580
+          env:
+            # S3 HMAC credentials — injected from the platform-wide S3 secret
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: access_key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: secret_key
+            - name: AWS_DEFAULT_REGION
+              value: us-east-2
+            # Polaris REST catalog endpoint (internal cluster DNS)
+            - name: POLARIS_URI
+              value: "http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog"
+            - name: POLARIS_WAREHOUSE
+              value: "IcebergCatalog"
+            # DuckDB persistent database file
+            - name: DUCKDB_DATABASE
+              value: /data/stargraph_iceberg.duckdb
+            # Spill-to-disk dir — also used by external_file_cache_spill
+            - name: DUCKDB_TEMP_DIR
+              value: /data/duckdb_tmp
+          volumeMounts:
+            - name: duckdb-storage
+              mountPath: /data
+            - name: duckdb-init
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: "1"
+            limits:
+              memory: 8Gi
+              cpu: "4"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8580
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8580
+            initialDelaySeconds: 40
+            periodSeconds: 20
+      volumes:
+        - name: duckdb-storage
+          persistentVolumeClaim:
+            claimName: duckdb-worker8-pvc
+        - name: duckdb-init
+          configMap:
+            name: duckdb-init-sql
+---
+# ── Service — NodePort :30580 ───────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: duckdb-worker8
+  namespace: prod
+  labels:
+    app: duckdb-worker8
+spec:
+  selector:
+    app: duckdb-worker8
+  type: NodePort
+  ports:
+    - name: http
+      port: 8580
+      targetPort: 8580
+      nodePort: 30580

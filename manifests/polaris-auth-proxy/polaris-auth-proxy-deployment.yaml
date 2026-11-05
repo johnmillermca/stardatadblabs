@@ -2,20 +2,12 @@
 # Polaris Auth Proxy — Deployment + Service
 # Namespace : prod
 #
-# Replaces the nginx hardcoded-token approach with a Python HTTP proxy that:
-#   • Fetches OAuth2 tokens from Polaris at startup using credentials from OpenBao
-#   • Automatically refreshes tokens TOKEN_REFRESH_BUFFER_S (300s) before expiry
-#   • Injects "Authorization: Bearer <token>" into every forwarded request
-#   • Forwards all other request headers and body to Polaris unchanged
-#   • Streams Polaris responses back to callers unchanged
+# Auto-refreshing OAuth2 token injector for Apache Polaris REST catalog.
+#   :8282  — stargraph-writer principal  (read + write)
+#   :8283  — stargraph-reader principal  (read-only)
 #
-# Port mapping (matches legacy nginx contract — no catalog changes needed):
-#   :8282  — stardata-writer principal  (read + write)
-#   :8283  — stardata-reader principal  (read-only)
-#
-# Credentials: read from OpenBao at startup via polaris-token-refresher SA.
-#   OpenBao path: secret/data/platform/polaris
-#   Keys used: stardata_writer_id, stardata_writer_secret, stardata_reader_id, stardata_reader_secret
+# Credentials: injected from polaris-stargraph-credentials Kubernetes Secret.
+# No OpenBao / Vault dependency.
 # =============================================================================
 ---
 apiVersion: apps/v1
@@ -37,7 +29,6 @@ spec:
       labels:
         app: polaris-auth-proxy
     spec:
-      serviceAccountName: polaris-token-refresher
       terminationGracePeriodSeconds: 10
       containers:
         - name: polaris-auth-proxy
@@ -47,17 +38,33 @@ spec:
           env:
             - name: POLARIS_URL
               value: "http://polaris-rest.prod.svc.cluster.local:8181"
-            - name: ADDR
-              value: "http://openbao.prod.svc.cluster.local:8200"
-            - name: BAO_ROLE
-              value: "polaris-token-refresher"
-            # Refresh token 300s (5 min) before it expires
             - name: TOKEN_REFRESH_BUFFER_S
               value: "300"
             - name: PORT_WRITER
               value: "8282"
             - name: PORT_READER
               value: "8283"
+            # Credentials from polaris-stargraph-credentials Kubernetes Secret
+            - name: POLARIS_READER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-stargraph-credentials
+                  key: reader_id
+            - name: POLARIS_READER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-stargraph-credentials
+                  key: reader_secret
+            - name: POLARIS_WRITER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-stargraph-credentials
+                  key: writer_id
+            - name: POLARIS_WRITER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: polaris-stargraph-credentials
+                  key: writer_secret
           ports:
             - name: writer
               containerPort: 8282

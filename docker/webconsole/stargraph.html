@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Stargraph · StarDataLabs</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0b0b0f;--surface:#111116;--surface2:#18181f;--border:#2a2a35;
+  --text:#e8e8f0;--muted:#6b6b80;--accent:#7c3aed;--accent2:#a78bfa;
+  --green:#10b981;--red:#ef4444;--yellow:#f59e0b;--blue:#3b82f6;
+  /* Bright neon node colors — visible on black, used as glow base */
+  --node-customer:#c084fc;--node-order:#60a5fa;--node-product:#34d399;
+  --node-payment:#fbbf24;--node-default:#94a3b8;
+  --edge:#4b4b60;--edge-hover:#c084fc;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",system-ui,sans-serif;font-size:14px;overflow:hidden}
+
+/* ── Layout ── */
+.layout{display:grid;grid-template-rows:48px 1fr;grid-template-columns:260px 1fr;height:100vh}
+.topbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:0 18px;background:var(--surface);border-bottom:1px solid var(--border);z-index:10}
+.topbar .logo{display:flex;align-items:center;gap:8px;font-weight:800;font-size:15px;color:var(--text);text-decoration:none;margin-right:8px}
+.topbar .logo svg{width:28px;height:28px}
+.topbar .tag{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:rgba(124,58,237,.18);color:var(--accent2);letter-spacing:.06em;text-transform:uppercase}
+.topbar .spacer{flex:1}
+.topbar .status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.topbar .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.topbar .dot.ok{background:var(--green)}
+.topbar .dot.err{background:var(--red)}
+
+/* ── Sidebar ── */
+.sidebar{background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;padding:0;display:flex;flex-direction:column}
+.sb-section{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);flex-shrink:0}
+.sb-item{display:block;padding:7px 16px;font-size:13px;color:var(--muted);cursor:pointer;border-left:2px solid transparent;transition:all .12s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb-item:hover,.sb-item.active{color:var(--text);background:rgba(124,58,237,.08);border-left-color:var(--accent)}
+.sb-item code{font-size:11px;background:rgba(255,255,255,.06);padding:1px 5px;border-radius:3px;margin-left:6px;color:var(--accent2)}
+.sb-divider{height:1px;background:var(--border);margin:8px 14px}
+/* Catalog tree */
+.cat-header{display:flex;align-items:center;justify-content:space-between;padding:9px 14px 5px;flex-shrink:0;border-bottom:1px solid var(--border)}
+.cat-title{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.cat-badge{font-size:10px;background:rgba(124,58,237,.2);color:var(--accent2);padding:1px 6px;border-radius:8px}
+.cat-scroll{flex:1;overflow-y:auto;padding:6px 0}
+.ns-group{margin-bottom:2px}
+.ns-toggle{display:flex;align-items:center;gap:6px;padding:6px 12px;cursor:pointer;user-select:none;border-radius:4px;margin:0 4px;transition:background .1s}
+.ns-toggle:hover{background:rgba(255,255,255,.04)}
+.ns-arrow{font-size:9px;color:var(--muted);transition:transform .15s;flex-shrink:0}
+.ns-arrow.open{transform:rotate(90deg)}
+.ns-icon{font-size:12px;flex-shrink:0}
+.ns-name{font-size:12px;font-weight:700;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ns-count{font-size:10px;color:var(--muted)}
+.ns-tables{display:none;padding-left:4px}
+.ns-tables.open{display:block}
+.tbl-row{display:flex;align-items:center;gap:5px;padding:5px 10px 5px 22px;cursor:pointer;border-radius:4px;margin:0 4px;border-left:2px solid transparent;transition:all .1s}
+.tbl-row:hover{background:rgba(124,58,237,.08);border-left-color:var(--accent)}
+.tbl-row.active{background:rgba(124,58,237,.12);border-left-color:var(--accent2)}
+.tbl-icon{font-size:10px;color:var(--accent2);flex-shrink:0}
+.tbl-name{font-size:12px;color:var(--muted);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .1s}
+.tbl-row:hover .tbl-name,.tbl-row.active .tbl-name{color:var(--text)}
+.tbl-ncols{font-size:10px;color:var(--muted)}
+.col-list{padding:4px 8px 6px 36px;display:none}
+.col-list.open{display:block}
+.col-pill{display:inline-flex;align-items:center;gap:4px;margin:1px 2px;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-size:10px;cursor:default}
+.col-pill-name{color:var(--text)}
+.col-pill-type{color:var(--muted)}
+.cat-loading{padding:20px;text-align:center;color:var(--muted);font-size:12px}
+.cat-error{padding:12px 14px;color:#fca5a5;font-size:11px;background:rgba(239,68,68,.08);border-left:2px solid var(--red);margin:8px}
+.cat-search{width:100%;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px;outline:none;box-sizing:border-box}
+.cat-search:focus{border-color:var(--accent)}
+.sb-cypher{flex-shrink:0;border-top:1px solid var(--border)}
+
+/* ── Main panel ── */
+.main{display:flex;flex-direction:column;overflow:hidden}
+
+/* Editor area */
+.editor-wrap{display:flex;flex-direction:column;border-bottom:1px solid var(--border);flex-shrink:0}
+.editor-toolbar{display:flex;align-items:center;gap:8px;padding:7px 12px;background:var(--surface2);border-bottom:1px solid var(--border)}
+.mode-btn{padding:4px 12px;border-radius:5px;font-size:12px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .12s}
+.mode-btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.mode-btn:hover:not(.active){color:var(--text);border-color:var(--accent2)}
+.editor-area{position:relative}
+textarea#queryInput{
+  width:100%;height:110px;background:var(--surface2);color:var(--text);
+  border:none;outline:none;resize:none;padding:12px 14px;
+  font-family:"JetBrains Mono","Fira Code","Consolas",monospace;font-size:13px;
+  line-height:1.6;tab-size:2;
+}
+textarea#queryInput::placeholder{color:var(--muted)}
+.run-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--surface2)}
+.btn-run{padding:7px 20px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;letter-spacing:.02em;transition:background .12s}
+.btn-run:hover{background:#6d28d9}
+.btn-run:disabled{background:#3a2060;cursor:not-allowed;opacity:.7}
+.btn-clear{padding:7px 14px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:13px;cursor:pointer;transition:all .12s}
+.btn-clear:hover{color:var(--text);border-color:var(--muted)}
+.query-info{font-size:11px;color:var(--muted);margin-left:auto}
+#elapsed{color:var(--green)}
+
+/* ── Results area ── */
+.results-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.results-tabs{display:flex;align-items:center;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.rtab{padding:9px 16px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:all .12s;user-select:none}
+.rtab.active{color:var(--accent2);border-bottom-color:var(--accent)}
+.rtab:hover:not(.active){color:var(--text)}
+.rpanel{display:none;flex:1;overflow:hidden}
+.rpanel.active{display:flex;flex-direction:column}
+
+/* Graph canvas */
+#graphCanvas{flex:1;width:100%;cursor:grab;background:var(--bg)}
+#graphCanvas:active{cursor:grabbing}
+
+/* Table view */
+.table-wrap{flex:1;overflow:auto}
+table.results{width:100%;border-collapse:collapse;font-size:12px}
+table.results th{position:sticky;top:0;background:var(--surface2);padding:8px 12px;text-align:left;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap}
+table.results td{padding:7px 12px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--text);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table.results tr:hover td{background:rgba(124,58,237,.05)}
+table.results td.null{color:var(--muted);font-style:italic}
+
+/* Empty/error states */
+.empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--muted);gap:10px;font-size:13px}
+.empty-state .icon{font-size:36px;opacity:.3}
+.error-banner{padding:10px 16px;background:rgba(239,68,68,.1);border-left:3px solid var(--red);color:#fca5a5;font-size:12px;font-family:monospace;white-space:pre-wrap;overflow:auto;max-height:120px}
+
+/* Graph legend */
+.graph-legend{display:flex;gap:14px;padding:8px 14px;background:var(--surface2);border-top:1px solid var(--border);flex-shrink:0}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+.legend-dot{width:10px;height:10px;border-radius:50%}
+
+/* Graph tooltip */
+#tooltip{position:fixed;display:none;background:rgba(17,17,22,.95);border:1px solid var(--border);border-radius:8px;padding:10px 13px;font-size:12px;max-width:260px;pointer-events:none;z-index:1000;line-height:1.6}
+#tooltip .t-title{font-weight:700;color:var(--accent2);margin-bottom:4px}
+#tooltip .t-row{display:flex;gap:6px}
+#tooltip .t-key{color:var(--muted)}
+#tooltip .t-val{color:var(--text);word-break:break-all}
+</style>
+</head>
+<body>
+
+<div id="tooltip"></div>
+
+<div class="layout">
+
+  <!-- ── Top bar ── -->
+  <header class="topbar">
+    <a class="logo" href="index.html">
+      <svg viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" fill="#1e0a3c" stroke="#a78bfa" stroke-width="1.5"/><path d="M8 30 Q13 41 24 42.5 Q35 41 40 30 Z" fill="#3b0f8c"/><path d="M9 31.5 Q14 28 19 31.5 Q24 35 29 31.5 Q34 28 39 31.5" stroke="#c4b5fd" stroke-width="1.6" fill="none"/><ellipse cx="24" cy="17" rx="7.5" ry="2.8" fill="#5b21b6" stroke="#ddd6fe" stroke-width="1.5"/><rect x="16.5" y="17" width="15" height="10" fill="#4c1d95" stroke="#ddd6fe" stroke-width="1.5"/><ellipse cx="24" cy="27" rx="7.5" ry="2.8" fill="#5b21b6" stroke="#ddd6fe" stroke-width="1.5"/></svg>
+      Stargraph Console
+    </a>
+    <span class="tag">Iceberg · DuckDB</span>
+    <div class="spacer"></div>
+    <div class="status">
+      <span class="dot" id="proxyDot"></span>
+      <span id="proxyStatus">Checking…</span>
+    </div>
+  </header>
+
+  <!-- ── Sidebar ── -->
+  <nav class="sidebar">
+    <!-- ── Catalog header + search ── -->
+    <div class="cat-header">
+      <span class="cat-title">⬡ Polaris Catalog</span>
+      <span class="cat-badge" id="catBadge">…</span>
+    </div>
+    <div style="padding:6px 8px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <input class="cat-search" id="catSearch" type="text" placeholder="Filter tables…" oninput="filterCatalog(this.value)">
+    </div>
+
+    <!-- ── Live catalog tree (populated by JS) ── -->
+    <div class="cat-scroll" id="catTree">
+      <div class="cat-loading">⟳ Loading catalog…</div>
+    </div>
+
+    <!-- ── Cypher section pinned at bottom ── -->
+    <div class="sb-cypher">
+      <div class="sb-section">Cypher Queries</div>
+      <div class="sb-item" onclick="loadQuery('cypher', `MATCH (c:Customer)-[r:PURCHASED]->(i:Item) RETURN c, r, i LIMIT 50`)">Customer → Purchased → Item</div>
+      <div class="sb-item" onclick="loadQuery('cypher', `MATCH (c:Customer)-[r:BOUGHT_AT]->(s:Store) RETURN c, r, s LIMIT 50`)">Customer → Bought At → Store</div>
+      <div class="sb-item" onclick="loadQuery('cypher', `MATCH (c:Customer)-[r:PURCHASED]->(i:Item) WHERE r.price > 100 RETURN c, r, i LIMIT 40`)">High-value (&gt;$100)</div>
+    </div>
+  </nav>
+
+  <!-- ── Main ── -->
+  <main class="main">
+
+    <!-- Editor -->
+    <div class="editor-wrap">
+      <div class="editor-toolbar">
+        <span style="font-size:11px;color:var(--muted);font-weight:600;margin-right:4px">MODE</span>
+        <button class="mode-btn active" id="btn-stargraph" onclick="setMode('stargraph')">⬡ Stargraph Live</button>
+        <button class="mode-btn" id="btn-cypher" onclick="setMode('cypher')">Cypher</button>
+        <button class="mode-btn" id="btn-compare" onclick="setMode('compare')">Compare</button>
+        <div style="flex:1"></div>
+        <span style="font-size:11px;color:var(--muted)">Ctrl+Enter to run</span>
+      </div>
+      <div class="editor-area">
+        <textarea id="queryInput" spellcheck="false" placeholder="Write SQL — proxy reads DuckDB/Iceberg, loads into Memgraph, returns graph"></textarea>
+      </div>
+      <div class="run-bar">
+        <button class="btn-run" id="btnRun" onclick="runQuery()">▶ Run</button>
+        <button class="btn-clear" onclick="clearAll()">Clear</button>
+        <div class="query-info">
+          <span id="rowCount"></span>
+          <span id="elapsed"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div class="results-area">
+      <div class="results-tabs">
+        <div class="rtab active" id="tab-graph" onclick="showTab('graph')">⬡ Graph</div>
+        <div class="rtab" id="tab-table" onclick="showTab('table')">≡ Table</div>
+        <div class="rtab" id="tab-compare" onclick="showTab('compare')">⇄ Compare</div>
+      </div>
+
+      <!-- Graph panel -->
+      <div class="rpanel active" id="panel-graph">
+        <svg id="graphCanvas"></svg>
+        <div class="graph-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#c084fc;box-shadow:0 0 6px #c084fc"></div>Customer</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#60a5fa;box-shadow:0 0 6px #60a5fa"></div>Order</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#34d399;box-shadow:0 0 6px #34d399"></div>Product</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#fbbf24;box-shadow:0 0 6px #fbbf24"></div>Payment</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#f472b6;box-shadow:0 0 6px #f472b6"></div>Category</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#22d3ee;box-shadow:0 0 6px #22d3ee"></div>Store</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#4ade80;box-shadow:0 0 6px #4ade80"></div>Item</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#94a3b8"></div>Other</div>
+          <span style="margin-left:auto;font-size:11px;color:var(--muted)" id="graphStats"></span>
+          <!-- Download buttons — only shown when data is present -->
+          <div id="downloadBar" style="display:none;gap:6px;margin-left:10px">
+            <button onclick="downloadCSV()"
+              style="padding:3px 11px;font-size:11px;font-weight:600;background:rgba(16,185,129,.12);color:#10b981;border:1px solid rgba(16,185,129,.3);border-radius:4px;cursor:pointer">
+              ↓ CSV
+            </button>
+            <button onclick="downloadExcel()"
+              style="padding:3px 11px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:#3b82f6;border:1px solid rgba(59,130,246,.3);border-radius:4px;cursor:pointer">
+              ↓ Excel
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Table panel -->
+      <div class="rpanel" id="panel-table">
+        <div class="table-wrap" id="tableWrap">
+          <div class="empty-state"><div class="icon">⬡</div><span>Run a query to see results</span></div>
+        </div>
+      </div>
+
+      <!-- Compare panel -->
+      <div class="rpanel" id="panel-compare">
+        <div style="display:grid;grid-template-columns:1fr 1fr;height:100%;gap:1px;background:var(--border)">
+          <div style="background:var(--bg);display:flex;flex-direction:column;overflow:hidden">
+            <div style="padding:7px 12px;background:var(--surface2);font-size:11px;font-weight:700;color:var(--green);letter-spacing:.06em;text-transform:uppercase">Iceberg (DuckDB)</div>
+            <div class="table-wrap" id="compareIceberg"><div class="empty-state"><div class="icon">⬡</div><span>No compare result yet</span></div></div>
+          </div>
+          <div style="background:var(--bg);display:flex;flex-direction:column;overflow:hidden">
+            <div style="padding:7px 12px;background:var(--surface2);font-size:11px;font-weight:700;color:var(--blue);letter-spacing:.06em;text-transform:uppercase">Stargraph Live</div>
+            <div class="table-wrap" id="compareStargraph"><div class="empty-state"><div class="icon">◈</div><span>No compare result yet</span></div></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let currentMode  = 'stargraph';
+let simulation   = null;
+let _lastCols    = [];   // kept for CSV/Excel download
+let _lastRows    = [];
+
+// ── Proxy base URL — served via nginx /api/iceberg/ → stargraph-sql-proxy ─────
+const API = '/api/iceberg';
+
+// ── Mode switching ────────────────────────────────────────────────────────────
+function setMode(m) {
+  currentMode = m;
+  ['stargraph','cypher','compare'].forEach(k => {
+    const el = document.getElementById('btn-'+k);
+    if (el) el.classList.toggle('active', k===m);
+  });
+  const ph = {
+    stargraph: "SELECT\n  CAST(ss.SS_CUSTOMER_SK AS VARCHAR) AS source_node_id,\n  CAST(ss.SS_ITEM_SK AS VARCHAR)     AS target_node_id,\n  'PURCHASED'                        AS relationship_type,\n  i.I_CATEGORY  AS item_category,\n  i.I_BRAND     AS brand,\n  ss.SS_SALES_PRICE AS price\nFROM polaris.tpcds_sf10tcl.store_sales ss\nJOIN polaris.tpcds_sf10tcl.item i ON ss.SS_ITEM_SK = i.I_ITEM_SK\nWHERE ss.SS_CUSTOMER_SK IS NOT NULL\nLIMIT 50",
+    cypher:    "MATCH (c:Customer)-[r:PURCHASED]->(i:Item) RETURN c, r, i LIMIT 30",
+    compare:   "MATCH (c:Customer)-[r:PURCHASED]->(i:Item) RETURN c, r, i LIMIT 20"
+  };
+  if (!document.getElementById('queryInput').value.trim())
+    document.getElementById('queryInput').placeholder = ph[m] || '';
+}
+
+function loadQuery(mode, q) {
+  setMode(mode);
+  document.getElementById('queryInput').value = q;
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────────
+function showTab(t) {
+  ['graph','table','compare'].forEach(k => {
+    document.getElementById('tab-'+k).classList.toggle('active', k===t);
+    document.getElementById('panel-'+k).classList.toggle('active', k===t);
+  });
+}
+
+// ── Run query ─────────────────────────────────────────────────────────────────
+async function runQuery() {
+  const q = document.getElementById('queryInput').value.trim();
+  if (!q) return;
+
+  const btn = document.getElementById('btnRun');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running…';
+  document.getElementById('rowCount').textContent = '';
+  document.getElementById('elapsed').textContent  = '';
+  clearGraph();
+
+  try {
+    if (currentMode === 'compare') {
+      await runCompare(q);
+    } else if (currentMode === 'cypher') {
+      // Cypher → translated SQL → DuckDB/Iceberg → graph
+      // Send as base64 to bypass Cloudflare WAF inspection of query body
+      const res = await post(`${API}/cypher`, { cypher_b64: btoa(unescape(encodeURIComponent(q))) });
+      showResults(res);
+    } else {
+      // Stargraph Live (default):
+      // SQL → DuckDB/Iceberg (rows) → Memgraph MERGE → Memgraph MATCH → graph
+      await runStargraphLive(q);
+    }
+  } catch(e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run';
+  }
+}
+
+// Encode a UTF-8 string to base64 safely (handles unicode)
+function toB64(str) { return btoa(unescape(encodeURIComponent(str))); }
+
+async function runStargraphLive(sql) {
+  // Step 1-5 all happen server-side in POST /sql-to-graph.
+  // Send SQL as base64 so Cloudflare WAF doesn't block polaris.catalog.schema.table
+  const res = await post(`${API}/graph-query`, { sql_b64: toB64(sql) });
+  if (res.pipeline_note) {
+    // Server-side note (e.g. 0 rows from DuckDB) — show as info, not error
+    console.info('[stargraph-live]', res.pipeline_note);
+  }
+  // Annotate timing to show both DuckDB + Memgraph were involved
+  const iceberg_rows = res.row_count_iceberg != null
+    ? ` · ${res.row_count_iceberg} rows from Iceberg` : '';
+  document.getElementById('elapsed').innerHTML =
+    `<span style="color:var(--green)">${res.elapsed_ms ?? '?'}ms</span>`
+    + `<span style="color:var(--muted);font-size:11px">${iceberg_rows} → Memgraph</span>`;
+  showResults(res);
+}
+
+async function runCompare(q) {
+  const res = await post(`${API}/compare`, { cypher_b64: toB64(q) });
+  renderTable(document.getElementById('compareIceberg'),
+              res.iceberg_result?.columns || [], res.iceberg_result?.rows || []);
+  renderTable(document.getElementById('compareStargraph'),
+              res.stardata_result?.columns || [], res.stardata_result?.rows || []);
+  const ie = res.iceberg_result?.elapsed_ms ?? '?';
+  const se = res.stardata_result?.elapsed_ms ?? '?';
+  document.getElementById('elapsed').innerHTML =
+    `<span style="color:var(--green)">Iceberg ${ie}ms</span> &nbsp;/&nbsp; <span style="color:var(--blue)">Live ${se}ms</span>`;
+  showTab('compare');
+}
+
+function showResults(res) {
+  if (res.error) { showError(res.error); return; }
+  const cols = res.columns || [];
+  const rows = res.rows || [];
+  _lastCols = cols;
+  _lastRows = rows;
+  const n = rows.length;
+  document.getElementById('rowCount').textContent = n + ' row' + (n!==1?'s':'') + '  ·  ';
+  document.getElementById('elapsed').textContent = (res.elapsed_ms ?? '?') + 'ms';
+
+  const graph = rowsToGraph(cols, rows, res.translated_sql);
+  if (graph.nodes.length > 0) {
+    renderGraph(graph);
+    showTab('graph');
+  } else {
+    clearGraph('No graph data — result needs source_node_id + target_node_id columns. See Graph Queries in the sidebar.');
+    showTab('table');
+  }
+
+  // Show download bar when we have data
+  const dl = document.getElementById('downloadBar');
+  if (dl) dl.style.display = n > 0 ? 'flex' : 'none';
+
+  renderTable(document.getElementById('tableWrap'), cols, rows);
+}
+
+function showError(msg) {
+  document.getElementById('tableWrap').innerHTML =
+    `<div class="error-banner">${escHtml(msg)}</div>`;
+  clearGraph();
+  showTab('table');
+}
+
+function clearAll() {
+  document.getElementById('queryInput').value = '';
+  document.getElementById('rowCount').textContent = '';
+  document.getElementById('elapsed').textContent  = '';
+  document.getElementById('tableWrap').innerHTML =
+    '<div class="empty-state"><div class="icon">⬡</div><span>Run a query to see results</span></div>';
+  _lastCols = []; _lastRows = [];
+  const dl = document.getElementById('downloadBar');
+  if (dl) dl.style.display = 'none';
+  clearGraph();
+}
+
+// ── Table renderer ─────────────────────────────────────────────────────────────
+function renderTable(container, cols, rows) {
+  if (!cols.length) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">⬡</div><span>No rows returned</span></div>';
+    return;
+  }
+  const thead = cols.map(c => `<th>${escHtml(c)}</th>`).join('');
+  const tbody = rows.map(r =>
+    '<tr>' + r.map(v =>
+      v === null ? '<td class="null">null</td>'
+                 : `<td title="${escHtml(String(v))}">${escHtml(String(v))}</td>`
+    ).join('') + '</tr>'
+  ).join('');
+  container.innerHTML = `<table class="results"><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table>`;
+}
+
+// ── Graph: convert result rows → {nodes, links} ───────────────────────────────
+// Bright neon palette — each must be clearly visible against #0b0b0f
+const NODE_COLOR = {
+  customer:  '#c084fc',   // violet
+  srcnode:   '#c084fc',   // alias: Memgraph pipeline source nodes
+  order:     '#60a5fa',   // sky blue
+  product:   '#34d399',   // emerald
+  payment:   '#fbbf24',   // amber
+  category:  '#f472b6',   // pink
+  store:     '#22d3ee',   // cyan
+  tgtnode:   '#22d3ee',   // alias: Memgraph pipeline target nodes
+  item:      '#4ade80',   // green
+  country:   '#fb923c',   // orange
+  brand:     '#a78bfa',   // purple
+  related:   '#94a3b8',   // slate (generic)
+};
+
+function nodeColor(type) {
+  return NODE_COLOR[(type||'').toLowerCase()] || '#94a3b8';
+}
+
+// Infer node type from relationship context when server returns 'SrcNode'/'TgtNode'
+function inferNodeType(rawType, relType, side) {
+  const rt = (relType||'').toUpperCase();
+  if (rt === 'PURCHASED' || rt === 'HIGH_VALUE') return side === 'source' ? 'Customer' : 'Item';
+  if (rt === 'BOUGHT_AT')  return side === 'source' ? 'Customer' : 'Store';
+  if (rt === 'SOLD_BY')    return side === 'source' ? 'Item' : 'Store';
+  // Fall back to the raw type if it's meaningful
+  const t = (rawType||'').toLowerCase();
+  if (t && t !== 'srcnode' && t !== 'tgtnode') return rawType;
+  return side === 'source' ? 'Customer' : 'Node';
+}
+
+function rowsToGraph(cols, rows, sql) {
+  const nodes = new Map();
+  const links = [];
+
+  // Detect which columns carry node/edge data by name patterns
+  const colLower = cols.map(c => c.toLowerCase());
+  const nodeIdIdx   = colLower.findIndex(c => c === 'node_id' || c === 'customer_id');
+  const nodeTypeIdx = colLower.findIndex(c => c === 'node_type');
+  const srcIdx      = colLower.findIndex(c => c === 'source_node_id');
+  const tgtIdx      = colLower.findIndex(c => c === 'target_node_id');
+  const relTypeIdx  = colLower.findIndex(c => c === 'relationship_type');
+
+  // Edge result (JOIN of nodes + edges)
+  if (srcIdx >= 0 && tgtIdx >= 0) {
+    rows.forEach((r, i) => {
+      const srcId   = String(r[srcIdx]  || i+'_src');
+      const tgtId   = String(r[tgtIdx]  || i+'_tgt');
+      const relType = relTypeIdx >= 0 ? String(r[relTypeIdx]) : 'REL';
+
+      // Prefer explicit source/target type columns; fall back to relationship inference
+      const rawSrcType = guessNodeType(cols, r, 'source') || 'SrcNode';
+      const rawTgtType = guessNodeType(cols, r, 'target') || 'TgtNode';
+      const srcType = inferNodeType(rawSrcType, relType, 'source');
+      const tgtType = inferNodeType(rawTgtType, relType, 'target');
+
+      if (!nodes.has(srcId)) nodes.set(srcId, buildNode(srcId, srcType, cols, r, 'source'));
+      if (!nodes.has(tgtId)) nodes.set(tgtId, buildNode(tgtId, tgtType, cols, r, 'target'));
+      links.push({ source: srcId, target: tgtId, label: relType, id: i });
+    });
+  } else if (nodeIdIdx >= 0) {
+    // Single-node result
+    rows.forEach(r => {
+      const id   = String(r[nodeIdIdx]);
+      const type = nodeTypeIdx >= 0 ? String(r[nodeTypeIdx]) : guessTypeFromCols(cols);
+      if (!nodes.has(id)) {
+        const props = {};
+        cols.forEach((c,i) => { props[c] = r[i]; });
+        nodes.set(id, { id, type, label: nodeLabel(type, props), color: nodeColor(type), props });
+      }
+    });
+  } else {
+    // Fallback A: any column ending in _id or named id
+    const idCol = colLower.findIndex(c => c.endsWith('_id') || c === 'id');
+    if (idCol >= 0) {
+      rows.forEach((r, i) => {
+        const id = String(r[idCol] ?? i);
+        if (!nodes.has(id)) {
+          const type = guessTypeFromCols(cols);
+          const props = {};
+          cols.forEach((c,k) => { props[c] = r[k]; });
+          nodes.set(id, { id, type, label: nodeLabel(type, props), color: nodeColor(type), props });
+        }
+      });
+    } else {
+      // Fallback B: aggregate / analytics queries with no id column at all.
+      // Treat the first non-numeric column as the node identity (e.g. I_CATEGORY,
+      // store_name, country …) and all numeric columns as node properties.
+      // Each distinct value becomes one node — no edges.
+      const labelColIdx = colLower.findIndex((c, i) => {
+        const sample = rows[0]?.[i];
+        return typeof sample === 'string' || sample === null;
+      });
+      const useCol = labelColIdx >= 0 ? labelColIdx : 0;
+      const type   = guessTypeFromCols(cols) || cols[useCol] || 'Node';
+      rows.forEach((r, i) => {
+        const id = String(r[useCol] ?? i);
+        if (!nodes.has(id)) {
+          const props = {};
+          cols.forEach((c, k) => { props[c] = r[k]; });
+          nodes.set(id, { id, type, label: String(r[useCol] ?? id).slice(0, 20), color: nodeColor(type), props });
+        }
+      });
+    }
+  }
+
+  document.getElementById('graphStats').textContent =
+    `${nodes.size} nodes · ${links.length} edges`;
+
+  return { nodes: Array.from(nodes.values()), links };
+}
+
+function guessTypeFromCols(cols) {
+  const joined = cols.join(' ').toLowerCase();
+  if (joined.includes('customer')) return 'Customer';
+  if (joined.includes('order'))    return 'Order';
+  if (joined.includes('product'))  return 'Product';
+  if (joined.includes('payment'))  return 'Payment';
+  if (joined.includes('category')) return 'Category';
+  if (joined.includes('store'))    return 'Store';
+  if (joined.includes('item'))     return 'Item';
+  if (joined.includes('country'))  return 'Country';
+  return 'Node';
+}
+
+function guessNodeType(cols, r, side) {
+  const colLower = cols.map(c => c.toLowerCase());
+  const typeIdx  = colLower.findIndex(c => c === (side === 'source' ? 'source_node_type' : 'target_node_type'));
+  if (typeIdx >= 0) return String(r[typeIdx]);
+  return null;
+}
+
+function buildNode(id, type, cols, r, side) {
+  const props = {};
+  cols.forEach((c,i) => { props[c] = r[i]; });
+  return { id, type, label: nodeLabel(type, props), color: nodeColor(type), props };
+}
+
+function nodeLabel(type, props) {
+  // Pick best display label from props.
+  // 1. Well-known named fields first.
+  const candidates = ['first_name','full_name','name','email','sku','order_id','customer_id','node_id'];
+  for (const c of candidates) {
+    if (props[c] != null) return String(props[c]).slice(0, 20);
+  }
+  // 2. Any column whose name contains 'name', 'category', 'label', 'type', 'country', 'city'.
+  for (const c of Object.keys(props)) {
+    const cl = c.toLowerCase();
+    if (['name','category','label','type','country','city','brand','class'].some(k => cl.includes(k))) {
+      if (props[c] != null) return String(props[c]).slice(0, 20);
+    }
+  }
+  // 3. First non-numeric, non-null value in the row.
+  for (const v of Object.values(props)) {
+    if (v != null && typeof v === 'string' && v.trim() !== '') return v.slice(0, 20);
+  }
+  return type;
+}
+
+// ── D3 Force Graph ─────────────────────────────────────────────────────────────
+function clearGraph(msg) {
+  document.getElementById('graphStats').textContent = '';
+  d3.select('#graphCanvas').selectAll('*').remove();
+  if (simulation) { simulation.stop(); simulation = null; }
+  if (msg) {
+    d3.select('#graphCanvas').append('text')
+      .attr('x', '50%').attr('y', '50%')
+      .attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+      .attr('fill', '#6b6b80').attr('font-size', '13px')
+      .text(msg);
+  }
+}
+
+function renderGraph({ nodes, links }) {
+  clearGraph();
+  if (!nodes.length) return;
+
+  const svg  = d3.select('#graphCanvas');
+  const rect = document.getElementById('graphCanvas').getBoundingClientRect();
+  const W = rect.width || 900, H = rect.height || 520;
+
+  // ── Defs: glow filters + per-type gradients + arrowheads ────────────────────
+  const defs = svg.append('defs');
+
+  // Strong bloom glow — applied to node circles on hover
+  const glowStrong = defs.append('filter')
+    .attr('id','glow-strong').attr('x','-80%').attr('y','-80%').attr('width','360%').attr('height','360%');
+  glowStrong.append('feGaussianBlur').attr('stdDeviation','8').attr('result','coloredBlur');
+  const mg1 = glowStrong.append('feMerge');
+  mg1.append('feMergeNode').attr('in','coloredBlur');
+  mg1.append('feMergeNode').attr('in','coloredBlur'); // double pass = stronger
+  mg1.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Ambient glow — always-on soft halo around every node
+  const glowAmbient = defs.append('filter')
+    .attr('id','glow-ambient').attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%');
+  glowAmbient.append('feGaussianBlur').attr('stdDeviation','3.5').attr('result','blur');
+  const mg2 = glowAmbient.append('feMerge');
+  mg2.append('feMergeNode').attr('in','blur');
+  mg2.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Per-type radial gradient: bright centre fading to full color at edge
+  const uniqueTypes = [...new Set(nodes.map(n => n.type.toLowerCase()))];
+  uniqueTypes.forEach(type => {
+    const base = nodeColor(type);
+    const grad = defs.append('radialGradient')
+      .attr('id', `grad-${type}`)
+      .attr('cx','38%').attr('cy','32%').attr('r','70%');
+    grad.append('stop').attr('offset','0%').attr('stop-color','#ffffff').attr('stop-opacity','0.55');
+    grad.append('stop').attr('offset','55%').attr('stop-color', base).attr('stop-opacity','0.9');
+    grad.append('stop').attr('offset','100%').attr('stop-color', base).attr('stop-opacity','1');
+  });
+
+  // Arrowhead — bright purple, large enough to see
+  defs.append('marker')
+    .attr('id','arrow')
+    .attr('viewBox','0 -5 10 10').attr('refX', 30).attr('refY', 0)
+    .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient','auto')
+    .append('path').attr('d','M0,-5L10,0L0,5').attr('fill','#a78bfa').attr('opacity','0.9');
+
+  defs.append('marker')
+    .attr('id','arrow-hover')
+    .attr('viewBox','0 -5 10 10').attr('refX', 30).attr('refY', 0)
+    .attr('markerWidth', 7).attr('markerHeight', 7).attr('orient','auto')
+    .append('path').attr('d','M0,-5L10,0L0,5').attr('fill','#f0abfc');
+
+  // ── Zoom + pan ───────────────────────────────────────────────────────────────
+  const root = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.05, 6]).on('zoom', e => root.attr('transform', e.transform)));
+
+  // ── Resolve id → object for links ───────────────────────────────────────────
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
+  const resolvedLinks = links.map(l => ({
+    ...l,
+    source: nodeById.get(typeof l.source === 'object' ? l.source.id : l.source) || l.source,
+    target: nodeById.get(typeof l.target === 'object' ? l.target.id : l.target) || l.target,
+  }));
+
+  // ── Edge paths (curved + colored) ───────────────────────────────────────────
+  const linkG = root.append('g');
+  const link = linkG.selectAll('path')
+    .data(resolvedLinks).join('path')
+    .attr('fill', 'none')
+    .attr('stroke', '#6d6d9a')        // visible purple-grey on black
+    .attr('stroke-width', 2)
+    .attr('stroke-opacity', 0.85)
+    .attr('marker-end', 'url(#arrow)');
+
+  // ── Edge label pill + text ───────────────────────────────────────────────────
+  const edgeLabelG = root.append('g');
+
+  const edgePill = edgeLabelG.selectAll('rect')
+    .data(resolvedLinks).join('rect')
+    .attr('rx', 5).attr('ry', 5)
+    .attr('fill', '#1a1a2e').attr('opacity', 0.9);
+
+  const edgeText = edgeLabelG.selectAll('text')
+    .data(resolvedLinks).join('text')
+    .attr('text-anchor','middle').attr('dominant-baseline','middle')
+    .attr('fill','#c4b5fd').attr('font-size', 9).attr('font-weight', 700)
+    .attr('font-family', '"JetBrains Mono","Fira Code",monospace')
+    .attr('pointer-events','none')
+    .text(d => d.label);
+
+  // ── Node groups ──────────────────────────────────────────────────────────────
+  const nodeR = d => {
+    const t = (d.type||'').toLowerCase();
+    if (t === 'customer') return 22;
+    if (t === 'store')    return 20;
+    if (t === 'item' || t === 'product') return 18;
+    return 16;
+  };
+
+  const nodeG = root.append('g').selectAll('g')
+    .data(nodes).join('g')
+    .attr('cursor','pointer')
+    .call(d3.drag()
+      .on('start', (e,d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
+      .on('end',   (e,d) => { if (!e.active) simulation.alphaTarget(0); d.fx=null; d.fy=null; })
+    );
+
+  // Ambient glow halo — always visible, gives the "glowing orb" look
+  nodeG.append('circle')
+    .attr('class','glow-halo')
+    .attr('r', d => nodeR(d) + 6)
+    .attr('fill', d => d.color)
+    .attr('opacity', 0.18)
+    .attr('filter','url(#glow-ambient)');
+
+  // Outer ring — brightens on hover
+  nodeG.append('circle')
+    .attr('class','glow-ring')
+    .attr('r', d => nodeR(d) + 9)
+    .attr('fill', 'none')
+    .attr('stroke', d => d.color)
+    .attr('stroke-width', 1.5)
+    .attr('opacity', 0.3);
+
+  // Main circle — gradient fill + bright border
+  nodeG.append('circle')
+    .attr('class','node-body')
+    .attr('r', nodeR)
+    .attr('fill', d => {
+      const t = d.type.toLowerCase();
+      return `url(#grad-${t})`;
+    })
+    .attr('stroke', d => d.color)
+    .attr('stroke-width', 2.5)
+    .attr('stroke-opacity', 0.95)
+    .attr('filter','url(#glow-ambient)');
+
+  // Type initial inside circle
+  nodeG.append('text')
+    .attr('text-anchor','middle').attr('dominant-baseline','middle')
+    .attr('fill','#ffffff').attr('font-size', d => nodeR(d) * 0.78).attr('font-weight', 900)
+    .attr('pointer-events','none')
+    .text(d => (d.type||'?')[0].toUpperCase());
+
+  // Label below node — brighter
+  nodeG.append('text')
+    .attr('text-anchor','middle').attr('dy', d => nodeR(d) + 14)
+    .attr('fill','#d4d4e8').attr('font-size', 10).attr('font-weight', 600)
+    .attr('pointer-events','none')
+    .text(d => d.label);
+
+  // ── Hover interactions ───────────────────────────────────────────────────────
+  const tip = document.getElementById('tooltip');
+
+  nodeG
+    .on('mouseenter', function(e, d) {
+      d3.select(this).select('.glow-ring')
+        .transition().duration(120).attr('opacity', 0.9).attr('stroke-width', 2.5);
+      d3.select(this).select('.node-body')
+        .transition().duration(120).attr('stroke-width', 3.5)
+        .attr('filter','url(#glow-strong)');
+      d3.select(this).select('.glow-halo')
+        .transition().duration(120).attr('opacity', 0.45);
+      // Highlight connected edges bright, dim others
+      link.attr('stroke', l =>
+        (l.source === d || l.source?.id === d.id || l.target === d || l.target?.id === d.id)
+          ? '#f0abfc' : '#3d3d55'
+      ).attr('stroke-width', l =>
+        (l.source === d || l.source?.id === d.id || l.target === d || l.target?.id === d.id)
+          ? 2.5 : 1.8
+      ).attr('marker-end', l =>
+        (l.source === d || l.source?.id === d.id || l.target === d || l.target?.id === d.id)
+          ? 'url(#arrow-hover)' : 'url(#arrow)'
+      );
+    })
+    .on('mousemove', (e, d) => {
+      const rows = Object.entries(d.props||{}).slice(0, 10)
+        .map(([k,v]) => `<div class="t-row"><span class="t-key">${escHtml(k)}:</span><span class="t-val">${escHtml(v==null?'null':String(v))}</span></div>`)
+        .join('');
+      tip.innerHTML = `<div class="t-title">${escHtml(d.type)} · ${escHtml(d.label)}</div>${rows}`;
+      tip.style.display = 'block';
+      tip.style.left = (e.clientX + 16) + 'px';
+      tip.style.top  = (e.clientY - 12) + 'px';
+    })
+    .on('mouseleave', function() {
+      d3.select(this).select('.glow-ring').transition().duration(200).attr('opacity', 0.3).attr('stroke-width', 1.5);
+      d3.select(this).select('.node-body').transition().duration(200).attr('stroke-width', 2.5).attr('filter','url(#glow-ambient)');
+      d3.select(this).select('.glow-halo').transition().duration(200).attr('opacity', 0.18);
+      link.attr('stroke','#6d6d9a').attr('stroke-width', 2).attr('marker-end','url(#arrow)');
+      tip.style.display = 'none';
+    });
+
+  // ── Force simulation ─────────────────────────────────────────────────────────
+  // Scale repulsion and link distance to node count so graph spreads nicely
+  const n = nodes.length;
+  const linkDist  = Math.max(80, Math.min(160, 400 / Math.sqrt(n + 1)));
+  const repulsion = Math.max(-600, Math.min(-120, -800 / Math.sqrt(n + 1)));
+
+  simulation = d3.forceSimulation(nodes)
+    .force('link',      d3.forceLink(resolvedLinks).id(d => d.id).distance(linkDist).strength(0.5))
+    .force('charge',    d3.forceManyBody().strength(repulsion))
+    .force('center',    d3.forceCenter(W / 2, H / 2).strength(0.05))
+    .force('collision', d3.forceCollide(d => nodeR(d) + 10))
+    .alphaDecay(0.025)
+    .on('tick', () => {
+      // Curved path: quadratic bezier with midpoint offset
+      link.attr('d', d => {
+        if (!d.source.x) return '';
+        const dx = d.target.x - d.source.x;
+        const dy = d.target.y - d.source.y;
+        const dr = Math.sqrt(dx*dx + dy*dy) * 0.35;   // curve tightness
+        // slightly offset source/target to stop at node edge
+        const len = Math.sqrt(dx*dx + dy*dy) || 1;
+        const r   = nodeR(d.target);
+        const tx  = d.target.x - (dx/len)*r;
+        const ty  = d.target.y - (dy/len)*r;
+        const sx  = d.source.x + (dx/len)*nodeR(d.source);
+        const sy  = d.source.y + (dy/len)*nodeR(d.source);
+        return `M${sx},${sy} A${dr},${dr} 0 0,1 ${tx},${ty}`;
+      });
+
+      // Edge label at arc midpoint
+      edgeText.attr('x', d => {
+        if (!d.source.x) return 0;
+        return (d.source.x + d.target.x) / 2;
+      }).attr('y', d => {
+        if (!d.source.y) return 0;
+        const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
+        const len = Math.sqrt(dx*dx+dy*dy)||1;
+        return (d.source.y + d.target.y)/2 - (dx/len)*18;
+      });
+
+      // Pill behind edge label
+      edgeText.each(function(d) {
+        const bb = this.getBBox();
+        const pad = 3;
+        d3.select(edgePill.nodes()[edgeText.nodes().indexOf(this)])
+          .attr('x', bb.x - pad).attr('y', bb.y - pad)
+          .attr('width', bb.width + pad*2).attr('height', bb.height + pad*2);
+      });
+
+      nodeG.attr('transform', d => `translate(${d.x ?? 0},${d.y ?? 0})`);
+    });
+}
+
+// ── Download helpers ──────────────────────────────────────────────────────────
+
+function _escCsvCell(v) {
+  const s = v == null ? '' : String(v);
+  return s.includes(',') || s.includes('"') || s.includes('\n')
+    ? '"' + s.replace(/"/g, '""') + '"'
+    : s;
+}
+
+function downloadCSV() {
+  if (!_lastCols.length) return;
+  const lines = [
+    _lastCols.map(_escCsvCell).join(','),
+    ..._lastRows.map(r => r.map(_escCsvCell).join(','))
+  ];
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  _triggerDownload(blob, 'stargraph_export.csv');
+}
+
+function downloadExcel() {
+  if (!_lastCols.length) return;
+  // Build a minimal XLSX-compatible XML Workbook (SpreadsheetML) — no external lib needed.
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  const cell = (v, colIdx) => {
+    const s = v == null ? '' : String(v);
+    const isNum = !isNaN(s) && s.trim() !== '';
+    if (isNum) return `<Cell><Data ss:Type="Number">${esc(s)}</Data></Cell>`;
+    return `<Cell><Data ss:Type="String">${esc(s)}</Data></Cell>`;
+  };
+
+  const headerRow = '<Row>' + _lastCols.map((c,i) =>
+    `<Cell ss:StyleID="header"><Data ss:Type="String">${esc(c)}</Data></Cell>`
+  ).join('') + '</Row>';
+
+  const dataRows = _lastRows.map(r =>
+    '<Row>' + r.map((v,i) => cell(v,i)).join('') + '</Row>'
+  ).join('');
+
+  const xml = `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Styles>
+    <Style ss:ID="header">
+      <Font ss:Bold="1"/>
+      <Interior ss:Color="#1e0a3c" ss:Pattern="Solid"/>
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="Stargraph">
+    <Table>
+      ${headerRow}
+      ${dataRows}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+
+  const blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  _triggerDownload(blob, 'stargraph_export.xls');
+}
+
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+}
+
+// ── HTTP helper ───────────────────────────────────────────────────────────────
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(`HTTP ${r.status}: ${txt}`);
+  }
+  return r.json();
+}
+
+// ── Escape HTML ───────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Health check ──────────────────────────────────────────────────────────────
+async function checkHealth() {
+  const dot = document.getElementById('proxyDot');
+  const lbl = document.getElementById('proxyStatus');
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    if (d.status === 'ok') {
+      dot.className = 'dot ok';
+      lbl.textContent = `DuckDB ${d.duckdb?.duckdb_version || ''} · ready`;
+    } else {
+      dot.className = 'dot err';
+      lbl.textContent = 'Proxy degraded';
+    }
+  } catch {
+    dot.className = 'dot err';
+    lbl.textContent = 'Proxy offline';
+  }
+}
+
+// ── Polaris Catalog browser ───────────────────────────────────────────────────
+let _catalog   = null;   // full parsed catalog from /catalog
+let _activeRow = null;   // currently selected .tbl-row element
+
+async function loadCatalog() {
+  const tree = document.getElementById('catTree');
+  try {
+    const r = await fetch(`${API}/catalog`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    _catalog = await r.json();
+    renderCatalogTree(_catalog.namespaces, '');
+    const total = _catalog.namespaces.reduce((s, ns) => s + ns.tables.length, 0);
+    document.getElementById('catBadge').textContent =
+      `${_catalog.namespaces.length} ns · ${total} tbl`;
+  } catch(e) {
+    tree.innerHTML = `<div class="cat-error">Failed to load catalog: ${escHtml(e.message)}</div>`;
+    document.getElementById('catBadge').textContent = 'error';
+  }
+}
+
+function renderCatalogTree(namespaces, filter) {
+  const tree  = document.getElementById('catTree');
+  const fLow  = filter.toLowerCase().trim();
+  let   html  = '';
+  let   shown = 0;
+
+  for (const ns of namespaces) {
+    // Filter tables
+    const tables = fLow
+      ? ns.tables.filter(t => t.name.toLowerCase().includes(fLow))
+      : ns.tables;
+    if (!tables.length) continue;
+
+    shown += tables.length;
+    const nsId    = 'ns_' + ns.name.replace(/\W/g,'_');
+    const tbsId   = 'tbs_' + ns.name.replace(/\W/g,'_');
+    const autoOpen = fLow || ns.name === 'tpcds_sf10tcl' ? 'open' : '';
+
+    html += `
+      <div class="ns-group" id="${nsId}">
+        <div class="ns-toggle" onclick="toggleNs('${tbsId}',this)">
+          <span class="ns-arrow ${autoOpen}">▶</span>
+          <span class="ns-icon">🗄</span>
+          <span class="ns-name">${escHtml(ns.name)}</span>
+          <span class="ns-count">${tables.length}</span>
+        </div>
+        <div class="ns-tables ${autoOpen}" id="${tbsId}">`;
+
+    for (const tbl of tables) {
+      const tblId  = 'tbl_' + tbl.full_name.replace(/\W/g,'_');
+      const colId  = 'col_' + tbl.full_name.replace(/\W/g,'_');
+      const ncols  = tbl.columns.length;
+
+      // Build column pills HTML
+      const colPills = tbl.columns.map(c =>
+        `<span class="col-pill"><span class="col-pill-name">${escHtml(c.name)}</span><span class="col-pill-type">${escHtml(c.type)}</span></span>`
+      ).join('');
+
+      html += `
+          <div class="tbl-row" id="${tblId}"
+               onclick="selectTable(this,'${escHtml(tbl.full_name)}','${colId}')">
+            <span class="tbl-icon">⊞</span>
+            <span class="tbl-name">${escHtml(tbl.name)}</span>
+            <span class="tbl-ncols">${ncols}</span>
+          </div>
+          <div class="col-list" id="${colId}">${colPills}</div>`;
+    }
+
+    html += `</div></div>`;
+  }
+
+  if (!shown) {
+    html = `<div class="cat-loading" style="padding:16px">No tables match <em>${escHtml(filter)}</em></div>`;
+  }
+
+  tree.innerHTML = html;
+}
+
+function toggleNs(tbsId, toggleEl) {
+  const tbs = document.getElementById(tbsId);
+  const arr = toggleEl.querySelector('.ns-arrow');
+  if (!tbs) return;
+  const isOpen = tbs.classList.toggle('open');
+  arr.classList.toggle('open', isOpen);
+}
+
+function selectTable(rowEl, fullName, colId) {
+  // Toggle column list for this table
+  const colEl = document.getElementById(colId);
+  if (colEl) {
+    const wasOpen = colEl.classList.contains('open');
+    // Close all open col-lists first
+    document.querySelectorAll('.col-list.open').forEach(el => el.classList.remove('open'));
+    document.querySelectorAll('.tbl-row.active').forEach(el => el.classList.remove('active'));
+    if (!wasOpen) {
+      colEl.classList.add('open');
+      rowEl.classList.add('active');
+    }
+  }
+  _activeRow = rowEl;
+
+  // Fill the editor with a smart SELECT template for this table
+  const sql = buildSelectTemplate(fullName);
+  document.getElementById('queryInput').value = sql;
+  setMode('stargraph');
+  document.getElementById('queryInput').focus();
+}
+
+function filterCatalog(val) {
+  if (!_catalog) return;
+  renderCatalogTree(_catalog.namespaces, val);
+}
+
+/**
+ * Build a SELECT template for a table.
+ * For Stargraph Live mode the query must output source_node_id + target_node_id +
+ * relationship_type so the graph pipeline can infer edges. We pre-fill a smart
+ * template based on known table patterns; for unknown tables we emit a plain SELECT.
+ */
+function buildSelectTemplate(fullName) {
+  const parts  = fullName.split('.');           // catalog.schema.table
+  const tbl    = parts[parts.length - 1].toLowerCase();
+  const schema = parts.length >= 2 ? parts[parts.length - 2] : '';
+
+  // ── stargraph tables → direct edge query ────────────────────────────────────
+  if (tbl === 'stargraph_edges') {
+    return (
+`-- Stargraph edges table — direct graph query\n` +
+`SELECT\n` +
+`  source_node_id,\n` +
+`  target_node_id,\n` +
+`  relationship_type\n` +
+`FROM ${fullName}\n` +
+`LIMIT 200`
+    );
+  }
+
+  // ── tpcds fact tables — suggest graph-ready JOIN templates ──────────────────
+  if (tbl === 'store_sales') {
+    return (
+`-- store_sales: Customer → PURCHASED → Item\n` +
+`-- Edit the columns, WHERE clause, and LIMIT to explore the graph\n` +
+`SELECT\n` +
+`  CAST(ss.SS_CUSTOMER_SK AS VARCHAR) AS source_node_id,\n` +
+`  CAST(ss.SS_ITEM_SK     AS VARCHAR) AS target_node_id,\n` +
+`  'PURCHASED'                        AS relationship_type,\n` +
+`  i.I_CATEGORY AS item_category,\n` +
+`  i.I_BRAND    AS brand,\n` +
+`  ROUND(ss.SS_SALES_PRICE, 2) AS price\n` +
+`FROM ${fullName} ss\n` +
+`JOIN polaris.tpcds_sf10tcl.item i ON ss.SS_ITEM_SK = i.I_ITEM_SK\n` +
+`WHERE ss.SS_CUSTOMER_SK IS NOT NULL\n` +
+`LIMIT 50`
+    );
+  }
+
+  if (tbl === 'catalog_sales') {
+    return (
+`-- catalog_sales: Customer → ORDERED → Item\n` +
+`SELECT\n` +
+`  CAST(cs.CS_BILL_CUSTOMER_SK AS VARCHAR) AS source_node_id,\n` +
+`  CAST(cs.CS_ITEM_SK          AS VARCHAR) AS target_node_id,\n` +
+`  'ORDERED'                               AS relationship_type,\n` +
+`  ROUND(cs.CS_SALES_PRICE, 2) AS price,\n` +
+`  ROUND(cs.CS_NET_PROFIT, 2)  AS profit\n` +
+`FROM ${fullName} cs\n` +
+`WHERE cs.CS_BILL_CUSTOMER_SK IS NOT NULL\n` +
+`LIMIT 50`
+    );
+  }
+
+  if (tbl === 'web_sales') {
+    return (
+`-- web_sales: Customer → WEB_PURCHASED → Item\n` +
+`SELECT\n` +
+`  CAST(ws.WS_BILL_CUSTOMER_SK AS VARCHAR) AS source_node_id,\n` +
+`  CAST(ws.WS_ITEM_SK          AS VARCHAR) AS target_node_id,\n` +
+`  'WEB_PURCHASED'                         AS relationship_type,\n` +
+`  ROUND(ws.WS_SALES_PRICE, 2) AS price\n` +
+`FROM ${fullName} ws\n` +
+`WHERE ws.WS_BILL_CUSTOMER_SK IS NOT NULL\n` +
+`LIMIT 50`
+    );
+  }
+
+  if (tbl === 'inventory') {
+    return (
+`-- inventory: Item ↔ Warehouse stock levels\n` +
+`SELECT\n` +
+`  CAST(inv.INV_ITEM_SK      AS VARCHAR) AS source_node_id,\n` +
+`  CAST(inv.INV_WAREHOUSE_SK AS VARCHAR) AS target_node_id,\n` +
+`  'STOCKED_IN'                          AS relationship_type,\n` +
+`  inv.INV_QUANTITY_ON_HAND AS quantity\n` +
+`FROM ${fullName} inv\n` +
+`WHERE inv.INV_QUANTITY_ON_HAND > 0\n` +
+`LIMIT 100`
+    );
+  }
+
+  // ── dimension tables — plain preview ────────────────────────────────────────
+  return (
+`-- Preview: ${fullName}\n` +
+`-- Tip: alias an ID column as source_node_id + target_node_id + relationship_type\n` +
+`-- to send results through the graph pipeline (⬡ Stargraph Live mode)\n` +
+`SELECT *\n` +
+`FROM ${fullName}\n` +
+`LIMIT 50`
+  );
+}
+
+// ── Keyboard shortcut ─────────────────────────────────────────────────────────
+document.getElementById('queryInput').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
+});
+
+// ── Init — Stargraph Live is default ─────────────────────────────────────────
+checkHealth();
+setInterval(checkHealth, 30000);
+setMode('stargraph');
+loadCatalog();
+</script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+# =============================================================================
+# DuckDB/Iceberg → Memgraph (Stargraph) Loader CronJob
+# Namespace : prod
+# Node      : worker8.local  (co-located with DuckDB PVC)
+# Schedule  : every 15 minutes (incremental watermark-based load)
+# Image     : 192.168.1.50:30500/duckdb:latest
+# =============================================================================
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stargraph-iceberg-sync
+  namespace: prod
+  labels:
+    app: stargraph-iceberg-sync
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: worker8.local
+          containers:
+            - name: sync
+              image: 192.168.1.50:30500/duckdb:latest
+              imagePullPolicy: Always
+              command:
+                - python3
+                - /app/stargraph_iceberg_engine.py
+                - --mode
+                - incremental
+              env:
+                - name: MEMGRAPH_HOST
+                  value: "192.168.1.58"
+                - name: MEMGRAPH_PORT
+                  value: "7687"
+                - name: ICEBERG_BATCH_SIZE
+                  value: "500"
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: platform-s3-credentials
+                      key: access_key
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: platform-s3-credentials
+                      key: secret_key
+                - name: AWS_DEFAULT_REGION
+                  value: us-east-2
+                - name: DUCKDB_DATABASE
+                  value: /data/stargraph_iceberg.duckdb
+                - name: POLARIS_URI
+                  value: "http://polaris-auth-proxy.prod.svc.cluster.local:8283/api/catalog"
+                - name: POLARIS_WAREHOUSE
+                  value: "IcebergCatalog"
+                - name: WATERMARK_DIR
+                  value: /data/watermarks
+                - name: ICEBERG_BATCH_SIZE
+                  value: "5000"
+              volumeMounts:
+                - name: duckdb-storage
+                  mountPath: /data
+              resources:
+                requests:
+                  memory: 1Gi
+                  cpu: "500m"
+                limits:
+                  memory: 4Gi
+                  cpu: "2"
+          volumes:
+            - name: duckdb-storage
+              persistentVolumeClaim:
+                claimName: duckdb-worker8-pvc

@@ -1,0 +1,80 @@
+# =============================================================================
+# Stargraph SQL Proxy — Deployment + Service
+# Namespace : prod
+# Node      : worker8.local  (co-located with DuckDB for minimal latency)
+# Access    : http://192.168.1.50:30680  (NodePort)
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stargraph-sql-proxy
+  namespace: prod
+  labels:
+    app: stargraph-sql-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stargraph-sql-proxy
+  template:
+    metadata:
+      labels:
+        app: stargraph-sql-proxy
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker8.local
+      containers:
+        - name: proxy
+          image: 192.168.1.50:30500/duckdb:latest
+          imagePullPolicy: Always
+          command: ["python3", "/app/stargraph_sql_proxy.py"]
+          ports:
+            - name: http
+              containerPort: 8680
+          env:
+            - name: DUCKDB_SERVER
+              value: "http://duckdb-worker8.prod.svc.cluster.local:8580"
+            - name: MEMGRAPH_HOST
+              value: "192.168.1.58"
+            - name: MEMGRAPH_PORT
+              value: "7687"
+            - name: PROXY_PORT
+              value: "8680"
+            # Memgraph graph cache TTL in seconds (0 = disable, default 300 = 5 min)
+            - name: GRAPH_CACHE_TTL_S
+              value: "300"
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: "500m"
+            limits:
+              memory: 1Gi
+              cpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8680
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8680
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stargraph-sql-proxy
+  namespace: prod
+spec:
+  selector:
+    app: stargraph-sql-proxy
+  type: NodePort
+  ports:
+    - name: http
+      port: 8680
+      targetPort: 8680
+      nodePort: 30680
