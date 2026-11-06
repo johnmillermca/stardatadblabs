@@ -69,7 +69,8 @@ defaultConfiguration:
     execution.checkpointing.interval: 60000
     execution.checkpointing.mode: EXACTLY_ONCE
     execution.checkpointing.timeout: 120000
-    state.backend: rocksdb
+    # Flink 2.0: state.backend is deprecated — use state.backend.type
+    state.backend.type: rocksdb
     state.backend.incremental: true
 
     # High-availability (Kubernetes HA provider — Flink 2.0 requires full key)
