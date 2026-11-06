@@ -20,9 +20,10 @@ metadata:
   namespace: flink
 spec:
   # ── Flink image ─────────────────────────────────────────────────────────────
-  # Apache Flink 2.0.0 — latest release with built-in FlinkSQL Gateway.
-  # java17 variant is required for Flink 2.0+.
-  image: 192.168.1.50:30500/apache/flink:2.0.0-java17
+  # Apache Flink 2.0.0 — custom image with flink-sql-connector-kafka-2.0.0.jar bundled.
+  # The Flink K8s Operator 1.16.1 injects ENABLE_BUILT_IN_PLUGINS=flink-sql-connector-kafka-2.0.0.jar;
+  # docker-entrypoint.sh requires the jar at /opt/flink/opt/ — it is absent from the base image.
+  image: 192.168.1.50:30500/apache/flink:2.0.0-java17-kafka
   imagePullPolicy: IfNotPresent
 
   flinkVersion: v2_0
