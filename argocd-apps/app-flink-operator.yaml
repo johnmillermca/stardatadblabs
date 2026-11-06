@@ -29,6 +29,42 @@ spec:
       jsonPointers:
         - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
         - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: flinkdeployments.flink.apache.org
+      jqPathExpressions:
+        - .status
+        - .spec.conversion
+        - .spec.names.listKind
+        - .spec.versions[].additionalPrinterColumns[].priority
+        - .spec.versions[].schema.openAPIV3Schema
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: flinkbluegreendeployments.flink.apache.org
+      jqPathExpressions:
+        - .status
+        - .spec.conversion
+        - .spec.names.listKind
+        - .spec.versions[].additionalPrinterColumns[].priority
+        - .spec.versions[].schema.openAPIV3Schema
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: flinksessionjobs.flink.apache.org
+      jqPathExpressions:
+        - .status
+        - .spec.conversion
+        - .spec.names.listKind
+        - .spec.versions[].additionalPrinterColumns[].priority
+        - .spec.versions[].schema.openAPIV3Schema
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: flinkstatesnapshots.flink.apache.org
+      jqPathExpressions:
+        - .status
+        - .spec.conversion
+        - .spec.names.listKind
+        - .spec.versions[].additionalPrinterColumns[].priority
+        - .spec.versions[].schema.openAPIV3Schema
   syncPolicy:
     automated:
       prune: true
@@ -36,3 +72,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true
