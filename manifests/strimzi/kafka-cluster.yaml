@@ -193,7 +193,7 @@ spec:
   kafka:
     version: 4.3.1
     metadataVersion: "4.3-IV0"
-    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.3.1
+    image: 192.168.1.50:30500/strimzi/kafka:1.2.0-kafka-4.3.1
     listeners:
       # ── Internal SCRAM listener ────────────────────────────────────────────
       - name: plain
