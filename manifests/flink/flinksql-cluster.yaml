@@ -1,0 +1,232 @@
+# =============================================================================
+# Apache Flink SQL Cluster — Session Mode (FlinkDeployment)
+# Namespace   : flink
+# Flink ver   : 2.0.0  (latest Apache Flink with native FlinkSQL Gateway)
+# Topology    : 1 JobManager + 3 TaskManagers (1 per worker5/6/7)
+# Kafka conn  : Flink Kafka connector 2.0.0 → strimzi-kafka cluster in prod
+#
+# FlinkSQL Gateway is exposed as a ClusterIP service on port 8083.
+# Use kubectl port-forward or an Ingress to reach the Gateway REST API.
+#
+# Storage     : local-path PVC per TaskManager for RocksDB state backend
+# HA          : Kubernetes HA provider (ConfigMap-based)
+# =============================================================================
+
+---
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: flinksql-cluster
+  namespace: flink
+spec:
+  # ── Flink image ─────────────────────────────────────────────────────────────
+  # Apache Flink 2.0.0 — latest release with built-in FlinkSQL Gateway.
+  # java17 variant is required for Flink 2.0+.
+  image: 192.168.1.50:30500/apache/flink:2.0.0-java17
+  imagePullPolicy: IfNotPresent
+
+  flinkVersion: v2_0
+
+  # ── Flink configuration ──────────────────────────────────────────────────────
+  flinkConfiguration:
+    # TaskManager slots — each TM handles one partition thread
+    taskmanager.numberOfTaskSlots: "4"
+
+    # ── Checkpointing ────────────────────────────────────────────────────────
+    execution.checkpointing.interval: "60000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.timeout: "120000"
+
+    # ── State backend (RocksDB — incremental for large document state) ───────
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.checkpoints.dir: file:///opt/flink/checkpoints
+    state.savepoints.dir: file:///opt/flink/savepoints
+
+    # ── High availability (Kubernetes HA) ────────────────────────────────────
+    high-availability: KUBERNETES
+    high-availability.storageDir: file:///opt/flink/ha
+
+    # ── Parallelism ──────────────────────────────────────────────────────────
+    # Default parallelism = 3 (one slot per broker partition)
+    parallelism.default: "3"
+
+    # ── Kafka connector (document pipeline) ──────────────────────────────────
+    # Consumer group for Flink SQL Kafka sources
+    table.exec.source.idle-timeout: "30000"
+
+    # ── Metrics → Prometheus ─────────────────────────────────────────────────
+    metrics.reporters: prom
+    metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+    metrics.reporter.prom.port: "9249"
+
+    # ── REST / SQL Gateway ────────────────────────────────────────────────────
+    # Enable SQL Gateway on port 8083 (served by the JobManager pod)
+    sql-gateway.endpoint.rest.address: "0.0.0.0"
+    sql-gateway.endpoint.rest.port: "8083"
+
+    # ── Web UI ────────────────────────────────────────────────────────────────
+    rest.port: "8081"
+    web.submit.enable: "true"
+
+  # ── Service account ──────────────────────────────────────────────────────────
+  serviceAccount: flink
+
+  # ── JobManager spec ──────────────────────────────────────────────────────────
+  jobManager:
+    replicas: 1
+    resource:
+      memory: "2048m"
+      cpu: 0.5
+
+    podTemplate:
+      spec:
+        # ── Tolerate the dedicated=kafka taint on worker5 ────────────────────
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "kafka"
+            effect: "NoSchedule"
+        # ── Schedule on one of the three kafka workers ───────────────────────
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                        - worker5.local
+                        - worker6.local
+                        - worker7.local
+        containers:
+          - name: flink-main-container
+            # ── SQL Gateway startup arg ──────────────────────────────────────
+            # The Flink 2.0 image supports ENABLE_BUILT_IN_PLUGINS for connector JARs.
+            env:
+              - name: ENABLE_BUILT_IN_PLUGINS
+                value: "flink-sql-connector-kafka-2.0.0.jar"
+            volumeMounts:
+              - name: flink-state
+                mountPath: /opt/flink/checkpoints
+                subPath: checkpoints
+              - name: flink-state
+                mountPath: /opt/flink/savepoints
+                subPath: savepoints
+              - name: flink-state
+                mountPath: /opt/flink/ha
+                subPath: ha
+        volumes:
+          - name: flink-state
+            persistentVolumeClaim:
+              claimName: flink-jobmanager-state
+
+  # ── TaskManager spec ─────────────────────────────────────────────────────────
+  # 3 replicas — one per worker node, spread via podAntiAffinity
+  taskManager:
+    replicas: 3
+    resource:
+      memory: "4096m"
+      cpu: 1.0
+
+    podTemplate:
+      spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "kafka"
+            effect: "NoSchedule"
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                        - worker5.local
+                        - worker6.local
+                        - worker7.local
+          podAntiAffinity:
+            # Spread TMs one-per-node for fault isolation
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    component: taskmanager
+                    app: flinksql-cluster
+                topologyKey: kubernetes.io/hostname
+        containers:
+          - name: flink-main-container
+            env:
+              - name: ENABLE_BUILT_IN_PLUGINS
+                value: "flink-sql-connector-kafka-2.0.0.jar"
+            volumeMounts:
+              - name: flink-tm-state
+                mountPath: /opt/flink/checkpoints
+                subPath: checkpoints
+              - name: flink-tm-state
+                mountPath: /opt/flink/savepoints
+                subPath: savepoints
+              - name: flink-tm-state
+                mountPath: /opt/flink/ha
+                subPath: ha
+        volumes:
+          - name: flink-tm-state
+            ephemeral:
+              volumeClaimTemplate:
+                metadata:
+                  labels:
+                    app: flinksql-cluster
+                    component: taskmanager
+                  annotations:
+                    argocd.argoproj.io/compare-options: IgnoreExtraneous
+                spec:
+                  accessModes: ["ReadWriteOnce"]
+                  storageClassName: local-path
+                  resources:
+                    requests:
+                      storage: 50Gi
+
+---
+# ── PVC for JobManager state (checkpoints, savepoints, HA metadata) ──────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-jobmanager-state
+  namespace: flink
+  annotations:
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+# ── Service: SQL Gateway (ClusterIP) ─────────────────────────────────────────
+# The Flink operator creates a rest service automatically; this supplemental
+# service exposes the SQL Gateway port (8083) separately for clean targeting.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flinksql-gateway
+  namespace: flink
+  labels:
+    app: flinksql-cluster
+    component: sql-gateway
+spec:
+  type: ClusterIP
+  selector:
+    component: jobmanager
+    app: flinksql-cluster
+  ports:
+    - name: sql-gateway
+      port: 8083
+      targetPort: 8083
+      protocol: TCP
+    - name: rest
+      port: 8081
+      targetPort: 8081
+      protocol: TCP

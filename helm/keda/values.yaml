@@ -1,0 +1,101 @@
+# =============================================================================
+# KEDA — kedacore/keda 2.21.0 (latest)
+# Namespace   : keda
+# Nodes       : worker5.local / worker6.local / worker7.local
+# HA          : 2 replicas each for operator and metrics-apiserver
+# Purpose     : Event-driven autoscaling for document-processing workloads
+#               (Kafka lag, HTTP, Prometheus triggers)
+# =============================================================================
+
+# ── Image (private registry) ─────────────────────────────────────────────────
+image:
+  keda:
+    repository: 192.168.1.50:30500/kedacore/keda
+    tag: "2.21.0"
+  metricsApiServer:
+    repository: 192.168.1.50:30500/kedacore/keda-metrics-apiserver
+    tag: "2.21.0"
+  webhooks:
+    repository: 192.168.1.50:30500/kedacore/keda-admission-webhooks
+    tag: "2.21.0"
+
+# ── Replicas ─────────────────────────────────────────────────────────────────
+replicaCount: 2
+metricsServer:
+  replicaCount: 2
+
+# ── Node placement: spread across worker5/6/7 ─────────────────────────────
+# worker5 carries the dedicated=kafka taint; tolerate it so KEDA can
+# co-locate with Kafka and read lag metrics without an extra network hop.
+tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "kafka"
+    effect: "NoSchedule"
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker5.local
+                - worker6.local
+                - worker7.local
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app: keda-operator
+          topologyKey: kubernetes.io/hostname
+
+# ── Resources ────────────────────────────────────────────────────────────────
+resources:
+  operator:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  metricServer:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  webhooks:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  operator:
+    level: info
+    format: json
+  metricServer:
+    level: "0"
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+prometheus:
+  operator:
+    enabled: true
+    port: 8080
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+  metricServer:
+    enabled: true
+    port: 8080
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring

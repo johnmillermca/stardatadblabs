@@ -1,26 +1,29 @@
 # =============================================================================
-# Strimzi-managed Kafka cluster — prod namespace  (single-broker, no HA)
+# Strimzi-managed Kafka cluster — prod namespace  (3-broker HA, RF=3)
 # Namespace   : prod
-# Node        : worker5.local (pinned via pod affinity on KafkaNodePool)
-# Topology    : 1 combined controller+broker (KRaft) — single replica
+# Nodes       : worker5.local / worker6.local / worker7.local
+# Topology    : 3 KafkaNodePools — one combined controller+broker per worker
+#               (KRaft, no ZooKeeper)
 #
 # Listeners   :
 #   INTERNAL port 9092 — SCRAM-SHA-512, in-cluster only
-#             Used by Strimzi operators (topic/user operator) and applications.
 #
 # Bootstrap   : strimzi-kafka-kafka-bootstrap.prod.svc.cluster.local:9092
-# Kafka ver   : 4.2.0 (matches installed Strimzi operator)
-# PVC         : 250Gi on /home (worker5.local) — reclaimPolicy: Retain
-#               PV: pvc-69ed15cb-feae-4d77-9f1f-362778687016
-#               hostPath: /home/local-path-provisioner/
-#                 pvc-69ed15cb-feae-4d77-9f1f-362778687016_prod_data-strimzi-kafka-combined-0
+# Kafka ver   : 4.3.1 (Strimzi 1.2.0 latest supported)
+# Replication : default.replication.factor=3, min.insync.replicas=2
+# Document processing tuning:
+#   - Large message support (max 20 MB)
+#   - Compression: lz4 for throughput
+#   - Increased socket buffers and network threads
+#   - Aggressive log compaction for CDC/changelog topics
 # =============================================================================
 
+# ── KafkaNodePool: worker5 ──────────────────────────────────────────────────
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
-  name: combined
+  name: worker5
   namespace: prod
   labels:
     strimzi.io/cluster: strimzi-kafka
@@ -36,31 +39,16 @@ spec:
     deleteClaim: false
   resources:
     requests:
-      # Request must reflect actual JVM consumption:
-      #   Heap:        2Gi  (STRIMZI_DYNAMIC_HEAP_PERCENTAGE=50% of 4Gi limit)
-      #   JVM overhead: ~1Gi  (metaspace, thread stacks, JIT code cache, off-heap)
-      #   OS + buffers: ~0.5Gi
-      # With request=1Gi the node scheduler undersizes the pod; under memory
-      # pressure the kernel OOM-kills the admin client thread inside the JVM
-      # which causes "describeMetadataQuorum" timeouts → operator stamps
-      # NotReady on the Kafka CR every reconcile cycle.
       memory: 3.5Gi
       cpu: 500m
     limits:
       memory: 4Gi
       cpu: "2"
   template:
-    # Annotate Strimzi-created PVCs so ArgoCD treats them as unmanaged (IgnoreExtraneous).
-    # Without this, ArgoCD prune:true deletes these PVCs on every sync because they
-    # don't exist in the git manifests — wiping all Kafka data.
     persistentVolumeClaim:
       metadata:
         annotations:
           argocd.argoproj.io/compare-options: IgnoreExtraneous
-    # NOTE: clusterRoleBinding is NOT a valid field in KafkaNodePool spec.template
-    # (not declared in the CRD schema). Having it here causes ArgoCD ServerSideApply
-    # to throw "field not declared in schema" → ComparisonError → Unknown sync status.
-    # The kafka-init CRB is instead ignored via ignoreDifferences in app-strimzi-kafka.yaml.
     pod:
       tolerations:
         - key: "dedicated"
@@ -76,14 +64,122 @@ spec:
                     operator: In
                     values:
                       - worker5.local
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: strimzi-kafka
+              topologyKey: kubernetes.io/hostname
       securityContext:
         fsGroup: 1000
         runAsUser: 1000
-      # Give KRaft enough time to flush the metadata log cleanly on shutdown.
-      # 30s (default) is too short — an unclean stop leaves more log to replay
-      # on the next boot, widening the window where the operator races controller
-      # election and stamps NotReady on the Kafka CR.
       terminationGracePeriodSeconds: 120
+
+# ── KafkaNodePool: worker6 ──────────────────────────────────────────────────
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: worker6
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  replicas: 1
+  roles:
+    - controller
+    - broker
+  storage:
+    type: persistent-claim
+    size: 250Gi
+    class: local-path
+    deleteClaim: false
+  resources:
+    requests:
+      memory: 3.5Gi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: "2"
+  template:
+    persistentVolumeClaim:
+      metadata:
+        annotations:
+          argocd.argoproj.io/compare-options: IgnoreExtraneous
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker6.local
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: strimzi-kafka
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+      terminationGracePeriodSeconds: 120
+
+# ── KafkaNodePool: worker7 ──────────────────────────────────────────────────
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: worker7
+  namespace: prod
+  labels:
+    strimzi.io/cluster: strimzi-kafka
+spec:
+  replicas: 1
+  roles:
+    - controller
+    - broker
+  storage:
+    type: persistent-claim
+    size: 250Gi
+    class: local-path
+    deleteClaim: false
+  resources:
+    requests:
+      memory: 3.5Gi
+      cpu: 500m
+    limits:
+      memory: 4Gi
+      cpu: "2"
+  template:
+    persistentVolumeClaim:
+      metadata:
+        annotations:
+          argocd.argoproj.io/compare-options: IgnoreExtraneous
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker7.local
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: strimzi-kafka
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+      terminationGracePeriodSeconds: 120
+
+# ── Kafka cluster ────────────────────────────────────────────────────────────
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: Kafka
@@ -95,75 +191,100 @@ metadata:
     strimzi.io/kraft: enabled
 spec:
   kafka:
-    version: 4.2.0
-    metadataVersion: "4.2-IV1"
-    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.2.0
+    version: 4.3.1
+    metadataVersion: "4.3-IV0"
+    image: 192.168.1.50:30500/strimzi/kafka:latest-kafka-4.3.1
     listeners:
       # ── Internal SCRAM listener ────────────────────────────────────────────
-      # Used by Strimzi operators and in-cluster applications.
       - name: plain
         port: 9092
         type: internal
         tls: false
         authentication:
           type: scram-sha-512
-    # ── Broker readiness / liveness probes ────────────────────────────────────
-    # Strimzi 1.x does not expose startupProbe on spec.kafka — use a generous
-    # initialDelaySeconds on readinessProbe instead to give KRaft enough time
-    # to replay all topic partition logs on cold start before the probe fires.
-    #
-    # Without this, the default 15s initialDelay fires while the broker is still
-    # loading __consumer_offsets (50+ partitions), returns 503 → restart loop
-    # → bootstrap service has no endpoints → lakehouse-ui loads nothing.
-    #
-    #   safe window = initialDelaySeconds + failureThreshold × periodSeconds
-    #               = 120 + 3 × 20 = 180 s before pod is restarted
     readinessProbe:
-      initialDelaySeconds: 120  # wait 2 min for KRaft log replay before probing
+      initialDelaySeconds: 120
       timeoutSeconds: 10
       periodSeconds: 20
       failureThreshold: 3
     livenessProbe:
-      initialDelaySeconds: 120  # same — don't kill the broker while it's warming up
+      initialDelaySeconds: 120
       timeoutSeconds: 10
       periodSeconds: 30
-      failureThreshold: 5       # allow up to 2.5 min of GC/compaction without restart
+      failureThreshold: 5
     config:
+      # ── Authentication / ACL ──────────────────────────────────────────────
       allow.everyone.if.no.acl.found: "true"
       sasl.mechanism.inter.broker.protocol: SCRAM-SHA-512
       inter.broker.listener.name: plain
-      offsets.topic.replication.factor: "1"
-      transaction.state.log.replication.factor: "1"
-      transaction.state.log.min.isr: "1"
-      default.replication.factor: "1"
-      min.insync.replicas: "1"
-      # Enable auto-create so producers can create topics dynamically without
-      # requiring every topic to be pre-declared as a KafkaTopic CR.
+
+      # ── Replication (RF=3) ────────────────────────────────────────────────
+      offsets.topic.replication.factor: "3"
+      transaction.state.log.replication.factor: "3"
+      transaction.state.log.min.isr: "2"
+      default.replication.factor: "3"
+      min.insync.replicas: "2"
+
+      # ── Topic auto-creation ───────────────────────────────────────────────
       auto.create.topics.enable: "true"
-      # ── Durability: flush to disk before OS page-cache writeback ─────────────
-      # Flush every 10 000 messages OR every 1 000ms — whichever comes first.
-      # Default (flush only on page-cache eviction) means up to ~5s of data is
-      # unsynced to disk on a hard power failure. These values cap that window.
+      # Default partitions per auto-created topic: 1 per broker = 3 total.
+      # Gives immediate parallelism for document ingest consumers.
+      num.partitions: "3"
+
+      # ── Document processing: message size ────────────────────────────────
+      # Allow up to 20 MB per message to handle large document payloads
+      # (PDFs, Office files, large JSON blobs).
+      message.max.bytes: "20971520"           # 20 MiB
+      replica.fetch.max.bytes: "20971520"     # must match message.max.bytes
+      fetch.message.max.bytes: "20971520"
+
+      # ── Compression ───────────────────────────────────────────────────────
+      # lz4: best balance of CPU and throughput for document/binary payloads.
+      compression.type: lz4
+
+      # ── Network threads & I/O threads ────────────────────────────────────
+      # 3 network threads per broker handles concurrent document producers/
+      # consumers without thread exhaustion.
+      num.network.threads: "6"
+      num.io.threads: "8"
+      num.replica.fetchers: "2"
+
+      # ── Socket send/receive buffers ───────────────────────────────────────
+      socket.send.buffer.bytes: "1048576"     # 1 MiB (default 100 KiB)
+      socket.receive.buffer.bytes: "1048576"  # 1 MiB
+      socket.request.max.bytes: "20971520"    # 20 MiB matches message size
+
+      # ── Durability ────────────────────────────────────────────────────────
       log.flush.interval.messages: "10000"
       log.flush.interval.ms: "1000"
-      # ── Log retention ─────────────────────────────────────────────────────────
-      # Keep log segments for 7 days (default). Check interval reduced to 1 min
-      # so compacted topics reclaim space promptly after restart.
-      log.retention.hours: "168"
+
+      # ── Log retention ─────────────────────────────────────────────────────
+      log.retention.hours: "168"              # 7 days
       log.retention.check.interval.ms: "60000"
-      # ── KRaft controller registration timeouts ────────────────────────────────
-      # Default controller.quorum.election.timeout.ms=1000ms is too short when
-      # the pod restarts — the JVM DNS cache is cold and the first lookup of
-      # strimzi-kafka-combined-0.strimzi-kafka-kafka-brokers.prod.svc can take
-      # >1s, causing "registrationTimeout" → fatal broker exit → crash loop.
-      # Raise to 10s to cover DNS cold-start and coredns round-trip latency.
+      # Segment size: 512 MiB keeps segment count manageable for large
+      # document topics while allowing timely cleanup on short-retention topics.
+      log.segment.bytes: "536870912"          # 512 MiB
+
+      # ── Log compaction (for CDC / document-state changelog topics) ────────
+      log.cleaner.enable: "true"
+      log.cleaner.threads: "2"
+      log.cleaner.min.compaction.lag.ms: "0"
+      log.cleaner.max.compaction.lag.ms: "3600000"  # max 1 h behind
+      log.cleaner.min.cleanable.ratio: "0.5"
+
+      # ── Consumer group rebalance ──────────────────────────────────────────
+      # Delay rebalance by 3 s so short-lived restarts don't trigger full
+      # partition reassignment across document-processing consumer groups.
+      group.initial.rebalance.delay.ms: "3000"
+      # Extend session timeout to tolerate slow document OCR/ML workers.
+      group.max.session.timeout.ms: "300000"  # 5 min
+
+      # ── KRaft quorum timeouts ─────────────────────────────────────────────
       controller.quorum.election.timeout.ms: "10000"
       controller.quorum.fetch.timeout.ms: "10000"
+
   entityOperator:
     topicOperator:
-      # Resources for the topic-operator JVM.
-      # Default 512Mi limit causes OOM when reconciling many topics on startup
-      # (8 restarts observed — all exit code 1 / OOM). Bump to 1Gi.
       resources:
         requests:
           memory: 256Mi
@@ -171,15 +292,11 @@ spec:
         limits:
           memory: 1Gi
           cpu: 500m
-      # Allow up to 3 min for Kafka bootstrap to be ready before declaring
-      # the operator unhealthy. On reboot, Kafka KRaft leader election can
-      # take 60–90 s; without a startupProbe the liveness probe fires first
-      # and restarts the operator — causing the 8 crash-loops seen in prod.
       startupProbe:
         initialDelaySeconds: 30
         timeoutSeconds: 10
         periodSeconds: 15
-        failureThreshold: 12   # 30 + 12×15 = 210s max wait for Kafka ready
+        failureThreshold: 12   # 30 + 12×15 = 210 s max wait
       livenessProbe:
         initialDelaySeconds: 0
         timeoutSeconds: 10
@@ -191,17 +308,6 @@ spec:
         periodSeconds: 30
         failureThreshold: 3
     userOperator:
-      # NOTE: startupProbe is NOT in the userOperator CRD schema (only topicOperator
-      # supports it). terminationGracePeriodSeconds is controlled by the entityOperator
-      # Deployment — no spec.template on the Kafka CR (not in CRD schema either).
-      #
-      # secretPrefix is not needed — KafkaUser secrets are named after the user.
-      # reconciliationIntervalSeconds default 120s is fine.
-      #
-      # aclsAdminApiSupported=false: stops the User Operator from calling
-      # DESCRIBE_ACLS / CREATE_ACLS, eliminating AclCache errors.
-      # SCRAM credential management is unaffected — it uses the
-      # ALTER_USER_SCRAM_CREDENTIALS API, not ACLs.
       aclsAdminApiSupported: false
       resources:
         requests:
@@ -244,4 +350,3 @@ metadata:
 spec:
   authentication:
     type: scram-sha-512
-

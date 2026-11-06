@@ -1,8 +1,9 @@
 # =============================================================================
-# Strimzi Kafka Operator — strimzi/strimzi-kafka-operator 1.1.0
+# Strimzi Kafka Operator — strimzi/strimzi-kafka-operator 1.2.0
 # Namespace   : strimzi-system
-# Image       : 192.168.1.50:30500/strimzi/operator:1.1.0 (private registry)
+# Image       : 192.168.1.50:30500/strimzi/operator:1.2.0 (private registry)
 # HA          : 2 replicas for operator HA during upgrades
+# K8s compat  : 1.30+ (supports Kafka 4.2.0 – 4.3.1)
 # =============================================================================
 
 watchNamespaces: ["prod"]
@@ -10,10 +11,10 @@ watchAnyNamespace: false
 
 replicas: 2
 
-# Pull from private registry
+# Pull from private registry (1.2.0 images seeded)
 defaultImageRegistry: 192.168.1.50:30500
 defaultImageRepository: strimzi
-defaultImageTag: "1.1.0"
+defaultImageTag: "1.2.0"
 
 image:
   registry: ""

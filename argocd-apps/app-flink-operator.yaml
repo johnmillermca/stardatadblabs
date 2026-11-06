@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: flink-operator
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: platform
+  sources:
+    - repoURL: https://downloads.apache.org/flink/flink-kubernetes-operator-1.16.1
+      chart: flink-kubernetes-operator
+      targetRevision: "1.16.1"
+      helm:
+        valueFiles:
+          - $values/k8s-platform/helm/flink-operator/values.yaml
+    - repoURL: https://github.com/johnmillermca/stardatadblabs
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: flink
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

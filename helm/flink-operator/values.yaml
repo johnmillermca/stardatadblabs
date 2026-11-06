@@ -1,0 +1,84 @@
+# =============================================================================
+# Apache Flink Kubernetes Operator — 1.16.1 (latest stable)
+# Namespace   : flink
+# Nodes       : worker5.local / worker6.local / worker7.local
+# appVersion  : 1.16.1
+# Purpose     : Manages FlinkDeployment CRs for Flink SQL cluster
+# =============================================================================
+
+# ── Operator image (private registry) ────────────────────────────────────────
+image:
+  repository: 192.168.1.50:30500/apache/flink-kubernetes-operator
+  tag: "1.16.1"
+  pullPolicy: IfNotPresent
+
+# ── Webhook ───────────────────────────────────────────────────────────────────
+webhook:
+  create: true
+
+# ── Watched namespaces ────────────────────────────────────────────────────────
+# Watch prod namespace where the FlinkDeployment CRs live.
+watchNamespaces:
+  - flink
+  - prod
+
+# ── Node placement: worker5/6/7 ──────────────────────────────────────────────
+tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "kafka"
+    effect: "NoSchedule"
+
+nodeSelector: {}
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - worker5.local
+                - worker6.local
+                - worker7.local
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# ── Default Flink configuration ───────────────────────────────────────────────
+# These values are inherited by all FlinkDeployments unless overridden.
+defaultConfiguration:
+  create: true
+  # Use a ConfigMap per-deployment for isolation
+  append: true
+  flink-conf.yaml: |+
+    # Kubernetes operator defaults
+    kubernetes.operator.reconcile.interval: 15s
+    kubernetes.operator.observer.progress-check.interval: 5s
+
+    # Checkpointing
+    execution.checkpointing.interval: 60000
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.timeout: 120000
+    state.backend: rocksdb
+    state.backend.incremental: true
+
+    # High-availability (Kubernetes HA provider)
+    high-availability: KUBERNETES
+    high-availability.storageDir: /tmp/flink-ha
+
+    # Kafka source/sink connector jar
+    # (pulled from private registry via init container — see FlinkDeployment)
+    classloader.resolve-order: parent-first
+
+    # Metrics
+    metrics.reporters: prom
+    metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+    metrics.reporter.prom.port: 9249

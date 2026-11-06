@@ -21,11 +21,10 @@ spec:
   # ignoreDifferences entries WITHOUT a name: filter are type-wide rules — ArgoCD
   # applies them to any resource of that kind, which is what suppresses the
   # requiresPruning / "not present in source" OutOfSync flag.
-  # (Entries with name: only suppress field-level diffs, not the presence check.)
   #
   # Resources covered:
-  #   PersistentVolumeClaim  data-strimzi-kafka-combined-0   — Strimzi-created Kafka PVC
-  #   ClusterRoleBinding     strimzi-prod-*-kafka-init       — Strimzi-created kafka-init CRB
+  #   PersistentVolumeClaim  data-strimzi-kafka-{worker5,worker6,worker7}-0
+  #   ClusterRoleBinding     strimzi-prod-*-kafka-init
   ignoreDifferences:
     - group: ""
       kind: PersistentVolumeClaim
@@ -35,11 +34,7 @@ spec:
       kind: ClusterRoleBinding
       jsonPointers:
         - /
-    # aclsAdminApiSupported is not declared in the Strimzi 1.1.0 CRD schema.
-    # ArgoCD ServerSideApply rejects it as "field not declared in schema" causing
-    # a ComparisonError → Unknown sync status. Suppress the field-level diff here;
-    # the field is still written by kubectl replace (field manager: kubectl-replace)
-    # and honoured at runtime — we just stop ArgoCD from diffing it.
+    # aclsAdminApiSupported is not in the Strimzi CRD schema — suppress diff.
     - group: "kafka.strimzi.io"
       kind: Kafka
       name: strimzi-kafka
