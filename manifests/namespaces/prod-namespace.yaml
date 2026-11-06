@@ -29,8 +29,8 @@ spec:
     limits.cpu:              "120"
     requests.memory:         120Gi
     limits.memory:           240Gi
-    requests.storage:        2500Gi
-    persistentvolumeclaims:  "60"
+    requests.storage:        3500Gi
+    persistentvolumeclaims:  "70"
     pods:                    "300"
     services:                "150"
     configmaps:              "300"
