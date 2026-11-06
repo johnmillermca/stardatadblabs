@@ -44,7 +44,7 @@ spec:
     state.savepoints.dir: file:///opt/flink/savepoints
 
     # ── High availability (Kubernetes HA) ────────────────────────────────────
-    high-availability: KUBERNETES
+    high-availability.type: KUBERNETES
     high-availability.storageDir: file:///opt/flink/ha
 
     # ── Parallelism ──────────────────────────────────────────────────────────

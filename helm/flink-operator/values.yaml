@@ -72,8 +72,8 @@ defaultConfiguration:
     state.backend: rocksdb
     state.backend.incremental: true
 
-    # High-availability (Kubernetes HA provider)
-    high-availability: KUBERNETES
+    # High-availability (Kubernetes HA provider — Flink 2.0 requires full key)
+    high-availability.type: KUBERNETES
     high-availability.storageDir: /tmp/flink-ha
 
     # Kafka source/sink connector jar
