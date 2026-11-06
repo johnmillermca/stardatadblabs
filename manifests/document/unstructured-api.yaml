@@ -1,0 +1,105 @@
+# =============================================================================
+# Unstructured.io API Server — Kubernetes Deployment
+# Namespace   : document
+# Node        : worker5.local
+# Port        : 8000 (HTTP REST API)
+# NodePort    : 30800
+# Image       : 192.168.1.50:30500/unstructured-api:0.1.16
+# Purpose     : Document parsing & chunking REST API (PDF, DOCX, HTML, etc.)
+# =============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: unstructured-uploads
+  namespace: document
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unstructured-api
+  namespace: document
+  labels:
+    app: unstructured-api
+    component: document-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unstructured-api
+  template:
+    metadata:
+      labels:
+        app: unstructured-api
+        component: document-processing
+    spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "kafka"
+          effect: "NoSchedule"
+      nodeSelector:
+        kubernetes.io/hostname: worker5.local
+      containers:
+        - name: unstructured-api
+          image: 192.168.1.50:30500/unstructured-api:0.1.16
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: UNSTRUCTURED_API_HOST
+              value: "0.0.0.0"
+            - name: UNSTRUCTURED_API_PORT
+              value: "8000"
+          volumeMounts:
+            - name: uploads
+              mountPath: /tmp/unstructured
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: unstructured-uploads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: unstructured-api
+  namespace: document
+  labels:
+    app: unstructured-api
+spec:
+  selector:
+    app: unstructured-api
+  type: NodePort
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30800
+      name: http
