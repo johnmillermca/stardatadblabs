@@ -25,25 +25,25 @@ watchNamespaces:
   - prod
 
 # ── Node placement: worker5/6/7 ──────────────────────────────────────────────
-tolerations:
-  - key: "dedicated"
-    operator: "Equal"
-    value: "kafka"
-    effect: "NoSchedule"
-
-nodeSelector: {}
-
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: kubernetes.io/hostname
-              operator: In
-              values:
-                - worker5.local
-                - worker6.local
-                - worker7.local
+# Flink operator chart uses operatorPod.* for pod-level scheduling overrides.
+operatorPod:
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "kafka"
+      effect: "NoSchedule"
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - worker5.local
+                  - worker6.local
+                  - worker7.local
+  nodeSelector: {}
 
 # ── Resources ─────────────────────────────────────────────────────────────────
 resources:
