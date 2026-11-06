@@ -54,14 +54,3 @@ tolerations:
     value: "kafka"
     effect: "NoSchedule"
 createGlobalResources: true
-
-# ── Override STRIMZI_KAFKA_IMAGES to include Kafka 4.3.1 ─────────────────────
-# The 1.2.0 Helm chart builds STRIMZI_KAFKA_IMAGES only for 4.2.0, 4.2.1, 4.3.0.
-# Override the env var to add 4.3.1 so the operator accepts the Kafka CR.
-extraEnvs:
-  - name: STRIMZI_KAFKA_IMAGES
-    value: |
-      4.2.0=192.168.1.50:30500/strimzi/kafka:1.2.0-kafka-4.2.0
-      4.2.1=192.168.1.50:30500/strimzi/kafka:1.2.0-kafka-4.2.1
-      4.3.0=192.168.1.50:30500/strimzi/kafka:1.2.0-kafka-4.3.0
-      4.3.1=192.168.1.50:30500/strimzi/kafka:1.2.0-kafka-4.3.1
