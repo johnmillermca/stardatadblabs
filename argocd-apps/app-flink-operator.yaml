@@ -14,7 +14,7 @@ spec:
       targetRevision: "1.16.1"
       helm:
         valueFiles:
-          - $values/k8s-platform/helm/flink-operator/values.yaml
+          - $values/helm/flink-operator/values.yaml
     - repoURL: https://github.com/johnmillermca/stardatadblabs
       targetRevision: HEAD
       ref: values
