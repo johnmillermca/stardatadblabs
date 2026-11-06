@@ -107,6 +107,11 @@ spec:
         annotations:
           argocd.argoproj.io/compare-options: IgnoreExtraneous
     pod:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "kafka"
+          effect: "NoSchedule"
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -159,6 +164,11 @@ spec:
         annotations:
           argocd.argoproj.io/compare-options: IgnoreExtraneous
     pod:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "kafka"
+          effect: "NoSchedule"
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
