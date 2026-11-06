@@ -10,13 +10,16 @@
 # ── Image (private registry) ─────────────────────────────────────────────────
 image:
   keda:
-    repository: 192.168.1.50:30500/kedacore/keda
+    registry: 192.168.1.50:30500
+    repository: kedacore/keda
     tag: "2.21.0"
   metricsApiServer:
-    repository: 192.168.1.50:30500/kedacore/keda-metrics-apiserver
+    registry: 192.168.1.50:30500
+    repository: kedacore/keda-metrics-apiserver
     tag: "2.21.0"
   webhooks:
-    repository: 192.168.1.50:30500/kedacore/keda-admission-webhooks
+    registry: 192.168.1.50:30500
+    repository: kedacore/keda-admission-webhooks
     tag: "2.21.0"
 
 # ── Replicas ─────────────────────────────────────────────────────────────────
