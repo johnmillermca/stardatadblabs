@@ -102,11 +102,6 @@ spec:
                         - worker7.local
         containers:
           - name: flink-main-container
-            # ── SQL Gateway startup arg ──────────────────────────────────────
-            # The Flink 2.0 image supports ENABLE_BUILT_IN_PLUGINS for connector JARs.
-            env:
-              - name: ENABLE_BUILT_IN_PLUGINS
-                value: "flink-sql-connector-kafka-2.0.0.jar"
             volumeMounts:
               - name: flink-state
                 mountPath: /opt/flink/checkpoints
@@ -158,9 +153,6 @@ spec:
                 topologyKey: kubernetes.io/hostname
         containers:
           - name: flink-main-container
-            env:
-              - name: ENABLE_BUILT_IN_PLUGINS
-                value: "flink-sql-connector-kafka-2.0.0.jar"
             volumeMounts:
               - name: flink-tm-state
                 mountPath: /opt/flink/checkpoints
