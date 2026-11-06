@@ -69,6 +69,7 @@ spec:
             - labelSelector:
                 matchLabels:
                   strimzi.io/cluster: strimzi-kafka
+                  strimzi.io/component-type: kafka
               topologyKey: kubernetes.io/hostname
       securityContext:
         fsGroup: 1000
@@ -126,6 +127,7 @@ spec:
             - labelSelector:
                 matchLabels:
                   strimzi.io/cluster: strimzi-kafka
+                  strimzi.io/component-type: kafka
               topologyKey: kubernetes.io/hostname
       securityContext:
         fsGroup: 1000
@@ -183,6 +185,7 @@ spec:
             - labelSelector:
                 matchLabels:
                   strimzi.io/cluster: strimzi-kafka
+                  strimzi.io/component-type: kafka
               topologyKey: kubernetes.io/hostname
       securityContext:
         fsGroup: 1000
