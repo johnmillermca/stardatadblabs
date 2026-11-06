@@ -13,8 +13,10 @@ image:
   pullPolicy: IfNotPresent
 
 # ── Webhook ───────────────────────────────────────────────────────────────────
+# Disable webhook — requires cert-manager which is not installed in this cluster.
+# Validation is handled by server-side apply in ArgoCD.
 webhook:
-  create: true
+  create: false
 
 # ── Watched namespaces ────────────────────────────────────────────────────────
 # Watch prod namespace where the FlinkDeployment CRs live.
