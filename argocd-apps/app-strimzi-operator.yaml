@@ -14,13 +14,13 @@ spec:
       targetRevision: "1.2.0"
       helm:
         valueFiles:
-          - $values/k8s-platform/helm/strimzi-operator/values.yaml
+          - $values/helm/strimzi-operator/values.yaml
     - repoURL: https://github.com/johnmillermca/stardatadblabs
       targetRevision: HEAD
       ref: values
   destination:
     server: https://kubernetes.default.svc
-    namespace: strimzi-system
+    namespace: prod
   syncPolicy:
     automated:
       prune: true

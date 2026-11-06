@@ -21,6 +21,14 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: flink
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      name: flink-kubernetes-operator
+      namespace: flink
+      jsonPointers:
+        - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+        - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
   syncPolicy:
     automated:
       prune: true
