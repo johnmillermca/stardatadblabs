@@ -27,15 +27,14 @@ spec:
         - /bin/sh
         - -c
         - |
-          # Add PREROUTING rule (external traffic on port 80 → 30081)
-          iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 30081 2>/dev/null || \
-            iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 30081
-          # Add OUTPUT rule (local traffic on port 80 → 30081)
-          iptables -t nat -C OUTPUT -p tcp --dport 80 -j REDIRECT --to-port 30081 2>/dev/null || \
-            iptables -t nat -A OUTPUT -p tcp --dport 80 -j REDIRECT --to-port 30081
-          echo "Rules applied:"
-          iptables -t nat -L PREROUTING -n --line-numbers | grep 30081
-          iptables -t nat -L OUTPUT -n --line-numbers | grep 30081
-          # Persist via iptables-save
-          iptables-save > /proc/1/fd/1 2>&1 || true
+          # Remove the old port-80→30081 redirect rules if still present.
+          # These were added when webconsole-proxy did not exist. Now that the
+          # proxy pod binds port 80 directly on master2, these redirects break
+          # cloudflared's ability to reach the proxy at 192.168.1.62:80.
+          iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 30081 2>/dev/null \
+            && echo "PREROUTING redirect removed" || echo "PREROUTING redirect not present (ok)"
+          iptables -t nat -D OUTPUT -p tcp --dport 80 -j REDIRECT --to-port 30081 2>/dev/null \
+            && echo "OUTPUT redirect removed" || echo "OUTPUT redirect not present (ok)"
+          echo "Current nat PREROUTING:"
+          iptables -t nat -L PREROUTING -n --line-numbers
           sleep 5

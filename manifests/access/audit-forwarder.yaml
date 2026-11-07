@@ -1,0 +1,131 @@
+# =============================================================================
+# audit-forwarder — ZITADEL events → Kafka platform.audit
+# Namespace : access
+# Nodes     : worker1.local (192.168.1.51)
+# Replicas  : 2
+# Receives  : ZITADEL Actions v2 restAsync calls on user/session/auth events
+# Writes    : Kafka topic platform.audit  (SASL/SCRAM-SHA-512 or mTLS)
+# DLQ       : platform.audit.dlq (retries with exponential backoff)
+# Secret    : audit-forwarder-target-key  (key: signingKey — from bootstrap job)
+#           : kafka-access-credentials    (key: username, password)
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-forwarder
+  namespace: access
+  labels:
+    app: audit-forwarder
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: audit-forwarder
+  template:
+    metadata:
+      labels:
+        app: audit-forwarder
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: doris
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: audit-forwarder
+          image: 192.168.1.50:30500/stardatadb/audit-forwarder:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: audit-forwarder-target-key
+                  key: signingKey
+            - name: KAFKA_BROKERS
+              value: "kafka-bootstrap.prod.svc.cluster.local:9093"
+            - name: KAFKA_AUDIT_TOPIC
+              value: "platform.audit"
+            - name: KAFKA_DLQ_TOPIC
+              value: "platform.audit.dlq"
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-access-credentials
+                  key: username
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-access-credentials
+                  key: password
+            - name: KAFKA_SECURITY_PROTOCOL
+              value: "SASL_SSL"
+            - name: KAFKA_SASL_MECHANISM
+              value: "SCRAM-SHA-512"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-forwarder
+  namespace: access
+  labels:
+    app: audit-forwarder
+spec:
+  type: ClusterIP
+  selector:
+    app: audit-forwarder
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: audit-forwarder-pdb
+  namespace: access
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: audit-forwarder

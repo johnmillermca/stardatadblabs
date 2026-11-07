@@ -1,0 +1,173 @@
+# =============================================================================
+# Actions v2 bootstrap Job — idempotent
+# Runs after Terraform (sync wave 4). Creates two targets and their executions:
+#   1. stardata-claims  — restCall, preaccesstoken + preuserinfo executions
+#   2. audit-forwarder  — restAsync, user/session event execution
+# Stores the claims target signingKey into Kubernetes Secret claims-target-key.
+# Safe to re-run: looks up existing targets by name before creating.
+# Secret : terraform-admin-key  (key: key.json — Org Owner JWT profile)
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: access-bootstrap
+  namespace: access
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: doris
+          effect: NoSchedule
+      serviceAccountName: access-bootstrap-sa
+      containers:
+        - name: bootstrap
+          image: 192.168.1.50:30500/curlimages/curl:8
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              ZITADEL="https://auth.stardatadb.com"
+              KEY_FILE=/run/secrets/terraform-admin-key/key.json
+
+              # ── Obtain a token for the terraform-admin machine user ──────────
+              TOKEN=$(curl -sf -X POST "${ZITADEL}/oauth/v2/token" \
+                --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+                --data-urlencode "scope=openid urn:zitadel:iam:org:project:id:zitadel:aud" \
+                --data-urlencode "assertion=$(cat ${KEY_FILE})" \
+                | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+
+              AUTH="Authorization: Bearer ${TOKEN}"
+
+              # ── Helper: get target ID by name if it already exists ───────────
+              get_target_id() {
+                local name="$1"
+                curl -sf -X POST "${ZITADEL}/v2/actions/targets/_search" \
+                  -H "${AUTH}" -H "Content-Type: application/json" \
+                  -d "{\"queries\":[{\"nameQuery\":{\"name\":\"${name}\",\"method\":\"TEXT_QUERY_METHOD_EQUALS\"}}]}" \
+                  | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
+              }
+
+              # ── 1. stardata-claims target ────────────────────────────────────
+              CLAIMS_ID=$(get_target_id "stardata-claims")
+              if [ -z "$CLAIMS_ID" ]; then
+                echo "Creating stardata-claims target..."
+                RESP=$(curl -sf -X POST "${ZITADEL}/v2/actions/targets" \
+                  -H "${AUTH}" -H "Content-Type: application/json" \
+                  -d '{
+                    "name": "stardata-claims",
+                    "restCall": {"interruptOnError": true},
+                    "endpoint": "http://stardata-claims.access.svc.cluster.local/zitadel/claims",
+                    "timeout": "3s"
+                  }')
+                CLAIMS_ID=$(echo "$RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+                SIGNING_KEY=$(echo "$RESP" | grep -o '"signingKey":"[^"]*"' | cut -d'"' -f4)
+
+                # Store signingKey into Kubernetes Secret claims-target-key
+                kubectl create secret generic claims-target-key \
+                  --namespace access \
+                  --from-literal=signingKey="${SIGNING_KEY}" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+                echo "claims target id=${CLAIMS_ID}"
+              else
+                echo "stardata-claims target already exists: ${CLAIMS_ID}"
+              fi
+
+              # ── 2. preaccesstoken execution ──────────────────────────────────
+              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
+                -H "${AUTH}" -H "Content-Type: application/json" \
+                -d "{\"condition\":{\"function\":{\"name\":\"preaccesstoken\"}},\"targets\":[\"${CLAIMS_ID}\"]}"
+
+              # ── 3. preuserinfo execution ─────────────────────────────────────
+              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
+                -H "${AUTH}" -H "Content-Type: application/json" \
+                -d "{\"condition\":{\"function\":{\"name\":\"preuserinfo\"}},\"targets\":[\"${CLAIMS_ID}\"]}"
+
+              # ── 4. audit-forwarder target ────────────────────────────────────
+              AUDIT_ID=$(get_target_id "audit-forwarder")
+              if [ -z "$AUDIT_ID" ]; then
+                echo "Creating audit-forwarder target..."
+                RESP=$(curl -sf -X POST "${ZITADEL}/v2/actions/targets" \
+                  -H "${AUTH}" -H "Content-Type: application/json" \
+                  -d '{
+                    "name": "audit-forwarder",
+                    "restAsync": {},
+                    "endpoint": "http://audit-forwarder.access.svc.cluster.local/zitadel/events",
+                    "timeout": "5s"
+                  }')
+                AUDIT_ID=$(echo "$RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+                AUDIT_SIGNING_KEY=$(echo "$RESP" | grep -o '"signingKey":"[^"]*"' | cut -d'"' -f4)
+
+                kubectl create secret generic audit-forwarder-target-key \
+                  --namespace access \
+                  --from-literal=signingKey="${AUDIT_SIGNING_KEY}" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+                echo "audit-forwarder target id=${AUDIT_ID}"
+              else
+                echo "audit-forwarder target already exists: ${AUDIT_ID}"
+              fi
+
+              # ── 5. Audit event execution (user + session + authorization events)
+              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
+                -H "${AUTH}" -H "Content-Type: application/json" \
+                -d "{\"condition\":{\"event\":{\"group\":\"user\"}},\"targets\":[\"${AUDIT_ID}\"]}"
+
+              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
+                -H "${AUTH}" -H "Content-Type: application/json" \
+                -d "{\"condition\":{\"event\":{\"group\":\"session\"}},\"targets\":[\"${AUDIT_ID}\"]}"
+
+              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
+                -H "${AUTH}" -H "Content-Type: application/json" \
+                -d "{\"condition\":{\"event\":{\"group\":\"user_grant\"}},\"targets\":[\"${AUDIT_ID}\"]}"
+
+              echo "Bootstrap complete."
+          volumeMounts:
+            - name: terraform-admin-key
+              mountPath: /run/secrets/terraform-admin-key
+              readOnly: true
+      volumes:
+        - name: terraform-admin-key
+          secret:
+            secretName: terraform-admin-key
+---
+# ServiceAccount for the bootstrap job — needs get/create/patch on secrets in access namespace
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: access-bootstrap-sa
+  namespace: access
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: access-bootstrap-role
+  namespace: access
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: access-bootstrap-rb
+  namespace: access
+subjects:
+  - kind: ServiceAccount
+    name: access-bootstrap-sa
+    namespace: access
+roleRef:
+  kind: Role
+  name: access-bootstrap-role
+  apiGroup: rbac.authorization.k8s.io

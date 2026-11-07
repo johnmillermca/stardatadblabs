@@ -1,0 +1,245 @@
+# =============================================================================
+# ArgoCD Applications — StarData access namespace (ZITADEL + claims + backend)
+# Sign-in and sign-up: auth.stardatadb.com (ZITADEL Login v2)
+# Console:             console.stardatadb.com (BFF + React frontend)
+#
+# Sync order (waves):
+#   -10  access namespace + default-deny NetworkPolicy
+#     0  Databases (zitadel-db on 192.168.1.50, console-db on 192.168.1.51)
+#     1  Valkey session store
+#     2  Network policies (allow-list)
+#     3  ZITADEL Helm chart (auth.stardatadb.com)
+#     4  stardata-claims + Actions v2 bootstrap job
+#     5  audit-forwarder
+#     6  console-backend + access-cron
+# =============================================================================
+
+# ── access namespace ─────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: access-namespace
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "namespace.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── ZITADEL database (192.168.1.50 / master.local) ──────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zitadel-db
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "zitadel-db.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── Console database (192.168.1.51 / worker1.local) ─────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: console-db
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "console-db.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── Valkey session store ─────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: access-valkey
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "valkey.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── Network policies (allow-list) ────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: access-network-policies
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "network-policies.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── ZITADEL v4 (auth.stardatadb.com) ────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zitadel
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: platform
+  sources:
+    - repoURL: https://charts.zitadel.com
+      chart: zitadel
+      targetRevision: "9.x"
+      helm:
+        releaseName: zitadel
+        valueFiles:
+          - $values/zitadel/helm/values-prod.yaml
+    - repoURL: https://github.com/johnmillermca/stardatadblabs
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── stardata-claims + bootstrap job ─────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: stardata-claims
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "{stardata-claims.yaml,bootstrap-job.yaml}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── audit-forwarder ──────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: audit-forwarder
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "audit-forwarder.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── console-backend + access-cron ────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: console-backend
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "{console-backend.yaml,access-cron.yaml}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]

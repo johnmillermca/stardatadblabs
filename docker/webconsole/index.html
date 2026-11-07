@@ -378,38 +378,31 @@
 
       <!-- Sign In Panel -->
       <div class="panel active" id="panel-signin">
-        <div class="field">
-          <label for="si-email">Email address</label>
-          <input type="email" id="si-email" placeholder="you@stardatalabs.com" autocomplete="email" />
-        </div>
-        <div class="field">
-          <label for="si-password">Password</label>
-          <input type="password" id="si-password" placeholder="Your password" autocomplete="current-password" />
-        </div>
-        <button class="btn btn-primary">Sign In</button>
+        <p style="font-size:13px;color:#9ca3af;margin-bottom:16px;line-height:1.5">
+          Sign in is handled by StarData's secure login page.
+          Click below to continue — you'll be back in seconds.
+        </p>
+        <!-- Redirect to the console BFF which starts the PKCE flow to ZITADEL.
+             The BFF at console.stardatadb.com/auth/login sets state/nonce/verifier
+             in Valkey then sends the browser to auth.stardatadb.com/ui/v2/login. -->
+        <a href="https://console.stardatadb.com/auth/login" style="display:block;width:100%;text-decoration:none">
+          <button class="btn btn-primary" style="width:100%">Sign In</button>
+        </a>
         <div class="divider">or</div>
         <button class="btn btn-secondary" onclick="switchTab('signup')">Create an account</button>
       </div>
 
       <!-- Sign Up Panel -->
       <div class="panel" id="panel-signup">
-        <div class="field">
-          <label for="su-name">Full name</label>
-          <input type="text" id="su-name" placeholder="Jane Smith" autocomplete="name" />
-        </div>
-        <div class="field">
-          <label for="su-email">Email address</label>
-          <input type="email" id="su-email" placeholder="you@stardatalabs.com" autocomplete="email" />
-        </div>
-        <div class="field">
-          <label for="su-password">Password</label>
-          <input type="password" id="su-password" placeholder="Create a password" autocomplete="new-password" />
-        </div>
-        <div class="field">
-          <label for="su-confirm">Confirm password</label>
-          <input type="password" id="su-confirm" placeholder="Repeat password" autocomplete="new-password" />
-        </div>
-        <button class="btn btn-primary">Create Account</button>
+        <p style="font-size:13px;color:#9ca3af;margin-bottom:16px;line-height:1.5">
+          Self-registration is handled on the secure login page.
+          An Owner or Admin approves access after you verify your email.
+        </p>
+        <!-- ZITADEL's Login v2 register page — allow_register must be true in
+             the login policy (it is, per zitadel/terraform/main.tf). -->
+        <a href="https://auth.stardatadb.com/ui/v2/login/register" style="display:block;width:100%;text-decoration:none">
+          <button class="btn btn-primary" style="width:100%">Create Account</button>
+        </a>
         <div class="divider">or</div>
         <button class="btn btn-secondary" onclick="switchTab('signin')">Already have an account?</button>
       </div>

@@ -1,0 +1,171 @@
+# =============================================================================
+# ZITADEL v4 — Helm chart values (prod)
+# Chart  : https://charts.zitadel.com  chart: zitadel  version: 9.x (pin latest 9.x)
+# Domain : auth.stardatadb.com  (API + OIDC + /ui/v2/login)
+# DB     : zitadel-db.access.svc.cluster.local:5432
+# Sign-in/sign-up for: www.stardatadb.com console (console.stardatadb.com)
+# All ZITADEL pods run on 192.168.1.51 (worker1.local) per deployment split
+# =============================================================================
+
+replicaCount: 3
+
+zitadel:
+  masterkeySecretName: zitadel-masterkey   # key: masterkey (32 chars, NEVER change)
+
+  configmapConfig:
+    ExternalDomain: auth.stardatadb.com
+    ExternalPort: 443
+    ExternalSecure: true
+
+    # TLS terminates at the ingress (NGINX); ZITADEL pods serve plain HTTP/2 (h2c)
+    TLS:
+      Enabled: false
+
+    Database:
+      Postgres:
+        Host: zitadel-db.access.svc.cluster.local
+        Port: 5432
+        Database: zitadel
+        MaxOpenConns: 20
+        User:
+          Username: zitadel
+          SSL:
+            Mode: require
+        Admin:
+          Username: zitadel_admin
+          SSL:
+            Mode: require
+
+    FirstInstance:
+      Org:
+        Name: stardatadb
+      Human:
+        # First Owner — change the password and enrol a passkey at first sign-in
+        UserName: owner@stardatadb.com
+        Email:
+          Address: owner@stardatadb.com
+          Verified: true
+      DefaultInstance:
+        LoginPolicy:
+          AllowRegister: true
+          ForceMFA: false          # MFA for Owners/Admins enforced by BFF amr check
+          AllowUsernamePassword: true
+          AllowExternalIdps: false
+          PasswordlessType: 2      # passkeys allowed
+          IgnoreUnknownUsernames: true   # prevents user enumeration
+          PasswordCheckLifetime: 168h    # 7 days — re-ask password after 7 days
+          SecondFactorCheckLifetime: 12h # re-ask TOTP/passkey after 12 h idle
+          MfaCheckLifetime: 12h
+          IdleSessionLifetime: 24h
+          SessionMaxAgeHours: 168        # 7 days maximum absolute session age
+
+  # Secret holds Database.Postgres.User.Password (key: app-password)
+  # and Database.Postgres.Admin.Password (key: admin-password)
+  configSecretName: zitadel-db-passwords
+
+login:
+  enabled: true
+  replicaCount: 2
+  # Extra environment variables passed to the Login v2 Next.js container.
+  # These configure the StarData branding applied on top of ZITADEL's label policy.
+  extraEnv:
+    # Primary brand colour — must match zitadel_label_policy primary_color.
+    - name: ZITADEL_PRIMARY_COLOR
+      value: "#3346C4"
+    # Title shown on the login card (Step 1 — "Sign in").
+    - name: ZITADEL_LOGIN_TITLE
+      value: "Sign in"
+    # Subtitle shown below the title.
+    - name: ZITADEL_LOGIN_SUBTITLE
+      value: "Use your StarData account"
+    # Step-2 MFA screen subtitle.
+    - name: ZITADEL_MFA_SUBTITLE
+      value: "Required for Owners and Admins. Enter the 6-digit code from your authenticator app."
+    # Org domain — allows users to type john@stardatadb.com (hide_login_name_suffix).
+    - name: ZITADEL_ORG_DOMAIN
+      value: "stardatadb.com"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: [worker1.local]
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    hosts:
+      - host: auth.stardatadb.com
+        paths:
+          - path: /ui/v2/login
+            pathType: Prefix
+    tls:
+      - secretName: zitadel-tls
+        hosts: [auth.stardatadb.com]
+
+# Main ZITADEL ingress (API + OIDC + /ui/console)
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Restrict /ui/console to platform-team VPN range only
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,192.168.0.0/16"
+  hosts:
+    - host: auth.stardatadb.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: zitadel-tls
+      hosts: [auth.stardatadb.com]
+
+# Pin all ZITADEL pods to worker1.local (192.168.1.51)
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [worker1.local]
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: zitadel
+          topologyKey: kubernetes.io/hostname
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+pdb:
+  enabled: true
+  minAvailable: 2
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true

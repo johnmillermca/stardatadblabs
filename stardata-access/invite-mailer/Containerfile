@@ -1,0 +1,12 @@
+FROM docker.io/golang:1.23-alpine AS builder
+WORKDIR /src
+COPY go.mod .
+COPY main.go .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /invite-mailer .
+
+# Use alpine — has ca-certificates so Gmail TLS cert verification works
+FROM docker.io/alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /invite-mailer /invite-mailer
+EXPOSE 8025
+CMD ["/invite-mailer"]

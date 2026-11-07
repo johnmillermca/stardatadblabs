@@ -1,0 +1,143 @@
+# =============================================================================
+# Valkey — server-side console session store
+# Host   : 192.168.1.51 (worker1.local)
+# Access : valkey.access.svc.cluster.local:6379  (internal ClusterIP only)
+# Secret : valkey-credentials  (key: password)
+# Used by: console-backend — stores sess:<id> hashes (access_token, refresh_token,
+#          platform_roles, mfa, created_at, abs_expires_at); TTL = 24h idle,
+#          7-day absolute enforced in the hash. Also used for PKCE pre-session keys
+#          (5 min TTL) and per-session refresh locks (sess:<id>:refresh, 5s TTL).
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valkey-config
+  namespace: access
+data:
+  valkey.conf: |
+    # Require password auth
+    requirepass PLACEHOLDER_REPLACED_BY_ENV
+
+    # Persistence — RDB snapshot for crash recovery (not a primary backup)
+    save 900 1
+    save 300 10
+    save 60  10000
+
+    # Protect against accidental data loss on OOM
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+
+    # Bind only to pod IP; the Service handles cluster access
+    bind 0.0.0.0
+
+    # Disable dangerous commands
+    rename-command FLUSHALL  ""
+    rename-command FLUSHDB   ""
+    rename-command CONFIG    ""
+    rename-command DEBUG     ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: access
+  labels:
+    app: valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey
+  template:
+    metadata:
+      labels:
+        app: valkey
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: doris
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          image: 192.168.1.50:30500/valkey/valkey:8
+          command:
+            - sh
+            - -c
+            - |
+              # Inject the actual password from the Secret into valkey.conf
+              cp /config/valkey.conf /tmp/valkey.conf
+              sed -i "s/PLACEHOLDER_REPLACED_BY_ENV/${VALKEY_PASSWORD}/" /tmp/valkey.conf
+              exec valkey-server /tmp/valkey.conf
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: valkey-credentials
+                  key: password
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - valkey-cli -a "${VALKEY_PASSWORD}" ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - valkey-cli -a "${VALKEY_PASSWORD}" ping | grep -q PONG
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 384Mi
+          securityContext:
+            readOnlyRootFilesystem: false   # valkey writes to /tmp
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: valkey-config
+              mountPath: /config
+            - name: valkey-data
+              mountPath: /data
+      volumes:
+        - name: valkey-config
+          configMap:
+            name: valkey-config
+        - name: valkey-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  namespace: access
+  labels:
+    app: valkey
+spec:
+  # ClusterIP only — Valkey must never be reachable outside the cluster
+  type: ClusterIP
+  selector:
+    app: valkey
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379

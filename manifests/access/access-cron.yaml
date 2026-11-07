@@ -1,0 +1,82 @@
+# =============================================================================
+# access-cron — approval expiry + credential reminder CronJob
+# Runs every 5 minutes in namespace access on worker1.local (192.168.1.51)
+# Actions:
+#   - Expire pending approvals past their expires_at (sets state → expired)
+#   - Send email reminders for app credentials expiring in 14, 7 and 1 days
+#   - Email Owners/Admins for approvals pending > 30 min (reminder at 30 min)
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: access-cron
+  namespace: access
+  labels:
+    app: access-cron
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: worker1.local
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: doris
+              effect: NoSchedule
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+            - name: access-cron
+              image: 192.168.1.50:30500/stardatadb/console-backend:1.0.0
+              command: ["/app/access-cron"]
+              env:
+                - name: CONSOLE_DB_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: console-db-credentials
+                      key: app-password
+                - name: CONSOLE_DB_DSN
+                  value: "postgres://console_app:$(CONSOLE_DB_PASS)@console-db.access.svc.cluster.local:5432/console?sslmode=require"
+                - name: ZITADEL_DOMAIN
+                  value: "https://auth.stardatadb.com"
+                - name: BACKEND_KEY_FILE
+                  value: /run/secrets/console-backend-key/key.json
+                - name: SMTP_HOST
+                  value: "smtp-relay.prod.svc.cluster.local:587"
+                - name: SMTP_FROM
+                  value: "no-reply@stardatadb.com"
+                - name: APPROVAL_WINDOW_SECONDS
+                  value: "3600"      # 1 hour approval window
+                - name: APPROVAL_REMINDER_SECONDS
+                  value: "1800"      # remind after 30 min
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+              volumeMounts:
+                - name: console-backend-key
+                  mountPath: /run/secrets/console-backend-key
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: console-backend-key
+              secret:
+                secretName: console-backend-key
+            - name: tmp
+              emptyDir: {}

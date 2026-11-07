@@ -12,14 +12,33 @@ data:
         server_name www.stardatadb.com stardatadb.com _;
 
         location / {
-            proxy_pass http://192.168.1.58:80;
+            # Forward to webconsole-worker8 via its NodePort (30081) on worker8.
+            # Port 30081 is open through the node firewall; direct port 80 is not.
+            proxy_pass http://192.168.1.58:30081;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_connect_timeout 5s;
             proxy_read_timeout 30s;
+            # Tell Cloudflare never to cache HTML responses
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+            add_header Pragma        "no-cache" always;
+            add_header Expires       "0" always;
         }
 
+        location /healthz {
+            access_log off;
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+    }
+
+    # ── Health check server on port 8081 ────────────────────────────────────────
+    # The iptables OUTPUT rule on master2 redirects local port 80 → 30081, which
+    # means liveness probes to http://localhost:80/healthz are redirected away and
+    # fail. This dedicated health port bypasses that redirect entirely.
+    server {
+        listen 8081;
         location /healthz {
             access_log off;
             return 200 "ok\n";
@@ -69,13 +88,13 @@ spec:
       readinessProbe:
         httpGet:
           path: /healthz
-          port: 80
+          port: 8081
         initialDelaySeconds: 5
         periodSeconds: 10
       livenessProbe:
         httpGet:
           path: /healthz
-          port: 80
+          port: 8081
         initialDelaySeconds: 10
         periodSeconds: 20
   volumes:

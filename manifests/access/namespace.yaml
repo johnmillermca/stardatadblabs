@@ -1,0 +1,43 @@
+# =============================================================================
+# access namespace — ZITADEL, stardata-claims, audit-forwarder, console-backend
+# sign-in and access management for www.stardatadb.com
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: access
+  labels:
+    environment: prod
+    app.kubernetes.io/managed-by: platform
+    purpose: access-management
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: access-quota
+  namespace: access
+spec:
+  hard:
+    requests.cpu:           "10"
+    limits.cpu:             "20"
+    requests.memory:        20Gi
+    limits.memory:          40Gi
+    requests.storage:       500Gi
+    persistentvolumeclaims: "10"
+    pods:                   "60"
+    services:               "20"
+    secrets:                "50"
+    configmaps:             "30"
+---
+# Default-deny all ingress and egress; individual NetworkPolicies open
+# only the required paths (ZITADEL ↔ claims, console-backend ↔ ZITADEL, etc.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: access
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
