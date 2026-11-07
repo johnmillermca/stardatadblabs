@@ -127,6 +127,10 @@ login:
       value: "Required for Owners and Admins. Enter the 6-digit code from your authenticator app."
     - name: ZITADEL_ORG_DOMAIN
       value: "stardatadb.com"
+    # Internal TLS cert is self-signed; tell Node.js to accept it.
+    # Traffic never leaves the cluster on this path.
+    - name: NODE_TLS_REJECT_UNAUTHORIZED
+      value: "0"
   ingress:
     enabled: false
   resources:
@@ -197,7 +201,7 @@ extraVolumeMounts:
     readOnly: true
 
 initJob:
-  enabled: false
+  enabled: true
 
 setupJob:
   resources:
