@@ -34,7 +34,7 @@ spec:
       tolerations:
         - key: dedicated
           operator: Equal
-          value: doris
+          value: zitadel
           effect: NoSchedule
       securityContext:
         runAsNonRoot: true

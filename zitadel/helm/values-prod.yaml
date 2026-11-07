@@ -29,9 +29,12 @@ zitadel:
     ExternalPort: 443
     ExternalSecure: true
 
-    # TLS terminates at Cloudflare; ZITADEL pods serve plain HTTP
+    # Self-signed TLS cert for in-cluster HTTPS (console-backend OIDC discovery).
+    # Cloudflare terminates public TLS; ZITADEL serves HTTPS internally.
     TLS:
-      Enabled: false
+      Enabled: true
+      KeyPath: /etc/zitadel/tls/tls.key
+      CertPath: /etc/zitadel/tls/tls.crt
 
     Database:
       Postgres:
@@ -96,6 +99,14 @@ tools:
     image:
       repository: "wait4x/wait4x"
       tag: "3.6"
+    # Required: access-quota ResourceQuota enforces explicit cpu/memory on every container
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
 
 # Disable in-cluster ingress — routing is handled by webconsole-proxy nginx
 ingress:
@@ -128,6 +139,11 @@ login:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: zitadel
+      effect: NoSchedule
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -169,6 +185,16 @@ resources:
   limits:
     cpu: 1000m
     memory: 1Gi
+
+extraVolumes:
+  - name: zitadel-tls
+    secret:
+      secretName: zitadel-internal-tls
+
+extraVolumeMounts:
+  - name: zitadel-tls
+    mountPath: /etc/zitadel/tls
+    readOnly: true
 
 initJob:
   enabled: false

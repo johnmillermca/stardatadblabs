@@ -100,7 +100,7 @@ spec:
       tolerations:
         - key: dedicated
           operator: Equal
-          value: doris
+          value: zitadel
           effect: NoSchedule
       terminationGracePeriodSeconds: 60
       containers:
