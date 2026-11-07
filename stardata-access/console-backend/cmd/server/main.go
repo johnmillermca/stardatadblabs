@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -137,10 +138,11 @@ func main() {
 	var oidcRoundTripper http.RoundTripper
 	if zitadelInternalURL != "" {
 		discoveryURL = zitadelInternalURL
-		// ZITADEL on port 8080 is plain HTTP. Inject Host: auth.stardatadb.com
-		// so ZITADEL's instance router matches ExternalDomain instead of the
-		// internal service FQDN.
-		oidcRoundTripper = newHostOverrideTransport(http.DefaultTransport, zitadelDomain)
+		// ZITADEL serves HTTPS with a self-signed cert on the internal service.
+		// Skip TLS verification (traffic never leaves the cluster) and inject
+		// Host: auth.stardatadb.com so ZITADEL's instance router matches ExternalDomain.
+		tlsSkip := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+		oidcRoundTripper = newHostOverrideTransport(tlsSkip, zitadelDomain)
 	}
 	oidcCtx := oidc.InsecureIssuerURLContext(
 		oidc.ClientContext(ctx, &http.Client{Transport: oidcRoundTripper}),
