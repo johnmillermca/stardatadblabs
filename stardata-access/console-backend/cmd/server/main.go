@@ -168,11 +168,20 @@ func main() {
 	}
 
 	// ── OAuth2 config ─────────────────────────────────────────────────────────
+	// Override the token endpoint to the internal ZITADEL service so the token
+	// exchange never goes through Cloudflare (whose cert the busybox image cannot
+	// verify — no CA bundle). The Host header rewrite makes ZITADEL accept the
+	// request as if it came from auth.stardatadb.com.
+	ep := provider.Endpoint()
+	if zitadelInternalURL != "" {
+		internalToken, _ := url.JoinPath(zitadelInternalURL, "/oauth/v2/token")
+		ep.TokenURL = internalToken
+	}
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		RedirectURL:  redirectURI,
-		Endpoint:     provider.Endpoint(),
+		Endpoint:     ep,
 		Scopes: []string{
 			oidc.ScopeOpenID,
 			"profile",
@@ -180,6 +189,14 @@ func main() {
 			"offline_access", // refresh token
 			"urn:zitadel:iam:org:project:id:" + projectID + ":aud",
 		},
+	}
+
+	// ── TLS-skipping HTTP client for token exchange ───────────────────────────
+	// Stored on the Handler so callback.go injects it into the oauth2 context.
+	var internalClient *http.Client
+	if zitadelInternalURL != "" {
+		tlsSkip2 := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+		internalClient = &http.Client{Transport: newHostOverrideTransport(tlsSkip2, zitadelDomain)}
 	}
 
 	// ── ID token verifier ─────────────────────────────────────────────────────
@@ -192,6 +209,7 @@ func main() {
 		Valkey:         valkeyClient,
 		ZitadelDomain:  zitadelDomain,
 		SessionIdleTTL: time.Duration(sessionIdleSec) * time.Second,
+		InternalClient: internalClient,
 	}
 	authReady.Store(h)
 	slog.Info("oidc discovery complete, auth routes live", "issuer", zitadelDomain)

@@ -7,6 +7,7 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"net/http"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -34,6 +35,11 @@ type Handler struct {
 	// request. Defaults to 24 hours. The Valkey key expires when the browser
 	// is idle for this long.
 	SessionIdleTTL time.Duration
+
+	// InternalClient is an HTTP client that routes token exchange requests
+	// directly to the in-cluster ZITADEL service, bypassing Cloudflare TLS.
+	// Nil when ZITADEL_INTERNAL_URL is unset (uses default transport).
+	InternalClient *http.Client
 }
 
 // PreSession is serialised to JSON and stored in Valkey under "pre:<state>"

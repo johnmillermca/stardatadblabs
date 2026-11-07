@@ -14,7 +14,9 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -53,8 +55,16 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, err := h.OAuth.Exchange(ctx, code, oauth2.VerifierOption(pre.Verifier))
+	// Use the internal HTTP client (TLS-skip + Host override) for the token
+	// exchange so the request goes to the in-cluster ZITADEL service directly,
+	// bypassing Cloudflare whose cert the busybox image cannot verify.
+	exchangeCtx := ctx
+	if h.InternalClient != nil {
+		exchangeCtx = context.WithValue(ctx, oauth2.HTTPClient, h.InternalClient)
+	}
+	tok, err := h.OAuth.Exchange(exchangeCtx, code, oauth2.VerifierOption(pre.Verifier))
 	if err != nil {
+		slog.Error("token exchange failed", "err", err)
 		http.Error(w, "sign-in failed", http.StatusBadRequest)
 		return
 	}
@@ -68,6 +78,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	idt, err := h.Verifier.Verify(ctx, rawID)
 	if err != nil {
+		slog.Error("id token verification failed", "err", err)
 		http.Error(w, "id token invalid", http.StatusBadRequest)
 		return
 	}
