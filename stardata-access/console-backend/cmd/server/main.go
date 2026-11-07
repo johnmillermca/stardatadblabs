@@ -35,7 +35,8 @@ func main() {
 	ctx := context.Background()
 
 	// ── Configuration from environment ───────────────────────────────────────
-	zitadelDomain := mustEnv("ZITADEL_DOMAIN")  // "https://auth.stardatadb.com"
+	zitadelDomain := mustEnv("ZITADEL_DOMAIN")       // "https://auth.stardatadb.com" — public issuer
+	zitadelInternalURL := mustEnv("ZITADEL_INTERNAL_URL") // "http://zitadel.access.svc.cluster.local:8080" — discovery fetch
 	clientID := mustEnv("OIDC_CLIENT_ID")
 	clientSecret := mustEnv("OIDC_CLIENT_SECRET")
 	redirectURI := mustEnv("OIDC_REDIRECT_URI") // "https://console.stardatadb.com/auth/callback"
@@ -119,10 +120,20 @@ func main() {
 	// ── OIDC provider discovery (retries with backoff) ────────────────────────
 	// Runs after the server is already accepting connections, so /healthz passes
 	// while we wait for ZITADEL to become available.
+	//
+	// Discovery is fetched from the plain-HTTP internal service URL to avoid the
+	// TLS handshake against plain HTTP that CoreDNS-overridden port-443 causes.
+	// InsecureIssuerURLContext tells go-oidc: "fetch the discovery doc from
+	// zitadelInternalURL but accept zitadelDomain as the issuer in the response".
+	oidcCtx := oidc.InsecureIssuerURLContext(
+		oidc.ClientContext(ctx, &http.Client{}),
+		zitadelDomain,
+	)
+
 	var provider *oidc.Provider
 	for attempt, delay := 1, 2*time.Second; ; attempt++ {
 		var err error
-		provider, err = oidc.NewProvider(ctx, zitadelDomain)
+		provider, err = oidc.NewProvider(oidcCtx, zitadelInternalURL)
 		if err == nil {
 			break
 		}

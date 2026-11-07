@@ -46,13 +46,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: console-backend
-          image: 192.168.1.50:30500/stardatadb/console-backend:1.0.3
+          image: 192.168.1.50:30500/stardatadb/console-backend:1.0.5
           imagePullPolicy: Always
           ports:
             - containerPort: 8090
           env:
             # ── OIDC ──────────────────────────────────────────────────────────
             - name: ZITADEL_DOMAIN
+              value: "https://auth.stardatadb.com"
+            - name: ZITADEL_INTERNAL_URL
               value: "http://zitadel.access.svc.cluster.local:8080"
             - name: OIDC_CLIENT_ID
               valueFrom:
