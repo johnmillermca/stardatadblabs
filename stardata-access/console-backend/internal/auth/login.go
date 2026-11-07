@@ -35,7 +35,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		"pre:"+state,
 		mustJSON(pre),
-		5*time.Minute,
+		15*time.Minute,
 	).Err(); err != nil {
 		http.Error(w, "session store unavailable", http.StatusServiceUnavailable)
 		return
