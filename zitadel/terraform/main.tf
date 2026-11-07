@@ -126,7 +126,8 @@ resource "zitadel_application_oidc" "console" {
 
 # Outputs → stored in Kubernetes Secret console-oidc (namespace access)
 output "console_client_id"     { value = zitadel_application_oidc.console.client_id }
-output "console_client_secret" { value = zitadel_application_oidc.console.client_secret; sensitive = true }
+output "console_client_secret" { value = zitadel_application_oidc.console.client_secret
+sensitive = true }
 
 # API Gateway (tools.stardatadb.com)
 resource "zitadel_application_oidc" "gateway" {

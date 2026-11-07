@@ -4,6 +4,7 @@
 # paths are open:
 #   webconsole-proxy (prod) → console-backend (8090)
 #   webconsole-proxy (prod) → ZITADEL (8080/8443)
+#   webconsole-proxy (prod) → zitadel-login (3000)
 #   ZITADEL pods   → stardata-claims (8080)
 #   ZITADEL pods   → audit-forwarder (8080)
 #   console-backend → ZITADEL (8080)
@@ -279,3 +280,31 @@ spec:
               kubernetes.io/metadata.name: prod
       ports:
         - port: 587
+
+# ── zitadel-login: ingress from webconsole-proxy (prod) on port 3000 ─────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zitadel-login-ingress
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zitadel-login
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # webconsole-proxy pod (hostNetwork on master2 — arrives as node/tunnel IP)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prod
+          podSelector:
+            matchLabels:
+              app: webconsole-proxy
+        - ipBlock:
+            cidr: 192.168.1.0/24
+        - ipBlock:
+            cidr: 10.244.0.0/16
+      ports:
+        - port: 3000

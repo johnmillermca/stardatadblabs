@@ -34,20 +34,32 @@ data:
     }
 
     # ── auth.stardatadb.com ───────────────────────────────────────────────────────
-    # All ZITADEL traffic: API, OIDC, Login v2 UI
+    # /ui/v2/login/* → Login v2 Next.js service
+    # everything else → ZITADEL API / OIDC
     server {
         listen 80;
         server_name auth.stardatadb.com;
 
-        location / {
-            proxy_pass http://zitadel.access.svc.cluster.local:8080;
+        location /ui/v2/login {
+            proxy_pass http://zitadel-login.access.svc.cluster.local:3000;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto https;
             proxy_connect_timeout 5s;
             proxy_read_timeout 60s;
-            # Required for ZITADEL h2c (HTTP/2 cleartext) gRPC traffic
+        }
+
+        location / {
+            proxy_pass https://zitadel-https.access.svc.cluster.local;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 60s;
+            # Required for ZITADEL gRPC/h2c traffic
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "";

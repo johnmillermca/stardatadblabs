@@ -29,6 +29,10 @@ zitadel:
     ExternalPort: 443
     ExternalSecure: true
 
+    # Login v2 Next.js app — ZITADEL proxies /ui/v2/login/* to this URL.
+    LoginV2:
+      BaseURL: http://zitadel-login.access.svc.cluster.local:3000
+
     # Self-signed TLS cert for in-cluster HTTPS (console-backend OIDC discovery).
     # Cloudflare terminates public TLS; ZITADEL serves HTTPS internally.
     TLS:
@@ -115,6 +119,10 @@ ingress:
 login:
   enabled: true
   replicaCount: 2
+  image:
+    repository: ghcr.io/zitadel/zitadel-login
+    tag: v4.13.1
+    pullPolicy: IfNotPresent
   # Extra environment variables passed to the Login v2 Next.js container.
   extraEnv:
     - name: ZITADEL_PRIMARY_COLOR
@@ -202,6 +210,13 @@ extraVolumeMounts:
 
 initJob:
   enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
 
 setupJob:
   resources:
