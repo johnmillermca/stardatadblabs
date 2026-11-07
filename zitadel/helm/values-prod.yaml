@@ -135,11 +135,11 @@ login:
       value: "Required for Owners and Admins. Enter the 6-digit code from your authenticator app."
     - name: ZITADEL_ORG_DOMAIN
       value: "stardatadb.com"
-    # The chart generates ZITADEL_API_URL as "https://zitadel:8080" (wrong port
-    # for TLS). Override it to the correct HTTPS service on 443.
-    # Traffic never leaves the cluster on this path.
+    # The chart generates ZITADEL_API_URL as "https://zitadel:8080" using just
+    # the short service name — TLS alert code 47 because the SNI doesn't match
+    # the cert SAN. Use the FQDN that IS in the cert SAN list.
     - name: ZITADEL_API_URL
-      value: "https://zitadel-https.access.svc.cluster.local:443"
+      value: "https://zitadel.access.svc.cluster.local:8080"
     # Accept the internal self-signed cert — node never sends this externally.
     - name: NODE_TLS_REJECT_UNAUTHORIZED
       value: "0"

@@ -55,7 +55,7 @@ spec:
             - name: ZITADEL_DOMAIN
               value: "https://auth.stardatadb.com"
             - name: ZITADEL_INTERNAL_URL
-              value: "https://zitadel-https.access.svc.cluster.local:443"
+              value: "https://zitadel.access.svc.cluster.local:8080"
             - name: OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:
