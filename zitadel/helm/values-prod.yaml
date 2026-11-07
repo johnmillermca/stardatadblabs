@@ -89,6 +89,7 @@ login:
       cpu: 100m
       memory: 128Mi
     limits:
+      cpu: 200m
       memory: 256Mi
   podDisruptionBudget:
     enabled: true
@@ -159,7 +160,17 @@ resources:
     cpu: 500m
     memory: 512Mi
   limits:
+    cpu: 1000m
     memory: 1Gi
+
+initJob:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
 
 pdb:
   enabled: true

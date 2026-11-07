@@ -2,16 +2,17 @@
 # Network policies — access namespace allow-list
 # Combined with the default-deny-all in namespace.yaml, only these exact
 # paths are open:
-#   ingress-nginx  → ZITADEL (443/h2c)
+#   webconsole-proxy (prod) → console-backend (8090)
+#   webconsole-proxy (prod) → ZITADEL (8080/8443)
 #   ZITADEL pods   → stardata-claims (8080)
 #   ZITADEL pods   → audit-forwarder (8080)
-#   console-backend → ZITADEL (443)
+#   console-backend → ZITADEL (8080)
 #   console-backend → console-db (5432)
 #   console-backend → valkey (6379)
 #   console-backend → kafka (9093)   [audit writes]
 #   audit-forwarder → kafka (9093)
 #   access-cron     → console-db (5432)
-#   access-cron     → ZITADEL (443)
+#   access-cron     → ZITADEL (8080)
 #   DNS (all pods   → kube-dns 53)
 # =============================================================================
 
@@ -32,7 +33,7 @@ spec:
         - port: 53
           protocol: TCP
 
-# ── ZITADEL: allow ingress from nginx ingress controller ──────────────────────
+# ── ZITADEL: allow ingress from webconsole-proxy (prod namespace) ─────────────
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -48,7 +49,13 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: prod
+          podSelector:
+            matchLabels:
+              app: webconsole-proxy
+        # hostNetwork pods route via the node's active interface IP
+        - ipBlock:
+            cidr: 192.168.1.0/24
       ports:
         - port: 8080
         - port: 8443
@@ -81,7 +88,7 @@ spec:
         - port: 53
           protocol: TCP
 
-# ── console-backend: ingress from nginx, egress to ZITADEL + DB + Valkey + Kafka
+# ── console-backend: ingress from webconsole-proxy (prod namespace) ───────────
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -95,9 +102,14 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
+        # Normal pods in prod namespace
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: prod
+        # hostNetwork pods on master2: kube-proxy SNATs them to the node tunl0 IP
+        # (10.244.119.192) — allow the full pod/node CIDR
+        - ipBlock:
+            cidr: 10.244.0.0/16
       ports:
         - port: 8090
   egress:

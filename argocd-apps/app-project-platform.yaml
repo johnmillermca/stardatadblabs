@@ -27,6 +27,8 @@ spec:
     - "https://kedacore.github.io/charts"
     # Apache Flink Kubernetes Operator
     - "https://downloads.apache.org/flink/flink-kubernetes-operator-1.16.1"
+    # ZITADEL
+    - "https://charts.zitadel.com"
 
   destinations:
     - namespace: "prod"
@@ -50,6 +52,10 @@ spec:
     - namespace: "keda"
       server: https://kubernetes.default.svc
     - namespace: "flink"
+      server: https://kubernetes.default.svc
+    - namespace: "access"
+      server: https://kubernetes.default.svc
+    - namespace: "document"
       server: https://kubernetes.default.svc
 
   clusterResourceWhitelist:
