@@ -33,6 +33,25 @@ spec:
         - port: 53
           protocol: TCP
 
+# ── ZITADEL setup job: egress to Kubernetes API server ───────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zitadel-setup-k8s-api
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: setup
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+
 # ── ZITADEL: allow ingress from webconsole-proxy (prod namespace) ─────────────
 ---
 apiVersion: networking.k8s.io/v1
@@ -53,9 +72,19 @@ spec:
           podSelector:
             matchLabels:
               app: webconsole-proxy
-        # hostNetwork pods route via the node's active interface IP
+        # hostNetwork pods on master2: traffic SNATs through node/tunnel IPs
         - ipBlock:
             cidr: 192.168.1.0/24
+        - ipBlock:
+            cidr: 10.244.0.0/16
+        # console-backend OIDC discovery + token introspection
+        - podSelector:
+            matchLabels:
+              app: console-backend
+        # stardata-claims service
+        - podSelector:
+            matchLabels:
+              app: stardata-claims
       ports:
         - port: 8080
         - port: 8443
@@ -174,6 +203,26 @@ spec:
               app.kubernetes.io/name: kafka
       ports:
         - port: 9093
+
+# ── zitadel-db: ingress from ZITADEL pods (admin + app user) ─────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zitadel-db-policy
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app: zitadel-db
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zitadel
+      ports:
+        - port: 5432
 
 # ── Valkey: ingress from console-backend only ─────────────────────────────────
 ---

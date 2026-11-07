@@ -37,7 +37,7 @@ spec:
       tolerations:
         - key: dedicated
           operator: Equal
-          value: doris
+          value: zitadel
           effect: NoSchedule
       securityContext:
         runAsNonRoot: true
@@ -46,14 +46,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: console-backend
-          image: 192.168.1.50:30500/stardatadb/console-backend:1.0.0
+          image: 192.168.1.50:30500/stardatadb/console-backend:1.0.3
           imagePullPolicy: Always
           ports:
             - containerPort: 8090
           env:
             # ── OIDC ──────────────────────────────────────────────────────────
             - name: ZITADEL_DOMAIN
-              value: "https://auth.stardatadb.com"
+              value: "http://zitadel.access.svc.cluster.local:8080"
             - name: OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:

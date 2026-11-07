@@ -33,6 +33,33 @@ data:
         }
     }
 
+    # ── auth.stardatadb.com ───────────────────────────────────────────────────────
+    # All ZITADEL traffic: API, OIDC, Login v2 UI
+    server {
+        listen 80;
+        server_name auth.stardatadb.com;
+
+        location / {
+            proxy_pass http://zitadel.access.svc.cluster.local:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 60s;
+            # Required for ZITADEL h2c (HTTP/2 cleartext) gRPC traffic
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "";
+        }
+
+        location /healthz {
+            access_log off;
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+    }
+
     # ── console.stardatadb.com ────────────────────────────────────────────────────
     # /auth/* and /api/* go to the BFF (console-backend in namespace access).
     # Everything else (/) is the console SPA on worker8.

@@ -1,13 +1,25 @@
 # =============================================================================
 # ZITADEL v4 — Helm chart values (prod)
+# ServiceAccount: stardatarbac (not the default "zitadel")
 # Chart  : https://charts.zitadel.com  chart: zitadel  version: 9.x (pin latest 9.x)
 # Domain : auth.stardatadb.com  (API + OIDC + /ui/v2/login)
 # DB     : zitadel-db.access.svc.cluster.local:5432
 # Sign-in/sign-up for: www.stardatadb.com console (console.stardatadb.com)
 # All ZITADEL pods run on 192.168.1.51 (worker1.local) per deployment split
+#
+# TLS NOTE: This cluster does NOT use an in-cluster nginx ingress controller.
+# Traffic reaches ZITADEL via:
+#   Cloudflare tunnel → webconsole-proxy nginx (master2:80)
+#     → proxy_pass http://zitadel.access.svc.cluster.local:8080
+# The webconsole-proxy terminates TLS via Cloudflare; ZITADEL serves plain HTTP.
+# Ingress is therefore disabled here.
 # =============================================================================
 
 replicaCount: 3
+
+serviceAccount:
+  create: false
+  name: stardatarbac
 
 zitadel:
   masterkeySecretName: zitadel-masterkey   # key: masterkey (32 chars, NEVER change)
@@ -17,7 +29,7 @@ zitadel:
     ExternalPort: 443
     ExternalSecure: true
 
-    # TLS terminates at the ingress (NGINX); ZITADEL pods serve plain HTTP/2 (h2c)
+    # TLS terminates at Cloudflare; ZITADEL pods serve plain HTTP
     TLS:
       Enabled: false
 
@@ -30,11 +42,11 @@ zitadel:
         User:
           Username: zitadel
           SSL:
-            Mode: require
+            Mode: disable
         Admin:
-          Username: zitadel_admin
+          Username: platform_admin
           SSL:
-            Mode: require
+            Mode: disable
 
     FirstInstance:
       Org:
@@ -59,31 +71,53 @@ zitadel:
           IdleSessionLifetime: 24h
           SessionMaxAgeHours: 168        # 7 days maximum absolute session age
 
-  # Secret holds Database.Postgres.User.Password (key: app-password)
-  # and Database.Postgres.Admin.Password (key: admin-password)
-  configSecretName: zitadel-db-passwords
+  # DB passwords injected via secretConfig — chart creates the config-yaml secret.
+  secretConfig:
+    Database:
+      Postgres:
+        User:
+          Password: "Priya1982"
+        Admin:
+          Password: "Priya1982"
+
+# Use local registry for all images (Docker Hub / ghcr.io not fully reachable)
+imageRegistry: "192.168.1.50:30500"
+
+image:
+  repository: 192.168.1.50:30500/zitadel/zitadel
+  tag: v4.13.1
+
+tools:
+  kubectl:
+    image:
+      repository: "bitnami/kubectl"
+      tag: "latest"
+  wait4x:
+    image:
+      repository: "wait4x/wait4x"
+      tag: "3.6"
+
+# Disable in-cluster ingress — routing is handled by webconsole-proxy nginx
+ingress:
+  enabled: false
 
 login:
   enabled: true
   replicaCount: 2
   # Extra environment variables passed to the Login v2 Next.js container.
-  # These configure the StarData branding applied on top of ZITADEL's label policy.
   extraEnv:
-    # Primary brand colour — must match zitadel_label_policy primary_color.
     - name: ZITADEL_PRIMARY_COLOR
       value: "#3346C4"
-    # Title shown on the login card (Step 1 — "Sign in").
     - name: ZITADEL_LOGIN_TITLE
       value: "Sign in"
-    # Subtitle shown below the title.
     - name: ZITADEL_LOGIN_SUBTITLE
       value: "Use your StarData account"
-    # Step-2 MFA screen subtitle.
     - name: ZITADEL_MFA_SUBTITLE
       value: "Required for Owners and Admins. Enter the 6-digit code from your authenticator app."
-    # Org domain — allows users to type john@stardatadb.com (hide_login_name_suffix).
     - name: ZITADEL_ORG_DOMAIN
       value: "stardatadb.com"
+  ingress:
+    enabled: false
   resources:
     requests:
       cpu: 100m
@@ -102,40 +136,13 @@ login:
               - key: kubernetes.io/hostname
                 operator: In
                 values: [worker1.local]
-  ingress:
-    enabled: true
-    className: nginx
-    annotations:
-      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-      nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-      nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
-    hosts:
-      - host: auth.stardatadb.com
-        paths:
-          - path: /ui/v2/login
-            pathType: Prefix
-    tls:
-      - secretName: zitadel-tls
-        hosts: [auth.stardatadb.com]
 
-# Main ZITADEL ingress (API + OIDC + /ui/console)
-ingress:
-  enabled: true
-  className: nginx
-  annotations:
-    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
-    # Restrict /ui/console to platform-team VPN range only
-    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,192.168.0.0/16"
-  hosts:
-    - host: auth.stardatadb.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: zitadel-tls
-      hosts: [auth.stardatadb.com]
+# Tolerate the dedicated=zitadel taint on worker1.local
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: zitadel
+    effect: NoSchedule
 
 # Pin all ZITADEL pods to worker1.local (192.168.1.51)
 affinity:
@@ -164,6 +171,9 @@ resources:
     memory: 1Gi
 
 initJob:
+  enabled: false
+
+setupJob:
   resources:
     requests:
       cpu: 100m

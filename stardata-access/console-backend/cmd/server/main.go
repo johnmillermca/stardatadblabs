@@ -7,7 +7,7 @@
 //   GET  /auth/callback    — receive code from ZITADEL, create session
 //   GET  /auth/logout      — delete session, redirect to ZITADEL end_session
 //   GET  /mfa-required     — shown to Owners/Admins who signed in without MFA
-//   GET  /healthz          — liveness / readiness probe
+//   GET  /healthz          — liveness / readiness probe (responds immediately)
 //   *    /api/*            — gated behind RequireSession; proxied to access APIs
 //
 // All configuration is read from environment variables (injected by Kubernetes
@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -34,25 +35,109 @@ func main() {
 	ctx := context.Background()
 
 	// ── Configuration from environment ───────────────────────────────────────
-	zitadelDomain := mustEnv("ZITADEL_DOMAIN")      // "https://auth.stardatadb.com"
+	zitadelDomain := mustEnv("ZITADEL_DOMAIN")  // "https://auth.stardatadb.com"
 	clientID := mustEnv("OIDC_CLIENT_ID")
 	clientSecret := mustEnv("OIDC_CLIENT_SECRET")
-	redirectURI := mustEnv("OIDC_REDIRECT_URI")     // "https://console.stardatadb.com/auth/callback"
+	redirectURI := mustEnv("OIDC_REDIRECT_URI") // "https://console.stardatadb.com/auth/callback"
 	projectID := mustEnv("ZITADEL_PROJECT_ID")
 
-	valkeyAddr := mustEnv("VALKEY_ADDR")             // "valkey.access.svc.cluster.local:6379"
-	valkeyPass := os.Getenv("VALKEY_PASSWORD")       // optional when running without auth
-	sessionIdleSec := envInt("SESSION_IDLE_TTL", 86400)  // default 24 h
+	valkeyAddr := mustEnv("VALKEY_ADDR")        // "valkey.access.svc.cluster.local:6379"
+	valkeyPass := os.Getenv("VALKEY_PASSWORD")  // optional when running without auth
+	sessionIdleSec := envInt("SESSION_IDLE_TTL", 86400) // default 24 h
 
-	// ── OIDC provider (discovers endpoints from /.well-known) ────────────────
-	provider, err := oidc.NewProvider(ctx, zitadelDomain)
-	if err != nil {
-		slog.Error("oidc provider discovery failed", "err", err)
+	// ── Valkey (Redis-compatible) client ──────────────────────────────────────
+	valkeyClient := redis.NewClient(&redis.Options{
+		Addr:     valkeyAddr,
+		Password: valkeyPass,
+	})
+	if err := valkeyClient.Ping(ctx).Err(); err != nil {
+		slog.Error("valkey connection failed", "addr", valkeyAddr, "err", err)
 		os.Exit(1)
 	}
 
+	// ── Handler placeholder — swapped in once OIDC discovery succeeds ─────────
+	// authReady is atomically swapped from nil → *auth.Handler once discovery
+	// completes. Auth routes return 503 until then; /healthz always returns 200
+	// so the readiness probe passes immediately and the pod is marked Ready.
+	var authReady atomic.Pointer[auth.Handler]
+
+	// ── HTTP routes ───────────────────────────────────────────────────────────
+	mux := http.NewServeMux()
+
+	// Health check — always available, no dependency on OIDC.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	// Auth routes — served once OIDC discovery has completed.
+	authGate := func(next func(*auth.Handler, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			h := authReady.Load()
+			if h == nil {
+				http.Error(w, "auth service starting, please retry in a moment", http.StatusServiceUnavailable)
+				return
+			}
+			next(h, w, r)
+		}
+	}
+	mux.HandleFunc("GET /auth/login", authGate((*auth.Handler).Login))
+	mux.HandleFunc("GET /auth/callback", authGate((*auth.Handler).Callback))
+	mux.HandleFunc("GET /auth/logout", authGate((*auth.Handler).Logout))
+	mux.HandleFunc("GET /mfa-required", authGate((*auth.Handler).MFARequired))
+
+	// /api/me — requires session.
+	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
+		h := authReady.Load()
+		if h == nil {
+			http.Error(w, "auth service starting, please retry in a moment", http.StatusServiceUnavailable)
+			return
+		}
+		h.RequireSession(http.HandlerFunc(handleMe)).ServeHTTP(w, r)
+	})
+
+	// All other /api/* routes are gated by session.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		h := authReady.Load()
+		if h == nil {
+			http.Error(w, "auth service starting, please retry in a moment", http.StatusServiceUnavailable)
+			return
+		}
+		h.RequireSession(http.NotFoundHandler()).ServeHTTP(w, r)
+	})
+
+	// ── Start HTTP server immediately so /healthz responds ────────────────────
+	addr := ":8090"
+	slog.Info("console-backend listening", "addr", addr)
+	go func() {
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// ── OIDC provider discovery (retries with backoff) ────────────────────────
+	// Runs after the server is already accepting connections, so /healthz passes
+	// while we wait for ZITADEL to become available.
+	var provider *oidc.Provider
+	for attempt, delay := 1, 2*time.Second; ; attempt++ {
+		var err error
+		provider, err = oidc.NewProvider(ctx, zitadelDomain)
+		if err == nil {
+			break
+		}
+		if attempt >= 10 {
+			slog.Error("oidc provider discovery failed after retries", "err", err)
+			os.Exit(1)
+		}
+		slog.Warn("oidc provider discovery failed, retrying", "attempt", attempt, "delay", delay, "err", err)
+		time.Sleep(delay)
+		if delay < 60*time.Second {
+			delay *= 2
+		}
+	}
+
 	// ── OAuth2 config ─────────────────────────────────────────────────────────
-	// The project audience scope makes ZITADEL include project roles in tokens.
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -70,17 +155,7 @@ func main() {
 	// ── ID token verifier ─────────────────────────────────────────────────────
 	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
 
-	// ── Valkey (Redis-compatible) client ──────────────────────────────────────
-	valkeyClient := redis.NewClient(&redis.Options{
-		Addr:     valkeyAddr,
-		Password: valkeyPass,
-	})
-	if err := valkeyClient.Ping(ctx).Err(); err != nil {
-		slog.Error("valkey connection failed", "addr", valkeyAddr, "err", err)
-		os.Exit(1)
-	}
-
-	// ── Auth handler ──────────────────────────────────────────────────────────
+	// ── Publish the handler — auth routes become live ─────────────────────────
 	h := &auth.Handler{
 		OAuth:          oauthCfg,
 		Verifier:       verifier,
@@ -88,36 +163,11 @@ func main() {
 		ZitadelDomain:  zitadelDomain,
 		SessionIdleTTL: time.Duration(sessionIdleSec) * time.Second,
 	}
+	authReady.Store(h)
+	slog.Info("oidc discovery complete, auth routes live", "issuer", zitadelDomain)
 
-	// ── HTTP routes ───────────────────────────────────────────────────────────
-	mux := http.NewServeMux()
-
-	// Public auth routes (no session required).
-	mux.HandleFunc("GET /auth/login", h.Login)
-	mux.HandleFunc("GET /auth/callback", h.Callback)
-	mux.HandleFunc("GET /auth/logout", h.Logout)
-	mux.HandleFunc("GET /mfa-required", h.MFARequired)
-
-	// Health check (no session required).
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	})
-
-	// /api/me — returns the current session's user info as JSON.
-	mux.Handle("GET /api/me", h.RequireSession(http.HandlerFunc(handleMe)))
-
-	// All other /api/* routes are gated by session; individual handlers add
-	// RequireMFA where needed (Owner/Admin-only operations).
-	mux.Handle("/api/", h.RequireSession(http.NotFoundHandler()))
-
-	// ── Start server ──────────────────────────────────────────────────────────
-	addr := ":8090"
-	slog.Info("console-backend listening", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
+	// Block forever (server runs in a goroutine above).
+	select {}
 }
 
 // handleMe returns session identity as JSON.
@@ -155,3 +205,4 @@ func envInt(key string, def int) int {
 	}
 	return n
 }
+
