@@ -140,4 +140,4 @@ metadata:
   name: claims-config
   namespace: access
 data:
-  project_id: "REPLACE_WITH_ZITADEL_PROJECT_ID"
+  project_id: "398583798385613384"
