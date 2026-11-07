@@ -17,8 +17,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -35,8 +37,12 @@ func main() {
 	ctx := context.Background()
 
 	// ── Configuration from environment ───────────────────────────────────────
-	zitadelDomain := mustEnv("ZITADEL_DOMAIN")       // "https://auth.stardatadb.com" — public issuer
-	zitadelInternalURL := mustEnv("ZITADEL_INTERNAL_URL") // "http://zitadel.access.svc.cluster.local:8080" — discovery fetch
+	zitadelDomain := mustEnv("ZITADEL_DOMAIN") // "https://auth.stardatadb.com"
+	// ZITADEL_INTERNAL_URL: plain in-cluster address for discovery fetch.
+	// ZITADEL serves HTTPS with a self-signed cert; Host header must equal the
+	// ExternalDomain so ZITADEL routes to the correct instance.
+	// A custom transport handles both: skip TLS verify + rewrite Host header.
+	zitadelInternalURL := os.Getenv("ZITADEL_INTERNAL_URL") // "https://zitadel.access.svc.cluster.local:8080"
 	clientID := mustEnv("OIDC_CLIENT_ID")
 	clientSecret := mustEnv("OIDC_CLIENT_SECRET")
 	redirectURI := mustEnv("OIDC_REDIRECT_URI") // "https://console.stardatadb.com/auth/callback"
@@ -118,22 +124,35 @@ func main() {
 	}()
 
 	// ── OIDC provider discovery (retries with backoff) ────────────────────────
-	// Runs after the server is already accepting connections, so /healthz passes
+	// Runs after the server is already accepting connections so /healthz passes
 	// while we wait for ZITADEL to become available.
 	//
-	// Discovery is fetched from the plain-HTTP internal service URL to avoid the
-	// TLS handshake against plain HTTP that CoreDNS-overridden port-443 causes.
-	// InsecureIssuerURLContext tells go-oidc: "fetch the discovery doc from
-	// zitadelInternalURL but accept zitadelDomain as the issuer in the response".
+	// ZITADEL serves HTTPS with a self-signed cert. When ZITADEL_INTERNAL_URL is
+	// set the discovery fetch goes directly to the in-cluster service, bypassing
+	// the CoreDNS override (auth.stardatadb.com → ClusterIP:443). A custom
+	// transport skips TLS verification for this internal hop and rewrites the
+	// Host header so ZITADEL's instance router matches ExternalDomain.
+	// When ZITADEL_INTERNAL_URL is unset the public URL is used as-is.
+	discoveryURL := zitadelDomain
+	baseTLSTransport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed internal cert
+	}
+	var oidcRoundTripper http.RoundTripper = baseTLSTransport
+	if zitadelInternalURL != "" {
+		discoveryURL = zitadelInternalURL
+		// Wrap to inject Host: auth.stardatadb.com so ZITADEL's instance router
+		// matches ExternalDomain instead of the internal service FQDN.
+		oidcRoundTripper = newHostOverrideTransport(baseTLSTransport, zitadelDomain)
+	}
 	oidcCtx := oidc.InsecureIssuerURLContext(
-		oidc.ClientContext(ctx, &http.Client{}),
+		oidc.ClientContext(ctx, &http.Client{Transport: oidcRoundTripper}),
 		zitadelDomain,
 	)
 
 	var provider *oidc.Provider
 	for attempt, delay := 1, 2*time.Second; ; attempt++ {
 		var err error
-		provider, err = oidc.NewProvider(oidcCtx, zitadelInternalURL)
+		provider, err = oidc.NewProvider(oidcCtx, discoveryURL)
 		if err == nil {
 			break
 		}
@@ -217,3 +236,27 @@ func envInt(key string, def int) int {
 	return n
 }
 
+
+// hostOverrideTransport wraps an http.RoundTripper and rewrites the Host
+// header on every request to the given value. This is required when fetching
+// the OIDC discovery document directly from the in-cluster ZITADEL service
+// (bypassing CoreDNS override): ZITADEL routes requests by Host header, so it
+// must see "auth.stardatadb.com" even though we dial the internal FQDN.
+type hostOverrideTransport struct {
+	base http.RoundTripper
+	host string // host[:port] — no scheme
+}
+
+func newHostOverrideTransport(base http.RoundTripper, issuerURL string) *hostOverrideTransport {
+	host := issuerURL
+	if u, err := url.Parse(issuerURL); err == nil {
+		host = u.Host // e.g. "auth.stardatadb.com"
+	}
+	return &hostOverrideTransport{base: base, host: host}
+}
+
+func (t *hostOverrideTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r2 := req.Clone(req.Context())
+	r2.Host = t.host
+	return t.base.RoundTrip(r2)
+}
