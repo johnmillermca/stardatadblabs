@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -127,22 +126,21 @@ func main() {
 	// Runs after the server is already accepting connections so /healthz passes
 	// while we wait for ZITADEL to become available.
 	//
-	// ZITADEL serves HTTPS with a self-signed cert. When ZITADEL_INTERNAL_URL is
-	// set the discovery fetch goes directly to the in-cluster service, bypassing
-	// the CoreDNS override (auth.stardatadb.com → ClusterIP:443). A custom
-	// transport skips TLS verification for this internal hop and rewrites the
-	// Host header so ZITADEL's instance router matches ExternalDomain.
+	// ZITADEL_INTERNAL_URL (http://zitadel.access.svc.cluster.local:8080) bypasses
+	// the CoreDNS override (auth.stardatadb.com → ClusterIP:443 → pod:8080).
+	// Port 8080 is plain HTTP. The custom transport injects Host: auth.stardatadb.com
+	// so ZITADEL's instance router matches ExternalDomain.
+	// InsecureIssuerURLContext lets go-oidc accept the external issuer URL in the
+	// discovery doc even though we fetched it from the internal address.
 	// When ZITADEL_INTERNAL_URL is unset the public URL is used as-is.
 	discoveryURL := zitadelDomain
-	baseTLSTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed internal cert
-	}
-	var oidcRoundTripper http.RoundTripper = baseTLSTransport
+	var oidcRoundTripper http.RoundTripper
 	if zitadelInternalURL != "" {
 		discoveryURL = zitadelInternalURL
-		// Wrap to inject Host: auth.stardatadb.com so ZITADEL's instance router
-		// matches ExternalDomain instead of the internal service FQDN.
-		oidcRoundTripper = newHostOverrideTransport(baseTLSTransport, zitadelDomain)
+		// ZITADEL on port 8080 is plain HTTP. Inject Host: auth.stardatadb.com
+		// so ZITADEL's instance router matches ExternalDomain instead of the
+		// internal service FQDN.
+		oidcRoundTripper = newHostOverrideTransport(http.DefaultTransport, zitadelDomain)
 	}
 	oidcCtx := oidc.InsecureIssuerURLContext(
 		oidc.ClientContext(ctx, &http.Client{Transport: oidcRoundTripper}),
