@@ -343,3 +343,28 @@ spec:
   syncPolicy:
     automated: {prune: false, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── Webconsole (nginx proxy on master2 + cloudflared tunnel) ─────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: webconsole
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/webconsole
+    directory:
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
