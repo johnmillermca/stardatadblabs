@@ -365,6 +365,13 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
+  ignoreDifferences:
+    - group: ""
+      kind: Pod
+      jsonPointers: [/status]
+    - group: apps
+      kind: DaemonSet
+      jsonPointers: [/status]
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
