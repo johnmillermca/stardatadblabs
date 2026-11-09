@@ -46,7 +46,8 @@ data:
         server_name auth.stardatadb.com;
 
         location /ui/v2/ {
-            proxy_pass http://zitadel-login.access.svc.cluster.local:3000;
+            set $zitadel_login "zitadel-login.access.svc.cluster.local";
+            proxy_pass http://$zitadel_login:3000;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -56,7 +57,8 @@ data:
         }
 
         location / {
-            proxy_pass https://zitadel-https.access.svc.cluster.local;
+            set $zitadel_https "zitadel-https.access.svc.cluster.local";
+            proxy_pass https://$zitadel_https;
             proxy_ssl_verify off;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -126,58 +128,68 @@ data:
         }
     }
 ---
-# Pod — hostNetwork on master2 (192.168.1.62), binds port 80 directly on the node
-apiVersion: v1
-kind: Pod
+# DaemonSet — hostNetwork on master2 (192.168.1.62), binds port 80 directly on the node.
+# Using a DaemonSet (not a bare Pod) ensures kubelet recreates it automatically after
+# a node reboot — bare Pods with restartPolicy:Always are not rescheduled on boot.
+apiVersion: apps/v1
+kind: DaemonSet
 metadata:
   name: webconsole-proxy
   namespace: prod
   labels:
     app: webconsole-proxy
 spec:
-  hostNetwork: true
-  dnsPolicy: ClusterFirstWithHostNet
-  nodeSelector:
-    kubernetes.io/hostname: master2.local
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Exists
-      effect: NoSchedule
-    - key: node-role.kubernetes.io/master
-      operator: Exists
-      effect: NoSchedule
-  restartPolicy: Always
-  containers:
-    - name: nginx
-      image: 192.168.1.50:30500/webconsole:latest
-      imagePullPolicy: Always
-      ports:
-        - containerPort: 80
-          hostPort: 80
-          protocol: TCP
-      volumeMounts:
+  selector:
+    matchLabels:
+      app: webconsole-proxy
+  template:
+    metadata:
+      labels:
+        app: webconsole-proxy
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: master2.local
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: nginx
+          image: 192.168.1.50:30500/webconsole:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              hostPort: 80
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
         - name: nginx-conf
-          mountPath: /etc/nginx/conf.d
-      resources:
-        requests:
-          cpu: "50m"
-          memory: "32Mi"
-        limits:
-          cpu: "200m"
-          memory: "64Mi"
-      readinessProbe:
-        httpGet:
-          path: /healthz
-          port: 8081
-        initialDelaySeconds: 5
-        periodSeconds: 10
-      livenessProbe:
-        httpGet:
-          path: /healthz
-          port: 8081
-        initialDelaySeconds: 10
-        periodSeconds: 20
-  volumes:
-    - name: nginx-conf
-      configMap:
-        name: webconsole-proxy-conf
+          configMap:
+            name: webconsole-proxy-conf
