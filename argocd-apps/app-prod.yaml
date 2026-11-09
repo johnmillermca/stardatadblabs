@@ -361,7 +361,9 @@ spec:
     targetRevision: HEAD
     path: manifests/webconsole
     directory:
-      include: "*.yaml"
+      # iptables-setup is a one-shot bootstrap pod (restartPolicy:Never).
+      # Excluding it prevents ArgoCD from re-running it on every sync cycle.
+      include: "{cloudflared,webconsole-proxy,webconsole-worker8,webconsole}.yaml"
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
