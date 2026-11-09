@@ -36,10 +36,8 @@ export default function WaitingPage() {
     }
   }, [me?.status]);
 
-  const handleSignOut = async () => {
-    const res = await apiFetch('/auth/logout', { method: 'POST' });
-    const { logoutUrl } = await res.json();
-    window.location.href = logoutUrl;
+  const handleSignOut = () => {
+    window.location.href = '/auth/logout';
   };
 
   return (

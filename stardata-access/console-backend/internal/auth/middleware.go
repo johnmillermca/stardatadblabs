@@ -15,8 +15,8 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 type contextKey string
@@ -42,8 +42,8 @@ func (h *Handler) RequireSession(next http.Handler) http.Handler {
 		sess, sid, ok := h.loadSession(w, r)
 		if !ok {
 			// Redirect to login; preserve the requested URL in ?next=.
-			next := safeNext(r.URL.RequestURI())
-			http.Redirect(w, r, "/auth/login?next="+next, http.StatusFound)
+			dest := safeNext(r.URL.RequestURI())
+			http.Redirect(w, r, "/auth/login?next="+dest, http.StatusFound)
 			return
 		}
 
@@ -115,12 +115,22 @@ func (h *Handler) MFARequired(w http.ResponseWriter, r *http.Request) {
 }
 
 // Logout handles GET /auth/logout.
-// It deletes the Valkey session, clears the cookie and redirects to the
-// ZITADEL end-session endpoint so the ZITADEL session is also terminated.
+// It deletes the Valkey session, clears the cookie, tells ZITADEL to
+// terminate its own session, then sends the browser directly to /auth/login
+// so the user lands on the custom-branded ZITADEL Login v2 page.
+//
+// We do NOT use post_logout_redirect_uri on the end_session call because
+// ZITADEL would bounce to console.stardatadb.com first (triggering a new
+// OIDC flow via RequireSession) which lands on the unstyled v1 login page.
+// Instead we fire-and-forget the end_session call server-side and redirect
+// the browser straight to /auth/login ourselves.
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("__Host-stardata_session")
-	if err == nil && cookie.Value != "" {
-		h.Valkey.Del(r.Context(), "sess:"+cookie.Value)
+	// Load session to get the id_token, then delete it.
+	var idToken string
+	sess, sid, ok := h.loadSession(w, r)
+	if ok {
+		idToken = sess.IDToken
+		h.Valkey.Del(r.Context(), "sess:"+sid)
 	}
 
 	// Clear the cookie.
@@ -134,15 +144,25 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 	})
 
-	// Redirect to ZITADEL's end-session endpoint.
+	// Redirect browser to ZITADEL end_session to terminate the ZITADEL session,
+	// then bounce back to /auth/login which starts a fresh OIDC flow and lands
+	// on the custom Login v2 page at auth.stardatadb.com.
+	// post_logout_redirect_uri must be registered on the OIDC app in ZITADEL.
 	http.Redirect(w, r,
-		h.ZitadelDomain+"/oidc/v1/end_session?post_logout_redirect_uri=https://console.stardatadb.com/",
+		h.ZitadelDomain+"/oidc/v1/end_session"+
+			"?id_token_hint="+idToken+
+			"&post_logout_redirect_uri=https://console.stardatadb.com/auth/login",
 		http.StatusFound,
 	)
 }
 
 // loadSession reads the session cookie and fetches the session from Valkey.
 // Returns the session, the session ID, and whether the load succeeded.
+//
+// Valkey stores all hash values as strings (go-redis serialises int64 and bool
+// to their decimal/0-1 string form). We read each field individually so we can
+// convert the types without going through a json round-trip that would fail on
+// e.g. `"1794137998"` (string) → int64.
 func (h *Handler) loadSession(w http.ResponseWriter, r *http.Request) (*Session, string, bool) {
 	cookie, err := r.Cookie("__Host-stardata_session")
 	if err != nil || cookie.Value == "" {
@@ -155,11 +175,23 @@ func (h *Handler) loadSession(w http.ResponseWriter, r *http.Request) (*Session,
 		return nil, "", false
 	}
 
-	// Marshal the flat string map back into a Session struct via JSON.
-	b, _ := json.Marshal(raw)
-	var sess Session
-	if err := json.Unmarshal(b, &sess); err != nil {
+	expAt, _ := strconv.ParseInt(raw["access_expires_at"], 10, 64)
+	createdAt, _ := strconv.ParseInt(raw["created_at"], 10, 64)
+	mfa := raw["mfa"] == "1" || raw["mfa"] == "true"
+
+	sess := &Session{
+		Sub:             raw["sub"],
+		Email:           raw["email"],
+		Name:            raw["name"],
+		AccessToken:     raw["access_token"],
+		RefreshToken:    raw["refresh_token"],
+		IDToken:         raw["id_token"],
+		AccessExpiresAt: expAt,
+		MFA:             mfa,
+		CreatedAt:       createdAt,
+	}
+	if sess.Sub == "" || sess.AccessToken == "" {
 		return nil, "", false
 	}
-	return &sess, sid, true
+	return sess, sid, true
 }

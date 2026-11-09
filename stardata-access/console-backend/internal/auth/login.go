@@ -41,22 +41,27 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := h.OAuth.AuthCodeURL(
-		state,
+	// Build the authorization URL. Pass login_hint if the caller provided one
+	// (e.g. www.stardatadb.com pre-fills the email so ZITADEL shows it).
+	authOpts := []oauth2.AuthCodeOption{
 		oidc.Nonce(nonce),
 		oauth2.S256ChallengeOption(verifier),
-	)
+	}
+	if hint := r.URL.Query().Get("login_hint"); hint != "" {
+		authOpts = append(authOpts, oauth2.SetAuthURLParam("login_hint", hint))
+	}
+	url := h.OAuth.AuthCodeURL(state, authOpts...)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
 // safeNext returns next only when it is a safe relative path (starts with /).
-// Any other value (empty, absolute URL, data: etc.) falls back to "/".
+// Any other value (empty, absolute URL, data: etc.) falls back to "/console.html".
 // This prevents open-redirect attacks via the ?next= parameter.
 func safeNext(next string) string {
 	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
 		return next
 	}
-	return "/"
+	return "/console.html"
 }
 
 func mustJSON(v any) string {

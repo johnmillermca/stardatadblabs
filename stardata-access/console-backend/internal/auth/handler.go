@@ -43,7 +43,7 @@ type Handler struct {
 }
 
 // PreSession is serialised to JSON and stored in Valkey under "pre:<state>"
-// for 5 minutes.  It binds the PKCE verifier, the nonce and the post-login
+// for 15 minutes.  It binds the PKCE verifier, the nonce and the post-login
 // redirect target to the state parameter so they survive the round trip to
 // ZITADEL and back.
 type PreSession struct {
@@ -61,3 +61,4 @@ func rand32() string {
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
+

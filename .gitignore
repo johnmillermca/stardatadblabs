@@ -39,3 +39,16 @@ docker/jupyter-spark/*.jar
 __pycache__/
 *.pyc
 *.pyo
+
+# Compiled Go binaries — built by scripts/build-console-backend.sh, not stored in git
+stardata-access/console-backend/console-backend-bin
+stardata-access/console-backend/server
+
+# Kafka connector JARs — large binaries downloaded at build time
+docker/flink-kafka/*.jar
+
+# Terraform providers / state — re-initialised via `terraform init`
+zitadel/terraform/.terraform/
+zitadel/terraform/.terraform.lock.hcl
+zitadel/terraform/terraform.tfstate
+zitadel/terraform/terraform.tfstate.backup

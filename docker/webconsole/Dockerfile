@@ -7,8 +7,9 @@ RUN rm /etc/nginx/conf.d/default.conf
 COPY nginx.conf /etc/nginx/conf.d/webconsole.conf
 
 # Copy static files
-COPY index.html    /usr/share/nginx/html/index.html
+COPY index.html     /usr/share/nginx/html/index.html
 COPY stargraph.html /usr/share/nginx/html/stargraph.html
+COPY console.html   /usr/share/nginx/html/console.html
 
 EXPOSE 80
 

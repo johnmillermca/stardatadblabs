@@ -7,6 +7,11 @@ metadata:
   namespace: prod
 data:
   default.conf: |
+    # Use kube-dns for dynamic upstream resolution (required for hostNetwork pods).
+    # Without this nginx resolves upstreams once at startup and caches them forever;
+    # any pod rollout causes 502/503 until nginx is manually reloaded.
+    resolver 10.96.0.10 valid=10s ipv6=off;
+
     server {
         listen 80;
         server_name www.stardatadb.com stardatadb.com _;
@@ -40,7 +45,7 @@ data:
         listen 80;
         server_name auth.stardatadb.com;
 
-        location /ui/v2/login {
+        location /ui/v2/ {
             proxy_pass http://zitadel-login.access.svc.cluster.local:3000;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -80,7 +85,8 @@ data:
         server_name console.stardatadb.com;
 
         location ~* ^/(auth|api)(/|$) {
-            proxy_pass http://console-backend.access.svc.cluster.local:80;
+            set $console_backend "console-backend.access.svc.cluster.local";
+            proxy_pass http://$console_backend:80;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

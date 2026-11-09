@@ -113,7 +113,7 @@ resource "zitadel_application_oidc" "console" {
   project_id                = zitadel_project.platform.id
   name                      = "stardata-console"
   redirect_uris             = ["https://console.stardatadb.com/auth/callback"]
-  post_logout_redirect_uris = ["https://console.stardatadb.com/"]
+  post_logout_redirect_uris = ["https://console.stardatadb.com/", "https://console.stardatadb.com/auth/login"]
   response_types            = ["OIDC_RESPONSE_TYPE_CODE"]
   grant_types               = ["OIDC_GRANT_TYPE_AUTHORIZATION_CODE", "OIDC_GRANT_TYPE_REFRESH_TOKEN"]
   app_type                  = "OIDC_APP_TYPE_WEB"
@@ -126,8 +126,10 @@ resource "zitadel_application_oidc" "console" {
 
 # Outputs → stored in Kubernetes Secret console-oidc (namespace access)
 output "console_client_id"     { value = zitadel_application_oidc.console.client_id }
-output "console_client_secret" { value = zitadel_application_oidc.console.client_secret
-sensitive = true }
+output "console_client_secret" {
+  value     = zitadel_application_oidc.console.client_secret
+  sensitive = true
+}
 
 # API Gateway (tools.stardatadb.com)
 resource "zitadel_application_oidc" "gateway" {
@@ -217,7 +219,7 @@ resource "zitadel_machine_user" "audit_reader" {
 
 resource "zitadel_login_policy" "default" {
   org_id                  = data.zitadel_org.stardatadb.id
-  allow_register          = true
+  allow_register          = false
   allow_username_password = true
   allow_external_idps     = false
   force_mfa               = false       # MFA for Owners/Admins enforced by BFF amr check

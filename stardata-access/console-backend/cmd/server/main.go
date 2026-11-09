@@ -18,18 +18,24 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
 
+	"github.com/stardatadb/console-backend/internal/access"
 	"github.com/stardatadb/console-backend/internal/auth"
 )
 
@@ -92,7 +98,6 @@ func main() {
 	mux.HandleFunc("GET /auth/callback", authGate((*auth.Handler).Callback))
 	mux.HandleFunc("GET /auth/logout", authGate((*auth.Handler).Logout))
 	mux.HandleFunc("GET /mfa-required", authGate((*auth.Handler).MFARequired))
-
 	// /api/me — requires session.
 	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
 		h := authReady.Load()
@@ -101,6 +106,18 @@ func main() {
 			return
 		}
 		h.RequireSession(http.HandlerFunc(handleMe)).ServeHTTP(w, r)
+	})
+
+	// /api/access/* — gated by session; access.Handler registers sub-routes.
+	// We register access routes onto a sub-mux wrapped in RequireSession.
+	accessMux := http.NewServeMux()
+	mux.HandleFunc("/api/access/", func(w http.ResponseWriter, r *http.Request) {
+		h := authReady.Load()
+		if h == nil {
+			http.Error(w, "auth service starting, please retry in a moment", http.StatusServiceUnavailable)
+			return
+		}
+		h.RequireSession(accessMux).ServeHTTP(w, r)
 	})
 
 	// All other /api/* routes are gated by session.
@@ -202,6 +219,47 @@ func main() {
 	// ── ID token verifier ─────────────────────────────────────────────────────
 	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
 
+	// ── Console database connection ───────────────────────────────────────────
+	consoleDB, err := sql.Open("postgres", mustEnv("CONSOLE_DB_DSN"))
+	if err != nil {
+		slog.Error("console db connect failed", "err", err)
+		os.Exit(1)
+	}
+	consoleDB.SetMaxOpenConns(10)
+
+	// ── ZITADEL machine-user client (console-backend service account) ─────────
+	zKeyData := []byte(mustEnv("ZITADEL_MACHINE_KEY_JSON"))
+	zClient, err := access.NewZitadelClient(
+		zitadelDomain,
+		zitadelInternalURL,
+		mustEnv("ZITADEL_ORG_ID"),
+		projectID,
+		zKeyData,
+	)
+	if err != nil {
+		slog.Error("zitadel client init failed", "err", err)
+		os.Exit(1)
+	}
+
+	// ── Register access routes onto the sub-mux ───────────────────────────────
+	accessHandler := &access.Handler{
+		Z:            zClient,
+		DB:           consoleDB,
+		Valkey:       valkeyClient,
+		OrgID:        mustEnv("ZITADEL_ORG_ID"),
+		ProjectID:    projectID,
+		InviteMailer: os.Getenv("INVITE_MAILER_URL"), // e.g. http://invite-mailer.access.svc.cluster.local:8025
+		OwnerEmail:   os.Getenv("OWNER_EMAIL"),        // e.g. johnmillermca@gmail.com
+	}
+	accessHandler.Register(accessMux)
+
+	// /api/signup — unauthenticated self-registration (no session required).
+	// Registered here so the closure captures the fully-initialised accessHandler.
+	mux.HandleFunc("POST /api/signup", accessHandler.HandleSignup)
+
+	// Internal cron endpoints — secret-protected, not session-gated.
+	accessHandler.RegisterInternal(mux, os.Getenv("CRON_SECRET"))
+
 	// ── Publish the handler — auth routes become live ─────────────────────────
 	h := &auth.Handler{
 		OAuth:          oauthCfg,
@@ -219,11 +277,57 @@ func main() {
 }
 
 // handleMe returns session identity as JSON.
+// Includes platform_roles decoded from the access token so the SPA can
+// determine whether the sidebar admin nav should be shown.
 func handleMe(w http.ResponseWriter, r *http.Request) {
 	sess, _ := r.Context().Value(auth.SessionKey).(*auth.Session)
+
+	// Decode platform_roles from the JWT access token.
+	roles := platformRolesFromToken(sess.AccessToken)
+	rolesJSON := "[]"
+	if len(roles) > 0 {
+		b := `["`
+		for i, rr := range roles {
+			if i > 0 {
+				b += `","`
+			}
+			b += rr
+		}
+		b += `"]`
+		rolesJSON = b
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"sub":"` + sess.Sub + `","email":"` + sess.Email +
-		`","name":"` + sess.Name + `","mfa":` + boolStr(sess.MFA) + `}`))
+		`","name":"` + sess.Name + `","mfa":` + boolStr(sess.MFA) +
+		`,"platformRoles":` + rolesJSON + `}`))
+}
+
+// platformRolesFromToken decodes the platform_roles claim from a JWT access
+// token without verifying the signature (the token was already verified at
+// sign-in; we only need the claim value here).
+func platformRolesFromToken(accessToken string) []string {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payload := parts[1]
+	// Pad to a multiple of 4 for standard base64.
+	switch len(payload) % 4 {
+	case 2:
+		payload += "=="
+	case 3:
+		payload += "="
+	}
+	b, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil
+	}
+	var claims struct {
+		PlatformRoles []string `json:"platform_roles"`
+	}
+	json.Unmarshal(b, &claims) //nolint:errcheck
+	return claims.PlatformRoles
 }
 
 func boolStr(b bool) string {

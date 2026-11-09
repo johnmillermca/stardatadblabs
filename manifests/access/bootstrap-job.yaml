@@ -45,23 +45,44 @@ spec:
             - -c
             - |
               set -e
-              ZITADEL="https://auth.stardatadb.com"
+              # Use internal service for all API calls (bypasses Cloudflare).
+              # Host header rewritten to the external domain so ZITADEL routes correctly.
+              ZITADEL_INT="https://zitadel.access.svc.cluster.local:8080"
+              ZITADEL_HOST="auth.stardatadb.com"
               KEY_FILE=/run/secrets/terraform-admin-key/key.json
 
-              # ── Obtain a token for the terraform-admin machine user ──────────
-              TOKEN=$(curl -sf -X POST "${ZITADEL}/oauth/v2/token" \
+              # Build a JWT assertion from the key file
+              ASSERTION=$(python3 - <<'PYEOF'
+import json,time,base64,subprocess,tempfile,os,sys
+with open('/run/secrets/terraform-admin-key/key.json') as f: key=json.load(f)
+header=base64.urlsafe_b64encode(json.dumps({"alg":"RS256","kid":key["keyId"]}).encode()).rstrip(b'=').decode()
+now=int(time.time())
+payload=base64.urlsafe_b64encode(json.dumps({"iss":key["userId"],"sub":key["userId"],"aud":"https://auth.stardatadb.com","iat":now,"exp":now+3600}).encode()).rstrip(b'=').decode()
+msg=f"{header}.{payload}"
+with tempfile.NamedTemporaryFile(mode='w',suffix='.pem',delete=False) as f: f.write(key["key"]); kp=f.name
+res=subprocess.run(['openssl','dgst','-sha256','-sign',kp,'-'],input=msg.encode(),capture_output=True)
+os.unlink(kp)
+sig=base64.urlsafe_b64encode(res.stdout).rstrip(b'=').decode()
+print(f"{msg}.{sig}")
+PYEOF
+)
+
+              # ── Obtain a token via internal ZITADEL service ──────────────────
+              TOKEN=$(curl -sf -k -X POST "${ZITADEL_INT}/oauth/v2/token" \
+                -H "Host: ${ZITADEL_HOST}" \
                 --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
                 --data-urlencode "scope=openid urn:zitadel:iam:org:project:id:zitadel:aud" \
-                --data-urlencode "assertion=$(cat ${KEY_FILE})" \
+                --data-urlencode "assertion=${ASSERTION}" \
                 | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
 
+              echo "Token obtained: ${TOKEN:0:20}..."
               AUTH="Authorization: Bearer ${TOKEN}"
 
               # ── Helper: get target ID by name if it already exists ───────────
               get_target_id() {
                 local name="$1"
-                curl -sf -X POST "${ZITADEL}/v2/actions/targets/_search" \
-                  -H "${AUTH}" -H "Content-Type: application/json" \
+                curl -sf -k -X POST "${ZITADEL_INT}/v2/actions/targets/_search" \
+                  -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                   -d "{\"queries\":[{\"nameQuery\":{\"name\":\"${name}\",\"method\":\"TEXT_QUERY_METHOD_EQUALS\"}}]}" \
                   | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
               }
@@ -70,8 +91,8 @@ spec:
               CLAIMS_ID=$(get_target_id "stardata-claims")
               if [ -z "$CLAIMS_ID" ]; then
                 echo "Creating stardata-claims target..."
-                RESP=$(curl -sf -X POST "${ZITADEL}/v2/actions/targets" \
-                  -H "${AUTH}" -H "Content-Type: application/json" \
+                RESP=$(curl -sf -k -X POST "${ZITADEL_INT}/v2/actions/targets" \
+                  -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                   -d '{
                     "name": "stardata-claims",
                     "restCall": {"interruptOnError": true},
@@ -92,21 +113,21 @@ spec:
               fi
 
               # ── 2. preaccesstoken execution ──────────────────────────────────
-              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
-                -H "${AUTH}" -H "Content-Type: application/json" \
+              curl -sf -k -X PUT "${ZITADEL_INT}/v2/actions/executions" \
+                -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                 -d "{\"condition\":{\"function\":{\"name\":\"preaccesstoken\"}},\"targets\":[\"${CLAIMS_ID}\"]}"
 
               # ── 3. preuserinfo execution ─────────────────────────────────────
-              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
-                -H "${AUTH}" -H "Content-Type: application/json" \
+              curl -sf -k -X PUT "${ZITADEL_INT}/v2/actions/executions" \
+                -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                 -d "{\"condition\":{\"function\":{\"name\":\"preuserinfo\"}},\"targets\":[\"${CLAIMS_ID}\"]}"
 
               # ── 4. audit-forwarder target ────────────────────────────────────
               AUDIT_ID=$(get_target_id "audit-forwarder")
               if [ -z "$AUDIT_ID" ]; then
                 echo "Creating audit-forwarder target..."
-                RESP=$(curl -sf -X POST "${ZITADEL}/v2/actions/targets" \
-                  -H "${AUTH}" -H "Content-Type: application/json" \
+                RESP=$(curl -sf -k -X POST "${ZITADEL_INT}/v2/actions/targets" \
+                  -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                   -d '{
                     "name": "audit-forwarder",
                     "restAsync": {},
@@ -126,16 +147,16 @@ spec:
               fi
 
               # ── 5. Audit event execution (user + session + authorization events)
-              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
-                -H "${AUTH}" -H "Content-Type: application/json" \
+              curl -sf -k -X PUT "${ZITADEL_INT}/v2/actions/executions" \
+                -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                 -d "{\"condition\":{\"event\":{\"group\":\"user\"}},\"targets\":[\"${AUDIT_ID}\"]}"
 
-              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
-                -H "${AUTH}" -H "Content-Type: application/json" \
+              curl -sf -k -X PUT "${ZITADEL_INT}/v2/actions/executions" \
+                -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                 -d "{\"condition\":{\"event\":{\"group\":\"session\"}},\"targets\":[\"${AUDIT_ID}\"]}"
 
-              curl -sf -X PUT "${ZITADEL}/v2/actions/executions" \
-                -H "${AUTH}" -H "Content-Type: application/json" \
+              curl -sf -k -X PUT "${ZITADEL_INT}/v2/actions/executions" \
+                -H "Host: ${ZITADEL_HOST}" -H "${AUTH}" -H "Content-Type: application/json" \
                 -d "{\"condition\":{\"event\":{\"group\":\"user_grant\"}},\"targets\":[\"${AUDIT_ID}\"]}"
 
               echo "Bootstrap complete."

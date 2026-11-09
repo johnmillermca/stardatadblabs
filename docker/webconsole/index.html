@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>StarDataLabs</title>
+  <title>StarDataLabs — Sign in</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -20,336 +20,187 @@
       overflow: hidden;
     }
 
-    /* Purple arc — bottom-left like the reference */
     .bg-arc {
-      position: fixed;
-      bottom: -120px;
-      left: -120px;
-      width: 520px;
-      height: 520px;
-      border-radius: 50%;
+      position: fixed; bottom: -120px; left: -120px;
+      width: 520px; height: 520px; border-radius: 50%;
       border: 1.5px solid rgba(139,92,246,0.35);
-      pointer-events: none;
-      z-index: 0;
+      pointer-events: none; z-index: 0;
     }
     .bg-arc::after {
-      content: '';
-      position: absolute;
+      content: ''; position: absolute;
       top: 60px; left: 60px; right: 60px; bottom: 60px;
-      border-radius: 50%;
-      border: 1px solid rgba(139,92,246,0.15);
+      border-radius: 50%; border: 1px solid rgba(139,92,246,0.15);
     }
-    /* Faint purple radial glow bottom-left */
     .bg-glow {
-      position: fixed;
-      bottom: -200px;
-      left: -200px;
-      width: 700px;
-      height: 700px;
-      border-radius: 50%;
+      position: fixed; bottom: -200px; left: -200px;
+      width: 700px; height: 700px; border-radius: 50%;
       background: radial-gradient(circle, rgba(109,40,217,0.12) 0%, transparent 65%);
-      pointer-events: none;
-      z-index: 0;
+      pointer-events: none; z-index: 0;
     }
 
-    /* ── Top-left corner logo ── */
     .corner-brand {
-      position: fixed;
-      top: 22px;
-      left: 28px;
-      display: flex;
-      align-items: center;
-      gap: 11px;
-      z-index: 100;
+      position: fixed; top: 22px; left: 28px;
+      display: flex; align-items: center; gap: 11px; z-index: 100;
+    }
+    .corner-brand svg.icon { width: 56px; height: 56px; flex-shrink: 0; }
+    .corner-brand .wordmark { display: flex; flex-direction: column; line-height: 1; }
+    .corner-brand .brand-line {
+      font-size: 16px; font-weight: 900; letter-spacing: 0.03em;
+      text-transform: uppercase; white-space: nowrap; color: #c8c8d4;
     }
 
-    .corner-brand svg.icon {
-      width: 56px;
-      height: 56px;
-      flex-shrink: 0;
-    }
-
-    .corner-brand .wordmark {
-      display: flex;
-      flex-direction: column;
-      line-height: 1;
-    }
-
-    .corner-brand .wordmark .brand-line {
-      font-size: 16px;
-      font-weight: 900;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-
-    .corner-brand .wordmark .brand-line .w-star { color: #c8c8d4; }
-    .corner-brand .wordmark .brand-line .w-data { color: #c8c8d4; }
-    .corner-brand .wordmark .brand-line .w-labs { color: #c8c8d4; }
-
-    /* ── Center content ── */
     .center-wrap {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      width: 100%;
-      max-width: 680px;
-      padding: 20px 24px 48px;
-      position: relative;
-      z-index: 1;
-      text-align: center;
+      display: flex; flex-direction: column; align-items: center;
+      width: 100%; max-width: 680px; padding: 20px 24px 48px;
+      position: relative; z-index: 1; text-align: center;
     }
 
-    /* Hero wordmark */
-    .hero-brand {
-      margin-bottom: 36px;
-    }
-
+    .hero-brand { margin-bottom: 36px; }
     .hero-brand .hero-name {
-      display: flex;
-      align-items: baseline;
-      justify-content: center;
-      white-space: nowrap;
-      line-height: 1;
+      display: flex; align-items: baseline; justify-content: center;
+      white-space: nowrap; line-height: 1;
     }
-
-    .hero-brand .h-star {
-      font-size: 52px;
-      font-weight: 900;
-      color: #d4d4de;
-      letter-spacing: -2px;
+    .hero-brand .h-star, .hero-brand .h-data, .hero-brand .h-labs {
+      font-size: 52px; font-weight: 900; color: #d4d4de; letter-spacing: -2px;
     }
-
-    .hero-brand .h-data {
-      font-size: 52px;
-      font-weight: 900;
-      color: #d4d4de;
-      letter-spacing: -2px;
-    }
-
-    .hero-brand .h-labs {
-      font-size: 52px;
-      font-weight: 900;
-      color: #d4d4de;
-      letter-spacing: -2px;
-    }
-
     .hero-brand .h-sub {
-      display: block;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.48em;
-      color: #8b8ba0;
-      text-transform: uppercase;
-      margin-top: 8px;
+      display: block; font-size: 11px; font-weight: 700;
+      letter-spacing: 0.48em; color: #8b8ba0;
+      text-transform: uppercase; margin-top: 8px;
     }
 
-    /* Tech pills */
     .tech-pills {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 8px;
-      margin-top: 18px;
-      margin-bottom: 36px;
+      display: flex; flex-wrap: wrap; justify-content: center;
+      gap: 8px; margin-top: 18px; margin-bottom: 36px;
     }
-
     .pill {
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      padding: 4px 13px;
-      border-radius: 20px;
-      white-space: nowrap;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+      padding: 4px 13px; border-radius: 20px; white-space: nowrap;
     }
-
     .pill-stream   { background: rgba(14,165,233,0.12);  color: #38bdf8; border: 1px solid rgba(14,165,233,0.3); }
     .pill-etl      { background: rgba(139,92,246,0.12);  color: #a78bfa; border: 1px solid rgba(139,92,246,0.3); }
     .pill-graphrag { background: rgba(109,40,217,0.15);  color: #c4b5fd; border: 1px solid rgba(109,40,217,0.35); }
     .pill-openrag  { background: rgba(16,185,129,0.1);   color: #34d399; border: 1px solid rgba(16,185,129,0.28); }
     .pill-lakehouse{ background: rgba(255,255,255,0.06); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); }
 
-    /* ── Login card ── */
     .card {
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 14px;
-      width: 100%;
-      max-width: 400px;
-      padding: 32px 32px 28px;
-      backdrop-filter: blur(8px);
+      border-radius: 14px; width: 100%; max-width: 400px;
+      padding: 32px 32px 28px; backdrop-filter: blur(8px);
     }
 
     .tabs {
-      display: flex;
-      border-bottom: 1px solid rgba(255,255,255,0.1);
+      display: flex; border-bottom: 1px solid rgba(255,255,255,0.1);
       margin-bottom: 28px;
     }
-
     .tab {
-      flex: 1;
-      text-align: center;
-      padding: 10px 0;
-      font-size: 14px;
-      font-weight: 600;
-      color: #6b7280;
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      transition: color 0.15s, border-color 0.15s;
-      user-select: none;
+      flex: 1; text-align: center; padding: 10px 0;
+      font-size: 14px; font-weight: 600; color: #6b7280;
+      cursor: pointer; border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s; user-select: none;
     }
-
-    .tab.active {
-      color: #a78bfa;
-      border-bottom-color: #7c3aed;
-    }
-
+    .tab.active { color: #a78bfa; border-bottom-color: #7c3aed; }
     .tab:hover:not(.active) { color: #d1d5db; }
 
     .panel { display: none; }
     .panel.active { display: block; }
 
     .field { margin-bottom: 16px; }
-
     label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: #9ca3af;
-      margin-bottom: 6px;
+      display: block; font-size: 13px; font-weight: 600;
+      color: #9ca3af; margin-bottom: 6px;
     }
+    .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
     input {
-      width: 100%;
-      padding: 9px 12px;
+      width: 100%; padding: 9px 12px;
       background: rgba(255,255,255,0.06);
       border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 7px;
-      color: #f0f0f5;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.15s, box-shadow 0.15s;
+      border-radius: 7px; color: #f0f0f5; font-size: 14px;
+      outline: none; transition: border-color 0.15s, box-shadow 0.15s;
     }
-
     input:focus {
-      border-color: #7c3aed;
-      box-shadow: 0 0 0 3px rgba(124,58,237,0.18);
+      border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,0.18);
     }
-
     input::placeholder { color: #4b5563; }
 
     .btn {
-      width: 100%;
-      padding: 10px;
-      border: none;
-      border-radius: 7px;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-      margin-top: 8px;
-      transition: background 0.15s, box-shadow 0.15s;
-      letter-spacing: 0.02em;
+      width: 100%; padding: 10px; border: none; border-radius: 7px;
+      font-size: 14px; font-weight: 700; cursor: pointer; margin-top: 8px;
+      transition: background 0.15s, box-shadow 0.15s; letter-spacing: 0.02em;
     }
-
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
     .btn-primary {
       background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%);
-      color: #fff;
-      box-shadow: 0 2px 12px rgba(109,40,217,0.4);
+      color: #fff; box-shadow: 0 2px 12px rgba(109,40,217,0.4);
     }
-
-    .btn-primary:hover {
+    .btn-primary:hover:not(:disabled) {
       background: linear-gradient(135deg, #5b21b6 0%, #6d28d9 100%);
       box-shadow: 0 4px 18px rgba(109,40,217,0.5);
     }
-
     .btn-secondary {
-      background: transparent;
-      color: #a78bfa;
+      background: transparent; color: #a78bfa;
       border: 1.5px solid rgba(139,92,246,0.4);
     }
-
-    .btn-secondary:hover {
-      background: rgba(139,92,246,0.08);
-      border-color: #7c3aed;
-    }
+    .btn-secondary:hover { background: rgba(139,92,246,0.08); border-color: #7c3aed; }
 
     .divider {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin: 20px 0;
-      color: #374151;
-      font-size: 12px;
+      display: flex; align-items: center; gap: 10px;
+      margin: 20px 0; color: #374151; font-size: 12px;
+    }
+    .divider::before, .divider::after {
+      content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.08);
     }
 
-    .divider::before, .divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: rgba(255,255,255,0.08);
+    .msg {
+      margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+      font-size: 13px; line-height: 1.5; text-align: left; display: none;
     }
+    .msg-error  { background: rgba(239,68,68,0.1);  border: 1px solid rgba(239,68,68,0.3);  color: #fca5a5; }
+    .msg-success{ background: rgba(34,197,94,0.1);  border: 1px solid rgba(34,197,94,0.3);  color: #86efac; }
 
     .page-footer {
-      margin-top: 28px;
-      font-size: 11.5px;
-      color: #374151;
-      text-align: center;
-      letter-spacing: 0.03em;
+      margin-top: 28px; font-size: 11.5px; color: #374151;
+      text-align: center; letter-spacing: 0.03em;
     }
   </style>
 </head>
 <body>
 
-  <!-- Background elements -->
   <div class="bg-glow"></div>
   <div class="bg-arc"></div>
 
-  <!-- ── Top-left corner logo ── -->
+  <!-- Corner logo -->
   <div class="corner-brand">
     <svg class="icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <!-- Backdrop circle — solid dark purple fill so icon pops -->
       <circle cx="24" cy="24" r="22" fill="#1e0a3c" stroke="#a78bfa" stroke-width="1.5"/>
-      <!-- Lake bowl fill -->
       <path d="M8 30 Q13 41 24 42.5 Q35 41 40 30 Z" fill="#3b0f8c"/>
-      <!-- Wave 1 -->
       <path d="M9 31.5 Q14 28 19 31.5 Q24 35 29 31.5 Q34 28 39 31.5" stroke="#c4b5fd" stroke-width="1.6" fill="none"/>
-      <!-- Wave 2 -->
       <path d="M10 35 Q15 32 20 35 Q25 38 30 35 Q35 32 38 35" stroke="#a78bfa" stroke-width="1.2" fill="none" opacity="0.7"/>
-      <!-- Main DB cylinder top cap -->
       <ellipse cx="24" cy="17" rx="7.5" ry="2.8" fill="#5b21b6" stroke="#ddd6fe" stroke-width="1.5"/>
-      <!-- cylinder body -->
       <rect x="16.5" y="17" width="15" height="10" fill="#4c1d95" stroke="#ddd6fe" stroke-width="1.5"/>
-      <!-- bottom cap -->
       <ellipse cx="24" cy="27" rx="7.5" ry="2.8" fill="#5b21b6" stroke="#ddd6fe" stroke-width="1.5"/>
-      <!-- mid seam -->
       <line x1="17" y1="22" x2="31" y2="22" stroke="#ddd6fe" stroke-width="1" opacity="0.6"/>
-      <!-- Small DB cylinder (right) -->
       <ellipse cx="35.5" cy="20.5" rx="4.5" ry="1.8" fill="#3b0f8c" stroke="#c4b5fd" stroke-width="1.3"/>
       <rect x="31" y="20.5" width="9" height="6" fill="#2e0a6e" stroke="#c4b5fd" stroke-width="1.3"/>
       <ellipse cx="35.5" cy="26.5" rx="4.5" ry="1.8" fill="#3b0f8c" stroke="#c4b5fd" stroke-width="1.3"/>
-      <!-- Streaming lines (left) — bright white so visible -->
       <line x1="4" y1="18" x2="14" y2="18" stroke="#e9d5ff" stroke-width="1.6" stroke-dasharray="2.5 1.5"/>
       <line x1="4" y1="22" x2="14" y2="22" stroke="#c4b5fd" stroke-width="1.4" stroke-dasharray="2.5 1.5" opacity="0.75"/>
-      <!-- Arrow tip -->
       <polyline points="11.5,15.5 15.5,18 11.5,20.5" stroke="#e9d5ff" stroke-width="1.6" fill="none"/>
-      <!-- AI 4-point star spark (top-right) — bright white/yellow -->
       <g transform="translate(33,11)">
         <path d="M0,-6 L1.4,-1.4 L6,0 L1.4,1.4 L0,6 L-1.4,1.4 L-6,0 L-1.4,-1.4 Z" fill="#f5f3ff"/>
         <circle cx="0" cy="0" r="1.4" fill="#ffffff"/>
       </g>
-      <!-- Small sparkle (top-left) -->
       <g transform="translate(13,11)">
         <path d="M0,-3.5 L0.8,-0.8 L3.5,0 L0.8,0.8 L0,3.5 L-0.8,0.8 L-3.5,0 L-0.8,-0.8 Z" fill="#ddd6fe"/>
       </g>
     </svg>
     <div class="wordmark">
-      <span class="brand-line">
-        <span class="w-star">Star</span><span class="w-data">Data</span><span class="w-labs">Labs</span>
-      </span>
+      <span class="brand-line">StarDataLabs</span>
     </div>
   </div>
 
-  <!-- ── Center content ── -->
   <div class="center-wrap">
 
     <!-- Hero brand -->
@@ -369,77 +220,124 @@
       <span class="pill pill-lakehouse">Lakehouse</span>
     </div>
 
-    <!-- Login card -->
+    <!-- Auth card -->
     <div class="card">
       <div class="tabs">
-        <div class="tab active" onclick="switchTab('signin')">Sign In</div>
-        <div class="tab" onclick="switchTab('signup')">Sign Up</div>
+        <div class="tab active" id="tab-signin" onclick="switchTab('signin')">Sign In</div>
+        <div class="tab"        id="tab-signup" onclick="switchTab('signup')">Sign Up</div>
       </div>
 
-      <!-- Sign In Panel -->
+      <!-- ── Sign In ── -->
       <div class="panel active" id="panel-signin">
-        <p style="font-size:13px;color:#9ca3af;margin-bottom:16px;line-height:1.5">
-          Sign in is handled by StarData's secure login page.
-          Click below to continue — you'll be back in seconds.
-        </p>
-        <!-- Redirect to the console BFF which starts the PKCE flow to ZITADEL.
-             The BFF at console.stardatadb.com/auth/login sets state/nonce/verifier
-             in Valkey then sends the browser to auth.stardatadb.com/ui/v2/login. -->
-        <a href="https://console.stardatadb.com/auth/login" style="display:block;width:100%;text-decoration:none">
-          <button class="btn btn-primary" style="width:100%">Sign In</button>
-        </a>
+        <button class="btn btn-primary" id="si-btn" onclick="doSignIn()">Sign In</button>
         <div class="divider">or</div>
         <button class="btn btn-secondary" onclick="switchTab('signup')">Create an account</button>
       </div>
 
-      <!-- Sign Up Panel -->
+      <!-- ── Sign Up ── -->
       <div class="panel" id="panel-signup">
-        <p style="font-size:13px;color:#9ca3af;margin-bottom:16px;line-height:1.5">
-          Self-registration is handled on the secure login page.
-          An Owner or Admin approves access after you verify your email.
-        </p>
-        <!-- ZITADEL's Login v2 register page — allow_register must be true in
-             the login policy (it is, per zitadel/terraform/main.tf). -->
-        <a href="https://auth.stardatadb.com/ui/v2/login/register" style="display:block;width:100%;text-decoration:none">
-          <button class="btn btn-primary" style="width:100%">Create Account</button>
-        </a>
+        <div class="field field-row">
+          <div>
+            <label for="su-first">First name</label>
+            <input type="text" id="su-first" placeholder="Ana" autocomplete="given-name"/>
+          </div>
+          <div>
+            <label for="su-last">Last name</label>
+            <input type="text" id="su-last" placeholder="Torres" autocomplete="family-name"/>
+          </div>
+        </div>
+        <div class="field">
+          <label for="su-email">Work email</label>
+          <input type="email" id="su-email" placeholder="you@stardatadb.com" autocomplete="email"/>
+        </div>
+        <button class="btn btn-primary" id="su-btn" onclick="doSignUp()">Request access</button>
+        <div class="msg msg-error"   id="su-error"></div>
+        <div class="msg msg-success" id="su-success"></div>
         <div class="divider">or</div>
         <button class="btn btn-secondary" onclick="switchTab('signin')">Already have an account?</button>
       </div>
     </div>
-
-    <!-- Stargraph launch button -->
-    <a href="/stargraph.html" style="display:block;width:100%;max-width:400px;margin-top:20px;text-decoration:none">
-      <button style="
-        width:100%;padding:11px 0;border-radius:8px;font-size:14px;font-weight:700;
-        cursor:pointer;letter-spacing:.03em;border:1.5px solid rgba(139,92,246,0.5);
-        background:rgba(124,58,237,0.1);color:#a78bfa;
-        display:flex;align-items:center;justify-content:center;gap:10px;
-        transition:background .15s,border-color .15s;
-      "
-        onmouseover="this.style.background='rgba(124,58,237,0.22)';this.style.borderColor='#7c3aed'"
-        onmouseout="this.style.background='rgba(124,58,237,0.1)';this.style.borderColor='rgba(139,92,246,0.5)'"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-          <circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>
-          <line x1="12" y1="7" x2="5" y2="17"/><line x1="12" y1="7" x2="19" y2="17"/><line x1="5" y1="19" x2="19" y2="19"/>
-        </svg>
-        Open Stargraph Console
-      </button>
-    </a>
 
     <p class="page-footer" style="margin-top:16px">www.stardatadb.com &nbsp;&bull;&nbsp; StarDataLabs Platform</p>
 
   </div>
 
   <script>
+    // ── Tab switcher ──────────────────────────────────────────────
     function switchTab(name) {
-      document.querySelectorAll('.tab').forEach(function(t, i) {
-        t.classList.toggle('active', (i === 0 ? 'signin' : 'signup') === name);
+      ['signin','signup'].forEach(function(t) {
+        document.getElementById('tab-'+t).classList.toggle('active', t === name);
+        document.getElementById('panel-'+t).classList.toggle('active', t === name);
       });
-      document.querySelectorAll('.panel').forEach(function(p) {
-        p.classList.toggle('active', p.id === 'panel-' + name);
+    }
+
+    // ── Sign In ───────────────────────────────────────────────────
+    // Redirect to ZITADEL via the BFF's /auth/login endpoint.
+    // ZITADEL handles the username/password form at auth.stardatadb.com.
+    // On success ZITADEL redirects back to /auth/callback on console.stardatadb.com
+    // which sets the session cookie and opens the console.
+    function doSignIn() {
+      window.location.href = 'https://console.stardatadb.com/auth/login';
+    }
+
+    // Allow Enter key to submit signup form
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        var active = document.querySelector('.panel.active').id;
+        if (active === 'panel-signup') doSignUp();
+      }
+    });
+
+    // ── Sign Up ───────────────────────────────────────────────────
+    // POSTs to /api/signup on the console-backend (via nginx proxy).
+    // On success shows a "check your email" message.
+    function doSignUp() {
+      var first = document.getElementById('su-first').value.trim();
+      var last  = document.getElementById('su-last').value.trim();
+      var email = document.getElementById('su-email').value.trim().toLowerCase();
+      var errEl = document.getElementById('su-error');
+      var okEl  = document.getElementById('su-success');
+      errEl.style.display = 'none';
+      okEl.style.display  = 'none';
+
+      if (!first) { showError(errEl, 'Please enter your first name.'); return; }
+      if (!last)  { showError(errEl, 'Please enter your last name.'); return; }
+      if (!email || !email.includes('@')) { showError(errEl, 'Please enter a valid email address.'); return; }
+
+      var btn = document.getElementById('su-btn');
+      btn.disabled = true;
+      btn.textContent = 'Requesting…';
+
+      fetch('/api/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email, firstName: first, lastName: last })
+      })
+      .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, status: r.status, data: d }; }); })
+      .then(function(res) {
+        btn.disabled = false;
+        btn.textContent = 'Request access';
+        if (res.ok) {
+          okEl.textContent = 'Done! Check your email — we sent a verification link to ' + email + '. Once you verify, an Owner will be notified to approve your access.';
+          okEl.style.display = 'block';
+          document.getElementById('su-first').value = '';
+          document.getElementById('su-last').value  = '';
+          document.getElementById('su-email').value = '';
+        } else {
+          var msg = (res.data && res.data.error) ? res.data.error : 'Something went wrong. Please try again.';
+          showError(errEl, msg);
+        }
+      })
+      .catch(function() {
+        btn.disabled = false;
+        btn.textContent = 'Request access';
+        showError(errEl, 'Could not connect to the server. Please try again.');
       });
+    }
+
+    function showError(el, msg) {
+      el.textContent = msg;
+      el.style.display = 'block';
     }
   </script>
 

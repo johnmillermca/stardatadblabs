@@ -188,9 +188,9 @@ export default function MembersPage() {
               <tr>
                 <th>Person</th>
                 <th>Platform</th>
-                <th>Doris</th>
+                <th>StarData</th>
                 <th>Kafka</th>
-                <th>Memgraph</th>
+                <th>StarGraph</th>
                 <th>ETL Studio</th>
                 <th>Last sign-in</th>
                 <th></th>
@@ -206,7 +206,7 @@ export default function MembersPage() {
                   <td>{m.platform}</td>
                   <td>{m.levels.doris ?? '—'}</td>
                   <td>{m.levels.kafka ?? '—'}</td>
-                  <td>{m.levels.memgraph ?? '—'}</td>
+                  <td>{m.levels.memgraph ?? '—'}</td>  {/* StarGraph */}
                   <td>{m.levels.etl ?? '—'}</td>
                   <td>{m.lastSignIn ? formatRelative(m.lastSignIn) : '—'}</td>
                   <td>

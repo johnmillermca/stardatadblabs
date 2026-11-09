@@ -288,7 +288,7 @@ export default function MemberDetailPage() {
       {showRevoke && (
         <ConfirmDialog
           title={`Revoke access for ${member.name}`}
-          description="This removes the ZITADEL authorization, ends every session, revokes refresh tokens, deletes console sessions in Valkey and app passwords at the Doris proxy. Access tokens already issued stop working within 10 minutes."
+          description="This removes the ZITADEL authorization, ends every session, revokes refresh tokens, deletes console sessions in Valkey and app passwords at the StarData proxy. Access tokens already issued stop working within 10 minutes."
           requireName={member.name}
           onConfirm={reason => revokeMutation.mutate(reason)}
           onCancel={() => setShowRevoke(false)}

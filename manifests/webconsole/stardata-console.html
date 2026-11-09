@@ -24,7 +24,13 @@ body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:var(--
 .topbar-search svg{position:absolute;left:8px;top:50%;transform:translateY(-50%);color:var(--muted)}
 .topbar-env{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;color:var(--muted)}
 .topbar-right{margin-left:auto;display:flex;align-items:center;gap:10px}
-.avatar-btn{width:30px;height:30px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;cursor:pointer;border:none;color:#fff}
+.avatar-btn{width:30px;height:30px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;cursor:pointer;border:none;color:#fff;position:relative}
+.user-menu{position:fixed;top:var(--topbar-h);right:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;min-width:180px;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.user-menu-name{padding:8px 14px 6px;font-size:12px;font-weight:600;color:var(--text);border-bottom:1px solid var(--border);margin-bottom:4px}
+.user-menu-email{font-size:11px;color:var(--muted);font-weight:400;margin-top:2px}
+.user-menu a,.user-menu button{display:block;width:100%;text-align:left;padding:7px 14px;font-size:13px;color:var(--muted);background:none;border:none;cursor:pointer;text-decoration:none}
+.user-menu a:hover,.user-menu button:hover{background:var(--surface2);color:var(--text)}
+.user-menu-sep{height:1px;background:var(--border);margin:4px 0}
 
 /* ── LAYOUT ── */
 .layout{display:flex;flex:1;overflow:hidden}
@@ -397,8 +403,15 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
       <input type="search" placeholder="Search"/>
     </div>
     <span class="topbar-env">prod</span>
-    <div class="topbar-right">
-      <button class="avatar-btn" title="John Miller">JM</button>
+    <div class="topbar-right" style="position:relative">
+      <button class="avatar-btn" id="avatar-btn" onclick="toggleUserMenu()" title="Account">JM</button>
+      <div class="user-menu hidden" id="user-menu">
+        <div class="user-menu-name" id="user-menu-name">
+          John Miller
+          <div class="user-menu-email" id="user-menu-email"></div>
+        </div>
+        <a href="/auth/logout" onclick="return doLogout()">Sign out</a>
+      </div>
     </div>
   </div>
 
@@ -426,7 +439,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
         </a>
         <a href="#" onclick="nav('doris');return false" id="nav-doris">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-          Doris
+          StarData
         </a>
         <a href="#" onclick="nav('connect');return false" id="nav-connect">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
@@ -478,51 +491,29 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           </button>
         </div>
 
-        <!-- Waiting -->
-        <div class="section-title">Waiting for approval <span class="section-count">2 people</span></div>
-        <div class="member-card">
-          <div class="member-card-header">
-            <div class="avatar">AT</div>
-            <div>
-              <strong>Ana Torres</strong>
-              <div class="member-card-meta">ana@stardatadb.com · email verified · signed up 2 hours ago</div>
-            </div>
-          </div>
-          <div id="levels-ana"></div>
-          <div style="font-size:11px;color:var(--muted);margin-top:8px">Roles reach the person's tokens within 10 minutes.</div>
-          <div class="member-card-actions">
-            <button class="btn btn-primary btn-sm" onclick="approveMember('ana')">Approve with these roles</button>
-            <button class="btn btn-danger-ghost btn-sm" onclick="openDecline('Ana Torres')">Decline</button>
-          </div>
+        <!-- Waiting — rendered dynamically by loadMembers() -->
+        <div class="section-title">
+          Waiting for approval
+          <span id="waiting-count-label" class="section-count"></span>
         </div>
-        <div class="member-card warning">
-          <div class="member-card-header">
-            <div class="avatar" style="background:#6b7280">BK</div>
-            <div>
-              <strong>Ben Kowalski</strong>
-              <div class="member-card-meta">ben.k@gmail.com · email verified · signed up yesterday</div>
-            </div>
-          </div>
-          <div class="member-card-warn">Ben signed up with a personal address. Check who he is before you approve.</div>
-          <div id="levels-ben"></div>
-          <div style="font-size:11px;color:var(--muted);margin-top:8px">Roles reach the person's tokens within 10 minutes.</div>
-          <div class="member-card-actions">
-            <button class="btn btn-primary btn-sm" onclick="approveMember('ben')">Approve with these roles</button>
-            <button class="btn btn-danger-ghost btn-sm" onclick="openDecline('Ben Kowalski')">Decline</button>
-          </div>
+        <div id="waiting-cards">
+          <div id="waiting-loading" style="color:var(--muted);font-size:13px;padding:12px 0">Loading…</div>
         </div>
 
-        <!-- All members table -->
-        <div class="section-title" style="margin-top:20px">All members <span class="section-count">(14)</span></div>
-        <div style="margin-bottom:12px"><input type="search" placeholder="Find a member" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);width:280px;outline:none;font-size:13px"/></div>
+        <!-- All members table — rendered dynamically by loadMembers() -->
+        <div class="section-title" style="margin-top:20px">
+          All members <span id="active-count-label" class="section-count"></span>
+        </div>
+        <div style="margin-bottom:12px">
+          <input type="search" id="member-search" placeholder="Find a member"
+            style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);width:280px;outline:none;font-size:13px"
+            oninput="filterActiveMembers(this.value)"/>
+        </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Person</th><th>Platform</th><th>Doris</th><th>Kafka</th><th>Memgraph</th><th>ETL Studio</th><th>Last sign-in</th><th></th></tr></thead>
-            <tbody>
-              <tr><td><strong>John Miller</strong><div class="td-sub">john@stardatadb.com</div></td><td><span class="pill pill-blue">Owner</span></td><td>engineer</td><td>engineer</td><td>engineer</td><td>admin</td><td>Today 09:40</td><td><button class="btn btn-ghost btn-sm" onclick="openMember('john')">Edit</button></td></tr>
-              <tr><td><strong>Priya Shah</strong><div class="td-sub">priya@stardatadb.com</div></td><td><span class="pill pill-grey">Member</span></td><td>analyst</td><td>viewer</td><td>—</td><td>viewer</td><td>Yesterday</td><td><button class="btn btn-ghost btn-sm" onclick="openMember('priya')">Edit</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('Priya Shah')">Revoke now</button></td></tr>
-              <tr><td><strong>Marco Diaz</strong><div class="td-sub">marco@stardatadb.com</div></td><td><span class="pill pill-amber">Admin</span></td><td>engineer</td><td>engineer</td><td>viewer</td><td>operator</td><td>Nov 3</td><td><button class="btn btn-ghost btn-sm" onclick="openMember('marco')">Edit</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('Marco Diaz')">Revoke now</button></td></tr>
-              <tr><td><strong>Lena Okafor</strong><div class="td-sub">lena@stardatadb.com</div></td><td><span class="pill pill-grey">Member</span></td><td>viewer</td><td>—</td><td>engineer</td><td>developer</td><td>Oct 28</td><td><button class="btn btn-ghost btn-sm" onclick="openMember('lena')">Edit</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('Lena Okafor')">Revoke now</button></td></tr>
+            <thead><tr><th>Person</th><th>Platform</th><th>StarData</th><th>Kafka</th><th>StarGraph</th><th>ETL Studio</th><th>Last sign-in</th><th></th></tr></thead>
+            <tbody id="active-members-tbody">
+              <tr id="active-loading-row"><td colspan="8" style="color:var(--muted);font-size:13px">Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -551,7 +542,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <div class="card-title">Access levels</div>
           <div class="card-sub">One level per component · stored as one ZITADEL authorization</div>
           <div id="levels-priya-detail"></div>
-          <div class="claims-preview">Token claims after saving: <code>doris_role=analyst</code> · <code>kafka_role=viewer</code> · <code>etl_role=viewer</code> · <code>mdm_role=steward</code> · <code>monitoring_role=viewer</code> · <code>platform_roles=[]</code></div>
+          <div class="claims-preview">Token claims after saving: <code>doris_role=analyst</code> · <code>kafka_role=viewer</code> · <code>memgraph_role=viewer</code> · <code>etl_role=viewer</code> · <code>mdm_role=steward</code> · <code>monitoring_role=viewer</code> · <code>platform_roles=[]</code></div>
           <div style="display:flex;gap:8px;margin-top:14px"><button class="btn btn-ghost btn-sm">Cancel</button><button class="btn btn-primary btn-sm" onclick="showToast('Access levels saved. Changes reach the next token in ~10 min.','success')">Save changes</button></div>
         </div>
         <div class="card">
@@ -567,7 +558,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <table><thead><tr><th>When</th><th>Event</th><th>Result</th><th>IP</th></tr></thead>
           <tbody>
             <tr><td>Today 09:40</td><td>Signed in</td><td><span class="pill pill-green">Allowed</span></td><td>10.4.2.18</td></tr>
-            <tr><td>Nov 4 17:20</td><td>Roles changed by John Miller: Doris viewer → analyst</td><td><span class="pill pill-grey">Done</span></td><td>—</td></tr>
+            <tr><td>Nov 4 17:20</td><td>Roles changed by John Miller: StarData viewer → analyst</td><td><span class="pill pill-grey">Done</span></td><td>—</td></tr>
             <tr><td>Nov 3 08:01</td><td>Wrong password</td><td><span class="pill pill-red">Denied</span></td><td>81.2.69.142</td></tr>
             <tr><td>Oct 30 09:12</td><td>Approved by Marco Diaz</td><td><span class="pill pill-grey">Done</span></td><td>—</td></tr>
           </tbody></table>
@@ -583,9 +574,9 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <table>
             <thead><tr><th>Application</th><th>Data roles</th><th>Credential</th><th>Status</th><th>Owner</th><th></th></tr></thead>
             <tbody>
-              <tr><td><strong>reporting-bi</strong><div class="td-sub">Tableau dashboards</div></td><td><span class="pill pill-grey">Doris analyst</span></td><td>App password</td><td><span class="pill pill-amber">Expires in 12 days</span></td><td>Marco Diaz</td><td><button class="btn btn-ghost btn-sm">Rotate</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('reporting-bi')">Revoke</button></td></tr>
+              <tr><td><strong>reporting-bi</strong><div class="td-sub">Tableau dashboards</div></td><td><span class="pill pill-grey">StarData analyst</span></td><td>App password</td><td><span class="pill pill-amber">Expires in 12 days</span></td><td>Marco Diaz</td><td><button class="btn btn-ghost btn-sm">Rotate</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('reporting-bi')">Revoke</button></td></tr>
               <tr><td><strong>orders-service</strong><div class="td-sub">Writes order events</div></td><td><span class="pill pill-grey">Kafka producer</span></td><td>Client ID and secret</td><td><span class="pill pill-green">Rotated Oct 2</span></td><td>John Miller</td><td><button class="btn btn-ghost btn-sm">Rotate</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('orders-service')">Revoke</button></td></tr>
-              <tr><td><strong>churn-model</strong><div class="td-sub">Nightly Python job</div></td><td><span class="pill pill-grey">Doris analyst</span> <span class="pill pill-grey">Memgraph viewer</span></td><td>Client certificate</td><td><span class="pill pill-green">Valid to Feb 4</span></td><td>Lena Okafor</td><td><button class="btn btn-ghost btn-sm">Rotate</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('churn-model')">Revoke</button></td></tr>
+              <tr><td><strong>churn-model</strong><div class="td-sub">Nightly Python job</div></td><td><span class="pill pill-grey">StarData analyst</span> <span class="pill pill-grey">StarGraph viewer</span></td><td>Client certificate</td><td><span class="pill pill-green">Valid to Feb 4</span></td><td>Lena Okafor</td><td><button class="btn btn-ghost btn-sm">Rotate</button>&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke('churn-model')">Revoke</button></td></tr>
             </tbody>
           </table>
         </div>
@@ -599,20 +590,20 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <div class="form-field">
             <label>Data roles</label>
             <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
-              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> Doris viewer</label>
-              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> Doris analyst</label>
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> StarData viewer</label>
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> StarData analyst</label>
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> Kafka viewer</label>
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> Kafka producer</label>
-              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> Memgraph viewer</label>
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);margin:0"><input type="checkbox" style="width:auto"/> StarGraph viewer</label>
             </div>
             <div class="form-hint">Engineer levels are for people only. Apps cannot get them.</div>
           </div>
           <div class="form-field">
             <label>How it signs in</label>
             <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">
-              <label style="display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer"><input type="radio" name="cred" style="width:auto;margin-top:2px"/><div><strong style="font-size:13px">Client certificate</strong><div class="form-hint">Best for Doris from your own code. Valid 90 days.</div></div></label>
-              <label style="display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer"><input type="radio" name="cred" style="width:auto;margin-top:2px" checked/><div><strong style="font-size:13px">Client ID and secret</strong><div class="form-hint">For Kafka and Memgraph. Short-lived tokens.</div></div></label>
-              <label style="display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer"><input type="radio" name="cred" style="width:auto;margin-top:2px"/><div><strong style="font-size:13px">App password</strong><div class="form-hint">Doris only, for tools that need a username and password. 90 days.</div></div></label>
+              <label style="display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer"><input type="radio" name="cred" style="width:auto;margin-top:2px"/><div><strong style="font-size:13px">Client certificate</strong><div class="form-hint">Best for StarData from your own code. Valid 90 days.</div></div></label>
+              <label style="display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer"><input type="radio" name="cred" style="width:auto;margin-top:2px" checked/><div><strong style="font-size:13px">Client ID and secret</strong><div class="form-hint">For Kafka and StarGraph. Short-lived tokens.</div></div></label>
+              <label style="display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer"><input type="radio" name="cred" style="width:auto;margin-top:2px"/><div><strong style="font-size:13px">App password</strong><div class="form-hint">StarData only, for tools that need a username and password. 90 days.</div></div></label>
             </div>
           </div>
           <div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="openAppCreated()">Create application</button><button class="btn btn-ghost">Cancel</button></div>
@@ -630,9 +621,9 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
             <thead><tr><th>Component</th><th>Role keys</th><th>Levels (low → high)</th><th>Token claim</th><th>What it allows</th><th>People per level</th></tr></thead>
             <tbody>
               <tr><td><strong>Platform</strong></td><td><code>platform.*</code></td><td>owner · admin</td><td><code>platform_roles</code></td><td>Owner: everything, incl. Owners and Admins. Admin: members, apps, audit.</td><td>3 / 4</td></tr>
-              <tr><td><strong>Doris</strong></td><td><code>doris.*</code></td><td>viewer · analyst · engineer · admin</td><td><code>doris_role</code></td><td>SQL access via the Doris proxy; admin = backup, restore, nodes</td><td>2 / 5 / 6 / 2</td></tr>
+              <tr><td><strong>StarData</strong></td><td><code>doris.*</code></td><td>viewer · analyst · engineer · admin</td><td><code>doris_role</code></td><td>SQL access via the StarData proxy; admin = backup, restore, nodes</td><td>2 / 5 / 6 / 2</td></tr>
               <tr><td><strong>Kafka</strong></td><td><code>kafka.*</code></td><td>viewer · producer · engineer</td><td><code>kafka_role</code></td><td>Topics data.*, OAUTHBEARER</td><td>4 / 3 / 5</td></tr>
-              <tr><td><strong>Memgraph / StarGraph</strong></td><td><code>memgraph.*</code></td><td>viewer · engineer</td><td><code>memgraph_role</code></td><td>Bolt token; engineer can write</td><td>2 / 3</td></tr>
+              <tr><td><strong>StarGraph</strong></td><td><code>memgraph.*</code></td><td>viewer · engineer</td><td><code>memgraph_role</code></td><td>Bolt token; engineer can write</td><td>2 / 3</td></tr>
               <tr><td><strong>Flink</strong></td><td><code>flink.*</code></td><td>viewer · engineer</td><td><code>flink_role</code></td><td>Flink UI through the gateway</td><td>1 / 4</td></tr>
               <tr><td><strong>SQLMesh</strong></td><td><code>sqlmesh.*</code></td><td>engineer</td><td><code>sqlmesh_role</code></td><td>SQLMesh UI</td><td>3</td></tr>
               <tr><td><strong>ETL Studio</strong></td><td><code>etl.*</code></td><td>viewer · developer · operator · admin</td><td><code>etl_role</code></td><td>Pipelines, CDC, document sources</td><td>2 / 6 / 2 / 1</td></tr>
@@ -646,13 +637,13 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <ol style="padding-left:20px;font-size:13px;color:var(--muted);line-height:2">
             <li>Owner or Admin sets levels in Members → console backend creates or updates one ZITADEL authorization.</li>
             <li>On the next token, ZITADEL calls the <code style="color:var(--accent)">stardata-claims</code> Action (preaccesstoken) which adds the short claims.</li>
-            <li>Each service reads its own claim: Doris proxy <code style="color:var(--accent)">doris_role</code>, Kafka <code style="color:var(--accent)">kafka_role</code>, Grafana <code style="color:var(--accent)">monitoring_role</code>…</li>
+            <li>Each service reads its own claim: StarData proxy <code style="color:var(--accent)">doris_role</code>, Kafka <code style="color:var(--accent)">kafka_role</code>, Grafana <code style="color:var(--accent)">monitoring_role</code>…</li>
             <li>Access tokens live 10 minutes, so changes reach every service within 10 minutes.</li>
           </ol>
         </div>
         <div class="card">
           <div class="card-title" style="margin-bottom:12px">Sample access token (Priya Shah)</div>
-          <div class="code-block">{"sub":"284019333120","email":"priya@stardatadb.com","doris_role":"analyst","kafka_role":"viewer","etl_role":"viewer","mdm_role":"steward","monitoring_role":"viewer","platform_roles":[],"exp":1793988000}</div>
+          <div class="code-block">{"sub":"284019333120","email":"priya@stardatadb.com","doris_role":"analyst","kafka_role":"viewer","memgraph_role":"viewer","flink_role":"viewer","etl_role":"viewer","mdm_role":"steward","monitoring_role":"viewer","platform_roles":[],"exp":1793988000}</div>
         </div>
       </div>
 
@@ -731,7 +722,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
         </div>
         <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
           <input type="search" placeholder="Person or app" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);width:200px;outline:none;font-size:13px"/>
-          <select style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);font-size:13px;outline:none"><option value="">Component</option><option>doris</option><option>kafka</option><option>memgraph</option><option>etl</option><option>mdm</option><option>console</option></select>
+          <select style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);font-size:13px;outline:none"><option value="">Component</option><option value="doris">StarData</option><option value="kafka">Kafka</option><option value="memgraph">StarGraph</option><option value="etl">ETL Studio</option><option value="mdm">MDM</option><option value="monitoring">Monitoring</option><option value="console">Console</option></select>
           <select style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);font-size:13px;outline:none"><option value="">Result</option><option>ok</option><option>denied</option><option>waiting</option><option>blocked</option></select>
           <button class="btn btn-primary">Search</button>
         </div>
@@ -740,11 +731,11 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <table>
             <thead><tr><th>Time</th><th>Who</th><th>Component</th><th>Action</th><th>Source IP</th><th>Result</th></tr></thead>
             <tbody>
-              <tr style="cursor:pointer" onclick="openAuditDetail()"><td>Nov 5, 09:42</td><td>John Miller</td><td>Doris</td><td>Connected with platform helper</td><td>10.4.2.18</td><td><span class="pill pill-green">Allowed</span></td></tr>
-              <tr><td>Nov 5, 09:31</td><td>reporting-bi</td><td>Doris</td><td>App password sign-in</td><td>52.14.88.10</td><td><span class="pill pill-green">Allowed</span></td></tr>
+              <tr style="cursor:pointer" onclick="openAuditDetail()"><td>Nov 5, 09:42</td><td>John Miller</td><td>StarData</td><td>Connected with platform helper</td><td>10.4.2.18</td><td><span class="pill pill-green">Allowed</span></td></tr>
+              <tr><td>Nov 5, 09:31</td><td>reporting-bi</td><td>StarData</td><td>App password sign-in</td><td>52.14.88.10</td><td><span class="pill pill-green">Allowed</span></td></tr>
               <tr><td>Nov 5, 08:57</td><td>Ben Kowalski</td><td>Console</td><td>Signed up, email verified</td><td>81.2.69.142</td><td><span class="pill pill-amber">Waiting</span></td></tr>
               <tr><td>Nov 5, 08:12</td><td>Lena Okafor</td><td>Kafka</td><td>Write to data.orders denied</td><td>10.4.7.33</td><td><span class="pill pill-red">Denied</span></td></tr>
-              <tr><td>Nov 4, 17:20</td><td>John Miller</td><td>Members</td><td>Approved Priya Shah as Doris analyst</td><td>10.4.2.18</td><td><span class="pill pill-green">Allowed</span></td></tr>
+              <tr><td>Nov 4, 17:20</td><td>John Miller</td><td>Members</td><td>Approved Priya Shah as StarData analyst</td><td>10.4.2.18</td><td><span class="pill pill-green">Allowed</span></td></tr>
               <tr><td>Nov 4, 16:05</td><td>Marco Diaz</td><td>Applications</td><td>Rotated orders-service secret</td><td>10.4.3.9</td><td><span class="pill pill-green">Allowed</span></td></tr>
               <tr><td>Nov 4, 11:48</td><td>unknown</td><td>Console</td><td>5 failed sign-ins, rate limited</td><td>185.220.101.4</td><td><span class="pill pill-red">Blocked</span></td></tr>
             </tbody>
@@ -764,6 +755,41 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
           <div class="stat-tile"><div class="stat-tile-label">Applications</div><div class="stat-tile-value">3</div></div>
         </div>
         <div style="color:var(--muted);font-size:13px">Use the sidebar to navigate to Members, Applications, Roles, Approvals, Sign-in policy or Audit.</div>
+      </div>
+
+      <!-- ── ETL Studio placeholder ── -->
+      <div id="page-etl" class="hidden">
+        <div class="page-title">ETL Studio</div>
+        <div class="page-sub">Pipeline orchestration, CDC and document sources.</div>
+        <div style="color:var(--muted);font-size:13px;margin-top:8px">ETL Studio content loads here. Access controlled by <code style="color:var(--accent)">etl_role</code>.</div>
+      </div>
+
+      <!-- ── StarGraph placeholder ── -->
+      <div id="page-stargraph" class="hidden">
+        <div class="page-title">StarGraph</div>
+        <div class="page-sub">Graph analytics and traversal on the knowledge graph.</div>
+        <div style="color:var(--muted);font-size:13px;margin-top:8px">StarGraph content loads here. Access controlled by <code style="color:var(--accent)">memgraph_role</code> (ZITADEL role key: <code style="color:var(--accent)">memgraph.*</code>).</div>
+      </div>
+
+      <!-- ── MDM placeholder ── -->
+      <div id="page-mdm" class="hidden">
+        <div class="page-title">MDM</div>
+        <div class="page-sub">Master data management — golden records, steward queue and rules.</div>
+        <div style="color:var(--muted);font-size:13px;margin-top:8px">MDM content loads here. Access controlled by <code style="color:var(--accent)">mdm_role</code>.</div>
+      </div>
+
+      <!-- ── StarData (Doris) placeholder ── -->
+      <div id="page-doris" class="hidden">
+        <div class="page-title">StarData</div>
+        <div class="page-sub">SQL analytics engine — queries, workloads and data exploration.</div>
+        <div style="color:var(--muted);font-size:13px;margin-top:8px">StarData content loads here. Access controlled by <code style="color:var(--accent)">doris_role</code> (ZITADEL role key: <code style="color:var(--accent)">doris.*</code>).</div>
+      </div>
+
+      <!-- ── Connect placeholder ── -->
+      <div id="page-connect" class="hidden">
+        <div class="page-title">Connect</div>
+        <div class="page-sub">Data connectors, CDC sources and Kafka topic management.</div>
+        <div style="color:var(--muted);font-size:13px;margin-top:8px">Connect content loads here.</div>
       </div>
 
     </div><!-- /main -->
@@ -810,7 +836,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
     <div class="copy-field"><div class="copy-field-label">Client ID</div><div class="copy-field-row"><span class="copy-field-val">293817442019@stardata-platform</span><button class="btn btn-ghost btn-sm" onclick="copyText('293817442019@stardata-platform')">Copy</button></div></div>
     <div class="copy-field"><div class="copy-field-label">Client secret</div><div class="copy-field-row"><span class="copy-field-val">Zk3v...(64 characters)...q8Pn</span><button class="btn btn-ghost btn-sm" onclick="copyText('Zk3v_placeholder_q8Pn')">Copy</button></div></div>
     <div class="copy-field"><div class="copy-field-label">Token URL</div><div class="copy-field-row"><span class="copy-field-val">https://auth.stardatadb.com/oauth/v2/token</span><button class="btn btn-ghost btn-sm" onclick="copyText('https://auth.stardatadb.com/oauth/v2/token')">Copy</button></div></div>
-    <div style="font-size:12px;color:var(--muted);margin:12px 0">Roles granted: doris.analyst · Owner: John Miller · Secret expires Feb 4, 2027 (90 days)</div>
+    <div style="font-size:12px;color:var(--muted);margin:12px 0">Roles granted: doris.analyst (StarData analyst) · Owner: John Miller · Secret expires Feb 4, 2027 (90 days)</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><input type="checkbox" id="stored-cb" style="width:auto"/><label for="stored-cb" style="margin:0;font-size:13px">I have stored the secret in our secrets manager</label></div>
     <div class="dialog-actions">
       <button class="btn btn-ghost" onclick="downloadEnv()">Download as .env</button>
@@ -838,7 +864,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
 <div id="drawer-approval" class="drawer">
   <div class="drawer-header"><div class="drawer-title">A-1029 · Make Marco Diaz an Owner</div><button class="drawer-close" onclick="closeDrawer()">✕</button></div>
   <dl class="info-grid" style="margin-bottom:16px">
-    <dt>Today</dt><dd>Admin · Doris engineer · Kafka engineer · ETL operator</dd>
+    <dt>Today</dt><dd>Admin · StarData engineer · Kafka engineer · ETL operator</dd>
     <dt>After</dt><dd>Owner · other levels unchanged</dd>
     <dt>Reason</dt><dd>Second on-call Owner for weekends</dd>
   </dl>
@@ -860,7 +886,7 @@ dl.info-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
     <dt>Who</dt><dd>Lena Okafor (284019333188)</dd>
     <dt>Component</dt><dd>Kafka authorizer</dd>
     <dt>Action</dt><dd>WRITE topic data.orders</dd>
-    <dt>Claim</dt><dd><code style="color:var(--accent)">kafka_role=viewer</code></dd>
+    <dt>Claim</dt><dd><code style="color:var(--accent)">kafka_role=viewer</code> · topic WRITE denied</dd>
     <dt>Source IP</dt><dd>10.4.7.33</dd>
     <dt>Trace</dt><dd><a href="#" style="color:var(--accent)">4bf92f3577b34da6</a></dd>
   </dl>
@@ -880,13 +906,15 @@ var currentPage = 'members';
 
 // ── Level picker data ──────────────────────────────────────────
 var COMPONENTS = [
-  {id:'doris',    label:'Doris',      levels:['none','viewer','analyst','engineer','admin']},
-  {id:'kafka',    label:'Kafka',      levels:['none','viewer','producer','engineer']},
-  {id:'memgraph', label:'Memgraph',   levels:['none','viewer','engineer']},
-  {id:'flink',    label:'Flink',      levels:['none','viewer','engineer']},
-  {id:'sqlmesh',  label:'SQLMesh',    levels:['none','engineer']},
-  {id:'etl',      label:'ETL Studio', levels:['none','viewer','developer','operator','admin']},
-  {id:'platform', label:'Platform',   levels:['none','member','admin','owner']},
+  {id:'doris',      label:'StarData',   levels:['none','viewer','analyst','engineer','admin']},
+  {id:'kafka',      label:'Kafka',      levels:['none','viewer','producer','engineer']},
+  {id:'memgraph',   label:'StarGraph',  levels:['none','viewer','engineer']},
+  {id:'flink',      label:'Flink',      levels:['none','viewer','engineer']},
+  {id:'sqlmesh',    label:'SQLMesh',    levels:['none','engineer']},
+  {id:'etl',        label:'ETL Studio', levels:['none','viewer','developer','operator','admin']},
+  {id:'mdm',        label:'MDM',        levels:['none','viewer','steward','admin']},
+  {id:'monitoring', label:'Monitoring', levels:['none','viewer','operator']},
+  {id:'platform',   label:'Platform',   levels:['none','member','admin','owner']},
 ];
 
 var memberLevels = {};  // userId -> {comp: level}
@@ -937,10 +965,32 @@ function showScreen(id) {
   }
 }
 
-function showConsole() { showScreen('screen-console'); }
+// setAvatarUser updates the avatar button initials and the user menu name/email.
+function setAvatarUser(name, email) {
+  var initials = (name||'?').split(' ').map(function(w){return w[0]||'';}).join('').toUpperCase().slice(0,2);
+  var btn = document.getElementById('avatar-btn');
+  if(btn) { btn.textContent = initials; btn.title = name; }
+  var nameEl = document.getElementById('user-menu-name');
+  if(nameEl) nameEl.childNodes[0].textContent = name + '\n';
+  var emailEl = document.getElementById('user-menu-email');
+  if(emailEl) emailEl.textContent = email || '';
+}
+
+// showConsole reveals the main shell and attempts to load the real user from
+// /api/me (works when a real ZITADEL session cookie is present).
+function showConsole() {
+  showScreen('screen-console');
+  fetch('/api/me', {credentials:'same-origin'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(me){
+      if(me && me.name) setAvatarUser(me.name, me.email);
+    })
+    .catch(function(){});
+}
 
 function nav(page) {
-  var pages = ['home','members','member-detail','apps','roles','approvals','policy','audit'];
+  var pages = ['home','members','member-detail','apps','roles','approvals','policy','audit',
+               'etl','stargraph','mdm','doris','connect'];
   pages.forEach(function(p) {
     var el = document.getElementById('page-'+p);
     if(el) el.classList.toggle('hidden', p!==page);
@@ -950,13 +1000,9 @@ function nav(page) {
   if(navEl) navEl.classList.add('active');
   currentPage = page;
 
-  // Init level pickers when navigating to members
+  // Load live data when navigating to members
   if(page==='members') {
-    buildLevelPickers('levels-ana','ana',{doris:'viewer',etl:'viewer'});
-    buildLevelPickers('levels-ben','ben',{});
-  }
-  if(page==='member-detail') {
-    buildLevelPickers('levels-priya-detail','priya',{doris:'analyst',kafka:'viewer',etl:'viewer',mdm:'steward',monitoring:'viewer'});
+    loadMembers();
   }
 }
 
@@ -989,63 +1035,42 @@ var currentSigninEmail = '';
 var currentMFAEmail = '';
 var currentMFAIsOwner = false;
 
-// doSignIn simulates what the console backend's GET /auth/login does:
-//  1. In production: browser is redirected to /auth/login → ZITADEL Login v2.
-//     ZITADEL handles email + password on its own screens, then either
-//     sends the browser back to /auth/callback (no MFA needed) or shows
-//     the TOTP screen before the callback.
-//  2. In this demo: we replicate that decision tree locally so every
-//     screen transition matches the spec.
+// doSignIn — signs in via the BFF (POST /api/login).
+// If the BFF returns mfa_required, fall back to the ZITADEL PKCE flow
+// (/auth/login) so the user can enrol their authenticator app.
 function doSignIn() {
   var email = document.getElementById('si-email').value.trim().toLowerCase();
   var pass  = document.getElementById('si-pass').value;
   if(!email || !pass) { showToast('Please enter your email and password.','error'); return; }
 
-  // ── Owner: needs MFA step (platform.owner) ────────────────────
-  if(DEMO_OWNERS[email] && pass === DEMO_OWNERS[email]) {
-    // ZITADEL returns to /auth/callback; callback.go calls needsMFA → true,
-    // hasMFA (amr) → false → redirect /mfa-required.
-    // Demo: show TOTP step which, on success, acts as the callback granting the session.
-    currentMFAEmail = email;
-    currentMFAIsOwner = true;
-    showScreen('screen-mfa-totp');
-    return;
-  }
+  var btn = document.querySelector('#screen-signin .btn-primary');
+  if(btn) { btn.disabled = true; btn.textContent = 'Signing in…'; }
 
-  // ── Admin: also needs MFA step (platform.admin) ───────────────
-  if(DEMO_ADMINS[email] && pass === DEMO_ADMINS[email]) {
-    currentMFAEmail = email;
-    currentMFAIsOwner = false;
-    showScreen('screen-mfa-totp');
-    return;
-  }
-
-  // ── Invited user — password already set → no MFA → simulate callback ──────
-  if(invitedUsers[email] && invitedUsers[email].activatedPassword) {
-    if(pass !== invitedUsers[email].activatedPassword) {
-      showToast('Incorrect password.','error');
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ email: email, password: pass })
+  })
+  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, status: r.status, data: d }; }); })
+  .then(function(res) {
+    if(btn) { btn.disabled = false; btn.textContent = 'Continue'; }
+    if(res.ok && res.data && res.data.redirect) {
+      window.location.href = res.data.redirect;
       return;
     }
-    // Regular member: needsMFA returns false → callback.go sets session → waiting
-    showWaiting(email);
-    return;
-  }
-
-  // ── Invited user — first sign-in → show Set Password screen ──────────────
-  if(invitedUsers[email] && !invitedUsers[email].activatedPassword) {
-    currentSigninEmail = email;
-    showSetPassword(email);
-    return;
-  }
-
-  // ── Unknown email: new self-sign-up path → waiting screen ─────────────────
-  if(email.includes('@') && pass.length >= 6) {
-    currentSigninEmail = email;
-    showWaiting(email);
-    return;
-  }
-
-  showToast('Incorrect email or password.','error');
+    if(res.status === 403 && res.data && res.data.mfa_required) {
+      var hint = encodeURIComponent(email);
+      window.location.href = '/auth/login?login_hint=' + hint;
+      return;
+    }
+    var msg = (res.data && res.data.error) ? res.data.error : 'Sign-in failed. Please try again.';
+    showToast(msg, 'error');
+  })
+  .catch(function() {
+    if(btn) { btn.disabled = false; btn.textContent = 'Continue'; }
+    showToast('Could not reach the sign-in service. Please try again.', 'error');
+  });
 }
 
 // doPasskeySignIn simulates the WebAuthn passkey flow.
@@ -1058,15 +1083,13 @@ function doPasskeySignIn() {
   // For the demo, passkey always succeeds for known users.
   if(DEMO_OWNERS[email]) {
     // Passkey = MFA satisfied; skip TOTP → straight to console.
-    document.querySelector('.avatar-btn').textContent = 'JM';
-    document.querySelector('.avatar-btn').title = 'John Miller (Owner)';
+    setAvatarUser('John Miller', email);
     showToast('Signed in with passkey.','success');
     showConsole();
     return;
   }
   if(DEMO_ADMINS[email]) {
-    document.querySelector('.avatar-btn').textContent = 'MD';
-    document.querySelector('.avatar-btn').title = 'Marco Diaz (Admin)';
+    setAvatarUser('Marco Diaz', email);
     showToast('Signed in with passkey.','success');
     showConsole();
     return;
@@ -1096,11 +1119,9 @@ function doVerifyTOTP() {
   // Demo: any 6-digit code is accepted (simulates correct TOTP).
   // In production ZITADEL validates RFC 6238 HMAC-SHA1 against the shared secret.
   if(currentMFAIsOwner || DEMO_OWNERS[currentMFAEmail]) {
-    document.querySelector('.avatar-btn').textContent = 'JM';
-    document.querySelector('.avatar-btn').title = 'John Miller (Owner)';
+    setAvatarUser('John Miller', currentMFAEmail || 'johnmillermca@gmail.com');
   } else {
-    document.querySelector('.avatar-btn').textContent = 'MD';
-    document.querySelector('.avatar-btn').title = 'Marco Diaz (Admin)';
+    setAvatarUser('Marco Diaz', currentMFAEmail || 'marco@stardatadb.com');
   }
   showToast('Signed in. MFA verified.', 'success');
   showConsole();
@@ -1226,13 +1247,210 @@ function checkAgain() {
   showToast('Still waiting. You will receive an email when an Owner approves your account.', 'info');
 }
 
-// ── Approve member ─────────────────────────────────────────────
-function approveMember(userId) {
+// ── Members live API ───────────────────────────────────────────
+var allActiveMembers = [];
+
+function loadMembers() {
+  // ── Waiting cards ────────────────────────────────────────────
+  var waitingEl = document.getElementById('waiting-cards');
+  var waitingLoader = document.getElementById('waiting-loading');
+  if(waitingLoader) waitingLoader.style.display = 'block';
+
+  fetch('/api/access/members?state=waiting', {credentials:'same-origin', redirect:'follow'})
+    .then(function(r){
+      // fetch follows the 302 to /auth/login; the final URL will contain "auth/login"
+      // which means we have no real ZITADEL session — show the sign-in banner.
+      if(r.redirected && r.url.indexOf('/auth/login') !== -1) {
+        throw new Error('NO_SESSION');
+      }
+      if(r.status === 401 || r.status === 302) { throw new Error('NO_SESSION'); }
+      if(r.status === 403) { throw new Error('FORBIDDEN'); }
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      if(waitingLoader) waitingLoader.remove();
+      var items = (data && data.items) || [];
+      var lbl = document.getElementById('waiting-count-label');
+      if(lbl) lbl.textContent = items.length ? items.length+' '+(items.length===1?'person':'people') : '';
+      var badge = document.getElementById('badge-members');
+      if(badge) badge.textContent = items.length || '';
+      Array.from(waitingEl.children).forEach(function(c){ c.remove(); });
+      if(!items.length) {
+        waitingEl.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:8px 0">No one is waiting.</p>';
+        return;
+      }
+      items.forEach(function(m) {
+        memberLevels[m.id] = m.levels || {};
+        waitingEl.appendChild(buildWaitingCard(m));
+      });
+    })
+    .catch(function(err) {
+      if(err.message === 'NO_SESSION') {
+        showNoSessionBanner(waitingEl, waitingLoader);
+      } else if(err.message === 'FORBIDDEN') {
+        if(waitingLoader) waitingLoader.textContent = 'Your account does not have Owner or Admin access.';
+      } else {
+        if(waitingLoader) waitingLoader.textContent = 'Could not load waiting members: '+err.message;
+      }
+    });
+
+  // ── Active members table ─────────────────────────────────────
+  var tbody = document.getElementById('active-members-tbody');
+  var loadingRow = document.getElementById('active-loading-row');
+
+  fetch('/api/access/members?state=active', {credentials:'same-origin', redirect:'follow'})
+    .then(function(r){
+      if(r.redirected && r.url.indexOf('/auth/login') !== -1) { throw new Error('NO_SESSION'); }
+      if(r.status === 401 || r.status === 302 || r.status === 403) { throw new Error('NO_SESSION'); }
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      allActiveMembers = (data && data.items) || [];
+      var lbl = document.getElementById('active-count-label');
+      if(lbl) lbl.textContent = '('+allActiveMembers.length+')';
+      renderActiveTable(allActiveMembers);
+    })
+    .catch(function(err) {
+      if(err.message === 'NO_SESSION') {
+        if(loadingRow) {
+          loadingRow.cells[0].innerHTML = '<a href="/auth/login?next=/console.html" style="color:var(--accent);font-weight:600">Sign in with ZITADEL</a> to see live member data.';
+        }
+      } else {
+        if(loadingRow) loadingRow.cells[0].textContent = 'Could not load members: '+err.message;
+      }
+    });
+}
+
+// Show a sign-in banner in place of the waiting cards section
+function showNoSessionBanner(container, loaderEl) {
+  if(loaderEl) loaderEl.remove();
+  Array.from(container.children).forEach(function(c){ c.remove(); });
+  container.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:12px">' +
+      '<div style="font-size:14px;font-weight:600;margin-bottom:8px">Sign in with ZITADEL to manage members</div>' +
+      '<div style="font-size:13px;color:var(--muted);margin-bottom:14px">The demo session does not have a real ZITADEL cookie. Use the real sign-in flow to approve, decline or edit members.</div>' +
+      '<a href="/auth/login?next=/console.html" class="btn btn-primary">Sign in with ZITADEL</a>' +
+    '</div>';
+}
+
+function buildWaitingCard(m) {
+  var initials = (m.name||'?').split(' ').map(function(w){return w[0]||'';}).join('').toUpperCase().slice(0,2);
+  var isPersonal = m.personalDomain;
+  var div = document.createElement('div');
+  div.className = 'member-card'+(isPersonal?' warning':'');
+  div.dataset.userId = m.id;
+
+  var headerHtml = '<div class="member-card-header"><div class="avatar">'+initials+'</div><div><strong>'+esc(m.name)+'</strong><div class="member-card-meta">'+esc(m.email)+(m.emailVerified?' · email verified':' · email unverified')+(m.createdAt?' · signed up '+fmtRel(m.createdAt):'')+'</div></div></div>';
+  var warnHtml = isPersonal ? '<div class="member-card-warn">'+esc(m.name.split(' ')[0])+' signed up with a personal address. Check who they are before approving.</div>' : '';
+  var levelContainerId = 'waiting-levels-'+m.id;
+  div.innerHTML = headerHtml + warnHtml +
+    '<div id="'+levelContainerId+'"></div>' +
+    '<div style="font-size:11px;color:var(--muted);margin-top:8px">Roles reach the person\'s tokens within 10 minutes.</div>' +
+    '<div class="member-card-actions">' +
+      '<button class="btn btn-primary btn-sm" onclick="approveMember(\''+m.id+'\',\''+esc(m.name)+'\',\''+levelContainerId+'\')">Approve with these roles</button>' +
+      '<button class="btn btn-danger-ghost btn-sm" onclick="openDeclineById(\''+m.id+'\',\''+esc(m.name)+'\')">Decline</button>' +
+    '</div>';
+  // Build level pickers after the element is in the DOM (deferred)
+  setTimeout(function(){ buildLevelPickers(levelContainerId, m.id, m.levels||{}); }, 0);
+  return div;
+}
+
+function renderActiveTable(items) {
+  var tbody = document.getElementById('active-members-tbody');
+  if(!tbody) return;
+  tbody.innerHTML = '';
+  if(!items.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);font-size:13px">No active members found.</td></tr>';
+    return;
+  }
+  items.forEach(function(m) {
+    var platPill = '';
+    if(m.platform==='owner') platPill='<span class="pill pill-blue">Owner</span>';
+    else if(m.platform==='admin') platPill='<span class="pill pill-amber">Admin</span>';
+    else platPill='<span class="pill pill-grey">Member</span>';
+    var tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td><strong>'+esc(m.name)+'</strong><div class="td-sub">'+esc(m.email)+'</div></td>' +
+      '<td>'+platPill+'</td>' +
+      '<td>'+(m.levels&&m.levels.doris||'—')+'</td>' +
+      '<td>'+(m.levels&&m.levels.kafka||'—')+'</td>' +
+      '<td>'+(m.levels&&m.levels.memgraph||'—')+'</td>' +
+      '<td>'+(m.levels&&m.levels.etl||'—')+'</td>' +
+      '<td>'+(m.lastSignIn?fmtRel(m.lastSignIn):'—')+'</td>' +
+      '<td><button class="btn btn-ghost btn-sm" onclick="openMember(\''+m.id+'\')">Edit</button>'+
+        (m.platform!=='owner'?'&nbsp;<button class="btn btn-danger-ghost btn-sm" onclick="openRevoke(\''+esc(m.name)+'\')">Revoke now</button>':'')+
+      '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function filterActiveMembers(q) {
+  if(!q) { renderActiveTable(allActiveMembers); return; }
+  var lower = q.toLowerCase();
+  renderActiveTable(allActiveMembers.filter(function(m){
+    return (m.name||'').toLowerCase().indexOf(lower)>=0 || (m.email||'').toLowerCase().indexOf(lower)>=0;
+  }));
+}
+
+// ── Approve member (real API) ──────────────────────────────────
+function approveMember(userId, userName, levelContainerId) {
   var lvs = memberLevels[userId]||{};
   var hasLevel = Object.values(lvs).some(function(v){ return v && v!=='none'; });
   if(!hasLevel) { showToast('Select at least one level before approving.','error'); return; }
-  showToast((userId==='ana'?'Ana Torres':'Ben Kowalski')+' approved. Roles will reach their next token within 10 minutes.','success');
-  document.getElementById('badge-members').textContent = '1';
+
+  // Build levels payload (exclude 'none' and 'platform')
+  var levels = {};
+  var platform = 'member';
+  Object.keys(lvs).forEach(function(comp){
+    var v = lvs[comp];
+    if(!v || v==='none') return;
+    if(comp==='platform') { platform = v; return; }
+    levels[comp] = v;
+  });
+
+  var btn = document.querySelector('[data-user-id="'+userId+'"] .btn-primary');
+  if(btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
+
+  fetch('/api/access/members/'+userId+'/approve', {
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:platform, levels:levels})
+  })
+  .then(function(r){
+    if(!r.ok) return r.json().then(function(e){ throw new Error(e.error||'HTTP '+r.status); });
+    return r.json();
+  })
+  .then(function(data) {
+    // Remove the card from the DOM
+    var card = document.querySelector('[data-user-id="'+userId+'"]');
+    if(card) card.remove();
+    // Update waiting count label and badge
+    var remaining = document.querySelectorAll('#waiting-cards .member-card').length;
+    var lbl = document.getElementById('waiting-count-label');
+    if(lbl) lbl.textContent = remaining ? remaining+' '+(remaining===1?'person':'people') : '';
+    var badge = document.getElementById('badge-members');
+    if(badge) badge.textContent = remaining || '';
+    if(!remaining) {
+      document.getElementById('waiting-cards').innerHTML = '<p style="color:var(--muted);font-size:13px;padding:8px 0">No one is waiting.</p>';
+    }
+    if(data.approvalId) {
+      showToast('Approval request '+data.approvalId+' created — a second Owner must approve.', 'info');
+    } else {
+      showToast(userName+' approved. Roles reach their next token within 10 minutes.','success');
+    }
+    // Refresh active table to show the newly approved member
+    fetch('/api/access/members?state=active',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+      allActiveMembers=(d&&d.items)||[];
+      var lbl2=document.getElementById('active-count-label'); if(lbl2) lbl2.textContent='('+allActiveMembers.length+')';
+      renderActiveTable(allActiveMembers);
+    }).catch(function(){});
+  })
+  .catch(function(err) {
+    showToast('Approve failed: '+err.message,'error');
+    if(btn) { btn.disabled=false; btn.textContent='Approve with these roles'; }
+  });
 }
 
 // ── Dialogs ────────────────────────────────────────────────────
@@ -1279,14 +1497,20 @@ var confirmType = '';
 function openRevoke(name) {
   confirmTarget = name; confirmType = 'revoke';
   document.getElementById('dlg-confirm-title').textContent = 'Revoke access for '+name;
-  document.getElementById('dlg-confirm-sub').textContent = 'This removes the ZITADEL authorization, ends every session, revokes refresh tokens, deletes console sessions in Valkey and app passwords at the Doris proxy. Access tokens already issued stop working within 10 minutes.';
+  document.getElementById('dlg-confirm-sub').textContent = 'This removes the ZITADEL authorization, ends every session, revokes refresh tokens, deletes console sessions in Valkey and app passwords at the StarData proxy. Access tokens already issued stop working within 10 minutes.';
   document.getElementById('dlg-confirm-name-row').classList.remove('hidden');
   document.getElementById('dlg-confirm-name-label').textContent = 'Type "'+name+'" to confirm';
   document.getElementById('dlg-confirm-name-input').value = '';
   document.getElementById('dlg-confirm-reason').value = '';
   document.getElementById('dlg-confirm').classList.remove('hidden');
 }
-function openDecline(name) {
+// openDecline keeps backward compat for any old static calls
+function openDecline(name) { openDeclineById(null, name); }
+
+// openDeclineById — called by dynamically-built waiting cards
+var _declineUserId = null;
+function openDeclineById(userId, name) {
+  _declineUserId = userId;
   confirmTarget = name; confirmType = 'decline';
   document.getElementById('dlg-confirm-title').textContent = 'Decline '+name;
   document.getElementById('dlg-confirm-sub').textContent = 'This will deactivate the user and send a notification email.';
@@ -1294,18 +1518,75 @@ function openDecline(name) {
   document.getElementById('dlg-confirm-reason').value = '';
   document.getElementById('dlg-confirm').classList.remove('hidden');
 }
+
 function confirmAction() {
   var reason = document.getElementById('dlg-confirm-reason').value.trim();
   if(!reason) { showToast('Reason is required.','error'); return; }
+
   if(confirmType==='revoke') {
     var nameInput = document.getElementById('dlg-confirm-name-input').value.trim();
     if(nameInput !== confirmTarget) { showToast('Name does not match.','error'); return; }
     showToast('Access revoked for '+confirmTarget+'. All sessions ended.','info');
-  } else {
-    showToast(confirmTarget+' declined. Notification sent.','info');
-    document.getElementById('badge-members').textContent = '1';
+    closeDlg('dlg-confirm');
+    return;
   }
+
+  // ── Decline: call real API when we have a live ZITADEL userId ──
+  if(confirmType==='decline' && _declineUserId) {
+    var userId = _declineUserId;
+    var name   = confirmTarget;
+    var confirmBtn = document.querySelector('#dlg-confirm .btn-danger');
+    if(confirmBtn) { confirmBtn.disabled=true; confirmBtn.textContent='Declining…'; }
+
+    fetch('/api/access/members/'+userId+'/decline', {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({reason:reason})
+    })
+    .then(function(r){
+      if(!r.ok) return r.json().then(function(e){ throw new Error(e.error||'HTTP '+r.status); });
+      return r.json();
+    })
+    .then(function() {
+      var card = document.querySelector('[data-user-id="'+userId+'"]');
+      if(card) card.remove();
+      var remaining = document.querySelectorAll('#waiting-cards .member-card').length;
+      var lbl = document.getElementById('waiting-count-label');
+      if(lbl) lbl.textContent = remaining ? remaining+' '+(remaining===1?'person':'people') : '';
+      var badge = document.getElementById('badge-members');
+      if(badge) badge.textContent = remaining || '';
+      if(!remaining) {
+        document.getElementById('waiting-cards').innerHTML = '<p style="color:var(--muted);font-size:13px;padding:8px 0">No one is waiting.</p>';
+      }
+      closeDlg('dlg-confirm');
+      showToast(name+' declined. The person has been notified.','info');
+      _declineUserId = null;
+    })
+    .catch(function(err) {
+      showToast('Decline failed: '+err.message,'error');
+      if(confirmBtn) { confirmBtn.disabled=false; confirmBtn.textContent='Confirm'; }
+    });
+    return;
+  }
+
+  // Fallback for static demo decline (no real userId)
+  showToast(confirmTarget+' declined. Notification sent.','info');
   closeDlg('dlg-confirm');
+}
+
+// ── String helpers ─────────────────────────────────────────────
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function fmtRel(iso) {
+  if(!iso) return '';
+  var d = new Date(iso); var now = new Date();
+  var diff = Math.floor((now - d) / 1000);
+  if(diff < 60) return 'just now';
+  if(diff < 3600) return Math.floor(diff/60)+' min ago';
+  if(diff < 86400) return Math.floor(diff/3600)+' hr ago';
+  if(diff < 172800) return 'Yesterday';
+  return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 }
 
 function sendInvite() {
@@ -1433,8 +1714,48 @@ function downloadEnv() {
   showToast('.env file downloaded.','success');
 }
 
+// ── User menu (avatar button) ──────────────────────────────────
+function toggleUserMenu() {
+  var menu = document.getElementById('user-menu');
+  menu.classList.toggle('hidden');
+}
+document.addEventListener('click', function(e) {
+  var btn = document.getElementById('avatar-btn');
+  var menu = document.getElementById('user-menu');
+  if(menu && btn && !btn.contains(e.target) && !menu.contains(e.target)) {
+    menu.classList.add('hidden');
+  }
+});
+function doLogout() {
+  window.location.href = '/auth/logout';
+  return false;
+}
+
 // ── Init ───────────────────────────────────────────────────────
-showScreen('screen-signin');
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  if(params.get('login_error') === 'expired') {
+    history.replaceState(null, '', window.location.pathname);
+    showScreen('screen-signin');
+    setTimeout(function(){ showToast('Your sign-in link expired. Please try again.', 'error'); }, 200);
+    return;
+  }
+
+  fetch('/api/me', {credentials:'same-origin'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(me) {
+      if(me && me.sub) {
+        setAvatarUser(me.name || me.email, me.email);
+        showScreen('screen-console');
+        nav('members');
+      } else {
+        showScreen('screen-signin');
+      }
+    })
+    .catch(function() {
+      showScreen('screen-signin');
+    });
+})();
 </script>
 </body>
 </html>

@@ -46,7 +46,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: console-backend
-          image: 192.168.1.50:30500/stardatadb/console-backend:1.0.11
+          image: 192.168.1.50:30500/stardatadb/console-backend:1.0.26
           imagePullPolicy: Always
           ports:
             - containerPort: 8090
@@ -69,7 +69,7 @@ spec:
             - name: OIDC_REDIRECT_URI
               value: "https://console.stardatadb.com/auth/callback"
             - name: OIDC_POST_LOGOUT_URI
-              value: "https://console.stardatadb.com/"
+              value: "https://www.stardatadb.com"
             # Project ID — required for the scope urn:zitadel:iam:org:project:id:<id>:aud
             - name: ZITADEL_PROJECT_ID
               valueFrom:
@@ -89,16 +89,34 @@ spec:
             - name: SESSION_MAX_TTL
               value: "604800"       # 7 days in seconds
             # ── Console DB ────────────────────────────────────────────────────
-            - name: CONSOLE_DB_DSN
-              value: "postgres://console_app:$(CONSOLE_DB_PASS)@console-db.access.svc.cluster.local:5432/console?sslmode=require"
+            # CONSOLE_DB_PASS must be declared BEFORE CONSOLE_DB_DSN so Kubernetes
+            # env-var substitution resolves $(CONSOLE_DB_PASS) correctly.
             - name: CONSOLE_DB_PASS
               valueFrom:
                 secretKeyRef:
                   name: console-db-credentials
                   key: app-password
-            # ── Machine user key (for ZITADEL API calls) ─────────────────────
-            - name: BACKEND_KEY_FILE
-              value: /run/secrets/console-backend-key/key.json
+            - name: CONSOLE_DB_DSN
+              value: "postgres://console_app:$(CONSOLE_DB_PASS)@console-db.access.svc.cluster.local:5432/console?sslmode=require"
+            # ── ZITADEL machine user (for /api/access/* calls) ────────────────
+            - name: ZITADEL_ORG_ID
+              value: "398572780116843097"
+            - name: ZITADEL_MACHINE_KEY_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: console-backend-key
+                  key: key.json
+            # ── Invite mailer + owner notification ────────────────────────────
+            - name: INVITE_MAILER_URL
+              value: "http://invite-mailer.access.svc.cluster.local:8025"
+            - name: OWNER_EMAIL
+              value: "johnmillermca@gmail.com"
+            # ── Cron endpoint secret ──────────────────────────────────────────
+            - name: CRON_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: console-cron-secret
+                  key: secret
             # ── Kafka audit ───────────────────────────────────────────────────
             - name: KAFKA_BROKERS
               value: "kafka-bootstrap.prod.svc.cluster.local:9093"
