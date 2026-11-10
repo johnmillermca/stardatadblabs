@@ -1759,13 +1759,20 @@ function downloadEnv() {
     return;
   }
 
+  var isWaitingRoute = window.location.pathname === '/waiting';
+
   fetch('/api/me', {credentials:'same-origin'})
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(me) {
       if(me && me.sub) {
         setAvatarUser(me.name || me.email, me.email);
-        showScreen('screen-console');
-        nav('members');
+        if(isWaitingRoute) {
+          // New user with no roles — show the waiting-for-approval screen.
+          showWaiting(me.email);
+        } else {
+          showScreen('screen-console');
+          nav('members');
+        }
       } else {
         showScreen('screen-signin');
       }

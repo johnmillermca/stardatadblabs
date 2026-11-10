@@ -106,7 +106,16 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	// access token (tok.AccessToken) the same way. For StarData both are on,
 	// so the ID token claims are sufficient.
 
-	// ── 5. MFA enforcement for Owners and Admins ──────────────────────────────
+	// ── 5a. Waiting room for new users with no roles yet ─────────────────────
+	// A user who has just registered via ZITADEL has no platform roles until
+	// an Owner approves them. Send them to /waiting so they see the approval
+	// screen rather than landing in the full console with empty data.
+	if len(claims.PlatformRoles) == 0 {
+		http.Redirect(w, r, "/waiting", http.StatusFound)
+		return
+	}
+
+	// ── 5b. MFA enforcement for Owners and Admins ─────────────────────────────
 	if needsMFA(claims.PlatformRoles) && !hasMFA(claims.AMR) {
 		// Person is an Owner or Admin but signed in with password only.
 		// Send them to the MFA-required page so they can enrol or re-sign-in
