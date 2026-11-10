@@ -1,0 +1,113 @@
+# =============================================================================
+# console-spa — serves console.html (the StarData console page) on worker1.
+# Routes:
+#   /auth/* /api/*  → handed upstream to console-backend by webconsole-proxy
+#   /               → console.html (checks /api/me, shows authed or unauthed state)
+#
+# Exposed via ClusterIP service console-spa.access.svc.cluster.local:80
+# which webconsole-proxy routes console.stardatadb.com / to.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: console-spa-conf
+  namespace: access
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name console.stardatadb.com _;
+
+        root /usr/share/nginx/html;
+
+        location / {
+            try_files $uri /console.html;
+        }
+
+        location ~* \.html$ {
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+            add_header Pragma        "no-cache" always;
+            add_header Expires       "0" always;
+            try_files $uri /console.html;
+        }
+
+        location /healthz {
+            access_log off;
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console-spa
+  namespace: access
+  labels:
+    app: console-spa
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: console-spa
+  template:
+    metadata:
+      labels:
+        app: console-spa
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: zitadel
+          effect: NoSchedule
+      containers:
+        - name: nginx
+          image: 192.168.1.50:30500/webconsole:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: console-spa-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console-spa
+  namespace: access
+  labels:
+    app: console-spa
+spec:
+  type: ClusterIP
+  selector:
+    app: console-spa
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

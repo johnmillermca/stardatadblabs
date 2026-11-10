@@ -1,5 +1,11 @@
 ---
-# ConfigMap — Nginx reverse proxy that forwards port 80 → worker8:30081
+# webconsole-proxy — nginx DaemonSet on master2 (hostNetwork, port 80)
+# Routes three domains:
+#   www.stardatadb.com       → S3 static website
+#   auth.stardatadb.com      → Pocket ID on worker1
+#   console.stardatadb.com   → static console.html on worker1
+#
+# Cloudflare sits in front and terminates TLS; traffic arrives here on HTTP.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,25 +13,17 @@ metadata:
   namespace: prod
 data:
   default.conf: |
-    # Use kube-dns for dynamic upstream resolution (required for hostNetwork pods).
-    # Without this nginx resolves upstreams once at startup and caches them forever;
-    # any pod rollout causes 502/503 until nginx is manually reloaded.
     resolver 10.96.0.10 valid=10s ipv6=off;
 
+    # ── www.stardatadb.com → S3 static website ────────────────────────────────
     server {
         listen 80;
         server_name www.stardatadb.com stardatadb.com _;
 
         location / {
-            # Forward to webconsole-worker8 via its NodePort (30081) on worker8.
-            # Port 30081 is open through the node firewall; direct port 80 is not.
-            proxy_pass http://192.168.1.58:30081;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_connect_timeout 5s;
-            proxy_read_timeout 30s;
-            # Tell Cloudflare never to cache HTML responses
+            set $s3 "stardatadb-web.s3-website.us-east-2.amazonaws.com";
+            proxy_pass       http://$s3;
+            proxy_set_header Host $s3;
             add_header Cache-Control "no-cache, no-store, must-revalidate" always;
             add_header Pragma        "no-cache" always;
             add_header Expires       "0" always;
@@ -38,38 +36,19 @@ data:
         }
     }
 
-    # ── auth.stardatadb.com ───────────────────────────────────────────────────────
-    # /ui/v2/login/* → Login v2 Next.js service
-    # everything else → ZITADEL API / OIDC
+    # ── auth.stardatadb.com → Pocket ID ───────────────────────────────────────
     server {
         listen 80;
         server_name auth.stardatadb.com;
 
-        location /ui/v2/ {
-            set $zitadel_login "zitadel-login.access.svc.cluster.local";
-            proxy_pass http://$zitadel_login:3000;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto https;
-            proxy_connect_timeout 5s;
-            proxy_read_timeout 60s;
-        }
-
         location / {
-            set $zitadel_https "zitadel-https.access.svc.cluster.local";
-            proxy_pass https://$zitadel_https;
-            proxy_ssl_verify off;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto https;
-            proxy_connect_timeout 5s;
-            proxy_read_timeout 60s;
-            # Required for ZITADEL gRPC/h2c traffic
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "";
+            set $pocket_id "pocket-id.access.svc.cluster.local";
+            proxy_pass         http://$pocket_id:1411;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto https;
+            proxy_buffering    off;
         }
 
         location /healthz {
@@ -79,30 +58,17 @@ data:
         }
     }
 
-    # ── console.stardatadb.com ────────────────────────────────────────────────────
-    # /auth/* and /api/* go to the BFF (console-backend in namespace access).
-    # Everything else (/) is the console SPA on worker8.
+    # ── console.stardatadb.com → static console.html on worker1 ──────────────
     server {
         listen 80;
         server_name console.stardatadb.com;
 
-        location ~* ^/(auth|api)(/|$) {
-            set $console_backend "console-backend.access.svc.cluster.local";
-            proxy_pass http://$console_backend:80;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_connect_timeout 5s;
-            proxy_read_timeout 60s;
-        }
-
         location / {
-            proxy_pass http://192.168.1.58:30081;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_connect_timeout 5s;
-            proxy_read_timeout 30s;
+            set $console "console-spa.access.svc.cluster.local";
+            proxy_pass         http://$console:80;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
             add_header Cache-Control "no-cache, no-store, must-revalidate" always;
             add_header Pragma        "no-cache" always;
             add_header Expires       "0" always;
@@ -115,10 +81,7 @@ data:
         }
     }
 
-    # ── Health check server on port 8081 ────────────────────────────────────────
-    # The iptables OUTPUT rule on master2 redirects local port 80 → 30081, which
-    # means liveness probes to http://localhost:80/healthz are redirected away and
-    # fail. This dedicated health port bypasses that redirect entirely.
+    # ── Health probe port (bypasses iptables redirect on master2) ────────────
     server {
         listen 8081;
         location /healthz {
@@ -128,9 +91,6 @@ data:
         }
     }
 ---
-# DaemonSet — hostNetwork on master2 (192.168.1.62), binds port 80 directly on the node.
-# Using a DaemonSet (not a bare Pod) ensures kubelet recreates it automatically after
-# a node reboot — bare Pods with restartPolicy:Always are not rescheduled on boot.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -166,7 +126,6 @@ spec:
           ports:
             - containerPort: 80
               hostPort: 80
-              protocol: TCP
           volumeMounts:
             - name: nginx-conf
               mountPath: /etc/nginx/conf.d

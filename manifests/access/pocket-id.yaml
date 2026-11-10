@@ -1,0 +1,124 @@
+# =============================================================================
+# Pocket ID — lightweight OIDC provider (replaces ZITADEL)
+# Docs: https://github.com/stonith404/pocket-id
+#
+# Runs on worker1 (192.168.1.51) inside the access namespace.
+# Exposed via ClusterIP service; webconsole-proxy routes
+# auth.stardatadb.com → pocket-id.access.svc.cluster.local:80
+#
+# First-run setup:
+#   1. Apply this manifest:  kubectl apply -f manifests/access/pocket-id.yaml
+#   2. Visit https://auth.stardatadb.com  (Pocket ID bootstraps a first-time
+#      setup wizard on port 80 behind the proxy).
+#   3. Create an admin account — use:
+#        Email:    johnmillermca@gmail.com
+#        Password: Priya1982S
+#   4. Go to OIDC Clients → New Client:
+#        Client name:      stardata-console
+#        Redirect URIs:    https://console.stardatadb.com/auth/callback
+#        Allowed scopes:   openid profile email
+#      Save.  Copy the Client ID and Client Secret.
+#   5. Create the Kubernetes secret (once per cluster):
+#        kubectl -n access create secret generic console-oidc \
+#          --from-literal=client_id=<ClientID> \
+#          --from-literal=client_secret=<ClientSecret>
+# =============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pocket-id-data
+  namespace: access
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path   # adjust to your cluster's default storage class
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pocket-id
+  namespace: access
+  labels:
+    app: pocket-id
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pocket-id
+  template:
+    metadata:
+      labels:
+        app: pocket-id
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: zitadel
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: false   # Pocket ID image runs as root by default
+      containers:
+        - name: pocket-id
+          image: 192.168.1.50:30500/pocket-id:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 1411
+          env:
+            - name: PUBLIC_APP_URL
+              value: "https://auth.stardatadb.com"
+            - name: TRUST_PROXY
+              value: "true"
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pocket-id-secrets
+                  key: encryption-key
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 1411
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 1411
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pocket-id-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pocket-id
+  namespace: access
+  labels:
+    app: pocket-id
+spec:
+  type: ClusterIP
+  selector:
+    app: pocket-id
+  ports:
+    - name: http
+      port: 80
+      targetPort: 1411

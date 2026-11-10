@@ -255,21 +255,15 @@
       });
     }
 
-    // ── Sign In ───────────────────────────────────────────────────
-    // Redirect to ZITADEL via the BFF's /auth/login endpoint.
-    // ZITADEL handles the username/password form at auth.stardatadb.com.
-    // On success ZITADEL redirects back to /auth/callback on console.stardatadb.com
-    // which sets the session cookie and opens the console.
+    // Sign In — go directly to Pocket ID login page.
+    // After successful authentication Pocket ID redirects to console.stardatadb.com.
     function doSignIn() {
-      window.location.href = 'https://console.stardatadb.com/auth/login';
+      window.location.href = 'https://auth.stardatadb.com';
     }
 
-    // ── Sign Up ───────────────────────────────────────────────────
-    // Redirect to ZITADEL's Login v2 registration page on auth.stardatadb.com.
-    // Registration (name, email, password) is handled entirely by ZITADEL;
-    // after verifying their email the user lands on console.stardatadb.com.
+    // Sign Up — Pocket ID registration page.
     function doSignUp() {
-      window.location.href = 'https://auth.stardatadb.com/ui/v2/login/register';
+      window.location.href = 'https://auth.stardatadb.com/register';
     }
   </script>
 
