@@ -236,23 +236,7 @@
 
       <!-- ── Sign Up ── -->
       <div class="panel" id="panel-signup">
-        <div class="field field-row">
-          <div>
-            <label for="su-first">First name</label>
-            <input type="text" id="su-first" placeholder="Ana" autocomplete="given-name"/>
-          </div>
-          <div>
-            <label for="su-last">Last name</label>
-            <input type="text" id="su-last" placeholder="Torres" autocomplete="family-name"/>
-          </div>
-        </div>
-        <div class="field">
-          <label for="su-email">Work email</label>
-          <input type="email" id="su-email" placeholder="you@stardatadb.com" autocomplete="email"/>
-        </div>
-        <button class="btn btn-primary" id="su-btn" onclick="doSignUp()">Request access</button>
-        <div class="msg msg-error"   id="su-error"></div>
-        <div class="msg msg-success" id="su-success"></div>
+        <button class="btn btn-primary" id="su-btn" onclick="doSignUp()">Create an account</button>
         <div class="divider">or</div>
         <button class="btn btn-secondary" onclick="switchTab('signin')">Already have an account?</button>
       </div>
@@ -280,64 +264,12 @@
       window.location.href = 'https://console.stardatadb.com/auth/login';
     }
 
-    // Allow Enter key to submit signup form
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') {
-        var active = document.querySelector('.panel.active').id;
-        if (active === 'panel-signup') doSignUp();
-      }
-    });
-
     // ── Sign Up ───────────────────────────────────────────────────
-    // POSTs to /api/signup on the console-backend (via nginx proxy).
-    // On success shows a "check your email" message.
+    // Redirect to ZITADEL's Login v2 registration page on auth.stardatadb.com.
+    // Registration (name, email, password) is handled entirely by ZITADEL;
+    // after verifying their email the user lands on console.stardatadb.com.
     function doSignUp() {
-      var first = document.getElementById('su-first').value.trim();
-      var last  = document.getElementById('su-last').value.trim();
-      var email = document.getElementById('su-email').value.trim().toLowerCase();
-      var errEl = document.getElementById('su-error');
-      var okEl  = document.getElementById('su-success');
-      errEl.style.display = 'none';
-      okEl.style.display  = 'none';
-
-      if (!first) { showError(errEl, 'Please enter your first name.'); return; }
-      if (!last)  { showError(errEl, 'Please enter your last name.'); return; }
-      if (!email || !email.includes('@')) { showError(errEl, 'Please enter a valid email address.'); return; }
-
-      var btn = document.getElementById('su-btn');
-      btn.disabled = true;
-      btn.textContent = 'Requesting…';
-
-      fetch('/api/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email, firstName: first, lastName: last })
-      })
-      .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, status: r.status, data: d }; }); })
-      .then(function(res) {
-        btn.disabled = false;
-        btn.textContent = 'Request access';
-        if (res.ok) {
-          okEl.textContent = 'Done! Check your email — we sent a verification link to ' + email + '. Once you verify, an Owner will be notified to approve your access.';
-          okEl.style.display = 'block';
-          document.getElementById('su-first').value = '';
-          document.getElementById('su-last').value  = '';
-          document.getElementById('su-email').value = '';
-        } else {
-          var msg = (res.data && res.data.error) ? res.data.error : 'Something went wrong. Please try again.';
-          showError(errEl, msg);
-        }
-      })
-      .catch(function() {
-        btn.disabled = false;
-        btn.textContent = 'Request access';
-        showError(errEl, 'Could not connect to the server. Please try again.');
-      });
-    }
-
-    function showError(el, msg) {
-      el.textContent = msg;
-      el.style.display = 'block';
+      window.location.href = 'https://auth.stardatadb.com/ui/v2/register';
     }
   </script>
 

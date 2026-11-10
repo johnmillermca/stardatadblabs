@@ -311,8 +311,14 @@ func (z *ZitadelClient) DeactivateUser(ctx context.Context, userID string) error
 }
 
 // PasswordReset sends a password-reset email via ZITADEL.
+// returnUrl is included in the email link so that after the user sets their
+// new password ZITADEL redirects them back to auth.stardatadb.com.
 func (z *ZitadelClient) PasswordReset(ctx context.Context, userID string) error {
-	body := map[string]any{"sendLink": map[string]any{}}
+	body := map[string]any{
+		"sendLink": map[string]any{
+			"returnUrl": z.domain,
+		},
+	}
 	b, status, err := z.do(ctx, http.MethodPost, "/v2/users/"+userID+"/password_reset", body)
 	if err != nil {
 		return err
