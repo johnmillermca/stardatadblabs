@@ -219,7 +219,7 @@ resource "zitadel_machine_user" "audit_reader" {
 
 resource "zitadel_login_policy" "default" {
   org_id                  = data.zitadel_org.stardatadb.id
-  allow_register          = false
+  allow_register          = true
   allow_username_password = true
   allow_external_idps     = false
   force_mfa               = false       # MFA for Owners/Admins enforced by BFF amr check
