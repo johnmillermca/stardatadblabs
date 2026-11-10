@@ -40,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: invite-mailer
-          image: 192.168.1.50:30500/stardatadb/invite-mailer:1.0.0
+          image: 192.168.1.50:30500/stardatadb/invite-mailer:1.0.1
           imagePullPolicy: Always
           ports:
             - containerPort: 8025
@@ -96,7 +96,7 @@ spec:
   restartPolicy: Always
   containers:
     - name: invite-mailer
-      image: 192.168.1.50:30500/stardatadb/invite-mailer:1.0.0
+      image: 192.168.1.50:30500/stardatadb/invite-mailer:1.0.1
       imagePullPolicy: Always
       ports:
         - containerPort: 8025

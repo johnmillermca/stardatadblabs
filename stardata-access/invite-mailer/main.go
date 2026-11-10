@@ -1,6 +1,16 @@
-// invite-mailer — sends StarData invite emails via Gmail SMTP
+// invite-mailer — sends StarData invite emails via SMTP
 // POST /send-invite   {"to":"x@y.com","name":"Ana Torres","levels":["doris.analyst"],"mfa":false}
 // GET  /healthz       → 200 ok
+//
+// Configuration (env vars):
+//   SMTP_HOST  — SMTP server hostname (default: smtp.gmail.com)
+//   SMTP_PORT  — SMTP server port    (default: 587)
+//   SMTP_USER  — SMTP login username (also used as MAIL FROM address)
+//   SMTP_PASS  — SMTP login password / app-password
+//   FROM_NAME  — display name for the From header (default: StarData Platform)
+//
+// Legacy aliases (still accepted for backwards compatibility):
+//   GMAIL_USER → SMTP_USER   GMAIL_PASS → SMTP_PASS
 package main
 
 import (
@@ -24,16 +34,18 @@ type inviteRequest struct {
 }
 
 var (
-	smtpHost = "smtp.gmail.com"
-	smtpPort = "587"
+	smtpHost string
+	smtpPort string
 	smtpUser string
 	smtpPass string
 	fromName string
 )
 
 func main() {
-	smtpUser = mustEnv("GMAIL_USER")
-	smtpPass = mustEnv("GMAIL_PASS")
+	smtpHost = getEnv("SMTP_HOST", getEnv("GMAIL_HOST", "smtp.gmail.com"))
+	smtpPort = getEnv("SMTP_PORT", "587")
+	smtpUser = mustEnvAlias("SMTP_USER", "GMAIL_USER")
+	smtpPass = mustEnvAlias("SMTP_PASS", "GMAIL_PASS")
 	fromName = getEnv("FROM_NAME", "StarData Platform")
 
 	mux := http.NewServeMux()
@@ -176,4 +188,17 @@ func getEnv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// mustEnvAlias returns the value of primary env var k, falling back to alias
+// if k is unset. Fatals if neither is set.
+func mustEnvAlias(k, alias string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	if v := os.Getenv(alias); v != "" {
+		return v
+	}
+	log.Fatalf("required env var %s (or legacy alias %s) is not set", k, alias)
+	return ""
 }

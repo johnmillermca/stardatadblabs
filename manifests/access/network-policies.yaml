@@ -111,6 +111,12 @@ spec:
               app: zitadel-db
       ports:
         - port: 5432
+    # ZITADEL → Gmail SMTP (outbound email: registration, invite, password reset)
+    # Gmail SMTP uses STARTTLS on port 587 — no destination restriction needed
+    # since this is internet egress to smtp.gmail.com.
+    - ports:
+        - port: 587
+          protocol: TCP
     # ZITADEL DNS
     - ports:
         - port: 53
