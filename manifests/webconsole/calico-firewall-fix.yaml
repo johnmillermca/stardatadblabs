@@ -1,0 +1,290 @@
+---
+# calico-firewall-fix — DaemonSet that runs on every node at startup and
+# configures firewalld so Calico eBPF cross-node pod traffic is not dropped.
+#
+# All values (CIDRs, interface names) are discovered dynamically at runtime:
+#   POD_CIDR      — Calico IP pool, read from /etc/calico/node-env or
+#                   /var/lib/calico/ipam/v2/host/<nodename>; falls back to
+#                   the node's podCIDR from the Kubernetes API via the
+#                   downward-API node name.
+#   SVC_CIDR      — kube-apiserver --service-cluster-ip-range flag, read
+#                   from /proc/$(pgrep kube-apiserver)/cmdline when present;
+#                   falls back to the KUBERNETES_SERVICE_HOST subnet.
+#   PRIMARY_NIC   — detected from `ip route get 1.1.1.1`; the interface
+#                   used for the default route to the outside world.
+#
+# Idempotent — safe to re-run on every pod restart.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calico-firewall-fix
+  namespace: kube-system
+  labels:
+    app: calico-firewall-fix
+spec:
+  selector:
+    matchLabels:
+      app: calico-firewall-fix
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: calico-firewall-fix
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      # Give us the node name via downward API for kubectl lookups
+      serviceAccountName: calico-firewall-fix
+      initContainers:
+        - name: fix
+          image: rockylinux:9
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits:  {cpu: "100m", memory: "128Mi"}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              FW="nsenter -t 1 -m -u -n --"
+              IP="nsenter -t 1 -m -u -n -- ip"
+              SYSCTL="nsenter -t 1 -m -u -n -- sysctl -w"
+
+              echo "[calico-firewall-fix] Node: ${NODE_NAME}"
+
+              # ── 1. Discover PRIMARY NIC dynamically ──────────────────────────
+              # Use the NIC that holds the node's Kubernetes InternalIP — NOT the
+              # default-route NIC, which may be a WiFi adapter on multi-homed nodes.
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)
+              APISERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+              CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              NODE_K8S_IP=""
+              if [ -n "$TOKEN" ] && [ -f "$CA" ]; then
+                NODE_K8S_IP=$(curl -sf --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
+                  "${APISERVER}/api/v1/nodes/${NODE_NAME}" 2>/dev/null \
+                  | grep -o '"address":"[^"]*","type":"InternalIP"' | head -1 \
+                  | grep -o '"address":"[^"]*"' | cut -d'"' -f4 || true)
+              fi
+              # Find the NIC that has that IP assigned
+              PRIMARY_NIC=""
+              if [ -n "$NODE_K8S_IP" ]; then
+                PRIMARY_NIC=$($IP -o addr show 2>/dev/null \
+                  | awk -v ip="$NODE_K8S_IP" '$4 ~ ("^" ip "/") {print $2}' | head -1)
+              fi
+              # Fallback: NIC used to reach the default route
+              if [ -z "$PRIMARY_NIC" ]; then
+                PRIMARY_NIC=$($IP route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+              fi
+              if [ -z "$PRIMARY_NIC" ]; then
+                PRIMARY_NIC=$($IP route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+              fi
+              echo "[calico-firewall-fix] Primary NIC: ${PRIMARY_NIC}"
+
+              # ── 2. Discover POD CIDR dynamically ────────────────────────────
+              # Try Calico's own nodename file + ipam data first
+              POD_CIDR=""
+              CALICO_NODENAME=$(nsenter -t 1 -m -u -n -- cat /var/lib/calico/nodename 2>/dev/null || true)
+              if [ -z "$POD_CIDR" ]; then
+                # Ask the Kubernetes API for this node's podCIDR
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)
+                APISERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+                CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                if [ -n "$TOKEN" ] && [ -f "$CA" ]; then
+                  POD_CIDR=$(curl -sf --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
+                    "${APISERVER}/api/v1/nodes/${NODE_NAME}" 2>/dev/null \
+                    | grep -o '"podCIDR":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+                fi
+              fi
+              # Fall back to reading Calico IP pool from configmap via API
+              if [ -z "$POD_CIDR" ] && [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                POD_CIDR=$(curl -sf --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                  -H "Authorization: Bearer $TOKEN" \
+                  "https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}/api/v1/namespaces/kube-system/configmaps/calico-config" \
+                  2>/dev/null | grep -o '"cni_network_config":"[^"]*"' | grep -o '"ipam":{[^}]*}' \
+                  | grep -o '"subnet":"[^"]*"' | cut -d'"' -f4 || true)
+              fi
+              # Hard last-resort: derive from this node's tunl0 address block
+              if [ -z "$POD_CIDR" ]; then
+                TUNL_ADDR=$(nsenter -t 1 -m -u -n -- ip addr show tunl0 2>/dev/null | awk '/inet /{print $2}' | head -1)
+                if [ -n "$TUNL_ADDR" ]; then
+                  # Widen to /16 from the tunnel local address
+                  POD_CIDR=$(echo "$TUNL_ADDR" | awk -F'[./]' '{print $1"."$2".0.0/16"}')
+                fi
+              fi
+              echo "[calico-firewall-fix] Pod CIDR: ${POD_CIDR:-<not found>}"
+
+              # ── 3. Discover SERVICE CIDR dynamically ─────────────────────────
+              SVC_CIDR=""
+              # Read from kube-apiserver process cmdline if running on a control-plane node
+              for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+                [ -r /proc/$pid/cmdline ] || continue
+                CMD=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null || true)
+                if echo "$CMD" | grep -q "kube-apiserver"; then
+                  SVC_CIDR=$(echo "$CMD" | grep -oE '\-\-service-cluster-ip-range=[^ ]+' | cut -d= -f2 | head -1 || true)
+                  break
+                fi
+              done
+              # Fall back to deriving from KUBERNETES_SERVICE_HOST (the ClusterIP of kubernetes svc)
+              if [ -z "$SVC_CIDR" ] && [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+                SVC_CIDR=$(echo "${KUBERNETES_SERVICE_HOST}" | awk -F'.' '{print $1"."$2".0.0/12"}')
+              fi
+              echo "[calico-firewall-fix] Service CIDR: ${SVC_CIDR:-<not found>}"
+
+              # ── 4. Apply firewalld rules ──────────────────────────────────────
+
+              # 4a. Trusted sources: pod CIDR + service CIDR + node subnet
+              # Reuse NODE_K8S_IP discovered above; fall back to default-route src IP
+              NODE_IP="${NODE_K8S_IP}"
+              if [ -z "$NODE_IP" ]; then
+                NODE_IP=$($IP route get 1.1.1.1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+              fi
+              NODE_SUBNET=$(echo "${NODE_IP}" | awk -F'.' '{print $1"."$2"."$3".0/24"}')
+
+              for CIDR in ${POD_CIDR} ${SVC_CIDR} ${NODE_SUBNET}; do
+                [ -z "$CIDR" ] && continue
+                # Remove from any other zone first, then add to trusted
+                for ZONE in public external dmz work home internal block drop; do
+                  $FW firewall-cmd --permanent --zone=${ZONE} --remove-source="$CIDR" 2>/dev/null || true
+                done
+                $FW firewall-cmd --permanent --zone=trusted --add-source="$CIDR" 2>&1 | grep -v "ALREADY_ENABLED" || true
+                echo "[calico-firewall-fix] trusted source: $CIDR"
+              done
+
+              # 4b. Allow IPIP protocol 4 in public zone (for IPIP packets arriving on primary NIC)
+              $FW firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 protocol value=4 accept' 2>&1 | grep -v "ALREADY_ENABLED" || true
+
+              # 4b2. Allow ALL traffic from the node subnet in public zone.
+              #      On multi-NIC nodes (e.g. master2 with both enp5s0 and wlp0s20f0u6),
+              #      secondary NICs may stay in the public zone under NetworkManager control.
+              #      This rich-rule ensures LAN traffic (ping, SSH) is never blocked regardless
+              #      of which NIC it arrives on.
+              $FW firewall-cmd --permanent --zone=trusted --add-source="${NODE_SUBNET}" 2>&1 | grep -v "ALREADY_ENABLED" || true
+              $FW firewall-cmd --permanent --zone=public --add-rich-rule="rule family=ipv4 source address=\"${NODE_SUBNET}\" accept" 2>&1 | grep -v "ALREADY_ENABLED" || true
+              echo "[calico-firewall-fix] LAN accept rule: ${NODE_SUBNET}"
+
+              # 4c. tunl0 → trusted zone; remove from public if it ended up there
+              $FW firewall-cmd --permanent --zone=public  --remove-interface=tunl0 2>/dev/null || true
+              $FW firewall-cmd --permanent --zone=trusted --add-interface=tunl0    2>&1 | grep -v "ALREADY_ENABLED" || true
+
+              # 4c2. cali* veth interfaces → trusted zone.
+              #      Calico BPF marks packets from pods with 0x1000000; traffic exiting a pod
+              #      veth arrives on the host with that mark.  If firewalld assigns cali* veths
+              #      to the public zone (the default for unmanaged interfaces), the Calico
+              #      iptables catch-all DROP (mark != 0x1000000) fires on INPUT, blocking
+              #      pod-to-host traffic — including cloudflared → webconsole-proxy on port 80.
+              #
+              #      The wildcard "cali+" covers every present and future veth created by Calico.
+              #      We also enumerate existing interfaces to catch any that firewalld registered
+              #      before the wildcard was set.
+              $FW firewall-cmd --permanent --zone=trusted --add-interface=cali+    2>&1 | grep -v "ALREADY_ENABLED" || true
+              $FW firewall-cmd --permanent --zone=trusted --add-interface=bpfin.cali  2>&1 | grep -v "ALREADY_ENABLED" || true
+              $FW firewall-cmd --permanent --zone=trusted --add-interface=bpfout.cali 2>&1 | grep -v "ALREADY_ENABLED" || true
+              # Enumerate any existing cali* veths and add them individually in case the
+              # wildcard was not processed yet by the running firewalld daemon.
+              for CALI_IF in $(nsenter -t 1 -m -u -n -- ip link show 2>/dev/null \
+                    | awk -F': ' '/^[0-9]+: cali/{print $2}' | cut -d@ -f1); do
+                $FW firewall-cmd --permanent --zone=public  --remove-interface="$CALI_IF" 2>/dev/null || true
+                $FW firewall-cmd --permanent --zone=trusted --add-interface="$CALI_IF"    2>&1 | grep -v "ALREADY_ENABLED" || true
+              done
+              echo "[calico-firewall-fix] cali* interfaces trusted ✓"
+
+              # 4d. lo should NOT be in public zone (breaks Calico BPF host endpoint detection)
+              $FW firewall-cmd --permanent --zone=public --remove-interface=lo 2>/dev/null || true
+
+              # 4e. Disable masquerade on public zone — Calico BPF handles SNAT.
+              #     masquerade on public rewrites IPIP reply src IPs breaking cross-node traffic.
+              $FW firewall-cmd --permanent --zone=public --remove-masquerade 2>/dev/null || true
+
+              # 4f. Primary NIC goes into TRUSTED (not public) so that IPIP-decapped
+              #     packets forwarded from eno1 → cali* veths are not rejected by
+              #     firewalld's iifname="eno1" cross-zone reject rule in FORWARD_POLICIES.
+              if [ -n "$PRIMARY_NIC" ]; then
+                $FW firewall-cmd --permanent --zone=public  --remove-interface="$PRIMARY_NIC" 2>/dev/null || true
+                $FW firewall-cmd --permanent --zone=trusted --add-interface="$PRIMARY_NIC"    2>&1 | grep -v "ALREADY_ENABLED" || true
+              fi
+
+              # 4g. Enable forwarding on both zones so IPIP-decapped packets arriving on
+              #     the physical NIC (public zone) and destined for pod IPs are forwarded
+              #     to cali* veths without hitting the iifname="eno1" reject rule.
+              #     --add-forward (firewalld 1.0+) enables intra-zone and cross-zone forwarding.
+              $FW firewall-cmd --permanent --zone=public  --add-forward 2>&1 | grep -v "ALREADY_ENABLED" || true
+              $FW firewall-cmd --permanent --zone=trusted --add-forward 2>&1 | grep -v "ALREADY_ENABLED" || true
+
+              # 4h. iptables: allow LAN ICMP + SSH before Calico BPF drop rules.
+              #     Calico BPF installs a catch-all DROP for packets without its
+              #     mark (rule: mark match ! 0x1000000). On nodes where BPF tc
+              #     programs are not attached those rules drop ALL incoming traffic
+              #     including ping and SSH from the LAN. These two rules inserted
+              #     at position 1 mirror the setup that already exists on master.local.
+              if ! nsenter -t 1 -m -u -n -- iptables -C INPUT -s "${NODE_SUBNET}" -p icmp -j ACCEPT 2>/dev/null; then
+                nsenter -t 1 -m -u -n -- iptables -I INPUT 1 -s "${NODE_SUBNET}" -p icmp -j ACCEPT
+              fi
+              if ! nsenter -t 1 -m -u -n -- iptables -C INPUT -s "${NODE_SUBNET}" -p tcp --dport 22 -j ACCEPT 2>/dev/null; then
+                nsenter -t 1 -m -u -n -- iptables -I INPUT 1 -s "${NODE_SUBNET}" -p tcp --dport 22 -j ACCEPT
+              fi
+              echo "[calico-firewall-fix] iptables LAN rules ensured for ${NODE_SUBNET}"
+
+              # 4i. rp_filter — tunl0 and primary NIC need 2 (loose mode); all=0
+              $SYSCTL net.ipv4.conf.all.rp_filter=0         2>/dev/null || true
+              $SYSCTL net.ipv4.conf.tunl0.rp_filter=2       2>/dev/null || true
+              [ -n "$PRIMARY_NIC" ] && $SYSCTL net.ipv4.conf.${PRIMARY_NIC}.rp_filter=2 2>/dev/null || true
+
+              # ── 5. Reload and verify ──────────────────────────────────────────
+              $FW firewall-cmd --reload
+              echo "[calico-firewall-fix] firewalld reloaded"
+              echo "[calico-firewall-fix] active zones:"
+              $FW firewall-cmd --get-active-zones
+              echo "[calico-firewall-fix] masquerade public: $($FW firewall-cmd --zone=public --query-masquerade 2>&1)"
+              echo "[calico-firewall-fix] done ✓"
+
+      containers:
+        - name: pause
+          image: rockylinux:9
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c", "while true; do sleep 3600; done"]
+          resources:
+            requests: {cpu: "10m", memory: "16Mi"}
+            limits:   {cpu: "20m", memory: "32Mi"}
+---
+# ServiceAccount so the init container can call the Kubernetes API
+# to discover nodeName → podCIDR without any hardcoded values.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: calico-firewall-fix
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: calico-firewall-fix
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: calico-firewall-fix
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: calico-firewall-fix
+subjects:
+  - kind: ServiceAccount
+    name: calico-firewall-fix
+    namespace: kube-system

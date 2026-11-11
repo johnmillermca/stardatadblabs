@@ -1,10 +1,10 @@
 ---
 # webconsole-proxy — nginx DaemonSet on master2 (hostNetwork, port 80)
-# Routes three domains:
-#   www.stardatadb.com       → S3 static website
-#   auth.stardatadb.com      → Pocket ID on worker1
-#   console.stardatadb.com   → static console.html on worker1
+# Routes two domains:
+#   auth.stardatadb.com      → Pocket ID (access namespace)
+#   console.stardatadb.com   → oauth2-proxy → console-spa (access namespace)
 #
+# www.stardatadb.com is served directly from S3 via Cloudflare DNS (no tunnel).
 # Cloudflare sits in front and terminates TLS; traffic arrives here on HTTP.
 apiVersion: v1
 kind: ConfigMap
@@ -13,41 +13,21 @@ metadata:
   namespace: prod
 data:
   default.conf: |
-    # resolver only needed for external upstream (S3). Internal k8s services use
-    # static proxy_pass so nginx resolves them at startup via the system resolver,
-    # avoiding per-request DNS lookups that can time out on external upstream queries.
+    # kube-dns resolver — needed for variable-based proxy_pass to cluster services.
     resolver 10.96.0.10 valid=30s ipv6=off;
 
-    # ── www.stardatadb.com → S3 static website ────────────────────────────────
-    server {
-        listen 80;
-        server_name www.stardatadb.com stardatadb.com _;
-
-        location / {
-            set $s3 "stardatadb-web.s3-website.us-east-2.amazonaws.com";
-            proxy_pass       http://$s3;
-            proxy_set_header Host $s3;
-            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-            add_header Pragma        "no-cache" always;
-            add_header Expires       "0" always;
-        }
-
-        location /healthz {
-            access_log off;
-            return 200 "ok\n";
-            add_header Content-Type text/plain;
-        }
-    }
-
     # ── auth.stardatadb.com → Pocket ID ───────────────────────────────────────
-    # Static proxy_pass: nginx resolves at startup via kube-dns (reliable for
-    # internal cluster names) — no per-request DNS needed.
+    # Use a variable for proxy_pass so nginx does NOT resolve the upstream at
+    # startup. Without this, nginx refuses to start if pocket-id is temporarily
+    # down (e.g. during a node restart), taking www and all other domains with it.
+    # kube-dns (10.96.0.10) resolves cluster-local names, so this is safe.
     server {
         listen 80;
         server_name auth.stardatadb.com;
 
         location / {
-            proxy_pass         http://pocket-id.access.svc.cluster.local:80;
+            set $pocket_id "pocket-id.access.svc.cluster.local";
+            proxy_pass         http://$pocket_id:80;
             proxy_set_header   Host              $host;
             proxy_set_header   X-Real-IP         $remote_addr;
             proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -66,13 +46,16 @@ data:
     # ── console.stardatadb.com → oauth2-proxy (OIDC gate) → console-spa ──────
     # All traffic passes through oauth2-proxy which enforces Pocket ID login.
     # Unauthenticated requests are redirected to auth.stardatadb.com.
+    # Variable-based proxy_pass prevents startup failure when oauth2-proxy is
+    # temporarily unavailable (same pattern as pocket-id above).
     server {
         listen 80;
         server_name console.stardatadb.com;
 
         # oauth2-proxy callback and internal paths
         location /oauth2/ {
-            proxy_pass         http://console-oauth2-proxy.access.svc.cluster.local:80;
+            set $oauth2_proxy "console-oauth2-proxy.access.svc.cluster.local";
+            proxy_pass         http://$oauth2_proxy:80;
             proxy_set_header   Host              $host;
             proxy_set_header   X-Real-IP         $remote_addr;
             proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -82,7 +65,8 @@ data:
 
         # All other traffic: gate through oauth2-proxy
         location / {
-            proxy_pass         http://console-oauth2-proxy.access.svc.cluster.local:80;
+            set $oauth2_proxy "console-oauth2-proxy.access.svc.cluster.local";
+            proxy_pass         http://$oauth2_proxy:80;
             proxy_set_header   Host              $host;
             proxy_set_header   X-Real-IP         $remote_addr;
             proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
