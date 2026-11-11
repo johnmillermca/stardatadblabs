@@ -31,7 +31,7 @@ metadata:
   namespace: access
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: local-path   # adjust to your cluster's default storage class
+  storageClassName: local-path
   resources:
     requests:
       storage: 2Gi
@@ -56,11 +56,16 @@ spec:
         app: pocket-id
     spec:
       nodeSelector:
-        kubernetes.io/hostname: worker1.local
+        kubernetes.io/hostname: master2.local
       tolerations:
-        - key: dedicated
-          operator: Equal
-          value: zitadel
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: workload
+          operator: Exists
           effect: NoSchedule
       securityContext:
         runAsNonRoot: false   # Pocket ID image runs as root by default
@@ -71,7 +76,7 @@ spec:
           ports:
             - containerPort: 1411
           env:
-            - name: PUBLIC_APP_URL
+            - name: APP_URL
               value: "https://auth.stardatadb.com"
             - name: TRUST_PROXY
               value: "true"
@@ -105,7 +110,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: pocket-id-data
+            claimName: pocket-id-data-m2
 ---
 apiVersion: v1
 kind: Service

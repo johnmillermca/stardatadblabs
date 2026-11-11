@@ -58,11 +58,6 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker1.local
-      tolerations:
-        - key: dedicated
-          operator: Equal
-          value: zitadel
-          effect: NoSchedule
       containers:
         - name: nginx
           image: 192.168.1.50:30500/webconsole:latest

@@ -1,0 +1,131 @@
+# =============================================================================
+# console-oauth2-proxy — OIDC authentication gateway for console.stardatadb.com
+#
+# Flow:
+#   1. User hits console.stardatadb.com
+#   2. webconsole-proxy (nginx) forwards to this oauth2-proxy (port 4180)
+#   3. oauth2-proxy checks session cookie; if missing → redirects to
+#      https://auth.stardatadb.com/authorize (Pocket ID)
+#   4. Pocket ID prompts for username/password (one-time-link or passkey)
+#   5. On success, Pocket ID redirects back to /oauth2/callback
+#   6. oauth2-proxy sets a session cookie and proxies to console-spa
+#
+# Secrets (console-oidc):
+#   client_id     — Pocket ID OIDC client ID
+#   client_secret — Pocket ID OIDC client secret
+#   cookie_secret — 32-byte random key for session cookie encryption
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console-oauth2-proxy
+  namespace: access
+  labels:
+    app: console-oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: console-oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: console-oauth2-proxy
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master2.local
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: oauth2-proxy
+          image: 192.168.1.50:30500/oauth2-proxy:v7.8.2
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4180
+          args:
+            - --provider=oidc
+            # Public issuer URL (matches what Pocket ID puts in tokens).
+            # Discovery is skipped; endpoints are wired directly to avoid the
+            # Cloudflare round-trip that causes a timeout inside the cluster.
+            - --oidc-issuer-url=https://auth.stardatadb.com
+            - --skip-oidc-discovery=true
+            - --insecure-oidc-skip-issuer-verification=true
+            - --insecure-oidc-allow-unverified-email=true
+            # All calls between oauth2-proxy and Pocket ID go through in-cluster DNS
+            - --login-url=https://auth.stardatadb.com/authorize
+            - --redeem-url=http://pocket-id.access.svc.cluster.local:80/api/oidc/token
+            - --profile-url=http://pocket-id.access.svc.cluster.local:80/api/oidc/userinfo
+            - --oidc-jwks-url=http://pocket-id.access.svc.cluster.local:80/.well-known/jwks.json
+            - --redirect-url=https://console.stardatadb.com/oauth2/callback
+            - --upstream=http://console-spa.access.svc.cluster.local:80
+            - --http-address=0.0.0.0:4180
+            - --cookie-secure=true
+            - --cookie-domain=.stardatadb.com
+            - --cookie-samesite=lax
+            - --cookie-expire=24h
+            - --session-store-type=cookie
+            - --skip-provider-button=true
+            - --email-domain=*
+            - --scope=openid profile email
+            - --pass-authorization-header=true
+            - --pass-user-headers=true
+            - --set-xauthrequest=true
+            - --reverse-proxy=true
+            - --silence-ping-logging=true
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: console-oidc
+                  key: client_id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: console-oidc
+                  key: client_secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: console-oidc
+                  key: cookie_secret
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console-oauth2-proxy
+  namespace: access
+  labels:
+    app: console-oauth2-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: console-oauth2-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 4180

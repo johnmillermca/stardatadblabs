@@ -1,0 +1,113 @@
+---
+# Allow all intra-namespace traffic (pods in access talk to each other)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: access
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+# Allow all pods in access to reach kube-dns for service discovery
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: access
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# Allow ingress + egress from cluster node IPs (192.168.1.0/24) AND from all
+# node pod CIDRs (10.244.0.0/16).
+# Needed because:
+#   - kubelet liveness/readiness probes come from the node host IP
+#   - webconsole-proxy runs with hostNetwork=true on master2 (192.168.1.62)
+#     so its traffic arrives from the node IP, not a pod IP
+#   - Calico BPF IPIP tunnel rewrites the source to the tunnel IP (10.244.x.x)
+#     before policy evaluation, so host-networked pods on remote nodes appear
+#     with their tunnel source IP, not their physical NIC IP
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-node-probes
+  namespace: access
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+    - from:
+        - ipBlock:
+            cidr: 10.244.0.0/16
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+    - to:
+        - ipBlock:
+            cidr: 10.244.0.0/16
+---
+# Allow Pocket ID to reach the internet (ghcr.io for updates, OIDC clients, etc.)
+# and respond to the nginx proxy on master2
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pocket-id-ingress
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app: pocket-id
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prod
+  egress:
+    - {}   # allow all egress from Pocket ID (needs internet for OIDC client callbacks)
+---
+# Allow console-spa nginx to respond to the nginx proxy on master2
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-spa-ingress
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app: console-spa
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prod
+      ports:
+        - port: 80
