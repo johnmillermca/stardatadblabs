@@ -49,7 +49,16 @@ spec:
                 secretKeyRef:
                   name: gmail-smtp-credentials
                   key: username
+            - name: SMTP_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: gmail-smtp-credentials
+                  key: password
             # ── SMTP relay — host-side msmtpd forwards to Gmail ───────────────
+            # Pods cannot reach smtp.gmail.com directly (ISP blocks 465/587 from
+            # pod CIDRs). msmtpd on master2 accepts plain connections and relays
+            # to Gmail with TLS. SMTP_USER/SMTP_PASS are still required by the
+            # binary at startup but the relay accepts unauthenticated sessions.
             - name: SMTP_HOST
               value: "192.168.1.62"
             - name: SMTP_PORT
