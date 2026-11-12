@@ -40,56 +40,6 @@ spec:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── ZITADEL database (192.168.1.50 / master.local) ──────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: zitadel-db
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/access
-    directory:
-      include: "zitadel-db.yaml"
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: access
-  syncPolicy:
-    automated: { prune: true, selfHeal: true }
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── Console database (192.168.1.51 / worker1.local) ─────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: console-db
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/access
-    directory:
-      include: "console-db.yaml"
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: access
-  syncPolicy:
-    automated: { prune: true, selfHeal: true }
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
 # ── Valkey session store ─────────────────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -211,31 +161,6 @@ spec:
     path: manifests/access
     directory:
       include: "invite-mailer.yaml"
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: access
-  syncPolicy:
-    automated: { prune: true, selfHeal: true }
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── stardata-claims + bootstrap job ─────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: stardata-claims
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "5"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/access
-    directory:
-      include: "{stardata-claims.yaml,bootstrap-job.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: access
