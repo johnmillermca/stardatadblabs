@@ -40,6 +40,8 @@ spec:
       name: strimzi-kafka
       jqPathExpressions:
         - .spec.entityOperator.userOperator.aclsAdminApiSupported
+        # reconcile-trigger label is written by Strimzi operator at runtime
+        - .metadata.labels["app.kubernetes.io/reconcile-trigger"]
   syncPolicy:
     automated:
       prune: false
