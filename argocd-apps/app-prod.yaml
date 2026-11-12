@@ -365,9 +365,14 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
+  ignoreDifferences:
+    - group: ""
+      kind: PersistentVolume
+      jsonPointers:
+        - /status
   syncPolicy:
     automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+    syncOptions: [CreateNamespace=true, ServerSideApply=true, RespectIgnoreDifferences=true]
 
 # ── Webconsole (nginx proxy on master2 + cloudflared tunnel) ─────────────────
 ---
