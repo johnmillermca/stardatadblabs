@@ -68,6 +68,9 @@ metadata:
     component: be
 spec:
   replicas: 3
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   serviceName: stardata-be-headless
   podManagementPolicy: Parallel   # All 3 BEs start concurrently — FE handles registration
   selector:

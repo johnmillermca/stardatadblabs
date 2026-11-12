@@ -51,6 +51,9 @@ spec:
   replicas: 3
   serviceName: stardata-fe-headless
   podManagementPolicy: Parallel
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       app: stardata-fe
