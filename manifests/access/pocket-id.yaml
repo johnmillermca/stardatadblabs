@@ -56,17 +56,7 @@ spec:
         app: pocket-id
     spec:
       nodeSelector:
-        kubernetes.io/hostname: master2.local
-      tolerations:
-        - key: node-role.kubernetes.io/control-plane
-          operator: Exists
-          effect: NoSchedule
-        - key: node-role.kubernetes.io/master
-          operator: Exists
-          effect: NoSchedule
-        - key: workload
-          operator: Exists
-          effect: NoSchedule
+        kubernetes.io/hostname: worker1.local
       securityContext:
         runAsNonRoot: false   # Pocket ID image runs as root by default
       containers:
@@ -80,11 +70,29 @@ spec:
               value: "https://auth.stardatadb.com"
             - name: TRUST_PROXY
               value: "true"
+            - name: UI_CONFIG_DISABLED
+              value: "true"
             - name: ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
                   name: pocket-id-secrets
                   key: encryption-key
+            # ── SMTP relay — pods cannot reach smtp.gmail.com directly (ISP block).
+            # msmtpd runs on master2 (192.168.1.62:2525), accepts unauthenticated
+            # connections, and forwards to Gmail with TLS from the host.
+            - name: SMTP_HOST
+              value: "192.168.1.62"
+            - name: SMTP_PORT
+              value: "2525"
+            - name: SMTP_FROM
+              value: "johnmillermca@gmail.com"
+            # ── Email one-time access (login link) ─────────────────────────────
+            # Allows admins to send a magic login link to any user from the UI,
+            # and allows unauthenticated users to request one for themselves.
+            - name: EMAIL_ONE_TIME_ACCESS_AS_ADMIN_ENABLED
+              value: "true"
+            - name: EMAIL_ONE_TIME_ACCESS_AS_UNAUTHENTICATED_ENABLED
+              value: "true"
           volumeMounts:
             - name: data
               mountPath: /app/data
@@ -110,7 +118,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: pocket-id-data-m2
+            claimName: pocket-id-data
 ---
 apiVersion: v1
 kind: Service

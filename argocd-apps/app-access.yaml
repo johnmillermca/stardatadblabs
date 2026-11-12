@@ -1,17 +1,18 @@
 # =============================================================================
-# ArgoCD Applications — StarData access namespace (ZITADEL + claims + backend)
-# Sign-in and sign-up: auth.stardatadb.com (ZITADEL Login v2)
-# Console:             console.stardatadb.com (BFF + React frontend)
+# ArgoCD Applications — StarData access namespace
+# Sign-in and sign-up: auth.stardatadb.com (Pocket ID)
+# Console:             console.stardatadb.com (oauth2-proxy + SPA)
 #
 # Sync order (waves):
 #   -10  access namespace + default-deny NetworkPolicy
 #     0  Databases (zitadel-db on 192.168.1.50, console-db on 192.168.1.51)
 #     1  Valkey session store
 #     2  Network policies (allow-list)
-#     3  ZITADEL Helm chart (auth.stardatadb.com)
-#     4  stardata-claims + Actions v2 bootstrap job
-#     5  audit-forwarder
-#     6  console-backend + access-cron
+#     3  Pocket ID OIDC provider (auth.stardatadb.com)
+#     4  console-oauth2-proxy + invite-mailer
+#     5  stardata-claims + Actions v2 bootstrap job
+#     6  audit-forwarder
+#     7  console-backend + access-cron
 # =============================================================================
 
 # ── access namespace ─────────────────────────────────────────────────────────
@@ -139,29 +140,72 @@ spec:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
-# ── ZITADEL v4 (auth.stardatadb.com) ────────────────────────────────────────
+# ── Pocket ID OIDC provider (auth.stardatadb.com) ───────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: zitadel
+  name: pocket-id
   namespace: argocd
   finalizers: [resources-finalizer.argocd.io]
   annotations:
     argocd.argoproj.io/sync-wave: "3"
 spec:
   project: platform
-  sources:
-    - repoURL: https://charts.zitadel.com
-      chart: zitadel
-      targetRevision: "9.x"
-      helm:
-        releaseName: zitadel
-        valueFiles:
-          - $values/zitadel/helm/values-prod.yaml
-    - repoURL: https://github.com/johnmillermca/stardatadblabs
-      targetRevision: HEAD
-      ref: values
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "pocket-id.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── console-oauth2-proxy + invite-mailer ─────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: console-oauth2-proxy
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "console-oauth2-proxy.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: access
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: invite-mailer
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/access
+    directory:
+      include: "invite-mailer.yaml"
   destination:
     server: https://kubernetes.default.svc
     namespace: access
@@ -178,7 +222,7 @@ metadata:
   namespace: argocd
   finalizers: [resources-finalizer.argocd.io]
   annotations:
-    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/sync-wave: "5"
 spec:
   project: platform
   source:
@@ -203,7 +247,7 @@ metadata:
   namespace: argocd
   finalizers: [resources-finalizer.argocd.io]
   annotations:
-    argocd.argoproj.io/sync-wave: "5"
+    argocd.argoproj.io/sync-wave: "6"
 spec:
   project: platform
   source:
@@ -228,7 +272,7 @@ metadata:
   namespace: argocd
   finalizers: [resources-finalizer.argocd.io]
   annotations:
-    argocd.argoproj.io/sync-wave: "6"
+    argocd.argoproj.io/sync-wave: "7"
 spec:
   project: platform
   source:

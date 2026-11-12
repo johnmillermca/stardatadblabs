@@ -1,10 +1,12 @@
 # Pocket ID — Passkey Setup Guide
 
-> **Platform context**  
+> **Platform context**
 > Pocket ID runs at `https://auth.stardatadb.com` (deployed as a Kubernetes Deployment in the
-> `access` namespace on `master2.local`, exposed via `webconsole-proxy`).  
+> `access` namespace on **`worker1.local`**, exposed via `webconsole-proxy`).
 > The console at `https://console.stardatadb.com` uses `console-oauth2-proxy` as the OIDC gate,
 > which redirects unauthenticated users to Pocket ID for login.
+>
+> **Locked out?** See [pocket-id-recovery.md](./pocket-id-recovery.md) for the full recovery runbook.
 
 ---
 
@@ -154,5 +156,7 @@ Browser
                           └─► console-spa.access.svc.cluster.local:80
 ```
 
-Pocket ID data is stored on a 2 Gi `local-path` PersistentVolumeClaim (`pocket-id-data`) mounted
+Pocket ID runs on **`worker1.local`** (`192.168.1.51`).
+Data is stored on a 2 Gi `local-path` PersistentVolumeClaim (`pocket-id-data`) mounted
 at `/app/data` inside the container.
+PV path on worker1: `/home/local-path-provisioner/pvc-e3a35cc0-6219-4ba5-ade3-099311bef67e_access_pocket-id-data/`

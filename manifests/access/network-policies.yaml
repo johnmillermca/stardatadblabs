@@ -111,3 +111,25 @@ spec:
               kubernetes.io/metadata.name: prod
       ports:
         - port: 80
+---
+# Allow LAN + intra-namespace ingress to console-oauth2-proxy-lan (NodePort 31080)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-oauth2-proxy-lan-ingress
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app: console-oauth2-proxy-lan
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 192.168.1.0/24
+  - from:
+    - podSelector: {}
+  egress:
+  - {}

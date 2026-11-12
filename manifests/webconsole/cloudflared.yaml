@@ -16,8 +16,11 @@ spec:
       labels:
         app: cloudflared
     spec:
+      # Use the control-plane role label rather than a hard hostname so that
+      # cloudflared reschedules automatically if master2 is replaced or
+      # temporarily unavailable (avoids "Unknown" pod stuck on a dead node).
       nodeSelector:
-        kubernetes.io/hostname: master2.local
+        node-role.kubernetes.io/control-plane: ""
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists

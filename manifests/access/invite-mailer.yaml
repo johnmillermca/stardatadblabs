@@ -1,0 +1,94 @@
+# =============================================================================
+# invite-mailer — sends StarData invitation emails via the msmtpd SMTP relay
+#
+# The relay (msmtpd) runs on master2 (192.168.1.62:2525) because the router
+# blocks outbound SMTP (465/587) from pod CIDRs but allows it from the host.
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invite-mailer
+  namespace: access
+  labels:
+    app: invite-mailer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: invite-mailer
+  template:
+    metadata:
+      labels:
+        app: invite-mailer
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: zitadel
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: invite-mailer
+          image: 192.168.1.50:30500/stardatadb/invite-mailer:1.0.1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8025
+          env:
+            # Sender identity (still used as From address)
+            - name: FROM_NAME
+              value: "StarData Platform"
+            - name: SMTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: gmail-smtp-credentials
+                  key: username
+            # ── SMTP relay — host-side msmtpd forwards to Gmail ───────────────
+            - name: SMTP_HOST
+              value: "192.168.1.62"
+            - name: SMTP_PORT
+              value: "2525"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8025
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8025
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: invite-mailer
+  namespace: access
+  labels:
+    app: invite-mailer
+spec:
+  type: ClusterIP
+  selector:
+    app: invite-mailer
+  ports:
+    - name: http
+      port: 8025
+      targetPort: 8025
