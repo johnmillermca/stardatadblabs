@@ -94,10 +94,11 @@ metadata:
   labels:
     app: invite-mailer
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: invite-mailer
   ports:
     - name: http
-      port: 8025
+      port: 80
       targetPort: 8025
+      nodePort: 30825
