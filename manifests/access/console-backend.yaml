@@ -1,0 +1,76 @@
+# =============================================================================
+# console-backend — serves console.stardatadb.com
+#
+# Receives authenticated traffic from webconsole-proxy after Pocket ID login.
+# Serves the StarData web console (console.html) on port 8080.
+# Routes /auth/* and /api/* will be added here when the backend is built.
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console-backend
+  namespace: access
+  labels:
+    app: console-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: console-backend
+  template:
+    metadata:
+      labels:
+        app: console-backend
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      containers:
+        - name: console-backend
+          image: 192.168.1.50:30500/webconsole:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: console-spa-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console-backend
+  namespace: access
+  labels:
+    app: console-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: console-backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

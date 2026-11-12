@@ -1,0 +1,53 @@
+# =============================================================================
+# access-cron — periodic access sync job (suspended until binary is built)
+#
+# Will sync user approvals, send reminders, and expire pending invites.
+# Binary /app/access-cron is not yet built into the console-backend image.
+# Set suspend: false once 192.168.1.50:30500/stardatadb/console-backend:1.0.0
+# contains the /app/access-cron binary.
+# =============================================================================
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: access-cron
+  namespace: access
+  labels:
+    app: access-cron
+spec:
+  schedule: "*/5 * * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: access-cron
+              image: 192.168.1.50:30500/stardatadb/console-backend:1.0.0
+              imagePullPolicy: IfNotPresent
+              command: ["/app/access-cron"]
+              env:
+                - name: CRON_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: console-cron-secret
+                      key: secret
+                - name: CONSOLE_DB_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: console-db-credentials
+                      key: app-password
+                - name: CONSOLE_DB_DSN
+                  value: "postgres://console_app:$(CONSOLE_DB_PASS)@console-db.access.svc.cluster.local:5432/console?sslmode=require"
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
