@@ -137,7 +137,7 @@ spec:
   sources:
     - repoURL: https://strimzi.io/charts/
       chart: strimzi-kafka-operator
-      targetRevision: "1.1.0"
+      targetRevision: "1.2.0"
       helm:
         releaseName: strimzi-operator
         valueFiles:
@@ -342,6 +342,31 @@ spec:
     namespace: local-path-storage
   syncPolicy:
     automated: {prune: false, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+
+# ── DuckDB + StarGraph SQL Proxy ──────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: duckdb
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.io]
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/johnmillermca/stardatadblabs
+    targetRevision: HEAD
+    path: manifests/duckdb
+    directory:
+      include: "{duckdb-worker8-deployment,stargraph-sql-proxy-deployment,stargraph-iceberg-sync-cronjob}.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
 
 # ── Webconsole (nginx proxy on master2 + cloudflared tunnel) ─────────────────
