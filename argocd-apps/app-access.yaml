@@ -140,7 +140,7 @@ spec:
     - group: networking.k8s.io
       kind: NetworkPolicy
       jsonPointers:
-        - /metadata/labels/argocd.argoproj.io~1instance
+        - /metadata/labels
   syncPolicy:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true, ServerSideApply=true, RespectIgnoreDifferences=true]
