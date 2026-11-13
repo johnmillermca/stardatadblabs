@@ -117,7 +117,7 @@ spec:
       containers:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
-          image: 192.168.1.50:30500/apache/stardata:fe-4.2
+          image: 192.168.1.50:30500/apache/stardata:fe-4.2@sha256:1864577550f924b9bbd89d9c75bff31dcaa28fb715cf4cc0223110e0e449c574
           imagePullPolicy: Always
           command:
             - /opt/apache-doris/fe_entrypoint.sh
