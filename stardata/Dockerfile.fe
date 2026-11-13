@@ -1,14 +1,45 @@
 # =============================================================================
-# Stardata FE — Apache Doris branch-4.2 upstream (no custom patch)
+# Stardata FE — Apache Doris branch-4.2 with snap_id auto-injection patch
 #
-# NOTE: Apache Doris has not yet published a branch-4.2 release image on
-# Docker Hub. This Dockerfile uses `fe-latest` as a stand-in and will be
-# updated to `fe-4.2.x` once an official 4.2 release image is published.
+# Build strategy (no full Maven build required):
+#   Stage 1 (builder): compile only the two patched .java files against the
+#                       classpath already present in doris-fe.jar, then replace
+#                       the original .class files in the JAR.
+#   Stage 2 (runtime): copy the patched JAR into a clean copy of the base image.
 #
-# To build manually against a locally built branch-4.2 FE binary, replace
-# the FROM line with your locally tagged image before building.
+# Patch applied:
+#   CreateTableInfo.java — injectSnapIdColumn() prepends snap_id BIGINT NOT NULL
+#                          AUTO_INCREMENT to every new internal OLAP table.
 # =============================================================================
+
+# ── Stage 1: compile patch and replace class files in doris-fe.jar ───────────
+FROM docker.io/apache/doris:fe-latest AS builder
+
+# Copy only the patched source file (CreateTableInfo.java is the only modified file)
+COPY doris-patch/CreateTableInfo.java  /patch/src/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java
+
+# Build classpath from all JARs in the FE lib directory; compile only CreateTableInfo
+RUN CP=$(find /opt/apache-doris/fe/lib -name '*.jar' | tr '\n' ':') && \
+    mkdir -p /patch/classes && \
+    javac \
+      --release 17 \
+      -encoding UTF-8 \
+      -cp "${CP}" \
+      -d /patch/classes \
+      /patch/src/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java
+
+# Patch doris-fe.jar: replace CreateTableInfo.class and any inner classes
+RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
+    cd /patch/classes && \
+    jar uf /patch/doris-fe.jar \
+      org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.class \
+      $(find org/apache/doris/nereids/trees/plans/commands/info -name 'CreateTableInfo$*.class' 2>/dev/null)
+
+# ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-latest
 
 LABEL org.stardata.version="4.2"
 LABEL org.stardata.base="apache/doris:branch-4.2"
+LABEL org.stardata.patch="snap_id-auto-inject"
+
+COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar

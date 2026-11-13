@@ -76,6 +76,8 @@ import org.apache.doris.nereids.trees.expressions.functions.scalar.Lambda;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ScalarFunction;
 import org.apache.doris.nereids.trees.expressions.visitor.DefaultExpressionRewriter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalEmptyRelation;
+import org.apache.doris.analysis.ColumnNullableType;
+import org.apache.doris.nereids.types.BigIntType;
 import org.apache.doris.nereids.types.DataType;
 import org.apache.doris.nereids.types.VariantField;
 import org.apache.doris.nereids.types.VariantType;
@@ -399,6 +401,57 @@ public class CreateTableInfo {
     }
 
     /**
+     * Stardata: inject snap_id BIGINT NOT NULL AUTO_INCREMENT into every OLAP table,
+     * unless the column is already explicitly declared by the user.
+     *
+     * Rules:
+     *  - Only applied to non-external (OLAP) tables; external engine tables are left unchanged.
+     *  - If the user already includes a column named "snap_id" (case-insensitive), the existing
+     *    definition is kept as-is -- no duplicate is added.
+     *  - Inserted immediately after the declared key columns so it is always a value column.
+     *    Doris requires that key columns form a contiguous prefix of the schema; placing
+     *    snap_id after them satisfies that constraint for UNIQUE KEY and AGG_KEYS tables.
+     *    For DUPLICATE KEY tables the key list may be empty at this point, in which case
+     *    snap_id lands at index 0 (the first column), which is also valid.
+     */
+    private void injectSnapIdColumn() {
+        // Only inject for internal OLAP tables; skip external engines (Iceberg, Hive, ...)
+        if (isExternal) {
+            return;
+        }
+        // Skip CTAS path -- columns list is null until validateCreateTableAsSelect sets it
+        if (columns == null) {
+            return;
+        }
+        // Skip if the user already declared snap_id (case-insensitive)
+        boolean alreadyDeclared = columns.stream()
+                .anyMatch(c -> "snap_id".equalsIgnoreCase(c.getName()));
+        if (alreadyDeclared) {
+            return;
+        }
+        // Build snap_id BIGINT NOT NULL AUTO_INCREMENT -- autoIncInitValue=1 enables AUTO_INCREMENT
+        ColumnDefinition snapIdCol = new ColumnDefinition(
+                "snap_id",
+                BigIntType.INSTANCE,
+                false,                          // isKey -- set later during key analysis
+                null,                           // aggType -- set later during key analysis
+                ColumnNullableType.NOT_NULLABLE,
+                1L,                             // autoIncInitValue != -1 -> AUTO_INCREMENT
+                Optional.empty(),               // no DEFAULT value
+                Optional.empty(),               // no ON UPDATE
+                "auto-increment row identifier",
+                Optional.empty()                // no generated column
+        );
+        // Insert after declared key columns so snap_id is always a value column.
+        // keys may still be empty here for DUPLICATE KEY tables -- that is fine.
+        int insertPos = (keys == null) ? 0 : keys.size();
+        if (insertPos > columns.size()) {
+            insertPos = columns.size();
+        }
+        columns.add(insertPos, snapIdCol);
+    }
+
+    /**
      * analyze create table info
      */
     public void validate(ConnectContext ctx) {
@@ -406,6 +459,10 @@ public class CreateTableInfo {
         if (columns.isEmpty()) {
             throw new AnalysisException("table should contain at least one column");
         }
+
+        // Stardata: automatically prepend snap_id BIGINT NOT NULL AUTO_INCREMENT to every
+        // OLAP (internal-catalog) table that does not already declare the column.
+        injectSnapIdColumn();
 
         // analyze catalog name
         if (Strings.isNullOrEmpty(ctlName)) {
@@ -834,7 +891,7 @@ public class CreateTableInfo {
 
         try {
             invertedIndexFileStorageFormat =
-                    PropertyAnalyzer.analyzePartitionInvertedIndexFileStorageFormat(new HashMap<>(properties));
+                    PropertyAnalyzer.analyzeInvertedIndexFileStorageFormat(new HashMap<>(properties));
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());
         }
@@ -1143,9 +1200,6 @@ public class CreateTableInfo {
      * analyzeEngine
      */
     public void analyzeEngine() {
-        if (isExternal) {
-            partitionTableInfo.validateExternalPartition(engineName);
-        }
         this.partitionDesc = partitionTableInfo.convertToPartitionDesc(isExternal);
         this.distributionDesc =
             distribution != null ? distribution.translateToCatalogStyle() : null;

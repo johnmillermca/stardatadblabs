@@ -37,6 +37,7 @@ USE cache_system;
 --   updated_at          — row last modified timestamp
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cache_system.table_query_stats (
+    snap_id               BIGINT        NOT NULL AUTO_INCREMENT,
     catalog_name          VARCHAR(128)  NOT NULL,
     db_name               VARCHAR(256)  NOT NULL,
     table_name            VARCHAR(256)  NOT NULL,
@@ -68,6 +69,7 @@ PROPERTIES (
 --   last_select_ts — last SELECT seen before eviction (for audit)
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cache_system.cache_eviction_log (
+    snap_id        BIGINT        NOT NULL AUTO_INCREMENT,
     id             BIGINT        NOT NULL,
     catalog_name   VARCHAR(128)  NOT NULL,
     db_name        VARCHAR(256)  NOT NULL,
@@ -105,6 +107,7 @@ PROPERTIES (
 --   spark_pushdown_count — Cumulative write-pushdown submissions this daemon process lifetime
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cache_system.table_cache_metrics (
+    snap_id               BIGINT        NOT NULL AUTO_INCREMENT,
     catalog_name          VARCHAR(128)  NOT NULL,
     db_name               VARCHAR(256)  NOT NULL,
     table_name            VARCHAR(256)  NOT NULL,
@@ -140,6 +143,7 @@ PROPERTIES (
 --   action         — Always 'CREATED' for now; reserved for future DROPPED / UPDATED
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cache_system.catalog_sync_log (
+    snap_id         BIGINT        NOT NULL AUTO_INCREMENT,
     catalog_name    VARCHAR(128)  NOT NULL,
     warehouse_name  VARCHAR(256)  NOT NULL,
     synced_at       DATETIME      NOT NULL,
@@ -165,6 +169,7 @@ PROPERTIES (
 --   message       — Human-readable explanation + retry advice shown to the user
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cache_system.query_block_log (
+    snap_id       BIGINT        NOT NULL AUTO_INCREMENT,
     query_id      VARCHAR(64)   NOT NULL,
     detected_at   DATETIME      NOT NULL,
     user_name     VARCHAR(128)  NOT NULL DEFAULT '',

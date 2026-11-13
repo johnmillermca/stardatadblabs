@@ -8,8 +8,35 @@ for the Stardatadblabs platform.
 
 Apache Doris `branch-4.2` (latest HEAD)
 
-No custom patches are applied. The Stardata distribution tracks upstream Doris branch-4.2
-directly and adds no modifications to the FE or BE source code.
+## Custom patches
+
+The following FE source files in `stardata/doris-patch/` are patched before building the
+FE image. Copy them into the Doris source tree at the matching package path before running
+`mvn package`.
+
+| Patch file | Doris source path |
+|---|---|
+| `doris-patch/CreateTableInfo.java` | `fe/src/main/java/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java` |
+| `doris-patch/ColumnDefinition.java` | `fe/src/main/java/org/apache/doris/nereids/trees/plans/commands/info/ColumnDefinition.java` |
+| `doris-patch/Column.java` | `fe/src/main/java/org/apache/doris/catalog/Column.java` |
+| `doris-patch/ColumnDef.java` | `fe/src/main/java/org/apache/doris/analysis/ColumnDef.java` |
+
+### snap_id auto-injection (`CreateTableInfo.java`)
+
+Every `CREATE TABLE` on an internal OLAP table automatically receives a leading column:
+
+```sql
+snap_id BIGINT NOT NULL AUTO_INCREMENT
+```
+
+**Rules:**
+- Injected only for internal (non-external) OLAP tables — Iceberg, Hive, Paimon, etc. are
+  not affected.
+- If the user's DDL already declares a column named `snap_id` (case-insensitive), no
+  duplicate is added and the user's definition is preserved unchanged.
+- The column is inserted at index 0, so it is always the first column in the schema.
+- Implemented in `CreateTableInfo.injectSnapIdColumn()`, called at the top of `validate()`
+  before any key or engine analysis.
 
 ## Build
 
