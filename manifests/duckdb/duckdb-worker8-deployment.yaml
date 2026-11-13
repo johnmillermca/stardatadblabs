@@ -18,6 +18,7 @@ spec:
     storage: 200Gi
   accessModes:
     - ReadWriteOnce
+  volumeMode: Filesystem
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-path
   hostPath:

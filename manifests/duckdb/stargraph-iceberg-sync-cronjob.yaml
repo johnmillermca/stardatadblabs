@@ -40,8 +40,6 @@ spec:
                   value: "192.168.1.58"
                 - name: MEMGRAPH_PORT
                   value: "7687"
-                - name: ICEBERG_BATCH_SIZE
-                  value: "500"
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:
                     secretKeyRef:
