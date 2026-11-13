@@ -10,7 +10,6 @@ USE platform;
 
 -- ── Audit table ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS platform.platform_audit (
-  snap_id      BIGINT        NOT NULL AUTO_INCREMENT,
   ts           DATETIME(3)   NOT NULL,
   event_id     VARCHAR(40)   NOT NULL,
   source       VARCHAR(16)   NOT NULL,          -- 'zitadel' | 'console'

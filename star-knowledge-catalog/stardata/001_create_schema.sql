@@ -40,7 +40,6 @@ CREATE USER IF NOT EXISTS 'bob'@'%' IDENTIFIED BY 'TempPass1!';
 DROP TABLE IF EXISTS customers;
 
 CREATE TABLE customers (
-    snap_id         BIGINT          NOT NULL AUTO_INCREMENT,
     customer_id     BIGINT          NOT NULL,
     -- PII — full_name → SHA256_HASH (glossary term: full_name)
     full_name       VARCHAR(200)    NOT NULL,
@@ -81,7 +80,6 @@ PROPERTIES (
 DROP TABLE IF EXISTS orders;
 
 CREATE TABLE orders (
-    snap_id         BIGINT          NOT NULL AUTO_INCREMENT,
     order_id        BIGINT          NOT NULL,
     customer_id     BIGINT          NOT NULL,
     order_date      DATETIME        NOT NULL,
@@ -107,7 +105,6 @@ PROPERTIES (
 DROP TABLE IF EXISTS payments;
 
 CREATE TABLE payments (
-    snap_id         BIGINT          NOT NULL AUTO_INCREMENT,
     payment_id      BIGINT          NOT NULL,
     order_id        BIGINT          NOT NULL,
     -- PCI — card_number → CREDIT_CARD_LAST4 (glossary term: credit_card_number)
@@ -138,7 +135,6 @@ PROPERTIES (
 DROP TABLE IF EXISTS products;
 
 CREATE TABLE products (
-    snap_id         BIGINT          NOT NULL AUTO_INCREMENT,
     product_id      BIGINT          NOT NULL,
     sku             VARCHAR(100)    NOT NULL,
     name            VARCHAR(500)    NOT NULL,
