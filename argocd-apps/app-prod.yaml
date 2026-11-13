@@ -148,9 +148,17 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: kafkas.kafka.strimzi.io
+      jqPathExpressions:
+        - .status
+        - .spec.conversion
+        - .spec.versions[].schema.openAPIV3Schema
   syncPolicy:
     automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true, Replace=true]
+    syncOptions: [CreateNamespace=true, ServerSideApply=true, Replace=true, RespectIgnoreDifferences=true]
 
 # ── Strimzi Kafka Cluster ─────────────────────────────────────────────────────
 ---
