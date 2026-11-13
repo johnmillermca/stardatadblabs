@@ -28,6 +28,8 @@ spec:
       kind: StatefulSet
       jsonPointers:
         - /spec/volumeClaimTemplates
+      jqPathExpressions:
+        - .metadata.labels["argocd.argoproj.io/instance"]
   syncPolicy:
     automated:
       prune: true
@@ -35,3 +37,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true

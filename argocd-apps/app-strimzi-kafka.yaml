@@ -34,14 +34,23 @@ spec:
       kind: ClusterRoleBinding
       jsonPointers:
         - /
-    # aclsAdminApiSupported is not in the Strimzi CRD schema — suppress diff.
+    # Strimzi operator writes reconcile-trigger and ArgoCD writes instance label
+    # at runtime — both cause an endless SSA diff loop. Ignore both permanently.
     - group: "kafka.strimzi.io"
       kind: Kafka
       name: strimzi-kafka
       jqPathExpressions:
         - .spec.entityOperator.userOperator.aclsAdminApiSupported
-        # reconcile-trigger label is written by Strimzi operator at runtime
         - .metadata.labels["app.kubernetes.io/reconcile-trigger"]
+        - .metadata.labels["argocd.argoproj.io/instance"]
+    - group: "kafka.strimzi.io"
+      kind: KafkaNodePool
+      jqPathExpressions:
+        - .metadata.labels["argocd.argoproj.io/instance"]
+    - group: "kafka.strimzi.io"
+      kind: KafkaUser
+      jqPathExpressions:
+        - .metadata.labels["argocd.argoproj.io/instance"]
   syncPolicy:
     automated:
       prune: false
