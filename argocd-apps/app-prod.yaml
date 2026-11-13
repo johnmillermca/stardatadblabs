@@ -160,35 +160,6 @@ spec:
     automated: {prune: true, selfHeal: true}
     syncOptions: [CreateNamespace=true, ServerSideApply=true, Replace=true, RespectIgnoreDifferences=true]
 
-# ── Strimzi Kafka Cluster ─────────────────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: strimzi-kafka
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "3"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/strimzi
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated:
-      # prune:false — Strimzi dynamically creates PVCs, ConfigMaps, Secrets, and
-      # StrimziPodSets at runtime that are not in git. Enabling prune deletes them
-      # on every sync, wiping Kafka data. selfHeal still reconciles declared resources.
-      prune: false
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-
 # ── Schema Registry ───────────────────────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -228,32 +199,6 @@ spec:
     repoURL: https://github.com/johnmillermca/stardatadblabs
     targetRevision: HEAD
     path: manifests/polaris
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: prod
-  syncPolicy:
-    automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
-
-# ── Apache Stardata (HA: 1 FE + 3 BE) ───────────────────────────────────────────
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: stardata
-  namespace: argocd
-  finalizers: [resources-finalizer.argocd.io]
-  annotations:
-    argocd.argoproj.io/sync-wave: "7"
-spec:
-  project: platform
-  source:
-    repoURL: https://github.com/johnmillermca/stardatadblabs
-    targetRevision: HEAD
-    path: manifests/stardata
-    directory:
-      recurse: true
-      exclude: "setup/*.sql"  # SQL DDL files are not K8s manifests — applied manually
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
