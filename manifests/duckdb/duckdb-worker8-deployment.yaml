@@ -25,6 +25,8 @@ spec:
     path: /home/duckdb-data
     type: DirectoryOrCreate
   claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
     name: duckdb-worker8-pvc
     namespace: prod
   nodeAffinity:
