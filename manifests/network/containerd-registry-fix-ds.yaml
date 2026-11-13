@@ -1,0 +1,148 @@
+# =============================================================================
+# containerd-registry-fix-ds.yaml
+# DaemonSet that permanently fixes containerd registry config on every node.
+#
+# What it does (idempotent, runs at every pod start):
+#   1. Writes the private registry CA cert to /etc/ssl/certs/registry.crt
+#   2. Creates /etc/containerd/certs.d/192.168.1.50:30500/hosts.toml
+#      and /etc/containerd/certs.d/registry.local:30500/hosts.toml
+#   3. Patches /etc/containerd/config.toml to set
+#        config_path = '/etc/containerd/certs.d'
+#      (only if not already set)
+#   4. Restarts containerd so the new config is live
+#
+# Permanent: the DaemonSet is always scheduled, so any node that reboots,
+# gets reimaged, or is freshly added to the cluster gets fixed automatically.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-cert
+  namespace: kube-system
+data:
+  registry.crt: |
+    -----BEGIN CERTIFICATE-----
+    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
+    -----END CERTIFICATE-----
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: containerd-registry-fix
+  namespace: kube-system
+  labels:
+    app: containerd-registry-fix
+spec:
+  selector:
+    matchLabels:
+      app: containerd-registry-fix
+  template:
+    metadata:
+      labels:
+        app: containerd-registry-fix
+    spec:
+      tolerations:
+        - operator: Exists        # run on every node including masters/taints
+      hostPID: true
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      initContainers:
+        - name: fix-registry
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-etc-containerd
+              mountPath: /host/etc/containerd
+            - name: host-etc-ssl
+              mountPath: /host/etc/ssl/certs
+            - name: registry-cert
+              mountPath: /certs
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+
+              # 1. Install CA cert
+              cp /certs/registry.crt /host/etc/ssl/certs/registry.crt
+              echo "✓ CA cert installed"
+
+              # 2. Create certs.d entries for both hostnames.
+              #    Primary endpoint: NodePort 192.168.1.50:30500
+              #    Mirror fallback : ClusterIP 10.102.177.220:5000 (registry svc)
+              #    This ensures nodes where NodePort is unreachable (worker4)
+              #    still pull via the Calico overlay ClusterIP path.
+              for HOST in "192.168.1.50:30500" "registry.local:30500"; do
+                mkdir -p "/host/etc/containerd/certs.d/${HOST}"
+                cat > "/host/etc/containerd/certs.d/${HOST}/hosts.toml" <<EOF
+              server = "https://192.168.1.50:30500"
+              [host."https://192.168.1.50:30500"]
+                capabilities = ["pull", "resolve", "push"]
+                ca = "/etc/ssl/certs/registry.crt"
+                skip_verify = false
+              [host."http://10.102.177.220:5000"]
+                capabilities = ["pull", "resolve", "push"]
+                skip_verify = true
+              EOF
+              done
+              echo "✓ certs.d hosts.toml written (with ClusterIP fallback)"
+
+              # 3. Patch config.toml: set config_path if not already set
+              CFG=/host/etc/containerd/config.toml
+              if grep -q "config_path = ''" "${CFG}"; then
+                sed -i "s|config_path = ''|config_path = '/etc/containerd/certs.d'|g" "${CFG}"
+                echo "✓ config.toml patched — config_path set"
+              else
+                echo "✓ config.toml already has config_path set — no change"
+              fi
+
+              # 4. Restart containerd via nsenter into host PID namespace
+              nsenter -t 1 -m -u -i -n -p -- systemctl restart containerd
+              echo "✓ containerd restarted"
+      containers:
+        - name: pause
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+      volumes:
+        - name: host-etc-containerd
+          hostPath:
+            path: /etc/containerd
+            type: Directory
+        - name: host-etc-ssl
+          hostPath:
+            path: /etc/ssl/certs
+            type: Directory
+        - name: registry-cert
+          configMap:
+            name: registry-cert

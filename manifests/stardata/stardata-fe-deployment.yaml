@@ -4,7 +4,7 @@
 # Nodes     : worker2.local, worker3.local, worker4.local (dedicated, exclusive)
 # Replicas  : 3  (BdbJE quorum — requires all 3 for leader election)
 # Access    : http://192.168.1.50:30030 (HTTP/WebUI)
-#             jdbc:mysql://192.168.1.50:30090 (MySQL — port 9030)
+#             jdbc:mysql://192.168.1.50:32530 (MySQL NodePort → pod port 9030)
 # Secret    : stardata-credentials  (key: admin-password)
 # PVCs      : stardata-fe-meta-stardata-fe-{0,1,2} — 100Gi each on /home
 #             provisioned via volumeClaimTemplates + static PVs in pv-retain.yaml
@@ -38,6 +38,13 @@ data:
     # All 3 FE FQDNs are listed so any pod can bootstrap the quorum.
     # stardata-fe-0 is the initial MASTER; -1 and -2 join as FOLLOWERs.
     election_timeout_ms = 10000
+
+    # ── snap_id AUTO PARTITION — permanent (08_patch_fe_conf_auto_partition.sh)
+    # Allows tables to declare AUTO PARTITION BY RANGE (snap_id).
+    # max_auto_partition_num raised from default 2000 to cover high snap-id
+    # cardinality workloads across all databases.
+    enable_auto_partition  = true
+    max_auto_partition_num = 50000
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -121,7 +128,7 @@ spec:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
           image: 192.168.1.50:30500/apache/stardata:fe-4.2
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command:
             - /opt/apache-doris/fe_entrypoint.sh
             - stardata-fe-headless.prod.svc.cluster.local
