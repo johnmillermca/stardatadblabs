@@ -85,6 +85,8 @@ spec:
               mountPath: /host/etc/containerd
             - name: host-etc-ssl
               mountPath: /host/etc/ssl/certs
+            - name: host-pki
+              mountPath: /host/etc/pki/ca-trust/source/anchors
             - name: registry-cert
               mountPath: /certs
           command:
@@ -93,8 +95,12 @@ spec:
             - |
               set -e
 
-              # 1. Install CA cert
+              # 1. Install CA cert — write to both common trust paths so it
+              # survives regardless of distro ssl cert layout
               cp /certs/registry.crt /host/etc/ssl/certs/registry.crt
+              # Also add to system trust bundle for RHEL/Rocky (update-ca-trust)
+              cp /certs/registry.crt /host/etc/pki/ca-trust/source/anchors/registry.crt 2>/dev/null || true
+              nsenter -t 1 -m -u -i -n -p -- update-ca-trust extract 2>/dev/null || true
               echo "✓ CA cert installed"
 
               # 2. Create certs.d entries for both hostnames.
@@ -143,6 +149,10 @@ spec:
           hostPath:
             path: /etc/ssl/certs
             type: Directory
+        - name: host-pki
+          hostPath:
+            path: /etc/pki/ca-trust/source/anchors
+            type: DirectoryOrCreate
         - name: registry-cert
           configMap:
             name: registry-cert
