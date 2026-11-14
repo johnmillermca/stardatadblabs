@@ -89,70 +89,70 @@ SHOW RESOURCES WHERE NAME = "sd_s3_cold";
 -- =============================================================================
 
 -- ── Policy 1 — cooldown after 1 day ──────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_1d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_1d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "86400"        -- 1 × 86 400 s = 1 day
 );
 
 -- ── Policy 2 — cooldown after 2 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_2d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_2d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "172800"       -- 2 × 86 400 s
 );
 
 -- ── Policy 3 — cooldown after 3 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_3d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_3d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "259200"       -- 3 × 86 400 s
 );
 
 -- ── Policy 4 — cooldown after 4 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_4d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_4d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "345600"       -- 4 × 86 400 s
 );
 
 -- ── Policy 5 — cooldown after 5 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_5d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_5d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "432000"       -- 5 × 86 400 s
 );
 
 -- ── Policy 6 — cooldown after 6 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_6d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_6d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "518400"       -- 6 × 86 400 s
 );
 
 -- ── Policy 7 — cooldown after 7 days (recommended default) ───────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_7d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_7d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "604800"       -- 7 × 86 400 s
 );
 
 -- ── Policy 8 — cooldown after 8 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_8d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_8d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "691200"       -- 8 × 86 400 s
 );
 
 -- ── Policy 9 — cooldown after 9 days ─────────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_9d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_9d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "777600"       -- 9 × 86 400 s
 );
 
 -- ── Policy 10 — cooldown after 10 days ───────────────────────────────────────
-CREATE STORAGE POLICY IF NOT EXISTS "sd_cold_10d"
+CREATE STORAGE POLICY IF NOT EXISTS sd_cold_10d
 PROPERTIES (
     "storage_resource" = "sd_s3_cold",
     "cooldown_ttl"     = "864000"       -- 10 × 86 400 s

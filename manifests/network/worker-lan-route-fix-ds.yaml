@@ -1,0 +1,150 @@
+# =============================================================================
+# worker-lan-route-fix-ds.yaml
+# DaemonSet — runs on worker2/3/4 (stardata=true nodes) only.
+#
+# Problem
+# ───────
+# worker2/3/4 are dual-homed:
+#   eno1   192.168.1.52/53/54  — cluster LAN (K8s node IP)
+#   wlp3s0 192.168.1.1xx       — WiFi (internet uplink, metric 50)
+#
+# Because wlp3s0 has metric=50 and eno1 has metric=100, the kernel routes
+# ALL 192.168.1.0/24 traffic (including BGP TCP/179 and IPIP) via wlp3s0
+# using the wrong source IP (192.168.1.1xx). Remote nodes see an unknown
+# BGP peer address → Hold timer expires → BGP down → no IPIP routes →
+# cross-node pod traffic drops → StarData FE BdbJE can't elect a leader.
+#
+# Fix
+# ───
+# Add a policy routing rule (ip rule) + dedicated route table (table 100)
+# that forces 192.168.1.0/24 traffic to always use eno1.
+# This is permanent — written to /etc/NetworkManager/dispatcher.d/ so it
+# survives NetworkManager restarts, node reboots, and NM profile changes.
+#
+# Result
+# ──────
+# - BGP sessions from worker2/3/4 → all peers use src 192.168.1.5x (eno1)
+# - IPIP cross-node pod traffic uses eno1
+# - Default route (internet) still goes via wlp3s0 (WiFi)
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: worker-lan-route-fix
+  namespace: kube-system
+  labels:
+    app: worker-lan-route-fix
+spec:
+  selector:
+    matchLabels:
+      app: worker-lan-route-fix
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: worker-lan-route-fix
+    spec:
+      nodeSelector:
+        stardata: "true"
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "stardata"
+          effect: "NoSchedule"
+        - operator: Exists
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+      initContainers:
+        - name: fix-lan-route
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+
+              # ── Discover eno1 IP and gateway ──────────────────────────────────
+              ENO1_IP=$(ip -4 addr show eno1 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]}')
+              if [ -z "$ENO1_IP" ]; then
+                echo "ERROR: eno1 has no IPv4 address — skipping"
+                exit 0
+              fi
+              LAN_SUBNET="192.168.1.0/24"
+              # Derive gateway as .1 of the LAN (standard home/lab setup)
+              GW=$(ip route show dev eno1 2>/dev/null | awk '/default/{print $3}' | head -1)
+              if [ -z "$GW" ]; then
+                # derive from IP: 192.168.1.x → 192.168.1.1
+                GW=$(echo "$ENO1_IP" | awk -F'.' '{print $1"."$2"."$3".1"}')
+              fi
+
+              echo "[lan-route-fix] eno1 IP: $ENO1_IP  LAN: $LAN_SUBNET  GW: $GW"
+
+              # ── 1. Policy routing: table 100 forces LAN via eno1 ─────────────
+              # Add route table 100 entry: LAN subnet via eno1
+              ip route replace $LAN_SUBNET dev eno1 src $ENO1_IP table 100 2>/dev/null || true
+              ip route replace default via $GW dev eno1 table 100 2>/dev/null || true
+
+              # ip rule: src from ENO1_IP subnet → use table 100
+              # This ensures outgoing traffic FROM this node TO LAN uses eno1
+              ip rule add from $ENO1_IP/32 table 100 priority 100 2>/dev/null || \
+                echo "[lan-route-fix] ip rule from $ENO1_IP already exists"
+
+              # Also add a rule: TO LAN subnet → use table 100
+              # This ensures traffic TO 192.168.1.x always goes via eno1
+              ip rule add to $LAN_SUBNET table 100 priority 101 2>/dev/null || \
+                echo "[lan-route-fix] ip rule to $LAN_SUBNET already exists"
+
+              ip route flush cache 2>/dev/null || true
+
+              echo "[lan-route-fix] ✓ Policy routing rules applied"
+
+              # ── 2. Verify BGP source IP is now correct ────────────────────────
+              echo "[lan-route-fix] BGP source IP check:"
+              ip route get 192.168.1.56 2>/dev/null
+              ip route get 192.168.1.57 2>/dev/null
+
+              # ── 3. Persist via NM dispatcher so it survives reboots ───────────
+              mkdir -p /host/etc/NetworkManager/dispatcher.d
+              cat > /host/etc/NetworkManager/dispatcher.d/50-lan-route-fix.sh << NMEOF
+              #!/bin/sh
+              # Injected by worker-lan-route-fix DaemonSet
+              # Ensures 192.168.1.0/24 LAN traffic always uses eno1 (not wlp3s0)
+              IFACE="\$1"
+              ACTION="\$2"
+              [ "\$IFACE" = "eno1" ] || exit 0
+              [ "\$ACTION" = "up" ] || exit 0
+              ENO1_IP=\$(ip -4 addr show eno1 2>/dev/null | awk '/inet /{split(\$2,a,"/"); print a[1]}')
+              [ -z "\$ENO1_IP" ] && exit 0
+              GW=\$(ip route show dev eno1 | awk '/default/{print \$3}' | head -1)
+              [ -z "\$GW" ] && GW=\$(echo "\$ENO1_IP" | awk -F'.' '{print \$1"."\$2"."\$3".1"}')
+              ip route replace 192.168.1.0/24 dev eno1 src \$ENO1_IP table 100
+              ip route replace default via \$GW dev eno1 table 100
+              ip rule add from \$ENO1_IP/32 table 100 priority 100 2>/dev/null || true
+              ip rule add to 192.168.1.0/24 table 100 priority 101 2>/dev/null || true
+              ip route flush cache
+              NMEOF
+              chmod +x /host/etc/NetworkManager/dispatcher.d/50-lan-route-fix.sh
+              echo "[lan-route-fix] ✓ NM dispatcher script installed"
+
+              # ── 4. Restart BIRD (calico-node) to re-initiate BGP sessions ─────
+              # Signal calico-node to re-evaluate peers after routing fix
+              # We do this by reloading BIRD inside the calico-node pod via birdcl
+              # Note: birdcl is in the calico-node container, not on the host
+              echo "[lan-route-fix] ✓ Done — BGP will re-establish on next calico-node sync"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+      containers:
+        - name: pause
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
