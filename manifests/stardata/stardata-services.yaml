@@ -1,17 +1,14 @@
 # =============================================================================
 # Apache Stardata Services
 # Namespace : prod
-# FE NodePort: http://192.168.1.50:30030 (HTTP)  jdbc://192.168.1.50:30090 (MySQL)
+# FE NodePort: http://192.168.1.50:30030 (HTTP)
+#              jdbc://192.168.1.50:32530  (MySQL — query port)
 #
-# Kerberos enforcement:
-#   MySQL port 9030 → targetPort 19030 (krb-stardata-guard sidecar).
-#   The guard validates the KDC principal before proxying to Stardata :9030.
-#   Clients connecting on port 30090 / 9030 go through the guard.
-#   Direct access to Stardata port 9030 is blocked at the Service level —
-#   only the guard (127.0.0.1:9030 inside the pod) can reach Stardata directly.
+# Note: Kerberos guard sidecar (krb-stardata-guard / targetPort 19030) has been
+# removed from the cluster. MySQL traffic now routes directly to Doris FE :9030.
 # =============================================================================
 ---
-# External NodePort for FE — HTTP WebUI (8030) and MySQL via guard (9030→19030)
+# External NodePort for FE — HTTP WebUI (8030) and MySQL query (9030)
 apiVersion: v1
 kind: Service
 metadata:
@@ -26,17 +23,18 @@ spec:
       port: 8030
       targetPort: 8030
       nodePort: 30030
-    # query port not exposed externally — all MySQL traffic enters via
-    # stardata-write-proxy NodePort 30090 → stardata-fe ClusterIP:9030 → guard.
     - name: query
       port: 9030
-      targetPort: 19030
+      targetPort: 9030
+      nodePort: 32530
     - name: edit-log
       port: 9010
       targetPort: 9010
+      nodePort: 31364
     - name: rpc
       port: 9020
       targetPort: 9020
+      nodePort: 31111
 ---
 # Headless service for stable FE DNS (required for enable_fqdn_mode=true)
 apiVersion: v1

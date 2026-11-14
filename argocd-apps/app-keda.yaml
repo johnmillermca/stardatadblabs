@@ -18,6 +18,13 @@ spec:
     - repoURL: https://github.com/johnmillermca/stardatadblabs
       targetRevision: HEAD
       ref: values
+    # Extra cluster-scoped RBAC that the Helm chart omits.
+    # Grants keda-metrics-server the system:auth-delegator role so the
+    # metrics apiserver can create SubjectAccessReviews. Without this,
+    # Kyverno's API discovery loop spams errors and starves webhook threads.
+    - repoURL: https://github.com/johnmillermca/stardatadblabs
+      targetRevision: HEAD
+      path: manifests/keda
   destination:
     server: https://kubernetes.default.svc
     namespace: keda

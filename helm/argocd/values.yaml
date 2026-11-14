@@ -97,6 +97,11 @@ configs:
     # prune: false alone is insufficient — it changes the action to PruneSkipped
     # but still marks the app OutOfSync. This exclusion removes them from the
     # comparison entirely so the app stays Synced/Healthy.
+    #
+    # NOTE: ArgoCD v2.11 does not support labelSelectors in resource.exclusions
+    # (added in v2.13). We use name glob patterns instead to scope the exclusion
+    # to only Strimzi-generated resources (all named strimzi-*), preventing
+    # accidental exclusion of KEDA, Prometheus, and other operator CRBs.
     resource.exclusions: |
       - apiGroups:
         - ""
@@ -104,18 +109,7 @@ configs:
         - PersistentVolumeClaim
         clusters:
         - "*"
-        labelSelectors:
-        - matchLabels:
-            app.kubernetes.io/managed-by: strimzi-cluster-operator
-      - apiGroups:
-        - rbac.authorization.k8s.io
-        kinds:
-        - ClusterRoleBinding
-        clusters:
-        - "*"
-        labelSelectors:
-        - matchLabels:
-            app.kubernetes.io/managed-by: strimzi-cluster-operator
+        name: "strimzi-*"
   rbac:
     policy.default: role:readonly
     policy.csv: |
