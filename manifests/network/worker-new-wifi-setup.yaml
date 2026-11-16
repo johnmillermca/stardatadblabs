@@ -134,9 +134,17 @@ spec:
               echo "[new-worker-wifi] dispatcher installed"
 
               # ── 6. Reload dbus + enable/start wpa_supplicant ───────────────
+              # Reload dbus so new policy file is active before wpa_supplicant
+              # tries to claim fi.w1.wpa_supplicant1.
               $NM systemctl reload dbus 2>/dev/null || true
               sleep 1
-              $NM systemctl enable wpa_supplicant 2>/dev/null | grep -v "^$" || true
+              # Create the enable symlink directly on host fs (systemctl enable
+              # inside nsenter doesn't write to the host's /etc/systemd).
+              mkdir -p /host/etc/systemd/system/multi-user.target.wants
+              ln -sf /usr/lib/systemd/system/wpa_supplicant.service \
+                /host/etc/systemd/system/multi-user.target.wants/wpa_supplicant.service 2>/dev/null || true
+              echo "[new-worker-wifi] wpa_supplicant enabled: $(ls /host/etc/systemd/system/multi-user.target.wants/wpa_supplicant.service 2>/dev/null && echo YES || echo NO)"
+              $NM systemctl daemon-reload 2>/dev/null || true
               $NM systemctl start wpa_supplicant 2>/dev/null
               sleep 3
               echo "[new-worker-wifi] wpa_supplicant: $($NM systemctl is-active wpa_supplicant 2>/dev/null)"
