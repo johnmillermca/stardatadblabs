@@ -1,0 +1,186 @@
+# =============================================================================
+# worker-new-wifi-setup — DaemonSet
+# Runs on worker1, worker6–10.
+#
+# ROOT CAUSE (vs worker2/3/4):
+#   These nodes are missing two packages that worker2/3/4 have:
+#     • NetworkManager-wifi  (libnm-device-plugin-wifi.so)
+#     • wpa_supplicant       (wpa_supplicant binary + dbus policy)
+#   Without them NM creates wlp3s0 as a generic device and can never activate
+#   any wifi connection regardless of keyfile or nmcli commands.
+#
+# FIX
+# ───
+#   1. Copy libnm-device-plugin-wifi.so + wpa_supplicant from the wifi-pkgs
+#      image (pre-built from worker2 binaries) into the host filesystem
+#   2. Install dbus policy so wpa_supplicant can claim fi.w1.wpa_supplicant1
+#   3. Enable + start wpa_supplicant.service
+#   4. Write twinkly36 NM keyfile WITH interface-name=wlp3s0
+#   5. Set LAN (eno1 / enp1s0) never-default=true
+#   6. Install NM dispatcher for reboot persistence
+#   7. Restart NM (now loads wifi plugin + wpa_supplicant is live)
+#   8. nmcli con up twinkly36
+#   9. Fix routing: LAN subnet in main table, no default via LAN
+#
+# INTERFACES
+#   wlp3s0  — WiFi MT7921e PCIe   internet uplink   (default route metric 50)
+#   eno1    — LAN (worker1)       192.168.1.51
+#   enp1s0  — LAN (worker6–10)   192.168.1.56–60
+#
+# REQUIRES: ConfigMap wifi-pkgs-image must exist OR image 192.168.1.50:30500/wifi-pkgs:latest
+#
+# Apply:  kubectl apply -f manifests/network/worker-new-wifi-setup.yaml
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: worker-new-wifi-setup
+  namespace: kube-system
+  labels:
+    app: worker-new-wifi-setup
+spec:
+  selector:
+    matchLabels:
+      app: worker-new-wifi-setup
+  template:
+    metadata:
+      labels:
+        app: worker-new-wifi-setup
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker1.local
+                      - worker6.local
+                      - worker7.local
+                      - worker8.local
+                      - worker9.local
+                      - worker10.local
+      tolerations:
+        - operator: Exists
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+
+      initContainers:
+        - name: wifi-setup
+          image: 192.168.1.50:30500/wifi-pkgs:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              NM="nsenter -t 1 -m --"
+              echo "[new-worker-wifi] Starting on $(cat /proc/1/root/etc/hostname 2>/dev/null)"
+
+              # ── Detect LAN interface ────────────────────────────────────────
+              LAN=""; LAN_IP=""
+              for iface in eno1 enp1s0; do
+                ADDR=$($NM ip -4 addr show "$iface" 2>/dev/null | awk '/inet 192\.168\.1\./{print $2}')
+                if [ -n "$ADDR" ]; then
+                  LAN="$iface"; LAN_IP=$(echo "$ADDR" | cut -d/ -f1); break
+                fi
+              done
+              [ -z "$LAN" ] && { echo "[new-worker-wifi] ERROR: no LAN interface"; exit 1; }
+              echo "[new-worker-wifi] LAN=${LAN} IP=${LAN_IP}"
+
+              # ── 1. Install NM wifi plugin ───────────────────────────────────
+              NM_VER=$($NM rpm -q --qf '%{VERSION}-%{RELEASE}' NetworkManager 2>/dev/null)
+              mkdir -p /host/usr/lib64/NetworkManager/${NM_VER}
+              cp /wifi-pkgs/usr/lib64/NetworkManager/*/libnm-device-plugin-wifi.so \
+                 /host/usr/lib64/NetworkManager/${NM_VER}/
+              echo "[new-worker-wifi] NM wifi plugin installed"
+
+              # ── 2. Install wpa_supplicant + dbus policy ─────────────────────
+              cp /wifi-pkgs/usr/sbin/wpa_supplicant /host/usr/sbin/wpa_supplicant
+              cp /wifi-pkgs/usr/sbin/wpa_cli /host/usr/sbin/wpa_cli
+              chmod +x /host/usr/sbin/wpa_supplicant /host/usr/sbin/wpa_cli
+              cp /wifi-pkgs/usr/lib/systemd/system/wpa_supplicant.service \
+                 /host/usr/lib/systemd/system/
+              cp /wifi-pkgs/usr/share/dbus-1/system-services/fi.w1.wpa_supplicant1.service \
+                 /host/usr/share/dbus-1/system-services/
+              mkdir -p /host/etc/dbus-1/system.d
+              cp /wifi-pkgs/etc/dbus-1/system.d/wpa_supplicant.conf \
+                 /host/etc/dbus-1/system.d/
+              mkdir -p /host/etc/wpa_supplicant
+              cp /wifi-pkgs/etc/wpa_supplicant/wpa_supplicant.conf \
+                 /host/etc/wpa_supplicant/ 2>/dev/null || true
+              echo "[new-worker-wifi] wpa_supplicant installed"
+
+              # ── 3. Write NM keyfile with interface-name=wlp3s0 ─────────────
+              mkdir -p /host/etc/NetworkManager/system-connections
+              printf '[connection]\nid=twinkly36\nuuid=11111111-1111-1111-1111-111111111111\ntype=wifi\ninterface-name=wlp3s0\nautoconnect=true\nautoconnect-priority=10\n\n[wifi]\nssid=twinkly36\nmode=infrastructure\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=gogoboys1316\n\n[ipv4]\nmethod=auto\nnever-default=false\nroute-metric=50\n\n[ipv6]\nmethod=ignore\n' \
+                > /host/etc/NetworkManager/system-connections/twinkly36.nmconnection
+              chmod 600 /host/etc/NetworkManager/system-connections/twinkly36.nmconnection
+              echo "[new-worker-wifi] NM keyfile written"
+
+              # ── 4. Set LAN never-default ────────────────────────────────────
+              $NM nmcli connection modify "$LAN" ipv4.never-default yes 2>/dev/null || true
+              echo "[new-worker-wifi] ${LAN} never-default=true"
+
+              # ── 5. Install NM dispatcher for reboot persistence ─────────────
+              mkdir -p /host/etc/NetworkManager/dispatcher.d
+              printf '#!/bin/sh\nIFACE="$1"; ACTION="$2"\n[ "$ACTION" = "up" ] || exit 0\n[ "$IFACE" = "wlp3s0" ] || [ "$IFACE" = "%s" ] || exit 0\nLAN_IP=$(ip -4 addr show %s 2>/dev/null | awk '"'"'/inet /{split($2,a,"/");print a[1]}'"'"')\n[ -z "$LAN_IP" ] && exit 0\nip route replace 192.168.1.0/24 dev %s src "$LAN_IP" 2>/dev/null || true\nip route del default dev %s 2>/dev/null || true\nip route flush cache 2>/dev/null || true\n' \
+                "$LAN" "$LAN" "$LAN" "$LAN" \
+                > /host/etc/NetworkManager/dispatcher.d/51-new-worker-wifi-routing.sh
+              chmod +x /host/etc/NetworkManager/dispatcher.d/51-new-worker-wifi-routing.sh
+              echo "[new-worker-wifi] dispatcher installed"
+
+              # ── 6. Reload dbus + enable/start wpa_supplicant ───────────────
+              $NM systemctl reload dbus 2>/dev/null || true
+              sleep 1
+              $NM systemctl enable wpa_supplicant 2>/dev/null | grep -v "^$" || true
+              $NM systemctl start wpa_supplicant 2>/dev/null
+              sleep 3
+              echo "[new-worker-wifi] wpa_supplicant: $($NM systemctl is-active wpa_supplicant 2>/dev/null)"
+
+              # ── 7. Restart NM to load wifi plugin ──────────────────────────
+              $NM nmcli con reload 2>/dev/null || true
+              $NM systemctl restart NetworkManager 2>/dev/null
+              sleep 5
+              echo "[new-worker-wifi] wlp3s0 state: $($NM nmcli -t -f DEVICE,STATE dev 2>/dev/null | grep wlp3s0 | head -1)"
+
+              # ── 8. Connect ──────────────────────────────────────────────────
+              echo "[new-worker-wifi] connecting to twinkly36..."
+              $NM nmcli con up twinkly36 2>&1
+              for i in $(seq 1 30); do
+                $NM ip addr show wlp3s0 2>/dev/null | grep -q "inet " && break; sleep 1
+              done
+              WIFI_IP=$($NM ip -4 addr show wlp3s0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+              echo "[new-worker-wifi] wlp3s0 IP: ${WIFI_IP:-NOT ASSIGNED}"
+
+              # ── 9. Fix routing ──────────────────────────────────────────────
+              [ -n "$LAN_IP" ] && $NM ip route replace 192.168.1.0/24 dev "$LAN" src "$LAN_IP" 2>/dev/null || true
+              $NM ip route del default dev "$LAN" 2>/dev/null || true
+              $NM ip rule del priority 100 2>/dev/null || true
+              $NM ip rule del priority 101 2>/dev/null || true
+              $NM ip route flush table 100 2>/dev/null || true
+              $NM ip route flush cache 2>/dev/null || true
+              echo "[new-worker-wifi] default: $($NM ip route show default 2>/dev/null)"
+
+              # ── 10. Verify ──────────────────────────────────────────────────
+              $NM ping -c1 -W5 1.1.1.1 >/dev/null 2>&1 \
+                && echo "[new-worker-wifi] ✅ Internet OK via wlp3s0" \
+                || echo "[new-worker-wifi] ⚠️  Internet not reachable"
+              echo "[new-worker-wifi] Done."
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+
+      containers:
+        - name: pause
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
