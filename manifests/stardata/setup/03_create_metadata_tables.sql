@@ -178,5 +178,46 @@ PROPERTIES (
     "replication_num" = "1"
 );
 
+-- ── datetime_load_tracker ─────────────────────────────────────────────────────
+-- Written once by the DDL Audit Plugin the instant a CREATE TABLE or ALTER TABLE
+-- completes on any user table satisfying BOTH:
+--   (a)  DATETIME DEFAULT CURRENT_TIMESTAMP column          (created-at)
+--   (b)  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE …     (updated-at)
+-- One row per qualifying table. No polling. Zero impact on query thread.
+--
+-- Columns:
+--   database_name   — actual database that owns the qualifying table
+--   table_name      — name of the qualifying table
+--   created_ts_col  — name of the column satisfying condition (a)
+--   updated_ts_col  — name of the column satisfying condition (b)
+--   min_created_ts  — MIN() value of created_ts_col from that table
+--   min_updated_ts  — MIN() value of updated_ts_col from that table
+--   min_snap_id     — MIN() value of snap_id from that table
+--   status          — fixed literal 'load'
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cache_system.datetime_load_tracker (
+    database_name   VARCHAR(256)  NOT NULL
+        COMMENT 'Actual database name that owns the qualifying table',
+    table_name      VARCHAR(256)  NOT NULL
+        COMMENT 'Name of the qualifying table',
+    created_ts_col  VARCHAR(256)  NOT NULL
+        COMMENT 'Column name that has DATETIME DEFAULT CURRENT_TIMESTAMP',
+    updated_ts_col  VARCHAR(256)  NOT NULL
+        COMMENT 'Column name that has DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP',
+    min_created_ts  DATETIME      NULL
+        COMMENT 'MIN() value of created_ts_col from the actual table',
+    min_updated_ts  DATETIME      NULL
+        COMMENT 'MIN() value of updated_ts_col from the actual table',
+    min_snap_id     BIGINT        NULL
+        COMMENT 'MIN() value of snap_id from the actual table',
+    status          VARCHAR(32)   NOT NULL  DEFAULT 'load'
+        COMMENT 'Fixed value: load'
+)
+UNIQUE KEY(database_name, table_name)
+DISTRIBUTED BY HASH(database_name) BUCKETS 4
+PROPERTIES (
+    "replication_num" = "1"
+);
+
 -- Verify
 SHOW TABLES FROM cache_system;

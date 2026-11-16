@@ -41,7 +41,7 @@ ADMIN SET FRONTEND CONFIG ("max_auto_partition_num" = "50000");
 --   DISTRIBUTED BY HASH (snap_id) BUCKETS AUTO
 --   PROPERTIES (
 --       "replication_num" = "3",
---       "storage_policy"  = "sd_cold_7d"   -- or sd_cold_1d … sd_cold_10d
+--       "storage_policy"  = "sd_cold_1d"
 --   );
 --
 -- What happens on INSERT:
@@ -69,7 +69,7 @@ ADMIN SET FRONTEND CONFIG ("max_auto_partition_num" = "50000");
 -- DISTRIBUTED BY HASH (snap_id) BUCKETS AUTO
 -- PROPERTIES (
 --     "replication_num" = "3",
---     "storage_policy"  = "sd_cold_7d"
+--     "storage_policy"  = "sd_cold_1d"
 -- );
 --
 -- INSERT INTO analytics.snap_demo VALUES

@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.stardata</groupId>
+    <artifactId>ddl-load-tracker-plugin</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>StarData DDL Load Tracker Audit Plugin</name>
+    <description>
+        Doris Audit Plugin that fires asynchronously on every CREATE TABLE /
+        ALTER TABLE statement and upserts a row into
+        cache_system.datetime_load_tracker for any table that has both a
+        DATETIME DEFAULT CURRENT_TIMESTAMP column and a
+        DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP column.
+    </description>
+
+    <properties>
+        <java.version>11</java.version>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Must match the Doris FE version deployed in the cluster -->
+        <doris.version>2.1.7</doris.version>
+        <mysql.connector.version>8.0.33</mysql.connector.version>
+    </properties>
+
+    <dependencies>
+        <!--
+            Doris plugin API — provided at runtime by the FE classloader.
+            Only the interface jar is needed to compile; it must NOT be
+            bundled into the fat-jar (scope=provided).
+        -->
+        <dependency>
+            <groupId>org.apache.doris</groupId>
+            <artifactId>fe-core</artifactId>
+            <version>${doris.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
+            MySQL Connector/J — shaded into the plugin jar so it is
+            self-contained.  Doris FE does not ship a MySQL client on
+            its classpath, so we must bundle it.
+        -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql.connector.version}</version>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                maven-shade-plugin: produce a fat-jar that bundles
+                mysql-connector-j.  The Doris plugin loader picks up a
+                single jar from the zip archive.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <!-- Relocate the MySQL connector to avoid classpath clashes -->
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.mysql</pattern>
+                                    <shadedPattern>io.stardata.shaded.mysql</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

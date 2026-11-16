@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 06_07_apply_storage_and_partitions.sh
-# Apply hot/cold storage policies + snap_id auto-partition defaults to StarData.
+# Apply hot/cold storage policy + snap_id auto-partition defaults to StarData.
 #
 # What this script does
 # ─────────────────────
@@ -10,13 +10,16 @@
 #   2. Applies 06_storage_policies.sql
 #      • Creates the shared S3 storage resource  sd_s3_cold
 #        pointing at s3://xdatatoiceberg1  (us-east-2)
-#      • Creates 10 STORAGE POLICYs:  sd_cold_1d … sd_cold_10d
-#        (cooldown_ttl 86400 s, 172800 s … 864000 s)
+#      • Creates 1 STORAGE POLICY:  sd_cold_1d  (cooldown_ttl 86400 s = 1 day)
 #   3. Applies 07_auto_partition_snap_id.sql
 #      • Enables AUTO PARTITION globally (FE config)
 #      • Creates cache_system.snap_id_partition_log audit table
 #      • Creates the hourly Doris JOB snap_id_partition_sweep that
 #        retrofits snap_id RANGE partitions on any table that lacks them
+#   4. Applies 08_datetime_load_tracker.sql
+#      • Creates cache_system.datetime_load_tracker (idempotent)
+#      NOTE: the DDL Audit Plugin that writes into this table is installed
+#      separately via 09_install_ddl_load_tracker_plugin.sh
 #
 # Prerequisites
 # ─────────────
@@ -98,13 +101,17 @@ run_sql() {
     || { red "  ✗ ${label} FAILED — see output above"; exit 1; }
 }
 
-# ── Step 1: Storage policies ──────────────────────────────────────────────────
-run_sql "06 — Hot/Cold Storage Policies (sd_cold_1d … sd_cold_10d)" \
+# ── Step 1: Storage policy ────────────────────────────────────────────────────
+run_sql "06 — Hot/Cold Storage Policy (sd_cold_1d)" \
         "${SCRIPT_DIR}/06_storage_policies.sql"
 
 # ── Step 2: Auto snap_id partitions ──────────────────────────────────────────
 run_sql "07 — snap_id AUTO PARTITION defaults + governance job" \
         "${SCRIPT_DIR}/07_auto_partition_snap_id.sql"
+
+# ── Step 3: DDL load tracker table ───────────────────────────────────────────
+run_sql "08 — DDL Load Tracker table (cache_system.datetime_load_tracker)" \
+        "${SCRIPT_DIR}/08_datetime_load_tracker.sql"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
@@ -113,15 +120,18 @@ green "  All steps completed successfully."
 bold "════════════════════════════════════════════════════════════════"
 echo ""
 echo "  Storage resource : sd_s3_cold  →  s3://xdatatoiceberg1/stardata-cold/"
-echo "  Policies created : sd_cold_1d  sd_cold_2d  sd_cold_3d  sd_cold_4d  sd_cold_5d"
-echo "                     sd_cold_6d  sd_cold_7d  sd_cold_8d  sd_cold_9d  sd_cold_10d"
+echo "  Policy created   : sd_cold_1d  (hot 1 day → cold S3)"
 echo ""
 echo "  Auto-partition   : snap_id RANGE (interval 1 000 000) — AUTO PARTITION enabled"
 echo "  Governance job   : snap_id_partition_sweep  (runs every 1 HOUR)"
 echo "  Audit table      : cache_system.snap_id_partition_log"
 echo ""
+echo "  DDL load tracker : cache_system.datetime_load_tracker  (table created)"
+echo "  → To activate event-driven tracking, run next:"
+echo "    bash manifests/stardata/setup/09_install_ddl_load_tracker_plugin.sh"
+echo ""
 echo "  To attach a policy to an existing table:"
-echo "    ALTER TABLE <db>.<tbl> SET (\"storage_policy\" = \"sd_cold_7d\");"
+echo "    ALTER TABLE <db>.<tbl> SET (\"storage_policy\" = \"sd_cold_1d\");"
 echo ""
 echo "  To create a new auto-partitioned table:"
 echo "    See SECTION E in 07_auto_partition_snap_id.sql for the full template."

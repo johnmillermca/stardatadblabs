@@ -1,0 +1,69 @@
+---
+# GlobalNetworkPolicy: allow-host-endpoints
+#
+# WHY THIS EXISTS
+# ---------------
+# master2-hostendpoint.yaml registers eno1 as a Calico HostEndpoint so the
+# BPF dataplane applies its mark to host-originated traffic.  Once any
+# HostEndpoint is active, Calico enforces a default-deny on host traffic for
+# ALL nodes (GlobalNetworkPolicy is cluster-wide).  Without an explicit allow,
+# external ICMP (ping), SSH, and Kubernetes API calls from the LAN are silently
+# dropped — including from a MacBook on 192.168.1.0/24.
+#
+# WHAT THIS ALLOWS
+# ----------------
+#  Ingress to host:
+#   • All traffic from the LAN (192.168.1.0/24)  ← fixes MacBook ping/SSH
+#   • All traffic from the pod CIDR (10.244.0.0/16) ← kubelet probes, IPIP
+#   • All traffic from the service CIDR (10.96.0.0/12) ← kube-proxy / BPF CTlb
+#   • ICMP between all cluster nodes
+#  Egress from host:
+#   • All traffic (hosts need unrestricted egress for kubelet, DNS, image pulls)
+#
+# IMPACT ON PODS
+# --------------
+# selector "has(kubernetes.io/hostname)" matches HostEndpoints only (nodes),
+# NOT pod workload endpoints — so pod NetworkPolicies are completely unaffected.
+#
+# ORDER
+# -----
+# order: 10 runs before any more-specific deny rules you might add later.
+
+apiVersion: crd.projectcalico.org/v1
+kind: GlobalNetworkPolicy
+metadata:
+  name: allow-host-endpoints
+spec:
+  # Target all node HostEndpoints (HostEndpoints inherit node labels)
+  selector: "has(kubernetes.io/hostname)"
+  order: 10
+  applyOnForward: false
+
+  ingress:
+    # ── LAN (MacBook, admin workstations, all nodes on 192.168.1.0/24) ──────
+    - action: Allow
+      source:
+        nets:
+          - 192.168.1.0/24
+
+    # ── Pod CIDR — kubelet liveness probes, IPIP-decapped pod traffic ────────
+    - action: Allow
+      source:
+        nets:
+          - 10.244.0.0/16
+
+    # ── Service CIDR — Calico BPF connect-time load balancing, kube-dns ─────
+    - action: Allow
+      source:
+        nets:
+          - 10.96.0.0/12
+
+    # ── Loopback — always needed ─────────────────────────────────────────────
+    - action: Allow
+      source:
+        nets:
+          - 127.0.0.0/8
+
+  egress:
+    # Hosts need full egress: image pulls, DNS, NTP, OIDC, external APIs, etc.
+    - action: Allow

@@ -1,0 +1,16 @@
+---
+# Register master2's main interface as a Calico HostEndpoint.
+# This tells Calico eBPF to apply its mark to traffic originating from
+# the master2 host network (including hostNetwork pods like webconsole-proxy),
+# so packets are not dropped by the "From workload without BPF seen mark" rule.
+apiVersion: crd.projectcalico.org/v1
+kind: HostEndpoint
+metadata:
+  name: master2-eno1
+  labels:
+    kubernetes.io/hostname: master2.local
+spec:
+  node: master2.local
+  interfaceName: eno1
+  expectedIPs:
+    - 192.168.1.62

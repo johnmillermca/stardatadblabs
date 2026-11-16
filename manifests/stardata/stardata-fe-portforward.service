@@ -1,0 +1,43 @@
+[Unit]
+Description=StarData FE MySQL port-forward (kubectl port-forward prod/stardata-fe 9030)
+Documentation=https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/
+After=network-online.target
+Wants=network-online.target
+# Restart after kube-apiserver is reachable — depends on k8s being up
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+# ── Identity ───────────────────────────────────────────────────────────────────
+# Run as starmaster so kubectl uses /home/starmaster/.kube/config
+User=starmaster
+Group=starmaster
+
+# ── Environment ────────────────────────────────────────────────────────────────
+Environment=KUBECONFIG=/home/starmaster/.kube/config
+Environment=HOME=/home/starmaster
+
+# ── Port-forward command ───────────────────────────────────────────────────────
+# Forwards  localhost:9030  →  stardata-fe-0 pod :9030  (MySQL/Doris query port)
+# Targets the pod directly (not svc) to bypass the now-removed Kerberos guard
+# targetPort mapping (19030) that was baked into the Service object.
+# stardata-fe-0 is always the BdbJE master/leader — safest target for writes.
+ExecStart=/usr/bin/kubectl port-forward \
+    --namespace prod \
+    --address 127.0.0.1 \
+    pod/stardata-fe-0 \
+    9030:9030
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+# Restart on any failure (pod restarts, network blips, leader re-election).
+# Wait 5 s between restarts so we don't hammer the apiserver.
+Restart=always
+RestartSec=5s
+
+# ── Output ────────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stardata-fe-portforward
+
+[Install]
+WantedBy=multi-user.target

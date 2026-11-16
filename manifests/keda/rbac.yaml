@@ -1,0 +1,22 @@
+# =============================================================================
+# KEDA RBAC fix — grant keda-metrics-server the system:auth-delegator role.
+#
+# Without this, the keda-metrics-apiserver cannot create SubjectAccessReviews,
+# causing every Kubernetes component that lists API groups (e.g. Kyverno) to
+# receive an Internal Server Error on external.metrics.k8s.io/v1beta1.
+# That in turn caused Kyverno's resource-discovery loop to spam errors every
+# 10 seconds, starving all webhook threads and making failurePolicy:Fail block
+# pod creation across the entire cluster.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-system-auth-delegator-metrics-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: keda-metrics-server
+    namespace: keda
