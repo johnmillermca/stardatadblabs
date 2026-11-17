@@ -16,6 +16,67 @@ metadata:
   name: stardata-fe-config
   namespace: prod
 data:
+  log4j2.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!-- Doris FE log4j2 config — mounted over /opt/apache-doris/fe/conf/log4j2.xml
+         Change from default: audit logger raised from ERROR → INFO so that DDL
+         statements (CREATE/ALTER TABLE) appear in fe.audit.log with StmtType=CREATE
+         and StmtType=ALTER, which the ddl-mirror sidecar relies on. -->
+    <Configuration status="WARN">
+      <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+          <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss,SSS} %p (%t|%tid) [%C{1}.%M():%L] %m%n"/>
+        </Console>
+        <RollingFile name="Sys" fileName="${sys:DORIS_HOME}/log/fe.log"
+                     filePattern="${sys:DORIS_HOME}/log/fe.log.${sys:fe_log_name}-%d{yyyy-MM-dd}-%i.gz">
+          <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss,SSS} %p (%t|%tid) [%C{1}.%M():%L] %m%n"/>
+          <Policies>
+            <TimeBasedTriggeringPolicy/>
+            <SizeBasedTriggeringPolicy size="1 GB"/>
+          </Policies>
+          <DefaultRolloverStrategy max="30"/>
+        </RollingFile>
+        <RollingFile name="SysWF" fileName="${sys:DORIS_HOME}/log/fe.warn.log"
+                     filePattern="${sys:DORIS_HOME}/log/fe.warn.log.${sys:fe_log_name}-%d{yyyy-MM-dd}-%i.gz">
+          <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss,SSS} %p (%t|%tid) [%C{1}.%M():%L] %m%n"/>
+          <Filters>
+            <ThresholdFilter level="WARN" onMatch="ACCEPT" onMismatch="DENY"/>
+          </Filters>
+          <Policies>
+            <TimeBasedTriggeringPolicy/>
+            <SizeBasedTriggeringPolicy size="1 GB"/>
+          </Policies>
+          <DefaultRolloverStrategy max="30"/>
+        </RollingFile>
+        <RollingFile name="Audit" fileName="${sys:DORIS_HOME}/log/fe.audit.log"
+                     filePattern="${sys:DORIS_HOME}/log/fe.audit.log.${sys:fe_log_name}-%d{yyyy-MM-dd}-%i.gz">
+          <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss,SSS} A %m%n"/>
+          <Policies>
+            <TimeBasedTriggeringPolicy/>
+            <SizeBasedTriggeringPolicy size="1 GB"/>
+          </Policies>
+          <DefaultRolloverStrategy max="30"/>
+        </RollingFile>
+      </Appenders>
+      <Loggers>
+        <Root level="INFO">
+          <AppenderRef ref="Sys"/>
+          <AppenderRef ref="SysWF"/>
+        </Root>
+        <!-- audit logger: raised to INFO (default is ERROR) so DDL statements
+             (CREATE/ALTER TABLE) are written to fe.audit.log alongside queries. -->
+        <Logger name="audit" level="INFO" additivity="false">
+          <AppenderRef ref="Audit"/>
+        </Logger>
+        <Logger name="audit.query" level="INFO" additivity="false">
+          <AppenderRef ref="Audit"/>
+        </Logger>
+        <Logger name="audit.slow_query" level="INFO" additivity="false">
+          <AppenderRef ref="Audit"/>
+        </Logger>
+      </Loggers>
+    </Configuration>
+
   fe.conf: |
     LOG_DIR = ${DORIS_HOME}/log
     sys_log_level = INFO
@@ -99,7 +160,7 @@ spec:
         # ── 1. Copy ConfigMap (read-only) into a writable emptyDir ────────────
         - name: copy-fe-config
           image: 192.168.1.50:30500/busybox:1.36
-          command: ["sh", "-c", "cp /config-ro/fe.conf /config-rw/fe.conf"]
+          command: ["sh", "-c", "cp /config-ro/fe.conf /config-rw/fe.conf && cp /config-ro/log4j2.xml /config-rw/log4j2.xml"]
           volumeMounts:
             - name: fe-config
               mountPath: /config-ro
@@ -151,8 +212,13 @@ spec:
             - name: fe-config-rw
               mountPath: /opt/apache-doris/fe/conf/fe.conf
               subPath: fe.conf
+            - name: fe-config-rw
+              mountPath: /opt/apache-doris/fe/conf/log4j2.xml
+              subPath: log4j2.xml
             - name: fe-meta
               mountPath: /opt/apache-doris/fe/doris-meta
+            - name: fe-log
+              mountPath: /opt/apache-doris/fe/log
           resources:
             requests:
               memory: 512Mi
@@ -167,11 +233,204 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 15
             failureThreshold: 20
+
+        # ── DDL Mirror Sidecar ─────────────────────────────────────────────────
+        # Tails fe.audit.log, detects CREATE/ALTER TABLE with created_at+updated_at
+        # columns, and creates a matching empty table in cache_system automatically.
+        # Only runs on stardata-fe-0 (leader) — others skip gracefully.
+        - name: ddl-mirror
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: STARDATA_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: stardata-credentials
+                  key: admin-password
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          command:
+            - sh
+            - -c
+            - |
+              pip install pymysql --quiet --no-cache-dir
+              python3 - << 'PYEOF'
+              import os, re, time, logging, pymysql, pymysql.cursors
+
+              logging.basicConfig(level=logging.INFO, format='[ddl-mirror] %(message)s')
+              log = logging.getLogger()
+
+              LOG_FILE  = "/opt/apache-doris/fe/log/fe.audit.log"
+              HOST      = "127.0.0.1"
+              PORT      = 9030
+              USER      = "root"
+              PASS      = os.environ.get("STARDATA_PASS", "")
+              POD       = os.environ.get("POD_NAME", "")
+
+              # Only the leader pod does DDL mirroring — followers skip entirely.
+              # stardata-fe-0 is always elected leader first; -1 and -2 are followers.
+              if POD and not POD.endswith("-0"):
+                  log.info(f"pod={POD} is not fe-0 — skipping ddl-mirror")
+                  while True:
+                      time.sleep(3600)
+
+              SKIP_DBS  = {"information_schema","mysql","performance_schema",
+                           "cache_system","__internal_schema","doris_audit_db__"}
+
+              # Matches a column definition: (ADD COLUMN|,|\() `col` ... DATETIME ... DEFAULT CURRENT_TIMESTAMP ... ON UPDATE
+              RE_UPDATED = re.compile(
+                  r'(?:ADD\s+COLUMN\s+|,\s*|\(\s*)`([\w$]+)`[^,)]*?DATETIME[^,)]*?'
+                  r'DEFAULT\s+CURRENT_TIMESTAMP[^,)]*?ON\s+UPDATE\s+CURRENT_TIMESTAMP', re.I)
+              # Matches a column definition with DATETIME DEFAULT CURRENT_TIMESTAMP but NO ON UPDATE after it
+              RE_CREATED = re.compile(
+                  r'(?:ADD\s+COLUMN\s+|,\s*|\(\s*)`([\w$]+)`[^,)]*?DATETIME[^,)]*?'
+                  r'DEFAULT\s+CURRENT_TIMESTAMP(?![^,)]*?ON\s+UPDATE)', re.I)
+              RE_CREATE_TBL = re.compile(
+                  r'\bCREATE\s+(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+                  r'`?([\w$]+)`?\.`?([\w$]+)`?', re.I)
+              RE_ALTER_TBL  = re.compile(
+                  r'\bALTER\s+TABLE\s+`?([\w$]+)`?\.`?([\w$]+)`?', re.I)
+
+              # ── Persistent connection with reconnect on failure ────────────────
+              _conn = None
+
+              def get_conn():
+                  global _conn
+                  try:
+                      if _conn is not None:
+                          _conn.ping(reconnect=False)
+                      if _conn is None:
+                          raise Exception("not connected")
+                  except Exception:
+                      try:
+                          if _conn is not None:
+                              _conn.close()
+                      except Exception:
+                          pass
+                      _conn = pymysql.connect(host=HOST, port=PORT, user=USER, password=PASS,
+                                              database="cache_system", connect_timeout=10,
+                                              charset="utf8mb4")
+                  return _conn
+
+              def create_mirror(db, tbl, cre_col, upd_col):
+                  ddl = (
+                      f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}` (\n"
+                      f"  `database_name` VARCHAR(256) NULL,\n"
+                      f"  `table_name`    VARCHAR(256) NULL,\n"
+                      f"  `{cre_col}`     DATETIME     NULL,\n"
+                      f"  `{upd_col}`     DATETIME     NULL,\n"
+                      f"  `snap_id`       BIGINT       NULL,\n"
+                      f"  `status`        VARCHAR(32)  NULL\n"
+                      f") UNIQUE KEY(`database_name`,`table_name`)\n"
+                      f"DISTRIBUTED BY HASH(`database_name`) BUCKETS 4\n"
+                      f"PROPERTIES (\"replication_num\"=\"1\","
+                      f"\"enable_unique_key_merge_on_write\"=\"true\")"
+                  )
+                  global _conn
+                  for attempt in range(1, 4):
+                      try:
+                          conn = get_conn()
+                          with conn.cursor() as cur:
+                              cur.execute(ddl)
+                          conn.commit()
+                          log.info(f"CREATED cache_system.{tbl} (source: {db}.{tbl}  cre={cre_col}  upd={upd_col})")
+                          return
+                      except Exception as e:
+                          log.warning(f"attempt {attempt} failed for cache_system.{tbl}: {e}")
+                          # Force reconnect on next attempt
+                          try:
+                              _conn.close()
+                          except Exception:
+                              pass
+                          _conn = None
+                          time.sleep(attempt)
+                  log.error(f"gave up creating cache_system.{tbl}")
+
+              def process_line(line):
+                  # Only act on successful CREATE or ALTER TABLE
+                  if '|StmtType=CREATE|' not in line and '|StmtType=ALTER|' not in line:
+                      return
+                  if '|State=OK|' not in line:
+                      return
+                  stmt_match = re.search(r'\|Stmt=(.+)$', line)
+                  if not stmt_match:
+                      return
+                  # Doris writes literal \n escape sequences in the Stmt field — normalize to spaces
+                  stmt = stmt_match.group(1).replace('\\n', ' ').replace('\\t', ' ')
+
+                  if '|StmtType=CREATE|' in line:
+                      m = RE_CREATE_TBL.search(stmt)
+                  else:
+                      m = RE_ALTER_TBL.search(stmt)
+                  if not m:
+                      return
+
+                  db, tbl = m.group(1), m.group(2)
+                  if db.lower() in SKIP_DBS:
+                      return
+
+                  upd_col = RE_UPDATED.search(stmt)
+                  if not upd_col:
+                      return
+                  cre_col = RE_CREATED.search(stmt)
+                  if not cre_col:
+                      return
+
+                  create_mirror(db, tbl, cre_col.group(1), upd_col.group(1))
+
+              def tail_log(path):
+                  """Open path, seek to end, yield lines. Reopen on rotation."""
+                  inode = os.stat(path).st_ino
+                  f = open(path, "r")
+                  f.seek(0, 2)
+                  while True:
+                      line = f.readline()
+                      if line:
+                          yield line.rstrip()
+                      else:
+                          time.sleep(0.5)
+                          # Detect log rotation: new inode or file shrank
+                          try:
+                              st = os.stat(path)
+                          except FileNotFoundError:
+                              time.sleep(1)
+                              continue
+                          if st.st_ino != inode or st.st_size < f.tell():
+                              log.info("Audit log rotated — reopening")
+                              f.close()
+                              f = open(path, "r")
+                              inode = os.stat(path).st_ino
+
+              log.info(f"Starting on pod={POD}")
+              log.info(f"Waiting for audit log: {LOG_FILE}")
+
+              # Wait for log file to appear (FE may still be starting)
+              while not os.path.exists(LOG_FILE):
+                  time.sleep(5)
+              log.info("Audit log found — tailing...")
+
+              for line in tail_log(LOG_FILE):
+                  process_line(line)
+              PYEOF
+          volumeMounts:
+            - name: fe-log
+              mountPath: /opt/apache-doris/fe/log
       volumes:
         - name: fe-config
           configMap:
             name: stardata-fe-config
         - name: fe-config-rw
+          emptyDir: {}
+        - name: fe-log
           emptyDir: {}
   # ── volumeClaimTemplates — each FE pod gets its own 100Gi meta PVC ─────────
   # PVs must be pre-created in pv-retain.yaml with matching claimRef names:
