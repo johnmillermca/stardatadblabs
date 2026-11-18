@@ -144,6 +144,9 @@ spec:
               subPath: be.conf
             - name: be-storage
               mountPath: /opt/apache-doris/be/storage
+            - name: snowflake-jwt
+              mountPath: /snowflake-jwt
+              readOnly: true
           resources:
             requests:
               memory: 1Gi
@@ -172,6 +175,10 @@ spec:
             name: stardata-be-config
         - name: be-config-rw
           emptyDir: {}
+        - name: snowflake-jwt
+          secret:
+            secretName: snowflake-jwt-key
+            defaultMode: 0400
   # ── volumeClaimTemplates — each BE pod gets its own 400Gi storage PVC ──────
   # PVs must be pre-created in pv-retain.yaml with matching claimRef names:
   #   stardata-be-storage-stardata-be-0  → worker2.local /home/...
