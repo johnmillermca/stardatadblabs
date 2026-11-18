@@ -2,11 +2,13 @@
 -- 10_create_snowflake_catalog.sql
 -- Create a JDBC external catalog in Stardata that maps Snowflake proprietary
 -- (native) tables — not Iceberg.  Doris reads directly via the Snowflake JDBC
--- driver mounted at /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-*.jar
+-- driver served by the busybox httpd sidecar on FE pods (:8181).
 --
 -- Snowflake connection:
 --   URL      : https://app.snowflake.com/oqihhtj/ta50603/
 --   Account  : oqihhtj-ta50603
+--   Database : SNOWFLAKE_AUGMENTATION
+--   Schemas  : AUG_TEST, PUBLIC  (appear as databases in Stardata)
 --   Username : testsnowflake
 --   Password : stored in Kubernetes Secret snowflake-credentials (key: password)
 --
@@ -30,13 +32,15 @@
 --
 -- Catalog name  : snowflake
 -- JDBC type     : net.snowflake.client.jdbc.SnowflakeDriver
--- Warehouse     : COMPUTE_WH (Snowflake default; change if yours differs)
+-- Warehouse     : COMPUTE_WH
+-- Database      : SNOWFLAKE_AUGMENTATION
 -- =============================================================================
 
 -- ── Snowflake (proprietary native tables via JDBC) ────────────────────────────
 -- The jdbc_url encodes:
---   account      — oqihhtj-ta50603  (org-name + account-name, no .snowflakecomputing.com)
---   warehouse    — COMPUTE_WH       (Snowflake default; change if yours differs)
+--   account      — oqihhtj-ta50603          (org-name + account-name)
+--   database     — SNOWFLAKE_AUGMENTATION   (Snowflake DB; schemas appear as Stardata DBs)
+--   warehouse    — COMPUTE_WH
 --   loginTimeout — 30 s
 -- NOTE: Snowflake JDBC 4.x ignores HikariCP setPassword() — credentials must
 -- be embedded directly in the JDBC URL in addition to the top-level properties.
@@ -44,15 +48,13 @@ CREATE CATALOG IF NOT EXISTS snowflake PROPERTIES (
     "type"                     = "jdbc",
     "user"                     = "testsnowflake",
     "password"                 = "${SNOWFLAKE_PASS}",
-    "jdbc_url"                 = "jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30&user=testsnowflake&password=${SNOWFLAKE_PASS}",
+    "jdbc_url"                 = "jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30&user=testsnowflake&password=${SNOWFLAKE_PASS}&db=SNOWFLAKE_AUGMENTATION",
     "driver_url"               = "http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar",
     "driver_class"             = "net.snowflake.client.jdbc.SnowflakeDriver"
 );
 
--- Immediately pull the catalog metadata so databases/schemas/tables are
--- visible in SHOW DATABASES and SHOW TABLES without waiting for the
--- next scheduled catalog refresh.
+-- Immediately pull the catalog metadata so schemas/tables are visible.
 REFRESH CATALOG snowflake;
 
--- Verify: should list all databases the testsnowflake user has access to.
+-- Verify: should list AUG_TEST and PUBLIC (schemas of SNOWFLAKE_AUGMENTATION).
 SHOW DATABASES FROM snowflake;
