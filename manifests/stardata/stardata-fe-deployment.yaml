@@ -234,6 +234,9 @@ spec:
               mountPath: /opt/apache-doris/fe/log
             - name: jdbc-drivers
               mountPath: /opt/apache-doris/fe/jdbc_drivers
+            - name: snowflake-jwt
+              mountPath: /snowflake-jwt
+              readOnly: true
           resources:
             requests:
               memory: 512Mi
@@ -474,6 +477,10 @@ spec:
           emptyDir: {}
         - name: jdbc-drivers
           emptyDir: {}
+        - name: snowflake-jwt
+          secret:
+            secretName: snowflake-jwt-key
+            defaultMode: 0400
   # ── volumeClaimTemplates — each FE pod gets its own 100Gi meta PVC ─────────
   # PVs must be pre-created in pv-retain.yaml with matching claimRef names:
   #   stardata-fe-meta-stardata-fe-0  → worker2.local /home/...

@@ -10,47 +10,43 @@
 --   Database : SNOWFLAKE_AUGMENTATION
 --   Schemas  : AUG_TEST, PUBLIC  (appear as databases in Stardata)
 --   Username : testsnowflake
---   Password : stored in Kubernetes Secret snowflake-credentials (key: password)
+--   Auth     : RSA key-pair / JWT (no password in URL — session-expiry proof)
 --
 -- Prerequisites:
---   1. Apply the Kubernetes Secret first (idempotent):
---        kubectl apply -f manifests/stardata/setup/snowflake-credentials-secret.yaml
+--   1. Apply the JWT key Secret (idempotent):
+--        kubectl apply -f manifests/stardata/setup/snowflake-jwt-key-secret.yaml
 --
 --   2. Snowflake JDBC jar is baked into the FE image (stardata/jars/snowflake-jdbc-4.0.2.jar
 --      COPY'd into /opt/apache-doris/fe/jdbc_drivers/ in Dockerfile.fe).
 --      At pod start the seed-jdbc-drivers initContainer copies it into an emptyDir that
 --      the busybox httpd sidecar serves on :8181.
---      Verify: curl http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar -I
 --
--- Invocation (reads password from the Kubernetes Secret, then pipes to mysql):
---   export SNOWFLAKE_PASS="$(kubectl get secret snowflake-credentials \
---       -n prod -o jsonpath='{.data.password}' | base64 -d)"
---   export STARDATA_PASS="$(kubectl get secret stardata-credentials \
+--   3. RSA private key is mounted at /snowflake-jwt/rsa_key.p8 on every FE pod
+--      via the snowflake-jwt-key K8s Secret volume.
+--
+-- Invocation:
+--   STARDATA_PASS="$(kubectl get secret stardata-credentials \
 --       -n prod -o jsonpath='{.data.admin-password}' | base64 -d)"
---   envsubst < manifests/stardata/setup/10_create_snowflake_catalog.sql \
---     | mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}"
+--   mysql -h 192.168.1.50 -P 30090 -u root -p"${STARDATA_PASS}" \
+--     < manifests/stardata/setup/10_create_snowflake_catalog.sql
 --
 -- Catalog name  : snowflake
 -- JDBC type     : net.snowflake.client.jdbc.SnowflakeDriver
+-- Authenticator : snowflake_jwt (RSA key-pair — no idle session expiry)
 -- Warehouse     : COMPUTE_WH
 -- Database      : SNOWFLAKE_AUGMENTATION
 -- =============================================================================
 
--- ── Snowflake (proprietary native tables via JDBC) ────────────────────────────
--- The jdbc_url encodes:
---   account      — oqihhtj-ta50603          (org-name + account-name)
---   database     — SNOWFLAKE_AUGMENTATION   (Snowflake DB; schemas appear as Stardata DBs)
---   warehouse    — COMPUTE_WH
---   loginTimeout — 30 s
--- NOTE: Snowflake JDBC 4.x ignores HikariCP setPassword() — credentials must
--- be embedded directly in the JDBC URL in addition to the top-level properties.
+-- ── Snowflake (proprietary native tables via JDBC — JWT auth) ─────────────────
+-- authenticator=snowflake_jwt: each new connection signs a fresh JWT with the
+-- private key at /snowflake-jwt/rsa_key.p8.  No password, no idle session to
+-- expire — the connection pool can be fully closed between queries.
 CREATE CATALOG IF NOT EXISTS snowflake PROPERTIES (
-    "type"                     = "jdbc",
-    "user"                     = "testsnowflake",
-    "password"                 = "${SNOWFLAKE_PASS}",
-    "jdbc_url"                 = "jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30&user=testsnowflake&password=${SNOWFLAKE_PASS}&db=SNOWFLAKE_AUGMENTATION",
-    "driver_url"               = "http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar",
-    "driver_class"             = "net.snowflake.client.jdbc.SnowflakeDriver"
+    "type"         = "jdbc",
+    "user"         = "testsnowflake",
+    "jdbc_url"     = "jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?authenticator=snowflake_jwt&private_key_file=/snowflake-jwt/rsa_key.p8&warehouse=COMPUTE_WH&db=SNOWFLAKE_AUGMENTATION&loginTimeout=60",
+    "driver_url"   = "http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar",
+    "driver_class" = "net.snowflake.client.jdbc.SnowflakeDriver"
 );
 
 -- Immediately pull the catalog metadata so schemas/tables are visible.
