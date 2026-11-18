@@ -79,6 +79,8 @@ LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
 
-# ── Bake Snowflake JDBC driver into image so the httpd sidecar can serve it ──
-# The sidecar init container copies this into the shared emptyDir at pod start.
-COPY jars/snowflake-jdbc-4.0.2.jar /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar
+# ── Bake JDBC drivers into image so the httpd sidecar can serve them ─────────
+# The seed-jdbc-drivers initContainer copies these into the shared emptyDir.
+COPY jars/snowflake-jdbc-4.0.2.jar   /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar
+COPY jars/ojdbc11.jar                 /opt/apache-doris/fe/jdbc_drivers/ojdbc11.jar
+COPY jars/postgresql-42.7.4.jar       /opt/apache-doris/fe/jdbc_drivers/postgresql-42.7.4.jar
