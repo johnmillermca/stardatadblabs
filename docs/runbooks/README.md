@@ -32,6 +32,7 @@ This directory contains detailed operational runbooks for every application depl
 | [30](runbook-30-cdc-e2e-testing.md) | **CDC Pipeline E2E Test Runbook (all sources)** | Full end-to-end test suite for PostgreSQL / Oracle / MongoDB → Kafka → Iceberg: standard, soft-delete, history-tracking, schema evolution, peak-hour simulation | 30888, 30707, 30083 |
 | [31](runbook-31-oracle-kafka-iceberg-e2e-testing.md) | **Oracle → Kafka → Iceberg E2E Tests** | Dedicated Oracle LogMiner CDC test suite — standard (SCD Type 0), soft-delete, history tracking; test IDs 900100–900199 | 30521, 30083, 30888 |
 | [32](runbook-32-mongodb-kafka-iceberg-e2e-testing.md) | **MongoDB → Kafka → Iceberg E2E Tests** | Dedicated MongoDB change-stream CDC test suite — standard, soft-delete, history tracking, implicit schema evolution; test IDs 900200–900299 | 30017, 30083, 30888 |
+| [35](runbook-35-stardata-doris-upgrade.md) | **Upgrading Doris (Stardata FE) with Snowflake JDBC Patches** | Step-by-step guide to upgrading the Doris base image while preserving Snowflake JDBC catalog support — patch re-compilation, image rebuild, node image eviction, pod roll, catalog verification | 30030, 30090, 8181 |
 
 ---
 
