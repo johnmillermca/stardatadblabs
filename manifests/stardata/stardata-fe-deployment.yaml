@@ -185,6 +185,19 @@ spec:
           volumeMounts:
             - name: fe-config-rw
               mountPath: /config-rw
+        # ── 3. Seed jdbc-drivers emptyDir from the baked image layer ──────────
+        # Copies snowflake-jdbc-4.0.2.jar (baked in Dockerfile.fe) into the
+        # shared emptyDir so the httpd sidecar can serve it on :8181.
+        - name: seed-jdbc-drivers
+          image: 192.168.1.50:30500/apache/stardata:fe-4.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cp /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar /jdbc-drivers/snowflake-jdbc-4.0.2.jar
+          volumeMounts:
+            - name: jdbc-drivers
+              mountPath: /jdbc-drivers
       containers:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
@@ -219,6 +232,8 @@ spec:
               mountPath: /opt/apache-doris/fe/doris-meta
             - name: fe-log
               mountPath: /opt/apache-doris/fe/log
+            - name: jdbc-drivers
+              mountPath: /opt/apache-doris/fe/jdbc_drivers
           resources:
             requests:
               memory: 512Mi
@@ -424,6 +439,31 @@ spec:
           volumeMounts:
             - name: fe-log
               mountPath: /opt/apache-doris/fe/log
+
+        # ── busybox httpd sidecar — serves jdbc_drivers on :8181 ───────────────
+        # Doris BE needs to download the Snowflake JDBC jar via an http:// URL
+        # (file:// on a different pod doesn't work).  busybox httpd -f serves the
+        # emptyDir that seed-jdbc-drivers populated at pod init time.
+        - name: jdbc-httpd
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - exec busybox httpd -f -p 8181 -h /jdbc-drivers
+          ports:
+            - name: jdbc-http
+              containerPort: 8181
+          volumeMounts:
+            - name: jdbc-drivers
+              mountPath: /jdbc-drivers
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
       volumes:
         - name: fe-config
           configMap:
@@ -431,6 +471,8 @@ spec:
         - name: fe-config-rw
           emptyDir: {}
         - name: fe-log
+          emptyDir: {}
+        - name: jdbc-drivers
           emptyDir: {}
   # ── volumeClaimTemplates — each FE pod gets its own 100Gi meta PVC ─────────
   # PVs must be pre-created in pv-retain.yaml with matching claimRef names:

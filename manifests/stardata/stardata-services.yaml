@@ -35,6 +35,9 @@ spec:
       port: 9020
       targetPort: 9020
       nodePort: 31111
+    - name: jdbc-http
+      port: 8181
+      targetPort: 8181
 ---
 # Headless service for stable FE DNS (required for enable_fqdn_mode=true)
 apiVersion: v1

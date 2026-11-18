@@ -1,24 +1,44 @@
 # =============================================================================
 # Stardata FE — Apache Doris branch-4.2 with snap_id auto-injection patch
+#               + Snowflake JDBC catalog support patch
 #
 # Build strategy (no full Maven build required):
-#   Stage 1 (builder): compile only the two patched .java files against the
+#   Stage 1 (builder): compile only the patched .java files against the
 #                       classpath already present in doris-fe.jar, then replace
 #                       the original .class files in the JAR.
 #   Stage 2 (runtime): copy the patched JAR into a clean copy of the base image.
 #
-# Patch applied:
-#   CreateTableInfo.java — injectSnapIdColumn() prepends snap_id BIGINT NOT NULL
-#                          AUTO_INCREMENT to every new internal OLAP table.
+# Patches applied:
+#   CreateTableInfo.java    — injectSnapIdColumn() prepends snap_id BIGINT NOT NULL
+#                             AUTO_INCREMENT to every new internal OLAP table.
+#   JdbcResource.java       — adds JDBC_SNOWFLAKE / SNOWFLAKE constants and a
+#                             parseDbType() branch for jdbc:snowflake:// URLs.
+#   JdbcClient.java         — adds a SNOWFLAKE case in createJdbcClient() that
+#                             returns a new JdbcSnowflakeClient instance.
+#   JdbcSnowflakeClient.java — new client: minimal Snowflake type mapping on top
+#                              of the JdbcClient base class.
 # =============================================================================
 
-# ── Stage 1: compile patch and replace class files in doris-fe.jar ───────────
+# ── Stage 1: compile patches and replace class files in doris-fe.jar ─────────
 FROM docker.io/apache/doris:fe-latest AS builder
 
-# Copy only the patched source file (CreateTableInfo.java is the only modified file)
-COPY doris-patch/CreateTableInfo.java  /patch/src/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java
+# Copy all patched source files
+COPY doris-patch/CreateTableInfo.java \
+     /patch/src/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java
 
-# Build classpath from all JARs in the FE lib directory; compile only CreateTableInfo
+COPY doris-patch/JdbcResource.java \
+     /patch/src/org/apache/doris/catalog/JdbcResource.java
+
+COPY doris-patch/JdbcClient.java \
+     /patch/src/org/apache/doris/datasource/jdbc/client/JdbcClient.java
+
+COPY doris-patch/JdbcSnowflakeClient.java \
+     /patch/src/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java
+
+COPY doris-patch/JdbcTable.java \
+     /patch/src/org/apache/doris/catalog/JdbcTable.java
+
+# Build classpath from all JARs in the FE lib directory; compile all patched files
 RUN CP=$(find /opt/apache-doris/fe/lib -name '*.jar' | tr '\n' ':') && \
     mkdir -p /patch/classes && \
     javac \
@@ -26,20 +46,36 @@ RUN CP=$(find /opt/apache-doris/fe/lib -name '*.jar' | tr '\n' ':') && \
       -encoding UTF-8 \
       -cp "${CP}" \
       -d /patch/classes \
-      /patch/src/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java
+      /patch/src/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java \
+      /patch/src/org/apache/doris/catalog/JdbcResource.java \
+      /patch/src/org/apache/doris/catalog/JdbcTable.java \
+      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcClient.java \
+      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java
 
-# Patch doris-fe.jar: replace CreateTableInfo.class and any inner classes
+# Patch doris-fe.jar: replace all changed classes and inner classes
 RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
     cd /patch/classes && \
     jar uf /patch/doris-fe.jar \
       org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.class \
-      $(find org/apache/doris/nereids/trees/plans/commands/info -name 'CreateTableInfo$*.class' 2>/dev/null)
+      $(find org/apache/doris/nereids/trees/plans/commands/info -name 'CreateTableInfo$*.class' 2>/dev/null) \
+      org/apache/doris/catalog/JdbcResource.class \
+      $(find org/apache/doris/catalog -name 'JdbcResource$*.class' 2>/dev/null) \
+      org/apache/doris/catalog/JdbcTable.class \
+      $(find org/apache/doris/catalog -name 'JdbcTable$*.class' 2>/dev/null) \
+      org/apache/doris/datasource/jdbc/client/JdbcClient.class \
+      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcClient$*.class' 2>/dev/null) \
+      org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.class \
+      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcSnowflakeClient$*.class' 2>/dev/null)
 
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-latest
 
 LABEL org.stardata.version="4.2"
 LABEL org.stardata.base="apache/doris:branch-4.2"
-LABEL org.stardata.patch="snap_id-auto-inject"
+LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
+
+# ── Bake Snowflake JDBC driver into image so the httpd sidecar can serve it ──
+# The sidecar init container copies this into the shared emptyDir at pod start.
+COPY jars/snowflake-jdbc-4.0.2.jar /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar
