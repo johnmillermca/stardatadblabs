@@ -1,8 +1,9 @@
 # Runbook 35 — Upgrading Doris (Stardata FE) with Snowflake JDBC Patches
 
-> **Applies to:** `192.168.1.50` cluster · namespace `prod` · Stardata FE StatefulSet  
-> **Current version:** `doris-4.1.4.1-rc02` · **Custom image tag:** `fe-4.2`  
-> **Snowflake account:** `oqihhtj-ta50603` · **Catalog:** `snowflake` (db: `SNOWFLAKE_AUGMENTATION`)
+> **Applies to:** `192.168.1.50` cluster · namespace `prod` · Stardata FE + BE StatefulSets
+> **Current version:** `doris-4.1.4.1-rc02` · **Custom image tag:** `fe-4.2`
+> **Snowflake account:** `oqihhtj-ta50603` · **Catalog:** `snowflake` (db: `LAKEHOUSE_DB`)
+> **Auth:** RSA key-pair / JWT (`snowflake-jwt-key` Secret, mounted at `/snowflake-jwt/rsa_key.p8`)
 
 ---
 
@@ -33,7 +34,9 @@ upgrades automatically.
 | Component | Storage | Survives? |
 |---|---|---|
 | `snowflake` catalog definition | BdbJE metadata on the 100 Gi Retain PVC (`/opt/apache-doris/fe/doris-meta`) | ✅ Yes — no action needed |
-| `snowflake-credentials` K8s Secret | Cluster namespace `prod` | ✅ Yes |
+| `snowflake-jwt-key` K8s Secret (RSA private key) | Cluster namespace `prod` | ✅ Yes |
+| JWT key mount on FE pods (`/snowflake-jwt/rsa_key.p8`) | `manifests/stardata/stardata-fe-deployment.yaml` in git | ✅ Yes — ArgoCD reapplies |
+| JWT key mount on BE pods (`/snowflake-jwt/rsa_key.p8`) | `manifests/stardata/stardata-be-deployment.yaml` in git | ✅ Yes — ArgoCD reapplies |
 | `busybox httpd` sidecar + port 8181 | `manifests/stardata/stardata-fe-deployment.yaml` in git | ✅ Yes — ArgoCD reapplies |
 | `driver_url` = `http://stardata-fe.prod.svc.cluster.local:8181/...` | `manifests/stardata/setup/10_create_snowflake_catalog.sql` in git | ✅ Yes |
 | Java patches | Compiled against the **base image's** `doris-fe.jar` | ⚠️ Must rebuild — may need re-patching |
@@ -229,13 +232,22 @@ kubectl get pods -n prod -l app=stardata-fe
 
 ---
 
-### Step 9 — Verify the sidecar is serving the jar
+### Step 9 — Verify the sidecar is serving the jar and the JWT key is mounted
 
 ```bash
+# Jar served by httpd sidecar
 kubectl exec -n prod stardata-fe-2 -c jdbc-httpd -- \
   wget -q -O /dev/null --server-response \
   http://localhost:8181/snowflake-jdbc-4.0.2.jar 2>&1 | head -3
 # Expected: HTTP/1.1 200 OK
+
+# JWT key mounted on FE
+kubectl exec -n prod stardata-fe-2 -c stardata-fe -- ls -la /snowflake-jwt/
+# Expected: rsa_key.p8 -> ..data/rsa_key.p8
+
+# JWT key mounted on BE
+kubectl exec -n prod stardata-be-0 -c stardata-be -- ls -la /snowflake-jwt/
+# Expected: rsa_key.p8 -> ..data/rsa_key.p8
 ```
 
 ---
@@ -256,11 +268,11 @@ kubectl exec -n prod stardata-fe-2 -c stardata-fe -- \
 kubectl exec -n prod stardata-fe-2 -c stardata-fe -- \
   mysql -h 127.0.0.1 -P 9030 -u root -p"${STARDATA_PASS}" --connect-timeout=10 \
   -e "SHOW DATABASES FROM snowflake;" 2>&1 | grep -v Warning
-# Expected: AUG_TEST, PUBLIC, information_schema, mysql
+# Expected: EVENTS, PUBLIC, information_schema, mysql
 
 kubectl exec -n prod stardata-fe-2 -c stardata-fe -- \
   mysql -h 127.0.0.1 -P 9030 -u root -p"${STARDATA_PASS}" --connect-timeout=10 \
-  -e "SELECT COUNT(*) FROM snowflake.AUG_TEST.CUSTOMER;" 2>&1 | grep -v Warning
+  -e "SELECT COUNT(*) FROM snowflake.EVENTS.EVENTS;" 2>&1 | grep -v Warning
 # Expected: a row count (not an error)
 ```
 
@@ -268,29 +280,40 @@ kubectl exec -n prod stardata-fe-2 -c stardata-fe -- \
 
 ### Step 11 — If the catalog is broken after upgrade
 
-If `SHOW DATABASES FROM snowflake` returns an error after the upgrade, recreate the catalog:
+If `SHOW DATABASES FROM snowflake` returns an error after the upgrade, recreate the catalog.
+Authentication uses RSA key-pair (JWT) — **no password required**.
+
+> ⚠️ Prerequisite: the `snowflake-jwt-key` Secret must be applied and the
+> JWT key must be mounted on both FE and BE pods (verified in Step 9).
 
 ```bash
-SNOWFLAKE_PASS=$(kubectl get secret snowflake-credentials \
-  -n prod -o jsonpath='{.data.password}' | base64 -d)
 STARDATA_PASS=$(kubectl get secret stardata-credentials \
   -n prod -o jsonpath='{.data.admin-password}' | base64 -d)
 
-kubectl exec -n prod stardata-fe-2 -c stardata-fe -- bash -c "
-mysql -h 127.0.0.1 -P 9030 -u root -p'${STARDATA_PASS}' --connect-timeout=10 -e \"
-  DROP CATALOG IF EXISTS snowflake;
-  CREATE CATALOG snowflake PROPERTIES (
-    'type'         = 'jdbc',
-    'user'         = 'testsnowflake',
-    'password'     = '${SNOWFLAKE_PASS}',
-    'jdbc_url'     = 'jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30&user=testsnowflake&password=${SNOWFLAKE_PASS}&db=SNOWFLAKE_AUGMENTATION',
-    'driver_url'   = 'http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar',
-    'driver_class' = 'net.snowflake.client.jdbc.SnowflakeDriver'
-  );
-  REFRESH CATALOG snowflake;
-\" 2>&1
-" 2>&1 | grep -v Warning
+kubectl exec -n prod stardata-fe-2 -c stardata-fe -- \
+  mysql -h 127.0.0.1 -P 9030 -u root -p"${STARDATA_PASS}" --connect-timeout=10 \
+  -e "DROP CATALOG IF EXISTS snowflake;
+      CREATE CATALOG snowflake PROPERTIES (
+        'type'         = 'jdbc',
+        'user'         = 'testsnowflake',
+        'jdbc_url'     = 'jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?authenticator=snowflake_jwt&private_key_file=/snowflake-jwt/rsa_key.p8&warehouse=COMPUTE_WH&db=LAKEHOUSE_DB&loginTimeout=60',
+        'driver_url'   = 'http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar',
+        'driver_class' = 'net.snowflake.client.jdbc.SnowflakeDriver'
+      );
+      REFRESH CATALOG snowflake;" 2>&1 | grep -v Warning
 ```
+
+#### Why JWT never has idle session expiry
+
+Each new JDBC connection signs a fresh JWT from the RSA private key on disk. There is no
+server-side session token to expire — the connection pool can be fully closed between queries
+and will always reconnect successfully, even after days of inactivity.
+
+If the RSA key pair ever needs to be rotated (security policy, key compromise):
+1. Generate a new key pair: `openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out /tmp/rsa_key_new.p8`
+2. Register the new public key in Snowflake: `ALTER USER testsnowflake SET RSA_PUBLIC_KEY='<new public key body>';`
+3. Update the K8s Secret: `kubectl create secret generic snowflake-jwt-key -n prod --from-file=rsa_key.p8=/tmp/rsa_key_new.p8 --dry-run=client -o yaml | kubectl apply -f -`
+4. Pods pick up the new key automatically within ~60 s (K8s Secret projection refresh) — no pod restart needed.
 
 ---
 
@@ -324,7 +347,8 @@ The catalog data in BdbJE on the PVC is unaffected by rollback.
 | [`stardata/Dockerfile.fe`](../../stardata/Dockerfile.fe) | Base image tag, patch compilation, jar COPY |
 | [`stardata/doris-patch/`](../../stardata/doris-patch/) | 4 patched Java source files |
 | [`stardata/jars/snowflake-jdbc-4.0.2.jar`](../../stardata/jars/snowflake-jdbc-4.0.2.jar) | JDBC driver baked into image |
-| [`manifests/stardata/stardata-fe-deployment.yaml`](../../manifests/stardata/stardata-fe-deployment.yaml) | FE StatefulSet — sidecar, initContainer, volumes |
+| [`manifests/stardata/stardata-fe-deployment.yaml`](../../manifests/stardata/stardata-fe-deployment.yaml) | FE StatefulSet — sidecar, initContainer, JWT key mount, volumes |
+| [`manifests/stardata/stardata-be-deployment.yaml`](../../manifests/stardata/stardata-be-deployment.yaml) | BE StatefulSet — JWT key mount |
 | [`manifests/stardata/stardata-services.yaml`](../../manifests/stardata/stardata-services.yaml) | FE Service — port 8181 |
-| [`manifests/stardata/setup/10_create_snowflake_catalog.sql`](../../manifests/stardata/setup/10_create_snowflake_catalog.sql) | Catalog DDL with correct `driver_url` and `jdbc_url` |
-| [`manifests/stardata/setup/snowflake-credentials-secret.yaml`](../../manifests/stardata/setup/snowflake-credentials-secret.yaml) | K8s Secret for Snowflake password |
+| [`manifests/stardata/setup/10_create_snowflake_catalog.sql`](../../manifests/stardata/setup/10_create_snowflake_catalog.sql) | Catalog DDL — JWT auth, `LAKEHOUSE_DB`, `driver_url` |
+| [`manifests/stardata/setup/snowflake-jwt-key-secret.yaml`](../../manifests/stardata/setup/snowflake-jwt-key-secret.yaml) | K8s Secret containing RSA private key for JWT auth |
