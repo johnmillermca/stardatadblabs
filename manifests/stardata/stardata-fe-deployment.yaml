@@ -194,7 +194,7 @@ spec:
           command:
             - sh
             - -c
-            - cp /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar /jdbc-drivers/snowflake-jdbc-4.0.2.jar
+            - cp /opt/apache-doris/fe/jdbc_drivers/*.jar /jdbc-drivers/
           volumeMounts:
             - name: jdbc-drivers
               mountPath: /jdbc-drivers
