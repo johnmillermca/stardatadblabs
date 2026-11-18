@@ -38,11 +38,13 @@
 --   account      — oqihhtj-ta50603  (org-name + account-name, no .snowflakecomputing.com)
 --   warehouse    — COMPUTE_WH       (Snowflake default; change if yours differs)
 --   loginTimeout — 30 s
+-- NOTE: Snowflake JDBC 4.x ignores HikariCP setPassword() — credentials must
+-- be embedded directly in the JDBC URL in addition to the top-level properties.
 CREATE CATALOG IF NOT EXISTS snowflake PROPERTIES (
     "type"                     = "jdbc",
     "user"                     = "testsnowflake",
     "password"                 = "${SNOWFLAKE_PASS}",
-    "jdbc_url"                 = "jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30",
+    "jdbc_url"                 = "jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30&user=testsnowflake&password=${SNOWFLAKE_PASS}",
     "driver_url"               = "http://stardata-fe.prod.svc.cluster.local:8181/snowflake-jdbc-4.0.2.jar",
     "driver_class"             = "net.snowflake.client.jdbc.SnowflakeDriver"
 );
