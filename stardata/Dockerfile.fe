@@ -20,7 +20,10 @@
 # =============================================================================
 
 # ── Stage 1: compile patches and replace class files in doris-fe.jar ─────────
-FROM docker.io/apache/doris:fe-latest AS builder
+# Pin to the exact Doris version tested with Snowflake JDBC patches.
+# To upgrade: change this tag, rebuild, verify javac succeeds, re-roll pods.
+# Tested version: doris-4.1.4.1-rc02 (commit 5dbec55b399)
+FROM docker.io/apache/doris:fe-4.1.4.1-rc02 AS builder
 
 # Copy all patched source files
 COPY doris-patch/CreateTableInfo.java \
@@ -68,7 +71,7 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
       $(find org/apache/doris/datasource/jdbc/client -name 'JdbcSnowflakeClient$*.class' 2>/dev/null)
 
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
-FROM docker.io/apache/doris:fe-latest
+FROM docker.io/apache/doris:fe-4.1.4.1-rc02
 
 LABEL org.stardata.version="4.2"
 LABEL org.stardata.base="apache/doris:branch-4.2"
