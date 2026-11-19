@@ -34,13 +34,14 @@ spec:
         app: console-oauth2-proxy
     spec:
       nodeSelector:
-        kubernetes.io/hostname: master2.local
+        kubernetes.io/hostname: worker1.local
       tolerations:
-        - key: node-role.kubernetes.io/control-plane
+        - key: node-role.kubernetes.io/worker
           operator: Exists
           effect: NoSchedule
-        - key: node-role.kubernetes.io/master
-          operator: Exists
+        - key: dedicated
+          operator: Equal
+          value: stardata
           effect: NoSchedule
       containers:
         - name: oauth2-proxy

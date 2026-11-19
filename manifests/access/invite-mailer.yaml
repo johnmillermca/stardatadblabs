@@ -1,8 +1,7 @@
 # =============================================================================
-# invite-mailer — sends StarData invitation emails via the msmtpd SMTP relay
+# invite-mailer — sends StarData invitation emails via the smtp-relay
 #
-# The relay (msmtpd) runs on master2 (192.168.1.62:2525) because the router
-# blocks outbound SMTP (465/587) from pod CIDRs but allows it from the host.
+# smtp-relay runs on worker1.local (internet-accessible) and forwards to Gmail.
 # =============================================================================
 ---
 apiVersion: apps/v1
@@ -54,13 +53,9 @@ spec:
                 secretKeyRef:
                   name: gmail-smtp-credentials
                   key: password
-            # ── SMTP relay — host-side msmtpd forwards to Gmail ───────────────
-            # Pods cannot reach smtp.gmail.com directly (ISP blocks 465/587 from
-            # pod CIDRs). msmtpd on master2 accepts plain connections and relays
-            # to Gmail with TLS. SMTP_USER/SMTP_PASS are still required by the
-            # binary at startup but the relay accepts unauthenticated sessions.
+            # ── SMTP relay — smtp-relay pod on worker1.local → Gmail ──────────
             - name: SMTP_HOST
-              value: "192.168.1.62"
+              value: "smtp-relay.access.svc.cluster.local"
             - name: SMTP_PORT
               value: "2525"
           securityContext:

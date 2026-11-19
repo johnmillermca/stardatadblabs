@@ -1,8 +1,8 @@
 # =============================================================================
 # Oracle XE 21c — PVC + Init Container + Deployment + Service
 # Namespace : prod
-# Node      : master.local
-# Access    : jdbc:oracle:thin:@192.168.1.50:30521/XEPDB1
+# Node      : master2.local
+# Access    : jdbc:oracle:thin:@192.168.1.62:30521/XEPDB1
 # Secret    : oracle-credentials  (key: oracle-password)
 # Note      : oracle-xe:19 has no public image; gvenzl/oracle-xe:21-slim is
 #             the closest free Oracle version and fully supports LogMiner/Debezium
@@ -42,7 +42,7 @@ spec:
         app: oracle-xe
     spec:
       nodeSelector:
-        kubernetes.io/hostname: master.local
+        kubernetes.io/hostname: master2.local
       tolerations:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"

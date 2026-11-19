@@ -19,6 +19,7 @@ DROP CATALOG IF EXISTS databricks;
 DROP CATALOG IF EXISTS postgres;
 DROP CATALOG IF EXISTS oracle;
 DROP CATALOG IF EXISTS mongodb;
+DROP CATALOG IF EXISTS snowflake;
 
 -- Also drop any legacy catalog that may have been created with the old URI
 -- from the runbook-05 example (iceberg_polaris).

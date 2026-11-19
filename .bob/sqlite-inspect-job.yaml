@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sqlite-inspect
+  namespace: access
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: pocket-id-data
+          persistentVolumeClaim:
+            claimName: pocket-id-data
+      containers:
+        - name: sqlite-inspect
+          image: keinos/sqlite3:latest
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+          command:
+            - sh
+            - -c
+            - |
+              echo "=== TABLES ===" && sqlite3 /data/pocket-id.db ".tables"
+              echo "=== SCHEMA ===" && sqlite3 /data/pocket-id.db ".schema"
+              echo "=== ROW COUNTS ===" && sqlite3 /data/pocket-id.db "SELECT name FROM sqlite_master WHERE type='table';" | while read t; do echo "$t: $(sqlite3 /data/pocket-id.db "SELECT COUNT(*) FROM \"$t\";")"; done
+          volumeMounts:
+            - name: pocket-id-data
+              mountPath: /data

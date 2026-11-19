@@ -32,14 +32,15 @@
     <dependencies>
         <!--
             Doris plugin API — provided at runtime by the FE classloader.
-            Only the interface jar is needed to compile; it must NOT be
-            bundled into the fat-jar (scope=provided).
+            Using local system jar (copied from the running FE pod) so we
+            don't need Maven Central to have this artifact.
         -->
         <dependency>
             <groupId>org.apache.doris</groupId>
-            <artifactId>fe-core</artifactId>
+            <artifactId>doris-fe</artifactId>
             <version>${doris.version}</version>
-            <scope>provided</scope>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/doris-fe.jar</systemPath>
         </dependency>
 
         <!--

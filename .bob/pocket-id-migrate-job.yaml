@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pocket-id-sqlite-to-pg
+  namespace: access
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: worker1.local
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: pocket-id-data
+          persistentVolumeClaim:
+            claimName: pocket-id-data
+      containers:
+        - name: pgloader
+          image: dimitri/pgloader:latest
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          env:
+            - name: PGPASSWORD
+              value: "PocketID2024!"
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "[migrate] Starting SQLite → PostgreSQL migration for Pocket ID"
+
+              # Checkpoint the WAL so we get a clean consistent snapshot
+              sqlite3 /data/pocket-id.db "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+
+              # Write pgloader command file
+              cat > /tmp/migrate.load << 'EOF'
+              LOAD DATABASE
+                FROM sqlite:///data/pocket-id.db
+                INTO postgresql://pocketid:PocketID2024!@postgresql.prod.svc.cluster.local:5432/pocket_id
+
+              WITH include drop, create tables, create indexes, reset sequences,
+                   workers = 4, concurrency = 1
+
+              SET work_mem to '128MB', maintenance_work_mem to '128MB'
+
+              EXCLUDING TABLE NAMES LIKE 'francis_host_active_actor_count';
+              EOF
+
+              echo "[migrate] Running pgloader..."
+              pgloader /tmp/migrate.load
+
+              echo "[migrate] Verifying row counts in PostgreSQL..."
+              PGPASSWORD=PocketID2024! psql -h postgresql.prod.svc.cluster.local -U pocketid -d pocket_id -c "
+                SELECT schemaname, tablename, n_live_tup
+                FROM pg_stat_user_tables
+                ORDER BY tablename;
+              "
+              echo "[migrate] ✅ Migration complete"
+          volumeMounts:
+            - name: pocket-id-data
+              mountPath: /data

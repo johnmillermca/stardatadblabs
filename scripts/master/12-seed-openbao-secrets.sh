@@ -258,6 +258,18 @@ else
   ok "stardata-credentials"
 fi
 
+# ─── 12b. Snowflake external catalog credentials ─────────────────────────────
+# No OpenBao — this is a plain Kubernetes Secret only.
+# The password is the fixed service-account credential for testsnowflake.
+ensure_ns prod
+if kubectl get secret snowflake-credentials -n prod &>/dev/null; then
+  skip "snowflake-credentials"
+else
+  kube_secret snowflake-credentials prod \
+    "password=Softlayeribm123!"
+  ok "snowflake-credentials"
+fi
+
 # ─── 13. JupyterHub ───────────────────────────────────────────────────────────
 if bao_secret_exists "secret/data/jupyterhub/credentials"; then
   skip "jupyterhub-credentials"
@@ -395,6 +407,7 @@ printf "  %-38s %-15s  %s\n" "kestra-credentials"           "prod"            "s
 printf "  %-38s %-15s  %s\n" "sqlmesh-credentials"          "prod"            "secret/data/sqlmesh/credentials"
 printf "  %-38s %-15s  %s\n" "grafana-credentials"          "monitoring"      "secret/data/grafana/credentials"
 printf "  %-38s %-15s  %s\n" "prometheus-credentials"       "monitoring"      "secret/data/prometheus/credentials"
+printf "  %-38s %-15s  %s\n" "snowflake-credentials"        "prod"            "(k8s-only — no OpenBao)"
 printf "  %-38s %-15s  %s\n" "rbac-users"                   "prod"            "secret/data/rbac/users"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

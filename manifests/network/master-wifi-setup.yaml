@@ -1,0 +1,180 @@
+# =============================================================================
+# master-wifi-setup — DaemonSet
+# Runs on master.local (192.168.1.50) only.
+#
+# GOAL
+# ────
+#   • twinkly36 WiFi (wlp2s0)  = internet uplink (default route, metric 50)
+#   • eno1 Ethernet             = k8s cluster LAN (192.168.1.0/24, main table)
+#
+# HOW IT WORKS
+# ────────────
+#   1. Writes the twinkly36 WiFi NM keyfile (autoconnect, metric 50)
+#      → WiFi DHCP gateway wins as default route over eno1 (metric 100)
+#   2. Sets eno1 never-default=true in its NM profile
+#      → NM will never install a default route via eno1, even after reboot
+#   3. Installs /etc/NetworkManager/dispatcher.d/51-master-wifi-routing.sh
+#      → On every interface-up: ensures WiFi default is in the main table
+#        and eno1's 192.168.1.0/24 subnet route is present (main table).
+#        No policy tables, no ip rules — the main table handles everything.
+#        kube-proxy, kubelet, CNI, and iptables all use the main table.
+#   4. Applies routing immediately (no reboot needed)
+#   5. Keep-alive pause container → kubelet re-runs initContainer on every
+#      node restart → dispatcher is always re-installed
+#
+# WHY NO POLICY TABLE 100
+# ────────────────────────
+#   Policy routing (ip rule / table 100) caused asymmetric routes: packets
+#   from other nodes arrived on eno1 but replies left via WiFi (main table
+#   had no eno1 default after `ip route del default dev eno1`). This broke
+#   all inter-node traffic including the image registry on :30500.
+#   Solution: keep eno1 in the main table with its subnet route intact.
+#   never-default=true is sufficient to prevent eno1 from hijacking internet.
+#
+# INTERFACES on master.local (192.168.1.50)
+#   wlp2s0  — built-in WiFi (twinkly36)   internet uplink
+#   eno1    — built-in Ethernet           k8s cluster LAN (192.168.1.x)
+#
+# Apply:   kubectl apply -f manifests/network/master-wifi-setup.yaml
+# Remove:  kubectl delete -f manifests/network/master-wifi-setup.yaml
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: master-wifi-setup
+  namespace: kube-system
+  labels:
+    app: master-wifi-setup
+spec:
+  selector:
+    matchLabels:
+      app: master-wifi-setup
+  template:
+    metadata:
+      labels:
+        app: master-wifi-setup
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - master.local
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+
+      initContainers:
+        - name: wifi-setup
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              SSID="twinkly36"
+              WIFI="wlp2s0"
+              LAN="eno1"
+              HOST="nsenter -t 1 -m -u -i -n --"
+              NM_CONN="/host/etc/NetworkManager/system-connections/twinkly36.nmconnection"
+
+              echo "[master-wifi] Starting on $(hostname)  wifi=${WIFI}  lan=${LAN}"
+
+              # ── 1. Write NM keyfile ──────────────────────────────────────────
+              # route-metric=50 makes WiFi the preferred default route.
+              # eno1 gets metric ~100 by default from DHCP — WiFi always wins.
+              # never-default=false here is intentional: WiFi IS allowed to be
+              # the default (internet). eno1's never-default is set separately.
+              mkdir -p /host/etc/NetworkManager/system-connections
+              printf '[connection]\nid=twinkly36\nuuid=22222222-2222-2222-2222-222222222222\ntype=wifi\nautoconnect=true\nautoconnect-priority=10\n\n[wifi]\nssid=twinkly36\nmode=infrastructure\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=gogoboys1316\n\n[ipv4]\nmethod=auto\nnever-default=false\nroute-metric=50\nignore-auto-routes=true\nroutes1=0.0.0.0/0,192.168.1.254,50\n\n[ipv6]\nmethod=ignore\n' > "${NM_CONN}"
+              chmod 600 "${NM_CONN}"
+              echo "[master-wifi] NM keyfile written"
+
+              # ── 2. Set eno1 never-default=true ──────────────────────────────
+              # Prevents NM from ever adding a default route via eno1 after
+              # reboot. eno1's subnet route (192.168.1.0/24) stays in the main
+              # table — that's what k8s, kube-proxy, and CNI use for LAN traffic.
+              ENO1_CFG=$($HOST nmcli -t -f filename con show eno1 2>/dev/null | cut -d: -f2 | tr -d ' ')
+              if [ -n "${ENO1_CFG}" ] && [ -f "/host${ENO1_CFG}" ]; then
+                grep -q 'never-default=true' "/host${ENO1_CFG}" 2>/dev/null || \
+                  sed -i '/\[ipv4\]/a never-default=true' "/host${ENO1_CFG}"
+                echo "[master-wifi] eno1 never-default=true set in ${ENO1_CFG}"
+              else
+                $HOST nmcli connection modify eno1 ipv4.never-default yes 2>/dev/null || true
+                echo "[master-wifi] eno1 never-default set via nmcli"
+              fi
+
+              # ── 3. Install NM dispatcher — reboot-persistence ───────────────
+              # NM fires this on every interface-up after every reboot.
+              # It ensures:
+              #   a) WiFi default route (metric 50) is present in the main table
+              #   b) eno1 LAN subnet route is present in the main table
+              #   c) NO ip rules or policy tables — main table handles everything
+              # This keeps kube-proxy / kubelet / iptables working correctly.
+              mkdir -p /host/etc/NetworkManager/dispatcher.d
+              DISP="/host/etc/NetworkManager/dispatcher.d/51-master-wifi-routing.sh"
+              printf '#!/bin/sh\n# Injected by master-wifi-setup DaemonSet (master.local / 192.168.1.50)\n# Goal: WiFi (wlp2s0) = internet default, eno1 = LAN subnet in main table.\n# No policy routing — main table only, so kube-proxy/kubelet work correctly.\nIFACE="$1"\nACTION="$2"\n[ "$ACTION" = "up" ] || exit 0\n[ "$IFACE" = "wlp2s0" ] || [ "$IFACE" = "eno1" ] || exit 0\n\n# Ensure eno1 LAN subnet route is in the main table\nENO1_IP=$(ip -4 addr show eno1 2>/dev/null | awk '"'"'/inet /{split($2,a,"/"); print a[1]}'"'"')\nif [ -n "$ENO1_IP" ]; then\n  ip route replace 192.168.1.0/24 dev eno1 src "$ENO1_IP" 2>/dev/null || true\nfi\n\n# Remove any stray default route NM may have added via eno1\n# (never-default=true should prevent this, but be defensive)\nip route del default dev eno1 2>/dev/null || true\n\nip route flush cache 2>/dev/null || true\n' > "${DISP}"
+              chmod +x "${DISP}"
+              echo "[master-wifi] NM dispatcher installed: ${DISP#/host}"
+
+              # ── 4. Reload NM + activate WiFi ────────────────────────────────
+              $HOST nmcli con reload 2>&1 || true
+              $HOST nmcli con up twinkly36 2>&1 || \
+                $HOST nmcli dev wifi connect "${SSID}" password "gogoboys1316" ifname "${WIFI}" 2>&1 || true
+
+              echo "[master-wifi] Waiting for DHCP on ${WIFI}..."
+              for i in $(seq 1 45); do
+                $HOST ip addr show "${WIFI}" 2>/dev/null | grep -q "inet " && break
+                sleep 1
+              done
+              WIFI_IP=$($HOST ip addr show "${WIFI}" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+              echo "[master-wifi] ${WIFI} IP: ${WIFI_IP:-NOT ASSIGNED}"
+
+              # ── 5. Apply routing immediately ────────────────────────────────
+              # Ensure eno1 LAN subnet route is in main table (it may have been
+              # lost if NM added a default via eno1 and we deleted it above).
+              ENO1_IP=$($HOST ip -4 addr show eno1 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]}')
+              if [ -n "${ENO1_IP}" ]; then
+                $HOST ip route replace 192.168.1.0/24 dev eno1 src "${ENO1_IP}" 2>/dev/null || true
+                echo "[master-wifi] eno1 LAN route present: 192.168.1.0/24 dev eno1 src ${ENO1_IP}"
+              fi
+              # Remove stray eno1 default if NM added one before never-default took effect
+              $HOST ip route del default dev eno1 2>/dev/null || true
+              $HOST ip route flush cache 2>/dev/null || true
+
+              # Remove any leftover policy rules from the old broken setup
+              $HOST ip rule del priority 100 2>/dev/null || true
+              $HOST ip rule del priority 101 2>/dev/null || true
+              $HOST ip route flush table 100 2>/dev/null || true
+
+              echo "[master-wifi] Route table (main):"
+              $HOST ip route show 2>/dev/null || true
+
+              echo "[master-wifi] Init done."
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+
+      containers:
+        - name: pause
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /

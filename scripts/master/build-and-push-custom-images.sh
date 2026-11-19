@@ -36,6 +36,7 @@ declare -A IMAGE_CONTEXT=(
   [tableflow]="docker/tableflow"
   [duckdb]="docker/duckdb"
   [webconsole]="docker/webconsole"
+  [stardata-fe]="stardata"
 )
 
 declare -A IMAGE_TAG=(
@@ -46,13 +47,22 @@ declare -A IMAGE_TAG=(
   [tableflow]="${REGISTRY}/tableflow:1.0.14"
   [duckdb]="${REGISTRY}/duckdb:latest"
   [webconsole]="${REGISTRY}/webconsole:latest"
+  [stardata-fe]="${REGISTRY}/apache/stardata:fe-4.2"
 )
 
 # =============================================================================
+declare -A IMAGE_DOCKERFILE=(
+  [stardata-fe]="Dockerfile.fe"
+)
+
 build_image() {
   local name="$1"
   local context="${REPO_ROOT}/${IMAGE_CONTEXT[$name]}"
   local tag="${IMAGE_TAG[$name]}"
+  local dockerfile_arg=""
+  if [[ -n "${IMAGE_DOCKERFILE[$name]+_}" ]]; then
+    dockerfile_arg="-f ${context}/${IMAGE_DOCKERFILE[$name]}"
+  fi
 
   if [[ ! -d "${context}" ]]; then
     fail "${name}: context dir not found: ${context}"
@@ -62,6 +72,7 @@ build_image() {
   log "Building ${name} → ${tag}"
   if ! podman build \
       --tag "${tag}" \
+      ${dockerfile_arg} \
       "${context}" 2>&1; then
     fail "${name}: build failed"
     return

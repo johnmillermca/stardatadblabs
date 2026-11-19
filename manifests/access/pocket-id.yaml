@@ -6,6 +6,9 @@
 # Exposed via ClusterIP service; webconsole-proxy routes
 # auth.stardatadb.com → pocket-id.access.svc.cluster.local:80
 #
+# Database: PostgreSQL (postgresql.prod.svc.cluster.local:5432/pocket_id)
+# Secret:   pocket-id-db  (key: connection-string)
+#
 # First-run setup:
 #   1. Apply this manifest:  kubectl apply -f manifests/access/pocket-id.yaml
 #   2. Visit https://auth.stardatadb.com  (Pocket ID bootstraps a first-time
@@ -15,26 +18,16 @@
 #        Password: Priya1982S
 #   4. Go to OIDC Clients → New Client:
 #        Client name:      stardata-console
-#        Redirect URIs:    https://console.stardatadb.com/auth/callback
+#        Redirect URIs:    https://console.stardatadb.com/oauth2/callback
 #        Allowed scopes:   openid profile email
 #      Save.  Copy the Client ID and Client Secret.
-#   5. Create the Kubernetes secret (once per cluster):
+#   5. Update the Kubernetes secret:
 #        kubectl -n access create secret generic console-oidc \
 #          --from-literal=client_id=<ClientID> \
-#          --from-literal=client_secret=<ClientSecret>
+#          --from-literal=client_secret=<ClientSecret> \
+#          --from-literal=cookie_secret=$(openssl rand -base64 32) \
+#          --dry-run=client -o yaml | kubectl apply -f -
 # =============================================================================
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: pocket-id-data
-  namespace: access
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 2Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -45,6 +38,7 @@ metadata:
     app: pocket-id
 spec:
   replicas: 1
+  # Postgres-backed: safe to restart without data loss
   strategy:
     type: Recreate
   selector:
@@ -72,16 +66,20 @@ spec:
               value: "true"
             - name: UI_CONFIG_DISABLED
               value: "true"
+            # ── Database — PostgreSQL ──────────────────────────────────────────
+            - name: DB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: pocket-id-db
+                  key: connection-string
             - name: ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
                   name: pocket-id-secrets
                   key: encryption-key
-            # ── SMTP relay — pods cannot reach smtp.gmail.com directly (ISP block).
-            # msmtpd runs on master2 (192.168.1.62:2525), accepts unauthenticated
-            # connections, and forwards to Gmail with TLS from the host.
+            # ── SMTP relay — smtp-relay pod on worker1.local forwards to Gmail ──
             - name: SMTP_HOST
-              value: "192.168.1.62"
+              value: "smtp-relay.access.svc.cluster.local"
             - name: SMTP_PORT
               value: "2525"
             - name: SMTP_FROM
@@ -94,8 +92,8 @@ spec:
             - name: EMAIL_ONE_TIME_ACCESS_AS_UNAUTHENTICATED_ENABLED
               value: "true"
           volumeMounts:
-            - name: data
-              mountPath: /app/data
+            - name: uploads
+              mountPath: /app/data/uploads
           resources:
             requests:
               cpu: "100m"
@@ -116,9 +114,8 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 20
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: pocket-id-data
+        - name: uploads
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

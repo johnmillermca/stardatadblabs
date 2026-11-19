@@ -112,6 +112,21 @@ spec:
       ports:
         - port: 80
 ---
+# Allow smtp-relay to reach smtp.gmail.com (port 587) for outbound email
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: smtp-relay-egress
+  namespace: access
+spec:
+  podSelector:
+    matchLabels:
+      app: smtp-relay
+  policyTypes: [Egress]
+  egress:
+    - {}   # allow all egress — needs smtp.gmail.com:587 and DNS
+---
 # Allow LAN + intra-namespace ingress to console-oauth2-proxy-lan (NodePort 31080)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

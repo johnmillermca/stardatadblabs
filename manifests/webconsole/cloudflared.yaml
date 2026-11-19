@@ -16,24 +16,23 @@ spec:
       labels:
         app: cloudflared
     spec:
-      # Use the control-plane role label rather than a hard hostname so that
-      # cloudflared reschedules automatically if master2 is replaced or
-      # temporarily unavailable (avoids "Unknown" pod stuck on a dead node).
+      # Pinned to worker1.local — tunnel endpoint node (192.168.1.51).
       nodeSelector:
-        node-role.kubernetes.io/control-plane: ""
+        kubernetes.io/hostname: worker1.local
       tolerations:
-        - key: node-role.kubernetes.io/control-plane
+        - key: node-role.kubernetes.io/worker
           operator: Exists
           effect: NoSchedule
-        - key: node-role.kubernetes.io/master
-          operator: Exists
+        - key: dedicated
+          operator: Equal
+          value: stardata
           effect: NoSchedule
       # Give cloudflared time to drain active tunnel connections on shutdown
       # instead of being SIGKILL'd (exit 137) by the default 30s timeout.
       terminationGracePeriodSeconds: 30
       containers:
         - name: cloudflared
-          image: cloudflare/cloudflared:latest
+          image: 192.168.1.50:30500/cloudflare/cloudflared:latest
           args:
             - tunnel
             - --no-autoupdate

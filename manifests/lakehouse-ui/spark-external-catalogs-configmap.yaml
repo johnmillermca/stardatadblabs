@@ -23,3 +23,8 @@ data:
   # mongodb → database cache_testing
   # Credentials in OpenBao: secret/platform/mongodb
   mongodb.cache_testing: '{"source":"mongodb","type":"mongodb","database":"cache_testing","host":"mongodb.prod.svc.cluster.local","port":"27017","user":"debezium","bao_secret_path":"secret/platform/mongodb","collections":"customers,orders,products"}'
+
+  # snowflake → proprietary (native) tables via JDBC
+  # Credentials in OpenBao: secret/platform/snowflake  (key: password)
+  # Account identifier: oqihhtj-ta50603  (org-name + account-name)
+  snowflake: '{"source":"snowflake","type":"jdbc","host":"oqihhtj-ta50603.snowflakecomputing.com","port":"443","user":"testsnowflake","bao_secret_path":"secret/platform/snowflake","jdbc_url":"jdbc:snowflake://oqihhtj-ta50603.snowflakecomputing.com/?warehouse=COMPUTE_WH&loginTimeout=30","driver_class":"com.snowflake.client.jdbc.SnowflakeDriver"}'

@@ -1,0 +1,115 @@
+# =============================================================================
+# master2-lan-route-fix — DaemonSet
+# Runs on master2.local (192.168.1.62) only.
+#
+# GOAL
+# ────
+#   master2 uses LAN ONLY (enp5s0, 192.168.1.62).
+#   No WiFi. No internet uplink needed on this node.
+#   Just ensure the 192.168.1.0/24 LAN subnet route stays in the main
+#   routing table after every reboot so the k8s cluster can reach it.
+#
+# HOW IT WORKS
+# ────────────
+#   1. Sets enp5s0 never-default=false (it IS the only interface — it
+#      must be the default for all traffic including cluster comms)
+#   2. Ensures 192.168.1.0/24 dev enp5s0 is in the main routing table
+#   3. Installs NM dispatcher to re-apply on every reboot
+#   4. Keep-alive pause container → kubelet re-runs initContainer on
+#      every node restart → LAN route is always restored
+#
+# INTERFACES on master2.local (192.168.1.62)
+#   enp5s0 — built-in Ethernet   k8s cluster LAN + only uplink
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: master2-lan-route-fix
+  namespace: kube-system
+  labels:
+    app: master2-lan-route-fix
+spec:
+  selector:
+    matchLabels:
+      app: master2-lan-route-fix
+  template:
+    metadata:
+      labels:
+        app: master2-lan-route-fix
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: master2.local
+      tolerations:
+        - key: node-role.kubernetes.io/standby
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+
+      initContainers:
+        - name: lan-route-fix
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              LAN="enp5s0"
+              HOST="nsenter -t 1 -m -u -i -n --"
+
+              echo "[master2-lan] Starting on $(hostname)"
+
+              # ── 1. Discover enp5s0 IP ────────────────────────────────────────
+              LAN_IP=$($HOST ip -4 addr show ${LAN} 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]}')
+              if [ -z "$LAN_IP" ]; then
+                echo "[master2-lan] ERROR: ${LAN} has no IPv4 address — skipping"
+                exit 0
+              fi
+              echo "[master2-lan] ${LAN} IP: ${LAN_IP}"
+
+              # ── 2. Ensure LAN subnet is in the main routing table ────────────
+              $HOST ip route replace 192.168.1.0/24 dev ${LAN} src "${LAN_IP}" 2>/dev/null || true
+              echo "[master2-lan] ✓ 192.168.1.0/24 dev ${LAN} src ${LAN_IP} (main table)"
+
+              # ── 3. Remove leftover policy rules from old setup ───────────────
+              $HOST ip rule del priority 100 2>/dev/null || true
+              $HOST ip rule del priority 101 2>/dev/null || true
+              $HOST ip route flush table 100 2>/dev/null || true
+              $HOST ip route flush cache 2>/dev/null || true
+
+              # ── 4. Install NM dispatcher for reboot persistence ──────────────
+              mkdir -p /host/etc/NetworkManager/dispatcher.d
+              printf '#!/bin/sh\n# Injected by master2-lan-route-fix DaemonSet\n# master2.local is LAN only (enp5s0). No WiFi.\nIFACE="$1"\nACTION="$2"\n[ "$IFACE" = "enp5s0" ] || exit 0\n[ "$ACTION" = "up" ] || exit 0\nLAN_IP=$(ip -4 addr show enp5s0 2>/dev/null | awk '"'"'/inet /{split($2,a,"/"); print a[1]}'"'"')\n[ -z "$LAN_IP" ] && exit 0\nip route replace 192.168.1.0/24 dev enp5s0 src "$LAN_IP" 2>/dev/null || true\nip route flush cache 2>/dev/null || true\n' > /host/etc/NetworkManager/dispatcher.d/51-master2-lan-route.sh
+              chmod +x /host/etc/NetworkManager/dispatcher.d/51-master2-lan-route.sh
+              echo "[master2-lan] ✓ NM dispatcher installed"
+
+              # ── 5. Remove old WiFi dispatcher if present ─────────────────────
+              rm -f /host/etc/NetworkManager/dispatcher.d/51-master2-wifi-routing.sh
+              echo "[master2-lan] ✓ Old WiFi dispatcher removed (if existed)"
+
+              echo "[master2-lan] Route table (main):"
+              $HOST ip route show 2>/dev/null || true
+
+              echo "[master2-lan] ✓ Done"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+
+      containers:
+        - name: pause
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /

@@ -1,0 +1,77 @@
+# DEPRECATED — DO NOT USE
+# This was a one-shot Pod that:
+#   1. Used wrong LAN interface (enp5s0) — master2.local's LAN is eno1
+#   2. Had NO reboot persistence (restartPolicy: Never)
+#   3. Never installed an NM dispatcher script → WiFi lost on every reboot
+#
+# REPLACED BY: manifests/network/master2-wifi-setup.yaml (DaemonSet)
+#
+# To migrate:
+#   kubectl delete pod master2-wifi-setup -n kube-system --ignore-not-found
+#   kubectl apply -f manifests/network/master2-wifi-setup.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: master2-wifi-setup
+  namespace: kube-system
+spec:
+  nodeName: master2.local
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: master
+      effect: NoSchedule
+  hostNetwork: true
+  hostPID: true
+  restartPolicy: Never
+  containers:
+    - name: wifi-setup
+      image: 192.168.1.50:30500/busybox:1.36
+      securityContext:
+        privileged: true
+      command:
+        - sh
+        - -c
+        - |
+          SSID="twinkly36"
+          IFACE="wlp0s20f0u6"
+          LAN="enp5s0"
+          HOST="nsenter -t 1 -m -u -i -n --"
+
+          echo "[wifi-setup] Starting on $(hostname) iface=${IFACE}"
+
+          mkdir -p /host/etc/NetworkManager/system-connections
+          printf '[connection]\nid=twinkly36\nuuid=11111111-1111-1111-1111-111111111111\ntype=wifi\nautoconnect=true\nautoconnect-priority=10\n\n[wifi]\nssid=twinkly36\nmode=infrastructure\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=gogoboys1316\n\n[ipv4]\nmethod=auto\nnever-default=false\nroute-metric=50\n\n[ipv6]\nmethod=ignore\n' > /host/etc/NetworkManager/system-connections/twinkly36.nmconnection
+          chmod 600 /host/etc/NetworkManager/system-connections/twinkly36.nmconnection
+          echo "[wifi-setup] NM keyfile written"
+
+          ENO1_CFG=$($HOST nmcli -t -f filename con show enp5s0 2>/dev/null | cut -d: -f2 | tr -d ' ')
+          if [ -n "${ENO1_CFG}" ] && [ -f "/host${ENO1_CFG}" ]; then
+            grep -q 'never-default=true' "/host${ENO1_CFG}" 2>/dev/null || sed -i '/\[ipv4\]/a never-default=true' "/host${ENO1_CFG}"
+            echo "[wifi-setup] enp5s0 never-default=true set"
+          fi
+
+          $HOST nmcli con reload 2>&1 || true
+          $HOST nmcli con up twinkly36 2>&1 || $HOST nmcli dev wifi connect "${SSID}" password "gogoboys1316" ifname "${IFACE}" 2>&1 || true
+
+          echo "[wifi-setup] Waiting for DHCP on ${IFACE}..."
+          for i in $(seq 1 45); do
+            $HOST ip addr show ${IFACE} 2>/dev/null | grep -q "inet " && break
+            sleep 1
+          done
+
+          WIFI_IP=$($HOST ip addr show ${IFACE} 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)
+          echo "[wifi-setup] ${IFACE} IP: ${WIFI_IP:-NOT ASSIGNED}"
+
+          $HOST ip route del default dev ${LAN} 2>/dev/null && echo "[wifi-setup] Removed LAN default route" || true
+
+          $HOST wget -q --timeout=15 -O /dev/null https://1.1.1.1 && echo "[wifi-setup] Internet OK" || echo "[wifi-setup] Not reachable yet"
+
+          echo "[wifi-setup] Done."
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+  volumes:
+    - name: host-root
+      hostPath:
+        path: /

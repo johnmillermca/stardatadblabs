@@ -79,6 +79,7 @@ spec:
                       REFRESH CATALOG postgres;
                       REFRESH CATALOG oracle;
                       REFRESH CATALOG mongodb;
+                      REFRESH CATALOG snowflake;
                     "
                   echo "[$(date -u +%FT%TZ)] Catalog refresh complete."
 

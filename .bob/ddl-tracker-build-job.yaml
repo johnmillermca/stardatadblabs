@@ -1,0 +1,256 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ddl-tracker-build
+  namespace: prod
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: master.local
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+      initContainers:
+        # Copy the doris-fe.jar out of the FE pod so Maven can use it as 'provided'
+        # We do this via a shared emptyDir volume
+        - name: copy-doris-jar
+          image: 192.168.1.50:30500/library/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "[copy] Waiting for doris-fe.jar..."
+              cp /doris-lib/doris-fe.jar /build/doris-fe.jar
+              echo "[copy] Done: $(ls -lh /build/doris-fe.jar)"
+          volumeMounts:
+            - name: build-workspace
+              mountPath: /build
+            - name: doris-fe-lib
+              mountPath: /doris-lib
+      containers:
+        - name: maven-build
+          image: maven:3.9-eclipse-temurin-11
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "1Gi"
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BUILD_DIR="/build"
+              PLUGIN_DIR="/build/plugin-src"
+              TARGET_DIR="${PLUGIN_DIR}/target"
+              PLUGIN_ZIP="${BUILD_DIR}/ddl_load_tracker.zip"
+
+              echo "[build] Setting up source directory..."
+              mkdir -p "${PLUGIN_DIR}/src/main/java/io/stardata/plugin"
+              mkdir -p "${PLUGIN_DIR}/src/main/resources"
+
+              # Write pom.xml — using local doris-fe.jar as system dep (no Maven central needed)
+              cat > "${PLUGIN_DIR}/pom.xml" << 'POMEOF'
+              <?xml version="1.0" encoding="UTF-8"?>
+              <project xmlns="http://maven.apache.org/POM/4.0.0"
+                       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                       xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>io.stardata</groupId>
+                <artifactId>ddl-load-tracker-plugin</artifactId>
+                <version>1.0.0</version>
+                <properties>
+                  <maven.compiler.source>11</maven.compiler.source>
+                  <maven.compiler.target>11</maven.compiler.target>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+                </properties>
+                <dependencies>
+                  <dependency>
+                    <groupId>org.apache.doris</groupId>
+                    <artifactId>doris-fe</artifactId>
+                    <version>2.1.7</version>
+                    <scope>system</scope>
+                    <systemPath>/build/doris-fe.jar</systemPath>
+                  </dependency>
+                  <dependency>
+                    <groupId>com.mysql</groupId>
+                    <artifactId>mysql-connector-j</artifactId>
+                    <version>8.0.33</version>
+                  </dependency>
+                </dependencies>
+                <build>
+                  <plugins>
+                    <plugin>
+                      <groupId>org.apache.maven.plugins</groupId>
+                      <artifactId>maven-shade-plugin</artifactId>
+                      <version>3.5.0</version>
+                      <executions>
+                        <execution>
+                          <phase>package</phase>
+                          <goals><goal>shade</goal></goals>
+                          <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <relocations>
+                              <relocation>
+                                <pattern>com.mysql</pattern>
+                                <shadedPattern>io.stardata.shaded.mysql</shadedPattern>
+                              </relocation>
+                            </relocations>
+                            <filters>
+                              <filter>
+                                <artifact>*:*</artifact>
+                                <excludes>
+                                  <exclude>META-INF/*.SF</exclude>
+                                  <exclude>META-INF/*.DSA</exclude>
+                                  <exclude>META-INF/*.RSA</exclude>
+                                </excludes>
+                              </filter>
+                            </filters>
+                          </configuration>
+                        </execution>
+                      </executions>
+                    </plugin>
+                  </plugins>
+                </build>
+              </project>
+              POMEOF
+
+              # Write plugin.properties
+              cat > "${PLUGIN_DIR}/src/main/resources/plugin.properties" << 'PROPSEOF'
+              name=ddl_load_tracker
+              type=AUDIT
+              description=Async DDL audit plugin: creates cache_system table on CREATE/ALTER TABLE
+              version=1.0.0
+              java.version=1.8.0
+              classname=io.stardata.plugin.DdlLoadTrackerPlugin
+              doris.host=127.0.0.1
+              doris.port=9030
+              doris.user=root
+              doris.pass=Priya1982
+              PROPSEOF
+
+              # Write Java source
+              cat > "${PLUGIN_DIR}/src/main/java/io/stardata/plugin/DdlLoadTrackerPlugin.java" << 'JAVAEOF'
+              package io.stardata.plugin;
+              import org.apache.doris.plugin.AuditEvent;
+              import org.apache.doris.plugin.AuditPlugin;
+              import org.apache.doris.plugin.Plugin;
+              import org.apache.doris.plugin.PluginContext;
+              import org.apache.doris.plugin.PluginException;
+              import org.apache.doris.plugin.PluginInfo;
+              import java.io.IOException;
+              import java.sql.Connection;
+              import java.sql.SQLException;
+              import java.sql.Statement;
+              import java.util.Properties;
+              import java.util.Set;
+              import java.util.concurrent.LinkedBlockingQueue;
+              import java.util.concurrent.TimeUnit;
+              import java.util.logging.Level;
+              import java.util.logging.Logger;
+              import java.util.regex.Matcher;
+              import java.util.regex.Pattern;
+              public class DdlLoadTrackerPlugin extends Plugin implements AuditPlugin {
+                  private static final Logger LOG = Logger.getLogger(DdlLoadTrackerPlugin.class.getName());
+                  private static final String STMT_CREATE = "CREATE";
+                  private static final String STMT_ALTER  = "ALTER";
+                  private static final Set<String> SKIP_DBS = Set.of("information_schema","mysql","performance_schema","cache_system","__internal_schema","doris_audit_db__");
+                  private static final Pattern RE_CREATE = Pattern.compile("(?i)\\bCREATE\\s+(?:EXTERNAL\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?`?([\\w$]+)`?\\.`?([\\w$]+)`?");
+                  private static final Pattern RE_ALTER  = Pattern.compile("(?i)\\bALTER\\s+TABLE\\s+`?([\\w$]+)`?\\.`?([\\w$]+)`?");
+                  private static final Pattern RE_COL_UPDATED = Pattern.compile("(?i)`([\\w$]+)`[^,)]*?DATETIME[^,)]*?DEFAULT\\s+CURRENT_TIMESTAMP[^,)]*?ON\\s+UPDATE\\s+CURRENT_TIMESTAMP");
+                  private static final Pattern RE_COL_CREATED = Pattern.compile("(?i)`([\\w$]+)`[^,)]*?DATETIME[^,)]*?DEFAULT\\s+CURRENT_TIMESTAMP(?![^,)]*?ON\\s+UPDATE)");
+                  private String jdbcUrl; private String dbUser; private String dbPass;
+                  private java.sql.Driver jdbcDriver;
+                  private volatile Connection sharedConn;
+                  private final LinkedBlockingQueue<String[]> taskQueue = new LinkedBlockingQueue<>();
+                  private Thread workerThread; private volatile boolean running = true;
+                  @Override public void init(PluginInfo info, PluginContext ctx) throws PluginException {
+                      try { jdbcDriver = (java.sql.Driver) Class.forName("com.mysql.cj.jdbc.Driver").getDeclaredConstructor().newInstance(); }
+                      catch (Exception e) { throw new PluginException("MySQL JDBC driver not found: " + e.getMessage()); }
+                      String host = env("STARDATA_HOST", info.getProperties().getOrDefault("doris.host","127.0.0.1"));
+                      String port = env("STARDATA_PORT", info.getProperties().getOrDefault("doris.port","9030"));
+                      dbUser = env("STARDATA_USER", info.getProperties().getOrDefault("doris.user","root"));
+                      dbPass = env("STARDATA_PASS", info.getProperties().getOrDefault("doris.pass",""));
+                      jdbcUrl = "jdbc:mysql://"+host+":"+port+"/cache_system?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=5000&socketTimeout=30000&characterEncoding=utf8";
+                      workerThread = new Thread(this::workerLoop, "ddl-load-tracker-worker");
+                      workerThread.setDaemon(true); workerThread.start();
+                      LOG.info("[ddl-load-tracker] init OK -> " + jdbcUrl);
+                  }
+                  @Override public void close() throws IOException { running = false; if (workerThread != null) workerThread.interrupt(); closeConn(); }
+                  @Override public boolean eventFilter(AuditEvent.EventType type) { return type == AuditEvent.EventType.AFTER_QUERY; }
+                  @Override public void exec(AuditEvent event) {
+                      String stmtType = event.stmtType; if (stmtType == null) return;
+                      if (!stmtType.equals(STMT_CREATE) && !stmtType.equals(STMT_ALTER)) return;
+                      String stmt = event.stmt; if (stmt == null) return;
+                      String[] dbTbl = extractDbTable(stmt, stmtType); if (dbTbl == null) return;
+                      if (SKIP_DBS.contains(dbTbl[0].toLowerCase())) return;
+                      String updCol = firstMatch(RE_COL_UPDATED, stmt); if (updCol == null) return;
+                      String creCol = firstMatch(RE_COL_CREATED, stmt); if (creCol == null) return;
+                      taskQueue.offer(new String[]{ dbTbl[0], dbTbl[1], creCol, updCol });
+                  }
+                  private void workerLoop() {
+                      LOG.info("[ddl-load-tracker] worker started");
+                      while (running) {
+                          try { String[] task = taskQueue.poll(60, TimeUnit.SECONDS); if (task == null) continue; createCacheTable(task[0],task[1],task[2],task[3]); }
+                          catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                          catch (Exception e) { LOG.log(Level.WARNING, "[ddl-load-tracker] worker error", e); }
+                      }
+                  }
+                  private void createCacheTable(String db, String tbl, String creCol, String updCol) {
+                      String ddl = "CREATE TABLE IF NOT EXISTS `cache_system`.`"+tbl+"` (\n"+
+                          "    `database_name` VARCHAR(256) NULL,\n`table_name` VARCHAR(256) NULL,\n"+
+                          "    `"+creCol+"` DATETIME NULL,\n`"+updCol+"` DATETIME NULL,\n"+
+                          "    `snap_id` BIGINT NULL,\n`status` VARCHAR(32) NULL\n)\n"+
+                          "UNIQUE KEY(`database_name`,`table_name`)\n"+
+                          "DISTRIBUTED BY HASH(`database_name`) BUCKETS 4\n"+
+                          "PROPERTIES (\"replication_num\"=\"1\",\"enable_unique_key_merge_on_write\"=\"true\")";
+                      for (int i=1;i<=3;i++) {
+                          try { Connection c=getConn(); try(Statement s=c.createStatement()){s.executeUpdate(ddl);} LOG.info("[ddl-load-tracker] CREATED cache_system."+tbl); return; }
+                          catch (SQLException e) { LOG.warning("[ddl-load-tracker] attempt "+i+" failed: "+e.getMessage()); closeConn(); try{Thread.sleep(1000L*i);}catch(InterruptedException ie){Thread.currentThread().interrupt();return;} }
+                      }
+                  }
+                  private Connection getConn() throws SQLException {
+                      if (sharedConn==null||sharedConn.isClosed()) { Properties p=new Properties(); p.setProperty("user",dbUser); p.setProperty("password",dbPass); sharedConn=jdbcDriver.connect(jdbcUrl,p); if(sharedConn==null) throw new SQLException("Driver returned null"); LOG.info("[ddl-load-tracker] connected"); } return sharedConn;
+                  }
+                  private void closeConn() { try{if(sharedConn!=null&&!sharedConn.isClosed())sharedConn.close();}catch(SQLException ignored){} sharedConn=null; }
+                  private static String firstMatch(Pattern p,String t){Matcher m=p.matcher(t);return m.find()?m.group(1):null;}
+                  private static String[] extractDbTable(String s,String t){Matcher m=(STMT_CREATE.equals(t)?RE_CREATE:RE_ALTER).matcher(s);return m.find()?new String[]{m.group(1),m.group(2)}:null;}
+                  private static String env(String k,String d){String v=System.getenv(k);return(v!=null&&!v.isEmpty())?v:d;}
+              }
+              JAVAEOF
+
+              echo "[build] Source files ready. Running Maven..."
+              cd "${PLUGIN_DIR}"
+              mvn -q clean package -DskipTests 2>&1
+
+              JAR=$(ls "${TARGET_DIR}/ddl-load-tracker-plugin-"*.jar | grep -v original | head -1)
+              echo "[build] Jar: ${JAR} ($(ls -lh ${JAR} | awk '{print $5}'))"
+
+              echo "[build] Creating zip..."
+              cd "${TARGET_DIR}"
+              cp "${PLUGIN_DIR}/src/main/resources/plugin.properties" ./
+              zip -j "${PLUGIN_ZIP}" "$(basename ${JAR})" plugin.properties
+              echo "[build] Zip: ${PLUGIN_ZIP} ($(ls -lh ${PLUGIN_ZIP} | awk '{print $5}'))"
+
+              echo "[build] ✅ Done — zip at ${PLUGIN_ZIP}"
+          volumeMounts:
+            - name: build-workspace
+              mountPath: /build
+      volumes:
+        - name: build-workspace
+          emptyDir:
+            sizeLimit: 500Mi
+        - name: doris-fe-lib
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
