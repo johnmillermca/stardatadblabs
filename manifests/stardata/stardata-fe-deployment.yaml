@@ -189,7 +189,7 @@ spec:
         # Copies snowflake-jdbc-4.0.2.jar (baked in Dockerfile.fe) into the
         # shared emptyDir so the httpd sidecar can serve it on :8181.
         - name: seed-jdbc-drivers
-          image: 192.168.1.50:30500/apache/stardata:fe-4.3
+          image: 192.168.1.50:30500/apache/stardata:fe-4.4
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -201,7 +201,7 @@ spec:
       containers:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
-          image: 192.168.1.50:30500/apache/stardata:fe-4.3
+          image: 192.168.1.50:30500/apache/stardata:fe-4.4
           imagePullPolicy: IfNotPresent
           command:
             - /opt/apache-doris/fe_entrypoint.sh

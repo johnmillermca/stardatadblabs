@@ -38,6 +38,9 @@ COPY doris-patch/JdbcClient.java \
 COPY doris-patch/JdbcSnowflakeClient.java \
      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java
 
+COPY doris-patch/JdbcMongoDBClient.java \
+     /patch/src/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java
+
 COPY doris-patch/JdbcTable.java \
      /patch/src/org/apache/doris/catalog/JdbcTable.java
 
@@ -53,7 +56,8 @@ RUN CP=$(find /opt/apache-doris/fe/lib -name '*.jar' | tr '\n' ':') && \
       /patch/src/org/apache/doris/catalog/JdbcResource.java \
       /patch/src/org/apache/doris/catalog/JdbcTable.java \
       /patch/src/org/apache/doris/datasource/jdbc/client/JdbcClient.java \
-      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java
+      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java \
+      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java
 
 # Patch doris-fe.jar: replace all changed classes and inner classes
 RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
@@ -68,14 +72,16 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
       org/apache/doris/datasource/jdbc/client/JdbcClient.class \
       $(find org/apache/doris/datasource/jdbc/client -name 'JdbcClient$*.class' 2>/dev/null) \
       org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.class \
-      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcSnowflakeClient$*.class' 2>/dev/null)
+      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcSnowflakeClient$*.class' 2>/dev/null) \
+      org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.class \
+      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcMongoDBClient$*.class' 2>/dev/null)
 
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
 
-LABEL org.stardata.version="4.2"
+LABEL org.stardata.version="4.4"
 LABEL org.stardata.base="apache/doris:branch-4.2"
-LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc"
+LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc,mongodb-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
 
