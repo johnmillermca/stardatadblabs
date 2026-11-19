@@ -84,3 +84,4 @@ COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
 COPY jars/snowflake-jdbc-4.0.2.jar   /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar
 COPY jars/ojdbc11.jar                 /opt/apache-doris/fe/jdbc_drivers/ojdbc11.jar
 COPY jars/postgresql-42.7.4.jar       /opt/apache-doris/fe/jdbc_drivers/postgresql-42.7.4.jar
+COPY jars/mongodb-jdbc-2.0.2-all.jar  /opt/apache-doris/fe/jdbc_drivers/mongodb-jdbc-2.0.2-all.jar
