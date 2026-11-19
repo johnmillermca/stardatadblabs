@@ -1,0 +1,4 @@
+FROM 192.168.1.50:30500/busybox:1.36
+# Trino MongoDB connector plugin (version 435) for Doris trino-connector catalog.
+# Used as an initContainer to seed /plugins/connectors/ on FE and BE pods.
+COPY plugins/mongodb/ /plugins/

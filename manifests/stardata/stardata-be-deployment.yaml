@@ -113,6 +113,20 @@ spec:
               mountPath: /config-ro
             - name: be-config-rw
               mountPath: /config-rw
+        # ── Seed Trino connector plugins ───────────────────────────────────────
+        # Copies trino-mongodb-435 JARs from the init image into an emptyDir
+        # mounted at /opt/apache-doris/be/plugins/connectors/trino-mongodb-435/.
+        # Doris loads all subdirs under connectors/ as Trino connector plugins.
+        - name: seed-trino-plugins
+          image: 192.168.1.50:30500/apache/stardata:trino-plugins-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cp -r /plugins/. /trino-plugins/
+          volumeMounts:
+            - name: trino-plugins
+              mountPath: /trino-plugins
       containers:
         - name: stardata-be
           image: 192.168.1.50:30500/apache/stardata:be-4.2
@@ -147,6 +161,8 @@ spec:
             - name: snowflake-jwt
               mountPath: /snowflake-jwt
               readOnly: true
+            - name: trino-plugins
+              mountPath: /opt/apache-doris/be/plugins/connectors
           resources:
             requests:
               memory: 1Gi
@@ -174,6 +190,8 @@ spec:
           configMap:
             name: stardata-be-config
         - name: be-config-rw
+          emptyDir: {}
+        - name: trino-plugins
           emptyDir: {}
         - name: snowflake-jwt
           secret:

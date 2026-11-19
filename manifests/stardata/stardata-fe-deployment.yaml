@@ -198,6 +198,19 @@ spec:
           volumeMounts:
             - name: jdbc-drivers
               mountPath: /jdbc-drivers
+        # ── 4. Seed Trino connector plugins ────────────────────────────────────
+        # Copies trino-mongodb-435 JARs into an emptyDir mounted over
+        # /opt/apache-doris/fe/plugins/connectors/ so Doris loads the plugin.
+        - name: seed-trino-plugins
+          image: 192.168.1.50:30500/apache/stardata:trino-plugins-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cp -r /plugins/. /trino-plugins/
+          volumeMounts:
+            - name: trino-plugins
+              mountPath: /trino-plugins
       containers:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
@@ -234,6 +247,8 @@ spec:
               mountPath: /opt/apache-doris/fe/log
             - name: jdbc-drivers
               mountPath: /opt/apache-doris/fe/jdbc_drivers
+            - name: trino-plugins
+              mountPath: /opt/apache-doris/fe/plugins/connectors
             - name: snowflake-jwt
               mountPath: /snowflake-jwt
               readOnly: true
@@ -476,6 +491,8 @@ spec:
         - name: fe-log
           emptyDir: {}
         - name: jdbc-drivers
+          emptyDir: {}
+        - name: trino-plugins
           emptyDir: {}
         - name: snowflake-jwt
           secret:
