@@ -1,70 +1,58 @@
 -- =============================================================================
 -- 13_create_mongodb_catalog.sql
--- Create a JDBC external catalog in Stardata (Apache Doris) pointing at the
--- MongoDB 8.0 replica set that runs on master2.local (mongodb.prod).
---
--- ⚠️  STATUS: BLOCKED — MongoDB JDBC driver limitation (see note below)
--- =============================================================================
+-- Create a Trino-connector external catalog in Stardata (Apache Doris) pointing
+-- at the MongoDB 8.0 replica set that runs on master2.local (mongodb.prod).
 --
 -- MongoDB connection:
---   Host     : mongodb.prod.svc.cluster.local:27017
---   Auth DB  : admin
---   Username : root
---   Auth     : SCRAM-SHA-256 (stored in K8s secret mongodb-credentials)
+--   Host      : mongodb.prod.svc.cluster.local:27017
+--   Auth DB   : admin
+--   Username  : root
+--   Auth      : SCRAM-SHA-256 (stored in K8s secret mongodb-credentials)
 --   ReplicaSet: rs0
 --
--- JDBC driver:
---   mongodb-jdbc-2.0.2-all.jar is baked into the FE image and served on :8181
---   Driver class: com.mongodb.jdbc.MongoDriver
+-- Catalog type: trino-connector (NOT jdbc)
+--   The trino-mongodb-435 plugin is loaded via the seed-trino-plugins
+--   initContainer on every FE and BE pod from:
+--     /opt/apache-doris/fe/plugins/connectors/trino-mongodb-435/
+--     /opt/apache-doris/be/plugins/connectors/trino-mongodb-435/
+--   Plugin image: 192.168.1.50:30500/apache/stardata:trino-plugins-v1
+--   Source: stardata/plugins/mongodb/trino-mongodb-435/ (69 JARs, 21MB)
 --
--- ⚠️  KNOWN LIMITATION:
---   The MongoDB JDBC 2.x driver (mongodb-jdbc-2.0.2-all.jar) is designed
---   exclusively for MongoDB Atlas Data Federation (Atlas SQL interface).
---   It issues internal commands like `sqlGetResultSchema` during connection
---   initialisation which are NOT supported by self-hosted mongod.
+-- Note on property naming:
+--   All Trino connector properties must be prefixed with 'trino.' so Doris
+--   strips the prefix before passing them to the plugin.
+--   trino.mongodb.connection-url → mongodb.connection-url (passed to plugin)
+--   trino.mongodb.schema-collection → mongodb.schema-collection (passed to plugin)
 --
---   Error observed:
---     "no such command: 'sqlGetResultSchema'" (CommandNotFound code 59)
+-- Databases visible in Stardata:
+--   cache_testing  — 6 collections: customers, inventory_events, order_items,
+--                    orders, product_reviews, products
 --
---   This is a MongoDB architectural constraint — no standard SQL-over-JDBC
---   interface exists for bare self-hosted mongod without an intermediary.
+-- Invocation:
+--   STARDATA_PASS="$(kubectl get secret stardata-credentials \
+--       -n prod -o jsonpath='{.data.admin-password}' | base64 -d)"
+--   MONGO_PASS="$(kubectl get secret mongodb-credentials \
+--       -n prod -o jsonpath='{.data.mongodb-root-password}' | base64 -d)"
+--   # substitute password manually before running — do not embed in git
 --
--- RESOLUTION OPTIONS (pick one):
---
---   Option A — BI Connector (mongosqld):
---     Deploy the MongoDB Connector for BI (mongosqld) as a sidecar or
---     separate pod. It translates SQL → MQL and exposes a MySQL-compatible
---     port (default 3307). Then create a MYSQL-type JDBC catalog pointing
---     at mongosqld instead of mongod.
---
---     jdbc_url = 'jdbc:mysql://mongosqld.prod.svc.cluster.local:3307/admin'
---     driver_class = 'com.mysql.cj.jdbc.Driver'
---     (use existing mysql-connector jar)
---
---   Option B — Change Stream / ETL into internal Doris table:
---     Use Flink/Kafka CDC (Debezium MongoDB connector) to stream MongoDB
---     collections into Doris internal tables. Already partially set up with
---     the debezium-credentials secret.
---
---   Option C — Atlas Data Federation:
---     If MongoDB Atlas is used, point the catalog at the Atlas SQL endpoint.
---     The mongodb-jdbc-2.0.2-all.jar driver will work correctly.
---     jdbc_url = 'jdbc:mongodb://[atlas-sql-endpoint]/admin?ssl=true'
---
--- Once Option A or C is implemented, run the CREATE CATALOG below:
+-- Catalog name  : mongodb
+-- Connector type: trino-connector / mongodb (Trino 435)
+-- Collections   : cache_testing.{customers,inventory_events,order_items,
+--                               orders,product_reviews,products}
 -- =============================================================================
 
--- ── MongoDB (via JDBC — requires BI Connector or Atlas SQL endpoint) ──────────
--- DROP CATALOG IF EXISTS mongodb;
---
--- CREATE CATALOG mongodb PROPERTIES (
---     "type"         = "jdbc",
---     "user"         = "root",
---     "password"     = "MONGODB_PASSWORD_PLACEHOLDER",
---     "jdbc_url"     = "jdbc:mongodb://mongodb.prod.svc.cluster.local:27017/admin?authSource=admin",
---     "driver_url"   = "http://stardata-fe.prod.svc.cluster.local:8181/mongodb-jdbc-2.0.2-all.jar",
---     "driver_class" = "com.mongodb.jdbc.MongoDriver"
--- );
---
--- REFRESH CATALOG mongodb;
--- SHOW DATABASES FROM mongodb;
+-- ── MongoDB (via Trino connector — trino-mongodb-435 plugin) ──────────────────
+DROP CATALOG IF EXISTS mongodb;
+
+CREATE CATALOG mongodb PROPERTIES (
+    "type"                            = "trino-connector",
+    "trino.connector.name"            = "mongodb",
+    "trino.mongodb.connection-url"    = "mongodb://root:MONGODB_PASSWORD_PLACEHOLDER@mongodb.prod.svc.cluster.local:27017/?authSource=admin",
+    "trino.mongodb.schema-collection" = "_schema"
+);
+
+-- Verify: should show cache_testing (and information_schema, mysql).
+SHOW DATABASES FROM mongodb;
+
+-- Verify collections:
+SHOW TABLES FROM mongodb.cache_testing;
