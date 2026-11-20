@@ -182,3 +182,16 @@ Always specify the container explicitly:
 ```bash
 kubectl exec -n prod statefulset/stardata-fe -c stardata-fe -- mysql ...
 ```
+
+
+## Automatic Table Features (FE Patch)
+
+As of image `fe-4.5.1`, every new OLAP table automatically receives:
+- `snap_id BIGINT AUTO_INCREMENT` — unique row identifier
+- `created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP` — row-creation timestamp
+- `AUTO PARTITION BY RANGE (date_trunc('day', created_at))` — daily range partitions on demand
+- `storage_policy = sd_cold_1d` — 1-day hot→cold tier to S3
+
+Excludes: `cache_system` DB, `__internal_schema`, `information_schema`, external-catalog tables, and CTAS.
+
+📖 **Full guide with examples:** [`docs/stardata-auto-table-features.md`](stardata-auto-table-features.md)
