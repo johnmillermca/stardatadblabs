@@ -84,7 +84,7 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
 
-LABEL org.stardata.version="4.5"
+LABEL org.stardata.version="4.5.1"
 LABEL org.stardata.base="apache/doris:branch-4.2"
 LABEL org.stardata.patch="snap_id-auto-inject,created_at-auto-inject,auto-range-partition,sd_cold_1d-storage-policy,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
 
