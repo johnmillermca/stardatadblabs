@@ -45,28 +45,25 @@ public class JdbcDatabricksClient extends JdbcClient {
 
     @Override
     protected Type jdbcTypeToDoris(JdbcFieldSchema fieldSchema) {
-        String typeName = fieldSchema.getDataTypeName().orElse("STRING").toUpperCase();
-        switch (typeName) {
-            case "BYTE":
-            case "TINYINT":
+        // Use the JDBC numeric type code as the primary discriminator — it is more
+        // reliable than the type name string which varies across Databricks driver versions.
+        int jdbcType = fieldSchema.getDataType();
+        switch (jdbcType) {
+            case java.sql.Types.TINYINT:
                 return Type.TINYINT;
-            case "SHORT":
-            case "SMALLINT":
+            case java.sql.Types.SMALLINT:
                 return Type.SMALLINT;
-            case "INT":
-            case "INTEGER":
+            case java.sql.Types.INTEGER:
                 return Type.INT;
-            case "LONG":
-            case "BIGINT":
+            case java.sql.Types.BIGINT:
                 return Type.BIGINT;
-            case "FLOAT":
-            case "REAL":
+            case java.sql.Types.FLOAT:
+            case java.sql.Types.REAL:
                 return Type.FLOAT;
-            case "DOUBLE":
-            case "DOUBLE PRECISION":
+            case java.sql.Types.DOUBLE:
                 return Type.DOUBLE;
-            case "DECIMAL":
-            case "NUMERIC": {
+            case java.sql.Types.DECIMAL:
+            case java.sql.Types.NUMERIC: {
                 int prec  = fieldSchema.getColumnSize().orElse(38);
                 int scale = fieldSchema.getDecimalDigits().orElse(0);
                 if (scale == 0 && prec <= 18) {
@@ -74,37 +71,30 @@ public class JdbcDatabricksClient extends JdbcClient {
                 }
                 return ScalarType.createDecimalV3Type(Math.min(prec, 38), scale);
             }
-            case "BOOLEAN":
+            case java.sql.Types.BOOLEAN:
+            case java.sql.Types.BIT:
                 return Type.BOOLEAN;
-            case "DATE":
+            case java.sql.Types.DATE:
                 return ScalarType.createDateV2Type();
-            case "TIMESTAMP":
-            case "TIMESTAMP_NTZ":
+            case java.sql.Types.TIMESTAMP:
+            case java.sql.Types.TIMESTAMP_WITH_TIMEZONE:
                 return ScalarType.createDatetimeV2Type(6);
-            case "CHAR": {
+            case java.sql.Types.CHAR:
+            case java.sql.Types.NCHAR: {
                 int len = fieldSchema.getColumnSize().orElse(1);
                 return ScalarType.createCharType(Math.min(len, ScalarType.MAX_CHAR_LENGTH));
             }
-            case "VARCHAR": {
+            case java.sql.Types.VARCHAR:
+            case java.sql.Types.NVARCHAR: {
                 int len = fieldSchema.getColumnSize().orElse(0);
                 if (len <= 0 || len > ScalarType.MAX_VARCHAR_LENGTH) {
                     return ScalarType.createStringType();
                 }
                 return ScalarType.createVarcharType(len);
             }
-            case "STRING":
-            case "TEXT":
-            case "BINARY":
-            case "VARBINARY":
-                return ScalarType.createStringType();
-            case "ARRAY":
-            case "MAP":
-            case "STRUCT":
-            case "VARIANT":
-            case "OBJECT":
-                // Semi-structured / complex types stored as JSON text
-                return ScalarType.createStringType();
             default:
+                // All other types (STRING, TEXT, BINARY, ARRAY, MAP, STRUCT, etc.)
+                // fall through to STRING — safe for all Spark SQL / Databricks types.
                 return ScalarType.createStringType();
         }
     }
