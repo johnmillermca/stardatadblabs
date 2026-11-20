@@ -20,6 +20,12 @@ FE image. Copy them into the Doris source tree at the matching package path befo
 | `doris-patch/ColumnDefinition.java` | `fe/src/main/java/org/apache/doris/nereids/trees/plans/commands/info/ColumnDefinition.java` |
 | `doris-patch/Column.java` | `fe/src/main/java/org/apache/doris/catalog/Column.java` |
 | `doris-patch/ColumnDef.java` | `fe/src/main/java/org/apache/doris/analysis/ColumnDef.java` |
+| `doris-patch/JdbcResource.java` | `fe/src/main/java/org/apache/doris/catalog/JdbcResource.java` |
+| `doris-patch/JdbcClient.java` | `fe/src/main/java/org/apache/doris/datasource/jdbc/client/JdbcClient.java` |
+| `doris-patch/JdbcSnowflakeClient.java` | `fe/src/main/java/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java` |
+| `doris-patch/JdbcMongoDBClient.java` | `fe/src/main/java/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java` |
+| `doris-patch/JdbcDatabricksClient.java` | `fe/src/main/java/org/apache/doris/datasource/jdbc/client/JdbcDatabricksClient.java` *(new)* |
+| `doris-patch/JdbcTable.java` | `fe/src/main/java/org/apache/doris/datasource/jdbc/JdbcTable.java` |
 
 ### snap_id auto-injection (`CreateTableInfo.java`)
 

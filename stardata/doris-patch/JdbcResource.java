@@ -88,6 +88,7 @@ public class JdbcResource extends Resource {
     public static final String JDBC_GBASE = "jdbc:gbase";
     public static final String JDBC_SNOWFLAKE = "jdbc:snowflake";
     public static final String JDBC_MONGODB = "jdbc:mongodb";
+    public static final String JDBC_DATABRICKS = "jdbc:databricks";
 
     public static final String MYSQL = "MYSQL";
     public static final String POSTGRESQL = "POSTGRESQL";
@@ -103,6 +104,7 @@ public class JdbcResource extends Resource {
     public static final String GBASE = "GBASE";
     public static final String SNOWFLAKE = "SNOWFLAKE";
     public static final String MONGODB = "MONGODB";
+    public static final String DATABRICKS = "DATABRICKS";
 
     public static final String JDBC_PROPERTIES_PREFIX = "jdbc.";
     public static final String JDBC_URL = "jdbc_url";
@@ -502,6 +504,8 @@ public class JdbcResource extends Resource {
             return SNOWFLAKE;
         } else if (url.startsWith(JDBC_MONGODB)) {
             return MONGODB;
+        } else if (url.startsWith(JDBC_DATABRICKS)) {
+            return DATABRICKS;
         }
         throw new DdlException("Unsupported jdbc database type, please check jdbcUrl: " + url);
     }

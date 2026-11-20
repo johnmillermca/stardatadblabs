@@ -105,6 +105,8 @@ public abstract class JdbcClient {
                 return new JdbcSnowflakeClient(jdbcClientConfig);
             case JdbcResource.MONGODB:
                 return new JdbcMongoDBClient(jdbcClientConfig);
+            case JdbcResource.DATABRICKS:
+                return new JdbcDatabricksClient(jdbcClientConfig);
             default:
                 throw new IllegalArgumentException("Unsupported DB type: " + dbType);
         }

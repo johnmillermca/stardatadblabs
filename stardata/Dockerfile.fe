@@ -1,6 +1,7 @@
 # =============================================================================
 # Stardata FE — Apache Doris branch-4.2 with snap_id auto-injection patch
 #               + Snowflake JDBC catalog support patch
+#               + Databricks JDBC catalog support patch
 #
 # Build strategy (no full Maven build required):
 #   Stage 1 (builder): compile only the patched .java files against the
@@ -9,14 +10,14 @@
 #   Stage 2 (runtime): copy the patched JAR into a clean copy of the base image.
 #
 # Patches applied:
-#   CreateTableInfo.java    — injectSnapIdColumn() prepends snap_id BIGINT NOT NULL
-#                             AUTO_INCREMENT to every new internal OLAP table.
-#   JdbcResource.java       — adds JDBC_SNOWFLAKE / SNOWFLAKE constants and a
-#                             parseDbType() branch for jdbc:snowflake:// URLs.
-#   JdbcClient.java         — adds a SNOWFLAKE case in createJdbcClient() that
-#                             returns a new JdbcSnowflakeClient instance.
-#   JdbcSnowflakeClient.java — new client: minimal Snowflake type mapping on top
-#                              of the JdbcClient base class.
+#   CreateTableInfo.java      — injectSnapIdColumn() prepends snap_id BIGINT NOT NULL
+#                               AUTO_INCREMENT to every new internal OLAP table.
+#   JdbcResource.java         — adds JDBC_SNOWFLAKE/SNOWFLAKE and JDBC_DATABRICKS/DATABRICKS
+#                               constants and parseDbType() branches.
+#   JdbcClient.java           — adds SNOWFLAKE and DATABRICKS cases in createJdbcClient().
+#   JdbcSnowflakeClient.java  — Snowflake type mapping on top of JdbcClient base class.
+#   JdbcDatabricksClient.java — Databricks/Spark SQL type mapping on top of JdbcClient
+#                               base class. PAT auth: user=token, password=<PAT>.
 # =============================================================================
 
 # ── Stage 1: compile patches and replace class files in doris-fe.jar ─────────
@@ -41,6 +42,9 @@ COPY doris-patch/JdbcSnowflakeClient.java \
 COPY doris-patch/JdbcMongoDBClient.java \
      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java
 
+COPY doris-patch/JdbcDatabricksClient.java \
+     /patch/src/org/apache/doris/datasource/jdbc/client/JdbcDatabricksClient.java
+
 COPY doris-patch/JdbcTable.java \
      /patch/src/org/apache/doris/catalog/JdbcTable.java
 
@@ -57,7 +61,8 @@ RUN CP=$(find /opt/apache-doris/fe/lib -name '*.jar' | tr '\n' ':') && \
       /patch/src/org/apache/doris/catalog/JdbcTable.java \
       /patch/src/org/apache/doris/datasource/jdbc/client/JdbcClient.java \
       /patch/src/org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.java \
-      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java
+      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java \
+      /patch/src/org/apache/doris/datasource/jdbc/client/JdbcDatabricksClient.java
 
 # Patch doris-fe.jar: replace all changed classes and inner classes
 RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
@@ -74,20 +79,23 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
       org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.class \
       $(find org/apache/doris/datasource/jdbc/client -name 'JdbcSnowflakeClient$*.class' 2>/dev/null) \
       org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.class \
-      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcMongoDBClient$*.class' 2>/dev/null)
+      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcMongoDBClient$*.class' 2>/dev/null) \
+      org/apache/doris/datasource/jdbc/client/JdbcDatabricksClient.class \
+      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcDatabricksClient$*.class' 2>/dev/null)
 
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
 
 LABEL org.stardata.version="4.4"
 LABEL org.stardata.base="apache/doris:branch-4.2"
-LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc,mongodb-jdbc"
+LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
 
 # ── Bake JDBC drivers into image so the httpd sidecar can serve them ─────────
 # The seed-jdbc-drivers initContainer copies these into the shared emptyDir.
-COPY jars/snowflake-jdbc-4.0.2.jar   /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar
-COPY jars/ojdbc11.jar                 /opt/apache-doris/fe/jdbc_drivers/ojdbc11.jar
-COPY jars/postgresql-42.7.4.jar       /opt/apache-doris/fe/jdbc_drivers/postgresql-42.7.4.jar
-COPY jars/mongodb-jdbc-2.0.2-all.jar  /opt/apache-doris/fe/jdbc_drivers/mongodb-jdbc-2.0.2-all.jar
+COPY jars/snowflake-jdbc-4.0.2.jar              /opt/apache-doris/fe/jdbc_drivers/snowflake-jdbc-4.0.2.jar
+COPY jars/ojdbc11.jar                            /opt/apache-doris/fe/jdbc_drivers/ojdbc11.jar
+COPY jars/postgresql-42.7.4.jar                  /opt/apache-doris/fe/jdbc_drivers/postgresql-42.7.4.jar
+COPY jars/mongodb-jdbc-2.0.2-all.jar             /opt/apache-doris/fe/jdbc_drivers/mongodb-jdbc-2.0.2-all.jar
+COPY jars/databricks-jdbc-2.6.36.1070.jar        /opt/apache-doris/fe/jdbc_drivers/databricks-jdbc-2.6.36.1070.jar
