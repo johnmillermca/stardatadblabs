@@ -14,15 +14,20 @@
 --   ──────────────────── ─────────────  ──────────────────────────────────────
 --   sd_cold_1d           1  day         Hot for 1 day  → then moves to S3
 --
--- Usage — attach a policy to a table at CREATE time:
---   CREATE TABLE analytics.events (…)
---   PROPERTIES (
---     "storage_policy" = "sd_cold_1d",
---     "replication_num" = "3"
---   );
+-- Usage
+-- ─────
+-- The Stardata FE patch (CreateTableInfo.java :: injectStoragePolicy) attaches
+-- sd_cold_1d automatically to every new OLAP table in any database except
+-- cache_system.  No manual PROPERTIES clause is needed for new tables.
 --
--- Or add it to an existing table:
+-- To attach the policy to an existing table (pre-patch):
 --   ALTER TABLE analytics.events SET ("storage_policy" = "sd_cold_1d");
+--
+-- To override with a different policy on a specific new table, include an
+-- explicit PROPERTIES clause — the FE patch uses putIfAbsent and will not
+-- overwrite a user-supplied value:
+--   CREATE TABLE analytics.events (…)
+--   PROPERTIES ("storage_policy" = "sd_cold_7d", "replication_num" = "3");
 --
 -- Apply
 -- ─────

@@ -1,5 +1,5 @@
 # =============================================================================
-# Stardata FE — Apache Doris branch-4.2 with snap_id auto-injection patch
+# Stardata FE — Apache Doris branch-4.2 with Stardata feature patches
 #               + Snowflake JDBC catalog support patch
 #               + Databricks JDBC catalog support patch
 #
@@ -9,9 +9,20 @@
 #                       the original .class files in the JAR.
 #   Stage 2 (runtime): copy the patched JAR into a clean copy of the base image.
 #
-# Patches applied:
-#   CreateTableInfo.java      — injectSnapIdColumn() prepends snap_id BIGINT NOT NULL
-#                               AUTO_INCREMENT to every new internal OLAP table.
+# Patches applied (CreateTableInfo.java — injectStardataFeatures()):
+#   (a) injectSnapIdColumn()        — prepends snap_id BIGINT NOT NULL AUTO_INCREMENT
+#                                     to every new internal OLAP table.
+#   (b) injectCreatedAtColumn()     — appends created_at DATETIMEV2 NOT NULL
+#                                     DEFAULT CURRENT_TIMESTAMP when missing.
+#                                     Skipped: cache_system DB, external catalogs.
+#   (c) injectAutoRangePartition()  — AUTO PARTITION BY RANGE
+#                                     (date_trunc('day', created_at)) when no
+#                                     explicit partition is declared.
+#                                     Opt-out: PROPERTIES ("stardata.disable_partition"="true")
+#   (d) injectStoragePolicy()       — sets "storage_policy"="sd_cold_1d" (hot→cold
+#                                     after 1 day via pre-created sd_s3_cold resource).
+#                                     Never overwrites a user-supplied value.
+#
 #   JdbcResource.java         — adds JDBC_SNOWFLAKE/SNOWFLAKE and JDBC_DATABRICKS/DATABRICKS
 #                               constants and parseDbType() branches.
 #   JdbcClient.java           — adds SNOWFLAKE and DATABRICKS cases in createJdbcClient().
@@ -73,9 +84,9 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
 
-LABEL org.stardata.version="4.4"
+LABEL org.stardata.version="4.5"
 LABEL org.stardata.base="apache/doris:branch-4.2"
-LABEL org.stardata.patch="snap_id-auto-inject,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
+LABEL org.stardata.patch="snap_id-auto-inject,created_at-auto-inject,auto-range-partition,sd_cold_1d-storage-policy,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
 

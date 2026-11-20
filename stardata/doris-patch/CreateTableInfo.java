@@ -57,7 +57,9 @@ import org.apache.doris.info.TableNameInfo;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.nereids.CascadesContext;
 import org.apache.doris.nereids.analyzer.Scope;
+import org.apache.doris.nereids.analyzer.UnboundFunction;
 import org.apache.doris.nereids.analyzer.UnboundSlot;
+import org.apache.doris.nereids.trees.expressions.literal.StringLiteral;
 import org.apache.doris.nereids.analyzer.UnboundVariable;
 import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.glue.translator.ExpressionTranslator;
@@ -79,6 +81,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalEmptyRelation;
 import org.apache.doris.analysis.ColumnNullableType;
 import org.apache.doris.nereids.types.BigIntType;
 import org.apache.doris.nereids.types.DataType;
+import org.apache.doris.nereids.types.DateTimeV2Type;
 import org.apache.doris.nereids.types.VariantField;
 import org.apache.doris.nereids.types.VariantType;
 import org.apache.doris.nereids.util.TypeCoercionUtils;
@@ -451,6 +454,203 @@ public class CreateTableInfo {
         columns.add(insertPos, snapIdCol);
     }
 
+    // ─── Stardata feature-injection helpers ──────────────────────────────────────
+    //
+    // Exclusion rule (applies to ALL three helpers below):
+    //   • skip external-engine tables  (isExternal == true)
+    //   • skip the cache_system database (internal bookkeeping tables)
+    //   • skip Doris's own system databases (__internal_schema, information_schema)
+    //   • skip the CTAS path where columns is still null
+    //
+    // All three helpers are called together from injectStardataFeatures() which
+    // runs in validate() after dbName has been fully resolved.
+
+    private static final String STARDATA_EXCLUDED_DB_CACHE_SYSTEM  = "cache_system";
+    private static final String STARDATA_STORAGE_POLICY             = "sd_cold_1d";
+    // Table property the user can set to opt out of auto partition injection only.
+    // Both created_at column injection and storage policy are still applied.
+    // Usage:  CREATE TABLE … PROPERTIES ("stardata.disable_partition" = "true");
+    private static final String STARDATA_PROP_DISABLE_PARTITION     = "stardata.disable_partition";
+
+    /**
+     * Returns true when the current CREATE TABLE should receive Stardata automatic
+     * enhancements (created_at column, range partition, storage policy).
+     *
+     * Excluded:
+     *   – any external-engine table (Iceberg, Hive, JDBC, …)
+     *   – cache_system database (internal bookkeeping)
+     *   – Doris system databases (__internal_schema, information_schema)
+     *   – CTAS path (columns list is null at this stage)
+     */
+    private boolean isStardataFeatureTarget() {
+        if (isExternal) {
+            return false;
+        }
+        if (columns == null) {
+            return false;
+        }
+        if (!engineName.equalsIgnoreCase(ENGINE_OLAP)) {
+            return false;
+        }
+        // Exclude reserved / system databases
+        if (STARDATA_EXCLUDED_DB_CACHE_SYSTEM.equalsIgnoreCase(dbName)
+                || "__internal_schema".equalsIgnoreCase(dbName)
+                || "information_schema".equalsIgnoreCase(dbName)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * (b) Inject {@code created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP}
+     * as the last visible column of every qualifying OLAP table, unless the user
+     * already declared a column named {@code created_at} (case-insensitive).
+     *
+     * The column is appended after all user-declared columns so it never
+     * interferes with key ordering or existing schema.
+     */
+    private void injectCreatedAtColumn() {
+        boolean alreadyDeclared = columns.stream()
+                .anyMatch(c -> "created_at".equalsIgnoreCase(c.getName()));
+        if (alreadyDeclared) {
+            return;
+        }
+        // DATETIMEV2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
+        // DefaultValue("CURRENT_TIMESTAMP", "now") mirrors ColumnDef.DefaultValue.CURRENT_TIMESTAMP_DEFAULT_VALUE
+        ColumnDefinition createdAtCol = new ColumnDefinition(
+                "created_at",
+                DateTimeV2Type.of(0),
+                false,                             // isKey
+                null,                              // aggType — set later during key analysis
+                ColumnNullableType.NOT_NULLABLE,
+                -1L,                               // not auto-increment
+                Optional.of(new DefaultValue("CURRENT_TIMESTAMP", "now")),
+                Optional.empty(),                  // no ON UPDATE
+                "row creation timestamp (auto-injected by Stardata)",
+                Optional.empty()                   // no generated column
+        );
+        columns.add(createdAtCol);
+        LOG.info("Stardata: injected created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP "
+                + "into table {}.{}", dbName, tableName);
+    }
+
+    /**
+     * (c) Inject an AUTO RANGE PARTITION on {@code created_at} (truncated to day)
+     * when the user has not already specified any partition scheme and has not set
+     * the {@value STARDATA_PROP_DISABLE_PARTITION} property to {@code "true"}.
+     *
+     * <p>The injected DDL is equivalent to:
+     * <pre>
+     *   AUTO PARTITION BY RANGE (date_trunc('day', `created_at`)) ()
+     * </pre>
+     *
+     * <p>This uses the real {@code PartitionTableInfo} constructor:
+     * {@code PartitionTableInfo(boolean isAutoPartition, String partitionType,
+     * List<PartitionDefinition> partitionDefs, List<Expression> autoPartitionExprs)}
+     * discovered from the compiled Doris FE bytecode.
+     *
+     * <p>Skipped when:
+     * <ul>
+     *   <li>The user already declared an explicit RANGE or LIST partition.</li>
+     *   <li>The property {@code "stardata.disable_partition" = "true"} is set —
+     *       in that case only the {@code created_at} column and storage policy
+     *       are still applied.</li>
+     * </ul>
+     */
+    private void injectAutoRangePartition() {
+        // ── opt-out check ────────────────────────────────────────────────────────
+        if ("true".equalsIgnoreCase(properties.get(STARDATA_PROP_DISABLE_PARTITION))) {
+            LOG.info("Stardata: auto partition skipped for {}.{} "
+                    + "(stardata.disable_partition=true)", dbName, tableName);
+            return;
+        }
+
+        // ── skip if the user already set an explicit partition ───────────────────
+        String existingType = partitionTableInfo == null ? "" : partitionTableInfo.getPartitionType();
+        if (!Strings.isNullOrEmpty(existingType)
+                && !existingType.equalsIgnoreCase("UNPARTITIONED")) {
+            return;
+        }
+
+        // ── require created_at to be present (injected just before this call) ────
+        boolean hasCreatedAt = columns.stream()
+                .anyMatch(c -> "created_at".equalsIgnoreCase(c.getName()));
+        if (!hasCreatedAt) {
+            return;
+        }
+
+        // ── build: AUTO PARTITION BY RANGE (date_trunc('day', `created_at`)) () ──
+        //
+        // autoPartitionExprs list contains one UnboundFunction node:
+        //   date_trunc('day', `created_at`)
+        //
+        // Constructor signatures confirmed from doris-fe.jar bytecode:
+        //   UnboundFunction(String name, List<Expression> args)
+        //   UnboundSlot(List<String> nameParts)       — single-part name: ["created_at"]
+        //   StringLiteral(String value)
+        //   PartitionTableInfo(boolean isAutoPartition, String partitionType,
+        //                      List<PartitionDefinition> partitionDefs,
+        //                      List<Expression> autoPartitionExprs)
+        UnboundSlot createdAtSlot = new UnboundSlot(ImmutableList.of("created_at"));
+        StringLiteral dayLiteral  = new StringLiteral("day");
+
+        // date_trunc('day', `created_at`) — argument order matches Doris SQL syntax
+        UnboundFunction dateTruncExpr = new UnboundFunction(
+                "date_trunc",
+                ImmutableList.of(dayLiteral, createdAtSlot)
+        );
+
+        // isAutoPartition=true, type="RANGE", no static partition defs, one auto-expr
+        PartitionTableInfo autoRangePartition = new PartitionTableInfo(
+                true,                              // isAutoPartition
+                PartitionType.RANGE.name(),        // partitionType = "RANGE"
+                Lists.newArrayList(),              // no static PartitionDefinition entries
+                ImmutableList.of(dateTruncExpr)   // auto partition expression
+        );
+        setPartitionTableInfo(autoRangePartition);
+        LOG.info("Stardata: injected AUTO PARTITION BY RANGE (date_trunc('day', created_at)) "
+                + "for table {}.{}", dbName, tableName);
+    }
+
+    /**
+     * (d) Attach the pre-created {@value STARDATA_STORAGE_POLICY} storage policy
+     * to every qualifying table so that segments older than 1 day are
+     * automatically moved from local NVMe to the S3 cold tier.
+     *
+     * <p>The policy {@code sd_cold_1d} is created by
+     * {@code manifests/stardata/setup/06_storage_policies.sql} and relies on
+     * the {@code sd_s3_cold} S3 resource (bucket {@code xdatatoiceberg1}).
+     *
+     * <p>If the user has already set {@code storage_policy} explicitly, their
+     * value is preserved — we only set the default.
+     */
+    private void injectStoragePolicy() {
+        properties.putIfAbsent("storage_policy", STARDATA_STORAGE_POLICY);
+        LOG.debug("Stardata: storage_policy={}  for table {}.{}",
+                STARDATA_STORAGE_POLICY, dbName, tableName);
+    }
+
+    /**
+     * Entry point called from {@link #validate} after {@code dbName} is fully
+     * resolved.  Applies (b), (c), and (d) to every qualifying OLAP table.
+     *
+     * <p>Partition injection (c) can be individually suppressed by the user with:
+     * <pre>
+     *   PROPERTIES ("stardata.disable_partition" = "true")
+     * </pre>
+     * Both (b) {@code created_at} column injection and (d) storage policy remain
+     * active regardless of that flag.
+     */
+    private void injectStardataFeatures() {
+        if (!isStardataFeatureTarget()) {
+            return;
+        }
+        injectCreatedAtColumn();      // (b) created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
+        injectAutoRangePartition();   // (c) AUTO PARTITION BY RANGE (date_trunc('day', created_at))
+                                      //     skipped when stardata.disable_partition = true
+        injectStoragePolicy();        // (d) storage_policy = sd_cold_1d  (1-day hot→cold)
+    }
+
     /**
      * analyze create table info
      */
@@ -511,6 +711,12 @@ public class CreateTableInfo {
         } catch (org.apache.doris.common.AnalysisException e) {
             throw new AnalysisException(e.getMessage(), e.getCause());
         }
+
+        // Stardata: for every qualifying OLAP table (non-external, non-system DB) —
+        //   (b) ensure created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP exists
+        //   (c) auto-inject RANGE partition on created_at / HASH subpartition on snap_id
+        //   (d) attach the pre-created sd_cold_1d hot→cold storage policy (1-day cooldown)
+        injectStardataFeatures();
         if (!Env.getCurrentEnv().getAccessManager().checkTblPriv(ConnectContext.get(), ctlName, dbName,
                 tableName, PrivPredicate.CREATE)) {
             try {
