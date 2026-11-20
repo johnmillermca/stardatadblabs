@@ -64,24 +64,11 @@ RUN CP=$(find /opt/apache-doris/fe/lib -name '*.jar' | tr '\n' ':') && \
       /patch/src/org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.java \
       /patch/src/org/apache/doris/datasource/jdbc/client/JdbcDatabricksClient.java
 
-# Patch doris-fe.jar: replace all changed classes and inner classes
+# Patch doris-fe.jar: replace all changed classes and inner classes.
+# Use find -print0 | xargs to safely handle the case where no inner classes exist.
 RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
     cd /patch/classes && \
-    jar uf /patch/doris-fe.jar \
-      org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.class \
-      $(find org/apache/doris/nereids/trees/plans/commands/info -name 'CreateTableInfo$*.class' 2>/dev/null) \
-      org/apache/doris/catalog/JdbcResource.class \
-      $(find org/apache/doris/catalog -name 'JdbcResource$*.class' 2>/dev/null) \
-      org/apache/doris/catalog/JdbcTable.class \
-      $(find org/apache/doris/catalog -name 'JdbcTable$*.class' 2>/dev/null) \
-      org/apache/doris/datasource/jdbc/client/JdbcClient.class \
-      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcClient$*.class' 2>/dev/null) \
-      org/apache/doris/datasource/jdbc/client/JdbcSnowflakeClient.class \
-      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcSnowflakeClient$*.class' 2>/dev/null) \
-      org/apache/doris/datasource/jdbc/client/JdbcMongoDBClient.class \
-      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcMongoDBClient$*.class' 2>/dev/null) \
-      org/apache/doris/datasource/jdbc/client/JdbcDatabricksClient.class \
-      $(find org/apache/doris/datasource/jdbc/client -name 'JdbcDatabricksClient$*.class' 2>/dev/null)
+    find . -name '*.class' -print0 | xargs -0 jar uf /patch/doris-fe.jar
 
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
