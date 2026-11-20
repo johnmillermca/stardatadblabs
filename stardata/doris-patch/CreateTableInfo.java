@@ -558,8 +558,10 @@ public class CreateTableInfo {
      * </ul>
      */
     private void injectAutoRangePartition() {
-        // ── opt-out check ────────────────────────────────────────────────────────
-        if ("true".equalsIgnoreCase(properties.get(STARDATA_PROP_DISABLE_PARTITION))) {
+        // ── opt-out check — consume the flag so Doris's property analyzer never sees it
+        boolean disablePartition = "true".equalsIgnoreCase(
+                properties.remove(STARDATA_PROP_DISABLE_PARTITION));
+        if (disablePartition) {
             LOG.info("Stardata: auto partition skipped for {}.{} "
                     + "(stardata.disable_partition=true)", dbName, tableName);
             return;
