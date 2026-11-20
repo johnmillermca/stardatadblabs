@@ -143,6 +143,8 @@ public class JdbcTable extends Table {
         tempMap.put("snowflake", TOdbcTableType.POSTGRESQL);
         // MongoDB JDBC: use POSTGRESQL quoting (double-quotes, standard SQL)
         tempMap.put("mongodb", TOdbcTableType.POSTGRESQL);
+        // Databricks: use POSTGRESQL quoting (backtick-free, double-quote ANSI SQL)
+        tempMap.put("databricks", TOdbcTableType.POSTGRESQL);
         TABLE_TYPE_MAP = Collections.unmodifiableMap(tempMap);
     }
 
