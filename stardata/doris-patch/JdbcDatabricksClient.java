@@ -75,10 +75,14 @@ public class JdbcDatabricksClient extends JdbcClient {
             case java.sql.Types.BIT:
                 return Type.BOOLEAN;
             case java.sql.Types.DATE:
-                return ScalarType.createDateV2Type();
+                // Databricks JDBC driver returns DATE values as String via getObject() —
+                // map to String so the BE does not allocate a date array.
+                return ScalarType.createStringType();
             case java.sql.Types.TIMESTAMP:
             case java.sql.Types.TIMESTAMP_WITH_TIMEZONE:
-                return ScalarType.createDatetimeV2Type(6);
+                // Databricks JDBC driver returns TIMESTAMP values as String —
+                // map to String to avoid ArrayStoreException in BE getBlockAddress.
+                return ScalarType.createStringType();
             case java.sql.Types.CHAR:
             case java.sql.Types.NCHAR: {
                 int len = fieldSchema.getColumnSize().orElse(1);
