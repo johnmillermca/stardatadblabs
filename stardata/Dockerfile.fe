@@ -10,18 +10,20 @@
 #   Stage 2 (runtime): copy the patched JAR into a clean copy of the base image.
 #
 # Patches applied (CreateTableInfo.java — injectStardataFeatures()):
-#   (a) injectSnapIdColumn()        — prepends snap_id BIGINT NOT NULL AUTO_INCREMENT
-#                                     to every new internal OLAP table.
-#   (b) injectCreatedAtColumn()     — appends created_at DATETIMEV2 NOT NULL
-#                                     DEFAULT CURRENT_TIMESTAMP when missing.
-#                                     Skipped: cache_system DB, external catalogs.
-#   (c) injectAutoRangePartition()  — AUTO PARTITION BY RANGE
-#                                     (date_trunc('day', created_at)) when no
-#                                     explicit partition is declared.
-#                                     Opt-out: PROPERTIES ("stardata.disable_partition"="true")
-#   (d) injectStoragePolicy()       — sets "storage_policy"="sd_cold_1d" (hot→cold
-#                                     after 1 day via pre-created sd_s3_cold resource).
-#                                     Never overwrites a user-supplied value.
+#   (a) injectSnapIdColumnIfIceberg()  — injects snap_id BIGINT NOT NULL AUTO_INCREMENT
+#                                        only when PROPERTIES ("stardata.table_type"="iceberg").
+#   (b) injectCreatedAtColumn()        — appends created_at DATETIMEV2 NOT NULL
+#                                        DEFAULT CURRENT_TIMESTAMP when missing (all tables).
+#       injectUpdatedAtColumnIfIceberg()— appends updated_at DATETIMEV2 NOT NULL
+#                                        DEFAULT CURRENT_TIMESTAMP ON UPDATE … (iceberg only).
+#       cache_system excluded for regular tables only; iceberg-type tables allowed through.
+#   (d) injectAutoRangePartition()     — AUTO PARTITION BY RANGE (date_trunc('day', created_at))
+#                                        + HASH(snap_id) for iceberg / RANDOM for regular (no unique key)
+#                                        / existing dist for unique-key tables.
+#                                        Opt-out: PROPERTIES ("stardata.disable_partition"="true")
+#   (c) injectStoragePolicy()          — sets "storage_policy"="sd_cold_1d" (hot→cold
+#                                        after 1 day). Applied to all qualifying tables.
+#                                        Never overwrites a user-supplied value.
 #
 #   JdbcResource.java         — adds JDBC_SNOWFLAKE/SNOWFLAKE and JDBC_DATABRICKS/DATABRICKS
 #                               constants and parseDbType() branches.
@@ -86,7 +88,7 @@ FROM docker.io/apache/doris:fe-4.1.4.1
 
 LABEL org.stardata.version="4.5.1"
 LABEL org.stardata.base="apache/doris:branch-4.2"
-LABEL org.stardata.patch="snap_id-auto-inject,created_at-auto-inject,auto-range-partition,sd_cold_1d-storage-policy,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
+LABEL org.stardata.patch="snap_id-iceberg-only,created_at-auto-inject,updated_at-iceberg-only,auto-range-partition,iceberg-hash-snap_id,regular-random-bucket,sd_cold_1d-storage-policy,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
 

@@ -9,63 +9,131 @@
 --    via the stardata-fe-config ConfigMap — no ADMIN SET needed here.
 --
 -- 2. The Stardata FE patch (CreateTableInfo.java :: injectStardataFeatures)
---    automatically applies the following to EVERY new OLAP table created in
---    any database EXCEPT cache_system (and Doris internal system databases):
+--    automatically applies the following to every new OLAP table created in
+--    any user database (excluding Doris system databases __internal_schema /
+--    information_schema, and cache_system for regular tables — see below).
 --
---      (b) Adds:  created_at  DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
---          if the table does not already declare that column.
---          Always applied. Cannot be suppressed.
+-- ─── Iceberg-type tables ─────────────────────────────────────────────────────
 --
---      (c) Injects:
---            AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
---          when no partition is explicitly specified by the user.
---          → one calendar-day partition is auto-created per INSERT automatically.
---          CAN BE SUPPRESSED per-table with:
---            PROPERTIES ("stardata.disable_partition" = "true")
---          When suppressed, only (b) and (d) are applied — useful for tables
---          that handle their own partition scheme or don't need range partitioning.
+--   Triggered by:  PROPERTIES ("stardata.table_type" = "iceberg")
 --
---      (d) Sets:  "storage_policy" = "sd_cold_1d"
---          (the policy created in 06_storage_policies.sql).
---          Always applied.  User-supplied storage_policy is never overwritten.
+--   Injected automatically (skipped if the user already declared the column):
+--     (a)  snap_id    BIGINT NOT NULL AUTO_INCREMENT(1)
+--     (b)  created_at DATETIMEV2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
+--     (b)  updated_at DATETIMEV2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
+--                     [ON UPDATE CURRENT_TIMESTAMP]
+--     (d)  AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
+--     (d)  DISTRIBUTED BY HASH(snap_id) BUCKETS AUTO
+--     (c)  "storage_policy" = "sd_cold_1d"
 --
--- ─── Normal usage — full automation ──────────────────────────────────────────
+--   The internal property "stardata.table_type" is stripped before Doris
+--   analyzers run — it will not appear in SHOW CREATE TABLE.
 --
---   CREATE TABLE analytics.my_table (
---       user_id  VARCHAR(64)  NOT NULL,
---       payload  JSON
---   );
+--   cache_system is NOT excluded for iceberg-type tables — a table in
+--   cache_system with stardata.table_type=iceberg receives full injection.
 --
--- FE produces the equivalent of:
+-- ─── Regular tables (no stardata.table_type property) ────────────────────────
 --
---   CREATE TABLE analytics.my_table (
---       snap_id    BIGINT       NOT NULL AUTO_INCREMENT(1),
---       user_id    VARCHAR(64)  NOT NULL,
---       payload    JSON,
---       created_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP
---   )
---   AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
---   DISTRIBUTED BY HASH (snap_id) BUCKETS AUTO
---   PROPERTIES ("storage_policy" = "sd_cold_1d");
+--   Injected automatically:
+--     (b)  created_at DATETIMEV2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
+--          (skipped if the user already declared created_at)
+--     (e)  AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
+--          DISTRIBUTED BY RANDOM BUCKETS AUTO    — when no UNIQUE KEY
+--          (existing user distribution kept)      — when UNIQUE KEY declared
+--     (c)  "storage_policy" = "sd_cold_1d"
 --
--- ─── Opt-out of partition only — keep created_at + hot/cold storage ──────────
+--   cache_system is excluded for regular tables (Doris internal bookkeeping
+--   tables must not receive auto-injected columns or policies).
 --
---   CREATE TABLE analytics.lookup_table (
---       code   VARCHAR(32) NOT NULL,
---       label  VARCHAR(256)
+-- ─── Opt-out of partition only ───────────────────────────────────────────────
+--
+--   Add  PROPERTIES ("stardata.disable_partition" = "true")  to suppress the
+--   AUTO PARTITION injection.  created_at column and storage_policy are still
+--   applied regardless of this flag.
+--
+-- ─── Example: iceberg-type table ─────────────────────────────────────────────
+--
+--   User writes:
+--
+--     CREATE TABLE analytics.events (
+--         user_id  VARCHAR(64) NOT NULL,
+--         payload  JSON
+--     )
+--     PROPERTIES ("stardata.table_type" = "iceberg");
+--
+--   FE produces the equivalent of:
+--
+--     CREATE TABLE analytics.events (
+--         user_id    VARCHAR(64)  NOT NULL,
+--         snap_id    BIGINT       NOT NULL AUTO_INCREMENT(1),
+--         payload    JSON,
+--         created_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--         updated_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP
+--     )
+--     AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
+--     DISTRIBUTED BY HASH(snap_id) BUCKETS AUTO
+--     PROPERTIES ("storage_policy" = "sd_cold_1d");
+--
+-- ─── Example: regular table (no unique key) ───────────────────────────────────
+--
+--   User writes:
+--
+--     CREATE TABLE analytics.logs (
+--         level    TINYINT NOT NULL,
+--         message  VARCHAR(1024)
+--     );
+--
+--   FE produces the equivalent of:
+--
+--     CREATE TABLE analytics.logs (
+--         level      TINYINT      NOT NULL,
+--         message    VARCHAR(1024),
+--         created_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP
+--     )
+--     AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
+--     DISTRIBUTED BY RANDOM BUCKETS AUTO
+--     PROPERTIES ("storage_policy" = "sd_cold_1d");
+--
+-- ─── Example: regular table with unique key ───────────────────────────────────
+--
+--   User writes:
+--
+--     CREATE TABLE analytics.users (
+--         user_id  VARCHAR(64) NOT NULL,
+--         email    VARCHAR(256)
+--     )
+--     UNIQUE KEY (user_id)
+--     DISTRIBUTED BY HASH(user_id) BUCKETS 10;
+--
+--   FE produces the equivalent of:
+--
+--     CREATE TABLE analytics.users (
+--         user_id    VARCHAR(64)  NOT NULL,
+--         email      VARCHAR(256),
+--         created_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP
+--     )
+--     UNIQUE KEY (user_id)
+--     AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()
+--     DISTRIBUTED BY HASH(user_id) BUCKETS 10          -- user value kept
+--     PROPERTIES ("storage_policy" = "sd_cold_1d");
+--
+-- ─── Example: opt-out of auto partition ──────────────────────────────────────
+--
+--   CREATE TABLE analytics.lookup (
+--       code  VARCHAR(32) NOT NULL,
+--       label VARCHAR(256)
 --   )
 --   PROPERTIES ("stardata.disable_partition" = "true");
 --
--- FE produces:
+--   FE produces:
 --
---   CREATE TABLE analytics.lookup_table (
---       snap_id    BIGINT       NOT NULL AUTO_INCREMENT(1),
---       code       VARCHAR(32)  NOT NULL,
---       label      VARCHAR(256),
---       created_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP
---   )
---   DISTRIBUTED BY HASH (snap_id) BUCKETS AUTO
---   PROPERTIES ("storage_policy" = "sd_cold_1d");   -- hot→cold still active
+--     CREATE TABLE analytics.lookup (
+--         code       VARCHAR(32)  NOT NULL,
+--         label      VARCHAR(256),
+--         created_at DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP
+--     )
+--     DISTRIBUTED BY RANDOM BUCKETS AUTO
+--     PROPERTIES ("storage_policy" = "sd_cold_1d");   -- hot→cold still active
 --
 -- Apply
 -- ─────
@@ -74,55 +142,12 @@
 --
 --   mysql -h 192.168.1.50 -P 9030 -u root -p"${STARDATA_PASS}" \
 --         < manifests/stardata/setup/07_auto_partition_snap_id.sql
+--
+-- Regression tests
+-- ────────────────
+--   See: manifests/stardata/setup/09_test_stardata_features.sql
 -- =============================================================================
 
 -- Raise the per-table auto-partition ceiling to 50 000 (default is 2 000).
--- Needed for tables with high created_at/snap_id cardinality over long retention windows.
+-- Needed for tables with high created_at cardinality over long retention windows.
 ADMIN SET FRONTEND CONFIG ("max_auto_partition_num" = "50000");
-
--- =============================================================================
--- Reference CREATE TABLE template — shown for documentation only.
--- The FE patch injects all of this automatically; you do NOT need to write it.
--- =============================================================================
---
---   CREATE TABLE <database>.<table_name> (
---       snap_id      BIGINT       NOT NULL,   -- auto-injected by FE patch
---       -- your columns …
---       created_at   DATETIMEV2   NOT NULL DEFAULT CURRENT_TIMESTAMP  -- auto-injected
---   )
---   DUPLICATE KEY (snap_id)        -- or UNIQUE KEY / AGGREGATE KEY
---   AUTO PARTITION BY RANGE (date_trunc('day', created_at)) ()  -- auto-injected
---   SUBPARTITIONED BY HASH (snap_id) BUCKETS AUTO               -- auto-injected
---   DISTRIBUTED BY HASH (snap_id) BUCKETS AUTO
---   PROPERTIES (
---       "replication_num" = "3",
---       "storage_policy"  = "sd_cold_1d"   -- auto-injected
---   );
---
--- What happens on INSERT:
---   created_at = 2026-11-20 …  → Doris AUTO-CREATES partition p20261120   [2026-11-20, 2026-11-21)
---   created_at = 2026-11-21 …  → Doris AUTO-CREATES partition p20261121   [2026-11-21, 2026-11-22)
---   Each daily partition is sub-sharded by HASH(snap_id).
---   No ALTER TABLE. No cron. No DBA action. Ever.
--- =============================================================================
-
--- =============================================================================
--- Smoke test (uncomment to run)
--- =============================================================================
--- CREATE DATABASE IF NOT EXISTS analytics;
---
--- -- Minimal DDL — FE patch injects snap_id, created_at, partition, storage_policy:
--- CREATE TABLE IF NOT EXISTS analytics.snap_demo (
---     event_ts     DATETIME    NOT NULL,
---     user_id      VARCHAR(64),
---     payload      JSON
--- );
---
--- INSERT INTO analytics.snap_demo (event_ts, user_id, payload) VALUES
---     (NOW(),                  'u1', NULL),
---     (NOW() + INTERVAL 1 DAY, 'u2', NULL),
---     (NOW() + INTERVAL 2 DAY, 'u3', NULL);
---
--- Should show three daily partitions created automatically:
--- SHOW PARTITIONS FROM analytics.snap_demo;
--- =============================================================================

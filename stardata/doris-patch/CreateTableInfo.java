@@ -403,82 +403,68 @@ public class CreateTableInfo {
         }
     }
 
-    /**
-     * Stardata: inject snap_id BIGINT NOT NULL AUTO_INCREMENT into every OLAP table,
-     * unless the column is already explicitly declared by the user.
-     *
-     * Rules:
-     *  - Only applied to non-external (OLAP) tables; external engine tables are left unchanged.
-     *  - If the user already includes a column named "snap_id" (case-insensitive), the existing
-     *    definition is kept as-is -- no duplicate is added.
-     *  - Inserted immediately after the declared key columns so it is always a value column.
-     *    Doris requires that key columns form a contiguous prefix of the schema; placing
-     *    snap_id after them satisfies that constraint for UNIQUE KEY and AGG_KEYS tables.
-     *    For DUPLICATE KEY tables the key list may be empty at this point, in which case
-     *    snap_id lands at index 0 (the first column), which is also valid.
-     */
-    private void injectSnapIdColumn() {
-        // Only inject for internal OLAP tables; skip external engines (Iceberg, Hive, ...)
-        if (isExternal) {
-            return;
-        }
-        // Skip CTAS path -- columns list is null until validateCreateTableAsSelect sets it
-        if (columns == null) {
-            return;
-        }
-        // Skip if the user already declared snap_id (case-insensitive)
-        boolean alreadyDeclared = columns.stream()
-                .anyMatch(c -> "snap_id".equalsIgnoreCase(c.getName()));
-        if (alreadyDeclared) {
-            return;
-        }
-        // Build snap_id BIGINT NOT NULL AUTO_INCREMENT -- autoIncInitValue=1 enables AUTO_INCREMENT
-        ColumnDefinition snapIdCol = new ColumnDefinition(
-                "snap_id",
-                BigIntType.INSTANCE,
-                false,                          // isKey -- set later during key analysis
-                null,                           // aggType -- set later during key analysis
-                ColumnNullableType.NOT_NULLABLE,
-                1L,                             // autoIncInitValue != -1 -> AUTO_INCREMENT
-                Optional.empty(),               // no DEFAULT value
-                Optional.empty(),               // no ON UPDATE
-                "auto-increment row identifier",
-                Optional.empty()                // no generated column
-        );
-        // Insert after declared key columns so snap_id is always a value column.
-        // keys may still be empty here for DUPLICATE KEY tables -- that is fine.
-        int insertPos = (keys == null) ? 0 : keys.size();
-        if (insertPos > columns.size()) {
-            insertPos = columns.size();
-        }
-        columns.add(insertPos, snapIdCol);
-    }
-
     // ─── Stardata feature-injection helpers ──────────────────────────────────────
     //
-    // Exclusion rule (applies to ALL three helpers below):
+    // Exclusion rule (applies to ALL helpers below):
     //   • skip external-engine tables  (isExternal == true)
-    //   • skip the cache_system database (internal bookkeeping tables)
     //   • skip Doris's own system databases (__internal_schema, information_schema)
     //   • skip the CTAS path where columns is still null
     //
-    // All three helpers are called together from injectStardataFeatures() which
-    // runs in validate() after dbName has been fully resolved.
+    // "Iceberg table type" is signalled by the user setting:
+    //   PROPERTIES ("stardata.table_type" = "iceberg")
+    //
+    // For iceberg-type tables:
+    //   – snap_id, created_at, updated_at are always injected (regardless of DB)
+    //   – auto partition uses created_at + HASH distribution on snap_id
+    //   – hot/cold storage policy is applied
+    //   – cache_system DB is NOT excluded (iceberg tables may live there)
+    //
+    // For regular (non-iceberg) tables:
+    //   – cache_system database is skipped
+    //   – only created_at is injected
+    //   – auto partition uses created_at day + RANDOM bucket (no unique cols)
+    //     or existing user distribution (if unique cols present)
+    //   – hot/cold storage policy is applied
+    //
+    // All helpers are called from injectStardataFeatures() which runs in
+    // validate() after dbName has been fully resolved.
 
     private static final String STARDATA_EXCLUDED_DB_CACHE_SYSTEM  = "cache_system";
     private static final String STARDATA_STORAGE_POLICY             = "sd_cold_1d";
     // Table property the user can set to opt out of auto partition injection only.
-    // Both created_at column injection and storage policy are still applied.
+    // Both column injection and storage policy are still applied.
     // Usage:  CREATE TABLE … PROPERTIES ("stardata.disable_partition" = "true");
     private static final String STARDATA_PROP_DISABLE_PARTITION     = "stardata.disable_partition";
+    // Table property that marks the table as an iceberg-type Stardata table.
+    // Usage:  CREATE TABLE … PROPERTIES ("stardata.table_type" = "iceberg");
+    private static final String STARDATA_PROP_TABLE_TYPE            = "stardata.table_type";
+    private static final String STARDATA_TABLE_TYPE_ICEBERG         = "iceberg";
+
+    /**
+     * Returns true when the user has declared this table as an iceberg-type
+     * Stardata table via {@code PROPERTIES ("stardata.table_type" = "iceberg")}.
+     */
+    private boolean isIcebergTableType() {
+        if (properties == null) {
+            return false;
+        }
+        return STARDATA_TABLE_TYPE_ICEBERG.equalsIgnoreCase(
+                properties.get(STARDATA_PROP_TABLE_TYPE));
+    }
 
     /**
      * Returns true when the current CREATE TABLE should receive Stardata automatic
-     * enhancements (created_at column, range partition, storage policy).
+     * enhancements (column injection, range partition, storage policy).
      *
-     * Excluded:
-     *   – any external-engine table (Iceberg, Hive, JDBC, …)
-     *   – cache_system database (internal bookkeeping)
+     * For iceberg-type tables (stardata.table_type=iceberg):
+     *   – system databases (__internal_schema, information_schema) are excluded
+     *   – cache_system is NOT excluded — iceberg tables can live in any user DB
+     *
+     * For regular tables:
+     *   – cache_system database is additionally excluded
+     *
+     * Common exclusions (both paths):
+     *   – any external-engine table (Iceberg engine, Hive, JDBC, …)
      *   – Doris system databases (__internal_schema, information_schema)
      *   – CTAS path (columns list is null at this stage)
      */
@@ -492,13 +478,55 @@ public class CreateTableInfo {
         if (!engineName.equalsIgnoreCase(ENGINE_OLAP)) {
             return false;
         }
-        // Exclude reserved / system databases
-        if (STARDATA_EXCLUDED_DB_CACHE_SYSTEM.equalsIgnoreCase(dbName)
-                || "__internal_schema".equalsIgnoreCase(dbName)
+        // Always exclude Doris internal system databases
+        if ("__internal_schema".equalsIgnoreCase(dbName)
                 || "information_schema".equalsIgnoreCase(dbName)) {
             return false;
         }
+        // Exclude cache_system only for regular (non-iceberg) tables
+        if (!isIcebergTableType()
+                && STARDATA_EXCLUDED_DB_CACHE_SYSTEM.equalsIgnoreCase(dbName)) {
+            return false;
+        }
         return true;
+    }
+
+    /**
+     * (a/b) Inject {@code snap_id BIGINT NOT NULL AUTO_INCREMENT} for iceberg-type
+     * Stardata tables, unless the user already declared a column named {@code snap_id}
+     * (case-insensitive).
+     *
+     * Called only from within the {@code isIceberg} branch of
+     * {@link #injectStardataFeatures()} — the caller guarantees iceberg-type.
+     * Inserted immediately after the declared key columns so it is always a value column.
+     */
+    private void injectSnapIdColumnIfIceberg() {
+        boolean alreadyDeclared = columns.stream()
+                .anyMatch(c -> "snap_id".equalsIgnoreCase(c.getName()));
+        if (alreadyDeclared) {
+            return;
+        }
+        // Build snap_id BIGINT NOT NULL AUTO_INCREMENT — autoIncInitValue=1 enables AUTO_INCREMENT
+        ColumnDefinition snapIdCol = new ColumnDefinition(
+                "snap_id",
+                BigIntType.INSTANCE,
+                false,                          // isKey — set later during key analysis
+                null,                           // aggType — set later during key analysis
+                ColumnNullableType.NOT_NULLABLE,
+                1L,                             // autoIncInitValue != -1 -> AUTO_INCREMENT
+                Optional.empty(),               // no DEFAULT value
+                Optional.empty(),               // no ON UPDATE
+                "auto-increment row identifier (Stardata iceberg-type)",
+                Optional.empty()                // no generated column
+        );
+        // Insert after declared key columns so snap_id is always a value column.
+        int insertPos = (keys == null) ? 0 : keys.size();
+        if (insertPos > columns.size()) {
+            insertPos = columns.size();
+        }
+        columns.add(insertPos, snapIdCol);
+        LOG.info("Stardata: injected snap_id BIGINT NOT NULL AUTO_INCREMENT "
+                + "into iceberg-type table {}.{}", dbName, tableName);
     }
 
     /**
@@ -535,29 +563,61 @@ public class CreateTableInfo {
     }
 
     /**
-     * (c) Inject an AUTO RANGE PARTITION on {@code created_at} (truncated to day)
-     * when the user has not already specified any partition scheme and has not set
-     * the {@value STARDATA_PROP_DISABLE_PARTITION} property to {@code "true"}.
+     * (b) Inject {@code updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP}
+     * for iceberg-type Stardata tables, unless the user already declared a column
+     * named {@code updated_at} (case-insensitive).
      *
-     * <p>The injected DDL is equivalent to:
+     * Called only from within the {@code isIceberg} branch of
+     * {@link #injectStardataFeatures()} — the caller guarantees iceberg-type.
+     */
+    private void injectUpdatedAtColumnIfIceberg() {
+        boolean alreadyDeclared = columns.stream()
+                .anyMatch(c -> "updated_at".equalsIgnoreCase(c.getName()));
+        if (alreadyDeclared) {
+            return;
+        }
+        ColumnDefinition updatedAtCol = new ColumnDefinition(
+                "updated_at",
+                DateTimeV2Type.of(0),
+                false,                             // isKey
+                null,                              // aggType — set later during key analysis
+                ColumnNullableType.NOT_NULLABLE,
+                -1L,                               // not auto-increment
+                Optional.of(new DefaultValue("CURRENT_TIMESTAMP", "now")),
+                Optional.of(new DefaultValue("CURRENT_TIMESTAMP", "now")), // ON UPDATE CURRENT_TIMESTAMP
+                "row last-update timestamp (auto-injected by Stardata iceberg-type)",
+                Optional.empty()                   // no generated column
+        );
+        columns.add(updatedAtCol);
+        LOG.info("Stardata: injected updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP "
+                + "ON UPDATE CURRENT_TIMESTAMP into iceberg-type table {}.{}", dbName, tableName);
+    }
+
+    /**
+     * (d/e) Inject an AUTO RANGE PARTITION on {@code created_at} (truncated to day).
+     *
+     * <p>For iceberg-type tables (stardata.table_type=iceberg):
      * <pre>
      *   AUTO PARTITION BY RANGE (date_trunc('day', `created_at`)) ()
+     *   DISTRIBUTED BY HASH(`snap_id`) BUCKETS AUTO
      * </pre>
      *
-     * <p>This uses the real {@code PartitionTableInfo} constructor:
-     * {@code PartitionTableInfo(boolean isAutoPartition, String partitionType,
-     * List<PartitionDefinition> partitionDefs, List<Expression> autoPartitionExprs)}
-     * discovered from the compiled Doris FE bytecode.
+     * <p>For regular tables:
+     * <pre>
+     *   AUTO PARTITION BY RANGE (date_trunc('day', `created_at`)) ()
+     *   DISTRIBUTED BY RANDOM BUCKETS AUTO   -- when no unique key columns exist
+     *   (existing user distribution kept)     -- when unique key columns exist
+     * </pre>
      *
      * <p>Skipped when:
      * <ul>
      *   <li>The user already declared an explicit RANGE or LIST partition.</li>
-     *   <li>The property {@code "stardata.disable_partition" = "true"} is set —
-     *       in that case only the {@code created_at} column and storage policy
-     *       are still applied.</li>
+     *   <li>The property {@code "stardata.disable_partition" = "true"} is set.</li>
      * </ul>
+     * @param isIcebergType true when {@code stardata.table_type=iceberg} was set
+     *        (the property has already been removed from the map by the time this runs)
      */
-    private void injectAutoRangePartition() {
+    private void injectAutoRangePartition(boolean isIcebergType) {
         // ── opt-out check — consume the flag so Doris's property analyzer never sees it
         boolean disablePartition = "true".equalsIgnoreCase(
                 properties.remove(STARDATA_PROP_DISABLE_PARTITION));
@@ -612,10 +672,39 @@ public class CreateTableInfo {
         setPartitionTableInfo(autoRangePartition);
         LOG.info("Stardata: injected AUTO PARTITION BY RANGE (date_trunc('day', created_at)) "
                 + "for table {}.{}", dbName, tableName);
+
+        // ── inject distribution ────────────────────────────────────────────────────
+        if (isIcebergType) {
+            // (d) iceberg-type: DISTRIBUTED BY HASH(`snap_id`) BUCKETS AUTO
+            // DistributionDescriptor(isHash=true, isAutoBucket=true, buckets, hashCols)
+            distribution = new DistributionDescriptor(
+                    true,                                       // isHash — HASH distribution
+                    true,                                       // isAutoBucket
+                    FeConstants.default_bucket_num,
+                    Lists.newArrayList("snap_id")
+            );
+            LOG.info("Stardata: set DISTRIBUTED BY HASH(snap_id) BUCKETS AUTO "
+                    + "for iceberg-type table {}.{}", dbName, tableName);
+        } else {
+            // (e) regular table: DISTRIBUTED BY RANDOM BUCKETS AUTO when no unique key columns.
+            // If unique keys are present, keep the existing user-specified (or Doris-default) distribution.
+            boolean hasUniqueKeys = (keysType == KeysType.UNIQUE_KEYS);
+            if (!hasUniqueKeys) {
+                // DistributionDescriptor(isHash=false, isAutoBucket=true, buckets, null) → RANDOM
+                distribution = new DistributionDescriptor(
+                        false,                                  // isHash=false → RANDOM distribution
+                        true,                                   // isAutoBucket
+                        FeConstants.default_bucket_num,
+                        null                                    // no hash columns → random
+                );
+                LOG.info("Stardata: set DISTRIBUTED BY RANDOM BUCKETS AUTO "
+                        + "for non-unique table {}.{}", dbName, tableName);
+            }
+        }
     }
 
     /**
-     * (d) Attach the pre-created {@value STARDATA_STORAGE_POLICY} storage policy
+     * (c) Attach the pre-created {@value STARDATA_STORAGE_POLICY} storage policy
      * to every qualifying table so that segments older than 1 day are
      * automatically moved from local NVMe to the S3 cold tier.
      *
@@ -625,6 +714,8 @@ public class CreateTableInfo {
      *
      * <p>If the user has already set {@code storage_policy} explicitly, their
      * value is preserved — we only set the default.
+     *
+     * Applied to ALL qualifying tables (both iceberg-type and regular).
      */
     private void injectStoragePolicy() {
         properties.putIfAbsent("storage_policy", STARDATA_STORAGE_POLICY);
@@ -634,23 +725,50 @@ public class CreateTableInfo {
 
     /**
      * Entry point called from {@link #validate} after {@code dbName} is fully
-     * resolved.  Applies (b), (c), and (d) to every qualifying OLAP table.
+     * resolved.  Applies column injection, partition, and storage policy to every
+     * qualifying OLAP table.
      *
-     * <p>Partition injection (c) can be individually suppressed by the user with:
+     * <p>For iceberg-type tables ({@code stardata.table_type=iceberg}):
+     * <ol>
+     *   <li>snap_id BIGINT NOT NULL AUTO_INCREMENT (if not already present)</li>
+     *   <li>created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP</li>
+     *   <li>updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE …</li>
+     *   <li>AUTO PARTITION BY RANGE (date_trunc('day', created_at)) + HASH(snap_id)</li>
+     *   <li>storage_policy = sd_cold_1d</li>
+     * </ol>
+     *
+     * <p>For regular tables:
+     * <ol>
+     *   <li>created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP</li>
+     *   <li>AUTO PARTITION BY RANGE (date_trunc('day', created_at))
+     *       + RANDOM bucket (no unique cols) or existing distribution (unique cols)</li>
+     *   <li>storage_policy = sd_cold_1d</li>
+     * </ol>
+     *
+     * <p>Partition injection can be individually suppressed by the user with:
      * <pre>
      *   PROPERTIES ("stardata.disable_partition" = "true")
      * </pre>
-     * Both (b) {@code created_at} column injection and (d) storage policy remain
-     * active regardless of that flag.
      */
     private void injectStardataFeatures() {
         if (!isStardataFeatureTarget()) {
             return;
         }
-        injectCreatedAtColumn();      // (b) created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
-        injectAutoRangePartition();   // (c) AUTO PARTITION BY RANGE (date_trunc('day', created_at))
-                                      //     skipped when stardata.disable_partition = true
-        injectStoragePolicy();        // (d) storage_policy = sd_cold_1d  (1-day hot→cold)
+        // Remove the internal stardata.table_type property before it reaches Doris analyzers
+        boolean isIceberg = isIcebergTableType();
+        properties.remove(STARDATA_PROP_TABLE_TYPE);
+
+        if (isIceberg) {
+            injectSnapIdColumnIfIceberg();    // snap_id BIGINT NOT NULL AUTO_INCREMENT
+            injectCreatedAtColumn();          // created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
+            injectUpdatedAtColumnIfIceberg(); // updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE …
+        } else {
+            injectCreatedAtColumn();          // created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
+        }
+        injectAutoRangePartition(isIceberg);  // AUTO PARTITION BY RANGE (date_trunc('day', created_at))
+                                              //   + HASH(snap_id) for iceberg / RANDOM for regular (no unique)
+                                              //   skipped when stardata.disable_partition = true
+        injectStoragePolicy();                // storage_policy = sd_cold_1d  (hot→cold, all tables)
     }
 
     /**
@@ -661,10 +779,6 @@ public class CreateTableInfo {
         if (columns.isEmpty()) {
             throw new AnalysisException("table should contain at least one column");
         }
-
-        // Stardata: automatically prepend snap_id BIGINT NOT NULL AUTO_INCREMENT to every
-        // OLAP (internal-catalog) table that does not already declare the column.
-        injectSnapIdColumn();
 
         // analyze catalog name
         if (Strings.isNullOrEmpty(ctlName)) {
