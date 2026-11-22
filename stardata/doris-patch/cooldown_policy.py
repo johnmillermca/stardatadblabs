@@ -190,13 +190,22 @@ def process_once(conn):
 def main():
     log.info("Stardata cooldown sidecar starting — host=%s port=%d cooldown=%dd interval=%ds",
              DORIS_HOST, DORIS_PORT, COOLDOWN_DAYS, POLL_INTERVAL_SECONDS)
+
+    # On startup, retry every 30s until we get a successful connection,
+    # then switch to the normal POLL_INTERVAL_SECONDS cadence.
+    startup_done = False
     while True:
         try:
             conn = connect()
             process_once(conn)
             conn.close()
+            startup_done = True
         except Exception as e:
             log.error("Cycle error: %s", e)
+            if not startup_done:
+                log.info("Retrying startup connection in 30s...")
+                time.sleep(30)
+                continue
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
