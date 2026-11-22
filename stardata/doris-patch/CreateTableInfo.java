@@ -795,12 +795,11 @@ public class CreateTableInfo {
      * user-declared UNIQUE KEY tables (which are non-MOW unless explicitly set).
      */
     private void injectStoragePolicy() {
-        // Doris engine hard-rejects storage_policy on MOW tables — skip only when MOW is active.
-        String mowVal = properties.get(
-                org.apache.doris.common.util.PropertyAnalyzer.ENABLE_UNIQUE_KEY_MERGE_ON_WRITE);
-        if ("true".equalsIgnoreCase(mowVal)) {
-            LOG.debug("Stardata: skipping storage_policy for MOW table {}.{} "
-                    + "(Doris rejects storage_policy on MOW tables)", dbName, tableName);
+        // Doris 4.x enables MOW by default for ALL UNIQUE KEY tables.
+        // MOW hard-rejects storage_policy — skip for any UNIQUE KEY table.
+        if (keysType == KeysType.UNIQUE_KEYS) {
+            LOG.debug("Stardata: skipping storage_policy for UNIQUE KEY table {}.{} "
+                    + "(Doris 4.x MOW-by-default rejects storage_policy)", dbName, tableName);
             return;
         }
         properties.putIfAbsent("storage_policy", STARDATA_STORAGE_POLICY);
