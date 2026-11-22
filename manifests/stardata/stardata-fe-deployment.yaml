@@ -190,7 +190,7 @@ spec:
         # shared emptyDir so the httpd sidecar can serve it on :8181.
         - name: seed-jdbc-drivers
           image: 192.168.1.50:30500/apache/stardata:fe-4.5.1
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - sh
             - -c
@@ -215,7 +215,7 @@ spec:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
           image: 192.168.1.50:30500/apache/stardata:fe-4.5.1
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - /opt/apache-doris/fe_entrypoint.sh
             - stardata-fe-headless.prod.svc.cluster.local
