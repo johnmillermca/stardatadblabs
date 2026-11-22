@@ -577,6 +577,18 @@ public class CreateTableInfo {
         boolean alreadyDeclared = columns.stream()
                 .anyMatch(c -> "created_at".equalsIgnoreCase(c.getName()));
         if (alreadyDeclared) {
+            // Column exists — but for UNIQUE KEY (MOW) tables the partition column must be
+            // a KEY column. If the user pre-declared created_at but it's not in the keys list,
+            // add it now so the auto-partition injection does not fail validation.
+            if (keysType == KeysType.UNIQUE_KEYS && keys != null
+                    && keys.stream().noneMatch(k -> "created_at".equalsIgnoreCase(k))) {
+                if (!(keys instanceof java.util.ArrayList)) {
+                    keys = Lists.newArrayList(keys);
+                }
+                keys.add("created_at");
+                LOG.info("Stardata: added pre-declared created_at to keys list "
+                        + "for UNIQUE KEY table {}.{}", dbName, tableName);
+            }
             return;
         }
         // DATETIMEV2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
