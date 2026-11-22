@@ -570,6 +570,10 @@ public class CreateTableInfo {
             // For MOW UNIQUE KEY tables the partition column must be a KEY column.
             // Insert created_at right after the declared key columns so the key
             // prefix stays contiguous, then register it in the keys list.
+            // keys may be an ImmutableList from Utils.copyRequiredList — make it mutable first.
+            if (!(keys instanceof java.util.ArrayList)) {
+                keys = Lists.newArrayList(keys);
+            }
             int insertPos = keys.size();
             if (insertPos > columns.size()) {
                 insertPos = columns.size();
