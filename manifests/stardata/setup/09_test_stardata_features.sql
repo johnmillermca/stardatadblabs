@@ -105,7 +105,7 @@ DISTRIBUTED BY HASH(user_id) BUCKETS 10;
 --   ✓  created_at   DATETIMEV2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP
 --   ✓  AUTO PARTITION BY RANGE (date_trunc('day', `created_at`)) ()
 --   ✓  DISTRIBUTED BY HASH(`user_id`) BUCKETS 10   ← user value kept
---   ✓  "storage_policy" = "sd_cold_1d"
+--   ✓  "storage_policy" = "sd_cold_1d"             ← regular non-MOW UNIQUE KEY gets storage_policy
 --   ✗  snap_id  (must NOT appear)
 --   ✗  DISTRIBUTED BY RANDOM  (must NOT appear)
 SHOW CREATE TABLE sd_test.t_regular_unique;

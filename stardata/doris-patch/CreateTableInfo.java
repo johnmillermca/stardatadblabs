@@ -744,11 +744,9 @@ public class CreateTableInfo {
             LOG.info("Stardata: set DISTRIBUTED BY HASH(snap_id) BUCKETS AUTO "
                     + "for iceberg-type table {}.{}", dbName, tableName);
         } else {
-            // (e) regular table: DISTRIBUTED BY RANDOM BUCKETS AUTO when no unique key columns.
-            // If unique keys are present, keep the existing user-specified (or Doris-default) distribution.
             boolean hasUniqueKeys = (keysType == KeysType.UNIQUE_KEYS);
             if (!hasUniqueKeys) {
-                // DistributionDescriptor(isHash=false, isAutoBucket=true, buckets, null) → RANDOM
+                // (e) regular DUP/AGG table: DISTRIBUTED BY RANDOM BUCKETS AUTO
                 distribution = new DistributionDescriptor(
                         false,                                  // isHash=false → RANDOM distribution
                         true,                                   // isAutoBucket
@@ -757,6 +755,23 @@ public class CreateTableInfo {
                 );
                 LOG.info("Stardata: set DISTRIBUTED BY RANDOM BUCKETS AUTO "
                         + "for non-unique table {}.{}", dbName, tableName);
+            } else {
+                // (e) regular UNIQUE KEY table: Doris rejects RANDOM on UNIQUE KEY.
+                // If the user explicitly supplied a distribution, keep it.
+                // If distribution is still the Doris default (RANDOM, no hash cols), replace it
+                // with HASH on the first key column so Doris accepts the DDL.
+                boolean distributionIsRandom = (distribution != null && !distribution.isHash());
+                if (distributionIsRandom && keys != null && !keys.isEmpty()) {
+                    distribution = new DistributionDescriptor(
+                            true,                               // isHash — HASH distribution
+                            true,                               // isAutoBucket
+                            FeConstants.default_bucket_num,
+                            Lists.newArrayList(keys.get(0))     // first key column
+                    );
+                    LOG.info("Stardata: set DISTRIBUTED BY HASH({}) BUCKETS AUTO "
+                            + "for UNIQUE KEY table {}.{}", keys.get(0), dbName, tableName);
+                }
+                // else: user explicitly set a distribution — leave it alone
             }
         }
     }
@@ -773,17 +788,19 @@ public class CreateTableInfo {
      * <p>If the user has already set {@code storage_policy} explicitly, their
      * value is preserved — we only set the default.
      *
-     * <p><b>Skipped for UNIQUE KEY (MOW) tables</b> — Doris does not allow
-     * {@code storage_policy} on Merge-on-Write UNIQUE KEY tables and will
-     * throw an error at DDL time if one is set.
-     *
-     * Applied to all other qualifying tables (DUP_KEYS, AGG_KEYS, iceberg-type).
+     * <p><b>Skipped only when MOW is enabled</b> — Doris hard-rejects
+     * {@code storage_policy} on any Merge-on-Write table with:
+     * "Can not create UNIQUE KEY table that enables Merge-On-write with storage policy".
+     * This affects iceberg-type tables (which are force-MOW) but NOT regular
+     * user-declared UNIQUE KEY tables (which are non-MOW unless explicitly set).
      */
     private void injectStoragePolicy() {
-        // Doris MOW UNIQUE KEY tables do not support storage_policy.
-        if (keysType == KeysType.UNIQUE_KEYS) {
-            LOG.debug("Stardata: skipping storage_policy for UNIQUE KEY table {}.{} "
-                    + "(MOW does not support storage_policy)", dbName, tableName);
+        // Doris engine hard-rejects storage_policy on MOW tables — skip only when MOW is active.
+        String mowVal = properties.get(
+                org.apache.doris.common.util.PropertyAnalyzer.ENABLE_UNIQUE_KEY_MERGE_ON_WRITE);
+        if ("true".equalsIgnoreCase(mowVal)) {
+            LOG.debug("Stardata: skipping storage_policy for MOW table {}.{} "
+                    + "(Doris rejects storage_policy on MOW tables)", dbName, tableName);
             return;
         }
         properties.putIfAbsent("storage_policy", STARDATA_STORAGE_POLICY);
@@ -837,7 +854,7 @@ public class CreateTableInfo {
         injectAutoRangePartition(isIceberg);  // AUTO PARTITION BY RANGE (date_trunc('day', created_at))
                                               //   + HASH(snap_id) for iceberg / RANDOM for regular (no unique)
                                               //   skipped when stardata.disable_partition = true
-        injectStoragePolicy();                // storage_policy = sd_cold_1d  (hot→cold, all tables)
+        injectStoragePolicy();                // storage_policy = sd_cold_1d  (all tables except MOW — Doris engine limit)
     }
 
     /**
