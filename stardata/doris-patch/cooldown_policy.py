@@ -124,19 +124,30 @@ def get_mow_tables(cur, db: str) -> list[str]:
 
 def get_partitions(cur, db: str, tbl: str) -> list[dict]:
     """
-    Returns list of dicts with keys: PartitionName, CreateTime, StorageCooldownTime.
-    Returns empty list if the table has no partitions yet.
+    Returns list of dicts from SHOW PARTITIONS.
+    Skips rows where PartitionName equals the table name (auto-partition
+    placeholder row that Doris returns for tables with no data yet).
+    Returns empty list if no real partitions exist.
+
+    SHOW PARTITIONS columns include:
+      PartitionId, PartitionName, VisibleVersion, VisibleVersionTime,
+      State, PartitionKey, Range, DistributionKey, Buckets,
+      ReplicationNum, StorageMedium, CooldownTime, ...
     """
     try:
         cur.execute(f"SHOW PARTITIONS FROM `{db}`.`{tbl}`")
         rows = cur.fetchall()
         if not rows:
             return []
-        # Normalise to list-of-dicts regardless of cursor type
-        if isinstance(rows[0], dict):
-            return list(rows)
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in rows]
+        # Normalise to list-of-dicts
+        if not isinstance(rows[0], dict):
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in rows]
+        # Filter out the placeholder row (partition name == table name, no real data)
+        real = [r for r in rows
+                if r.get("PartitionName", "").lower() != tbl.lower()
+                or r.get("VisibleVersion", "1") not in ("", "0", "1")]
+        return real
     except Exception as e:
         log.warning("SHOW PARTITIONS %s.%s failed: %s", db, tbl, e)
         return []
@@ -172,11 +183,12 @@ def process_once(conn):
             for tbl in mow_tables:
                 partitions = get_partitions(cur, db, tbl)
                 for p in partitions:
-                    cooldown_val = str(p.get("StorageCooldownTime", NO_COOLDOWN_SENTINEL))
+                    cooldown_val = str(p.get("CooldownTime", p.get("StorageCooldownTime", NO_COOLDOWN_SENTINEL)))
                     if NO_COOLDOWN_SENTINEL not in cooldown_val:
                         continue  # already has a cooldown set
                     # Parse partition creation time
-                    create_time_str = str(p.get("CreateTime", ""))
+                    # Doris SHOW PARTITIONS uses "VisibleVersionTime" for the partition creation time
+                    create_time_str = str(p.get("VisibleVersionTime", p.get("CreateTime", "")))
                     try:
                         create_dt = datetime.strptime(create_time_str, "%Y-%m-%d %H:%M:%S")
                     except ValueError:
@@ -184,7 +196,7 @@ def process_once(conn):
                                     create_time_str, db, tbl, p.get("PartitionName"))
                         continue
                     cooldown_dt = create_dt + timedelta(days=COOLDOWN_DAYS)
-                    apply_cooldown(cur, db, tbl, p["PartitionName"], cooldown_dt)
+                    apply_cooldown(cur, db, tbl, str(p["PartitionName"]), cooldown_dt)
                     total_set += 1
 
         log.info("Cycle complete — %d partition(s) had cooldown set.", total_set)
