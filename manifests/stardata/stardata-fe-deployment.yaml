@@ -185,11 +185,22 @@ spec:
           volumeMounts:
             - name: fe-config-rw
               mountPath: /config-rw
-        # ── 3. Seed jdbc-drivers emptyDir from the baked image layer ──────────
+        # ── 3. Seed cooldown-policy script from the baked FE image ────────────
+        - name: seed-cooldown-script
+          image: 192.168.1.50:30500/apache/stardata:fe-4.5.7
+          imagePullPolicy: Always
+          command:
+            - sh
+            - -c
+            - cp /opt/apache-doris/fe/bin/cooldown_policy.py /scripts/
+          volumeMounts:
+            - name: cooldown-scripts
+              mountPath: /scripts
+        # ── 4. Seed jdbc-drivers emptyDir from the baked image layer ──────────
         # Copies snowflake-jdbc-4.0.2.jar (baked in Dockerfile.fe) into the
         # shared emptyDir so the httpd sidecar can serve it on :8181.
         - name: seed-jdbc-drivers
-          image: 192.168.1.50:30500/apache/stardata:fe-4.5.6
+          image: 192.168.1.50:30500/apache/stardata:fe-4.5.7
           imagePullPolicy: Always
           command:
             - sh
@@ -214,7 +225,7 @@ spec:
       containers:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
-          image: 192.168.1.50:30500/apache/stardata:fe-4.5.6
+          image: 192.168.1.50:30500/apache/stardata:fe-4.5.7
           imagePullPolicy: Always
           command:
             - /opt/apache-doris/fe_entrypoint.sh
@@ -458,6 +469,50 @@ spec:
             - name: fe-log
               mountPath: /opt/apache-doris/fe/log
 
+        # ── cooldown-policy sidecar — sets COOLDOWN TIME on MOW partitions ─────
+        # Runs continuously (every POLL_INTERVAL_SECONDS = 3600s).
+        # On each cycle, discovers all MOW UNIQUE KEY tables and sets
+        # storage_cooldown_time = partition_create_time + 1 day on every
+        # partition that does not already have one.
+        # Only the FE leader executes the cycle (LEADER_CHECK=true).
+        - name: cooldown-policy
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DORIS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: stardata-credentials
+                  key: admin-password
+            - name: DORIS_HOST
+              value: "127.0.0.1"
+            - name: DORIS_PORT
+              value: "9030"
+            - name: DORIS_USER
+              value: "root"
+            - name: COOLDOWN_DAYS
+              value: "1"
+            - name: POLL_INTERVAL_SECONDS
+              value: "3600"
+            - name: LEADER_CHECK
+              value: "true"
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          command:
+            - sh
+            - -c
+            - |
+              pip install pymysql --quiet --no-cache-dir
+              python3 /scripts/cooldown_policy.py
+          volumeMounts:
+            - name: cooldown-scripts
+              mountPath: /scripts
+
         # ── busybox httpd sidecar — serves jdbc_drivers on :8181 ───────────────
         # Doris BE needs to download the Snowflake JDBC jar via an http:// URL
         # (file:// on a different pod doesn't work).  busybox httpd -f serves the
@@ -493,6 +548,8 @@ spec:
         - name: jdbc-drivers
           emptyDir: {}
         - name: trino-plugins
+          emptyDir: {}
+        - name: cooldown-scripts
           emptyDir: {}
         - name: snowflake-jwt
           secret:

@@ -86,11 +86,16 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
 
-LABEL org.stardata.version="4.5.6"
+LABEL org.stardata.version="4.5.7"
 LABEL org.stardata.base="apache/doris:branch-4.2"
-LABEL org.stardata.patch="snap_id-iceberg-only,created_at-auto-inject,updated_at-iceberg-only,auto-range-partition,iceberg-hash-snap_id,regular-unique-hash-dist,sd_cold_1d-storage-policy-non-mow,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
+LABEL org.stardata.patch="snap_id-iceberg-only,created_at-auto-inject,updated_at-iceberg-only,auto-range-partition,iceberg-hash-snap_id,regular-unique-hash-dist,sd_cold_1d-storage-policy-non-mow,cooldown-sidecar,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
 
 COPY --from=builder /patch/doris-fe.jar /opt/apache-doris/fe/lib/doris-fe.jar
+
+# ── Cooldown policy sidecar script ───────────────────────────────────────────
+# Baked into the FE image so the ddl-mirror sidecar container can run it
+# using the python:3.12-alpine image already present in the pod.
+COPY doris-patch/cooldown_policy.py /opt/apache-doris/fe/bin/cooldown_policy.py
 
 # ── Bake JDBC drivers into image so the httpd sidecar can serve them ─────────
 # The seed-jdbc-drivers initContainer copies these into the shared emptyDir.
