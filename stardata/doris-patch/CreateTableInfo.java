@@ -820,21 +820,21 @@ public class CreateTableInfo {
     }
 
     /**
-     * (f) Enable the BE-side segment data file cache for every qualifying table.
+     * (f) Set per-table file cache TTL to 0 (no expiry) for every qualifying table.
      *
-     * <p>The BE nodes already have file caching enabled globally via
-     * {@code enable_file_cache = true} in {@code be.conf}, but the per-table
-     * property {@code "enable_file_cache" = "true"} is also required for a table's
-     * tablet data to be admitted into the cache.  Setting it here makes caching
-     * the default for all new OLAP tables without requiring users to include it
-     * in every {@code CREATE TABLE} statement.
+     * <p>The BE nodes have file caching enabled globally via
+     * {@code enable_file_cache = true} in {@code be.conf}.  Within that global
+     * cache, {@code file_cache_ttl_seconds = 0} opts the table's segments into
+     * the permanent (non-TTL) cache tier — they are evicted only under cache
+     * pressure, not by a time limit.  Without this property Doris uses the
+     * default TTL-cache behaviour which may evict cold segments sooner.
      *
-     * <p>If the user has already set {@code enable_file_cache} explicitly (e.g. to
-     * {@code "false"} to opt out), their value is preserved — we only set the default.
+     * <p>If the user has already set {@code file_cache_ttl_seconds} explicitly,
+     * their value is preserved — we only set the default.
      */
     private void injectFileCache() {
-        properties.putIfAbsent("enable_file_cache", "true");
-        LOG.debug("Stardata: enable_file_cache=true for table {}.{}", dbName, tableName);
+        properties.putIfAbsent("file_cache_ttl_seconds", "0");
+        LOG.debug("Stardata: file_cache_ttl_seconds=0 for table {}.{}", dbName, tableName);
     }
 
     /**

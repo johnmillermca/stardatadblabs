@@ -187,7 +187,7 @@ spec:
               mountPath: /config-rw
         # ── 3. Seed cooldown-policy script from the baked FE image ────────────
         - name: seed-cooldown-script
-          image: 192.168.1.50:30500/apache/stardata:fe-4.6.3
+          image: 192.168.1.50:30500/apache/stardata:fe-4.6.5
           imagePullPolicy: Always
           command:
             - sh
@@ -200,7 +200,7 @@ spec:
         # Copies snowflake-jdbc-4.0.2.jar (baked in Dockerfile.fe) into the
         # shared emptyDir so the httpd sidecar can serve it on :8181.
         - name: seed-jdbc-drivers
-          image: 192.168.1.50:30500/apache/stardata:fe-4.6.3
+          image: 192.168.1.50:30500/apache/stardata:fe-4.6.5
           imagePullPolicy: Always
           command:
             - sh
@@ -225,7 +225,7 @@ spec:
       containers:
         # ── Stardata FE ────────────────────────────────────────────────────────
         - name: stardata-fe
-          image: 192.168.1.50:30500/apache/stardata:fe-4.6.3
+          image: 192.168.1.50:30500/apache/stardata:fe-4.6.5
           imagePullPolicy: Always
           command:
             - /opt/apache-doris/fe_entrypoint.sh
