@@ -47,7 +47,7 @@ declare -A IMAGE_TAG=(
   [tableflow]="${REGISTRY}/tableflow:1.0.14"
   [duckdb]="${REGISTRY}/duckdb:latest"
   [webconsole]="${REGISTRY}/webconsole:latest"
-  [stardata-fe]="${REGISTRY}/apache/stardata:fe-4.6.0"
+  [stardata-fe]="${REGISTRY}/apache/stardata:fe-4.6.1"
 )
 
 # =============================================================================

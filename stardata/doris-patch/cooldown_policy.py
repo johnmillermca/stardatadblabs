@@ -143,10 +143,12 @@ def get_partitions(cur, db: str, tbl: str) -> list[dict]:
         if not isinstance(rows[0], dict):
             cols = [d[0] for d in cur.description]
             rows = [dict(zip(cols, r)) for r in rows]
-        # Filter out the placeholder row (partition name == table name, no real data)
+        # Only process rows that belong to a range-partitioned table.
+        # Non-partitioned tables have empty PartitionKey and Range — skip them.
+        # Auto-partition tables have PartitionKey set (e.g. `created_at`).
         real = [r for r in rows
-                if r.get("PartitionName", "").lower() != tbl.lower()
-                or r.get("VisibleVersion", "1") not in ("", "0", "1")]
+                if r.get("PartitionKey", "").strip() != ""
+                or r.get("Range", "").strip() not in ("", "NULL")]
         return real
     except Exception as e:
         log.warning("SHOW PARTITIONS %s.%s failed: %s", db, tbl, e)
