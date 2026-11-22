@@ -66,8 +66,6 @@ spec:
               value: "true"
             - name: UI_CONFIG_DISABLED
               value: "true"
-            - name: HOME_PAGE_URL
-              value: "/apps"
             # ── Database — PostgreSQL ──────────────────────────────────────────
             - name: DB_CONNECTION_STRING
               valueFrom:
