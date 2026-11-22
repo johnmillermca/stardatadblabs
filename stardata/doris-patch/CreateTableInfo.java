@@ -820,9 +820,27 @@ public class CreateTableInfo {
     }
 
     /**
+     * (f) Enable the BE-side segment data file cache for every qualifying table.
+     *
+     * <p>The BE nodes already have file caching enabled globally via
+     * {@code enable_file_cache = true} in {@code be.conf}, but the per-table
+     * property {@code "enable_file_cache" = "true"} is also required for a table's
+     * tablet data to be admitted into the cache.  Setting it here makes caching
+     * the default for all new OLAP tables without requiring users to include it
+     * in every {@code CREATE TABLE} statement.
+     *
+     * <p>If the user has already set {@code enable_file_cache} explicitly (e.g. to
+     * {@code "false"} to opt out), their value is preserved — we only set the default.
+     */
+    private void injectFileCache() {
+        properties.putIfAbsent("enable_file_cache", "true");
+        LOG.debug("Stardata: enable_file_cache=true for table {}.{}", dbName, tableName);
+    }
+
+    /**
      * Entry point called from {@link #validate} after {@code dbName} is fully
-     * resolved.  Applies column injection, partition, and storage policy to every
-     * qualifying OLAP table.
+     * resolved.  Applies column injection, partition, storage policy, and file
+     * cache to every qualifying OLAP table.
      *
      * <p>For iceberg-type tables ({@code stardata.table_type=iceberg}):
      * <ol>
@@ -831,6 +849,7 @@ public class CreateTableInfo {
      *   <li>updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE …</li>
      *   <li>AUTO PARTITION BY RANGE (date_trunc('day', created_at)) + HASH(snap_id)</li>
      *   <li>no storage_policy (Doris MOW UNIQUE KEY restriction)</li>
+     *   <li>enable_file_cache = true</li>
      * </ol>
      *
      * <p>For regular tables:
@@ -839,6 +858,7 @@ public class CreateTableInfo {
      *   <li>AUTO PARTITION BY RANGE (date_trunc('day', created_at))
      *       + RANDOM bucket (no unique cols) or existing distribution (unique cols)</li>
      *   <li>storage_policy = sd_cold_1d</li>
+     *   <li>enable_file_cache = true</li>
      * </ol>
      *
      * <p>Partition injection can be individually suppressed by the user with:
@@ -866,6 +886,7 @@ public class CreateTableInfo {
                                               //   + HASH(snap_id) for iceberg / RANDOM for regular (no unique)
                                               //   skipped when stardata.disable_partition = true
         injectStoragePolicy();                // storage_policy = sd_cold_1d  (all tables except MOW — Doris engine limit)
+        injectFileCache();                    // enable_file_cache = true  (all qualifying tables)
     }
 
     /**
