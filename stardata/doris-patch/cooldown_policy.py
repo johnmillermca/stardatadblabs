@@ -173,7 +173,7 @@ def apply_cooldown(cur, db: str, tbl: str, partition: str, cooldown_dt: datetime
 def process_once(conn):
     with conn.cursor(pymysql.cursors.DictCursor) as cur:
         if LEADER_CHECK and not is_leader(cur):
-            log.debug("Not the FE leader — skipping this cycle.")
+            log.info("Not the FE leader — skipping this cycle.")
             return
 
         dbs = get_user_databases(cur)
