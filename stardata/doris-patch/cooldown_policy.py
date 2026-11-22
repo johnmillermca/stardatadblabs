@@ -208,22 +208,31 @@ def main():
     log.info("Stardata cooldown sidecar starting — host=%s port=%d cooldown=%dd interval=%ds",
              DORIS_HOST, DORIS_PORT, COOLDOWN_DAYS, POLL_INTERVAL_SECONDS)
 
-    # On startup, retry every 30s until we get a successful connection,
-    # then switch to the normal POLL_INTERVAL_SECONDS cadence.
+    # On startup, retry every 30s until this pod is the FE leader AND a full
+    # scan completes successfully. After that, switch to POLL_INTERVAL_SECONDS.
+    # This handles: FE not yet listening, FE up but not yet elected leader.
     startup_done = False
     while True:
         try:
             conn = connect()
+            was_leader = _is_leader_conn(conn)
             process_once(conn)
             conn.close()
-            startup_done = True
+            if was_leader:
+                startup_done = True  # ran a full scan as leader — go to normal interval
         except Exception as e:
             log.error("Cycle error: %s", e)
-            if not startup_done:
-                log.info("Retrying startup connection in 30s...")
-                time.sleep(30)
-                continue
-        time.sleep(POLL_INTERVAL_SECONDS)
+        if not startup_done:
+            log.info("Startup: not yet leader or scan not complete — retrying in 30s...")
+            time.sleep(30)
+        else:
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def _is_leader_conn(conn) -> bool:
+    """Check leader status using an existing connection."""
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        return is_leader(cur)
 
 
 if __name__ == "__main__":
