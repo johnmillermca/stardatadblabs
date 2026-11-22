@@ -492,13 +492,43 @@ public class CreateTableInfo {
     }
 
     /**
+     * Force the table to {@code UNIQUE KEY (snap_id)} with Merge-on-Write enabled,
+     * only for iceberg-type tables.
+     *
+     * <p>This is a prerequisite for {@code updated_at ON UPDATE CURRENT_TIMESTAMP}:
+     * Doris only allows that clause on MOW UNIQUE KEY tables.
+     *
+     * <p>Also sets {@code enable_unique_key_merge_on_write = true} in properties so
+     * Doris's property analyzer enables MOW automatically.
+     *
+     * <p>Called before column injection so that subsequent helpers (e.g.
+     * {@link #injectCreatedAtColumn()}) see {@code keysType == UNIQUE_KEYS} and
+     * place {@code created_at} correctly in the key list.
+     */
+    private void forceIcebergUniqueKey() {
+        // Override whatever keys type the user may have declared
+        keysType = KeysType.UNIQUE_KEYS;
+        // snap_id will be injected as the first column after key columns (index = 0 at this
+        // point since we haven't injected it yet); declare it as the sole unique key.
+        // We use a fresh mutable list — the user's original keys are intentionally replaced
+        // because snap_id is the identity column for iceberg snapshots.
+        keys = Lists.newArrayList("snap_id");
+        // Enable Merge-on-Write so ON UPDATE CURRENT_TIMESTAMP is accepted on updated_at
+        properties.putIfAbsent(
+                org.apache.doris.common.util.PropertyAnalyzer.ENABLE_UNIQUE_KEY_MERGE_ON_WRITE,
+                "true");
+        LOG.info("Stardata: forced UNIQUE KEY (snap_id) + MOW for iceberg-type table {}.{}",
+                dbName, tableName);
+    }
+
+    /**
      * (a/b) Inject {@code snap_id BIGINT NOT NULL AUTO_INCREMENT} for iceberg-type
      * Stardata tables, unless the user already declared a column named {@code snap_id}
      * (case-insensitive).
      *
      * Called only from within the {@code isIceberg} branch of
      * {@link #injectStardataFeatures()} — the caller guarantees iceberg-type.
-     * Inserted immediately after the declared key columns so it is always a value column.
+     * Inserted at index 0 (first column) so it becomes the UNIQUE KEY prefix.
      */
     private void injectSnapIdColumnIfIceberg() {
         boolean alreadyDeclared = columns.stream()
@@ -519,12 +549,10 @@ public class CreateTableInfo {
                 "auto-increment row identifier (Stardata iceberg-type)",
                 Optional.empty()                // no generated column
         );
-        // Insert after declared key columns so snap_id is always a value column.
-        int insertPos = (keys == null) ? 0 : keys.size();
-        if (insertPos > columns.size()) {
-            insertPos = columns.size();
-        }
-        columns.add(insertPos, snapIdCol);
+        // Insert at position 0 — snap_id is the sole UNIQUE KEY for iceberg-type tables.
+        // forceIcebergUniqueKey() has already set keys=["snap_id"], so snap_id must be
+        // the very first column in the schema (key columns must be a contiguous prefix).
+        columns.add(0, snapIdCol);
         LOG.info("Stardata: injected snap_id BIGINT NOT NULL AUTO_INCREMENT "
                 + "into iceberg-type table {}.{}", dbName, tableName);
     }
@@ -604,6 +632,8 @@ public class CreateTableInfo {
         if (alreadyDeclared) {
             return;
         }
+        // ON UPDATE CURRENT_TIMESTAMP is valid here because forceIcebergUniqueKey() has
+        // already set keysType=UNIQUE_KEYS and enable_unique_key_merge_on_write=true.
         ColumnDefinition updatedAtCol = new ColumnDefinition(
                 "updated_at",
                 DateTimeV2Type.of(0),
@@ -772,7 +802,7 @@ public class CreateTableInfo {
      *   <li>created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP</li>
      *   <li>updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE …</li>
      *   <li>AUTO PARTITION BY RANGE (date_trunc('day', created_at)) + HASH(snap_id)</li>
-     *   <li>storage_policy = sd_cold_1d</li>
+     *   <li>no storage_policy (Doris MOW UNIQUE KEY restriction)</li>
      * </ol>
      *
      * <p>For regular tables:
@@ -797,9 +827,10 @@ public class CreateTableInfo {
         properties.remove(STARDATA_PROP_TABLE_TYPE);
 
         if (isIceberg) {
-            injectSnapIdColumnIfIceberg();    // snap_id BIGINT NOT NULL AUTO_INCREMENT
-            injectCreatedAtColumn();          // created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
-            injectUpdatedAtColumnIfIceberg(); // updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE …
+            forceIcebergUniqueKey();          // keysType=UNIQUE_KEYS, keys=[snap_id], MOW=true
+            injectSnapIdColumnIfIceberg();    // snap_id BIGINT NOT NULL AUTO_INCREMENT (col 0, the unique key)
+            injectCreatedAtColumn();          // created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP (key col, for partition)
+            injectUpdatedAtColumnIfIceberg(); // updated_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         } else {
             injectCreatedAtColumn();          // created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP
         }
