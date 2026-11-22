@@ -531,11 +531,19 @@ public class CreateTableInfo {
 
     /**
      * (b) Inject {@code created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP}
-     * as the last visible column of every qualifying OLAP table, unless the user
-     * already declared a column named {@code created_at} (case-insensitive).
+     * into every qualifying OLAP table, unless the user already declared a column
+     * named {@code created_at} (case-insensitive).
      *
-     * The column is appended after all user-declared columns so it never
-     * interferes with key ordering or existing schema.
+     * <p>Placement and key-list rules:
+     * <ul>
+     *   <li><b>UNIQUE KEY (MOW) tables:</b> {@code created_at} is inserted immediately
+     *       after the user-declared key columns and is also appended to the {@code keys}
+     *       list.  Doris Merge-on-Write requires the auto-partition column to be a KEY
+     *       column; placing it here satisfies that constraint without disrupting the
+     *       user's existing key prefix.</li>
+     *   <li><b>All other tables:</b> {@code created_at} is appended after all columns
+     *       so it never interferes with key ordering.</li>
+     * </ul>
      */
     private void injectCreatedAtColumn() {
         boolean alreadyDeclared = columns.stream()
@@ -548,7 +556,7 @@ public class CreateTableInfo {
         ColumnDefinition createdAtCol = new ColumnDefinition(
                 "created_at",
                 DateTimeV2Type.of(0),
-                false,                             // isKey
+                false,                             // isKey — set below for UNIQUE tables
                 null,                              // aggType — set later during key analysis
                 ColumnNullableType.NOT_NULLABLE,
                 -1L,                               // not auto-increment
@@ -557,9 +565,25 @@ public class CreateTableInfo {
                 "row creation timestamp (auto-injected by Stardata)",
                 Optional.empty()                   // no generated column
         );
-        columns.add(createdAtCol);
-        LOG.info("Stardata: injected created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP "
-                + "into table {}.{}", dbName, tableName);
+
+        if (keysType == KeysType.UNIQUE_KEYS && keys != null && !keys.isEmpty()) {
+            // For MOW UNIQUE KEY tables the partition column must be a KEY column.
+            // Insert created_at right after the declared key columns so the key
+            // prefix stays contiguous, then register it in the keys list.
+            int insertPos = keys.size();
+            if (insertPos > columns.size()) {
+                insertPos = columns.size();
+            }
+            columns.add(insertPos, createdAtCol);
+            keys.add("created_at");
+            LOG.info("Stardata: injected created_at as KEY column at position {} "
+                    + "for UNIQUE KEY table {}.{}", insertPos, dbName, tableName);
+        } else {
+            // DUP_KEYS / AGG_KEYS / keysType not yet resolved — append at end
+            columns.add(createdAtCol);
+            LOG.info("Stardata: injected created_at DATETIMEV2 NOT NULL DEFAULT CURRENT_TIMESTAMP "
+                    + "into table {}.{}", dbName, tableName);
+        }
     }
 
     /**
