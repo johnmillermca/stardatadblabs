@@ -743,9 +743,19 @@ public class CreateTableInfo {
      * <p>If the user has already set {@code storage_policy} explicitly, their
      * value is preserved — we only set the default.
      *
-     * Applied to ALL qualifying tables (both iceberg-type and regular).
+     * <p><b>Skipped for UNIQUE KEY (MOW) tables</b> — Doris does not allow
+     * {@code storage_policy} on Merge-on-Write UNIQUE KEY tables and will
+     * throw an error at DDL time if one is set.
+     *
+     * Applied to all other qualifying tables (DUP_KEYS, AGG_KEYS, iceberg-type).
      */
     private void injectStoragePolicy() {
+        // Doris MOW UNIQUE KEY tables do not support storage_policy.
+        if (keysType == KeysType.UNIQUE_KEYS) {
+            LOG.debug("Stardata: skipping storage_policy for UNIQUE KEY table {}.{} "
+                    + "(MOW does not support storage_policy)", dbName, tableName);
+            return;
+        }
         properties.putIfAbsent("storage_policy", STARDATA_STORAGE_POLICY);
         LOG.debug("Stardata: storage_policy={}  for table {}.{}",
                 STARDATA_STORAGE_POLICY, dbName, tableName);
