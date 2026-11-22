@@ -86,7 +86,7 @@ RUN cp /opt/apache-doris/fe/lib/doris-fe.jar /patch/doris-fe.jar && \
 # ── Stage 2: final image with patched JAR ────────────────────────────────────
 FROM docker.io/apache/doris:fe-4.1.4.1
 
-LABEL org.stardata.version="4.5.8"
+LABEL org.stardata.version="4.5.9"
 LABEL org.stardata.base="apache/doris:branch-4.2"
 LABEL org.stardata.patch="snap_id-iceberg-only,created_at-auto-inject,updated_at-iceberg-only,auto-range-partition,iceberg-hash-snap_id,regular-unique-hash-dist,sd_cold_1d-storage-policy-non-mow,cooldown-sidecar,snowflake-jdbc,mongodb-jdbc,databricks-jdbc"
 

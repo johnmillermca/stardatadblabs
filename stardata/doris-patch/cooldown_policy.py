@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
 """
 cooldown_policy.py — Stardata partition cooldown sidecar
 =========================================================
