@@ -450,10 +450,13 @@ a:hover{color:#163BA6}
             </div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px">
-            <span class="lbl">Tables (leave all unticked to back up the whole database)</span>
-            <div id="bk-tables-list" style="display:flex;flex-wrap:wrap;gap:4px 20px">
-              <span class="hint" style="padding:10px 0">Select a database above to see its tables.</span>
-            </div>
+            <label class="lbl" for="bk-tables-sel">Tables
+              <span style="font-weight:400;color:#4F5866"> — hold Ctrl / ⌘ to pick multiple · leave blank to back up whole database</span>
+            </label>
+            <select class="inp" id="bk-tables-sel" multiple disabled
+              style="height:120px;padding:6px 8px;font:400 14px Inter,sans-serif">
+              <option value="" disabled>Select a database above…</option>
+            </select>
           </div>
           <div style="display:flex;align-items:center;gap:12px">
             <button class="btnp" onclick="doBackup()">Back up now</button>
@@ -518,23 +521,26 @@ a:hover{color:#163BA6}
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
           <div style="display:flex;flex-direction:column;gap:6px">
-            <label class="lbl" for="pitr-db">Database</label>
-            <select class="inp" id="pitr-db" onchange="loadPitrSnapshots()">
-              <option value="">Select database…</option>
+            <label class="lbl" for="pitr-db">1 · Database</label>
+            <select class="inp" id="pitr-db" onchange="onPitrDbChange()">
+              <option value="">Loading databases…</option>
             </select>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px">
-            <label class="lbl" for="pitr-snap">Snapshot (point in time)</label>
-            <select class="inp" id="pitr-snap" onchange="loadPitrTables()" disabled>
+            <label class="lbl" for="pitr-snap">2 · Snapshot (point in time)</label>
+            <select class="inp" id="pitr-snap" onchange="onPitrSnapChange()" disabled>
               <option value="">— select a database first —</option>
             </select>
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
-          <span class="lbl">Tables to restore <span style="font-weight:400;color:#4F5866">(leave all unticked to restore whole database)</span></span>
-          <div id="pitr-tables-list" style="display:flex;flex-wrap:wrap;gap:4px 20px">
-            <span class="hint" style="padding:8px 0">Select a snapshot above to see its tables.</span>
-          </div>
+          <label class="lbl" for="pitr-tables-sel">3 · Tables to restore
+            <span style="font-weight:400;color:#4F5866"> — hold Ctrl / ⌘ to pick multiple · leave blank to restore whole database</span>
+          </label>
+          <select class="inp" id="pitr-tables-sel" multiple disabled
+            style="height:120px;padding:6px 8px;font:400 14px Inter,sans-serif">
+            <option value="" disabled>Select a snapshot above…</option>
+          </select>
         </div>
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
           <button class="btnd" id="pitr-restore-btn" onclick="startPitrRestore()" disabled
@@ -814,20 +820,31 @@ function autoFillSnapName() {
 function updateBkTables() {
   autoFillSnapName();
   var db = document.getElementById('bk-db').value;
-  if (!db) return;
-  var container = document.getElementById('bk-tables-list');
-  container.innerHTML = '<span class="hint" style="padding:10px 0">Loading tables…</span>';
+  var sel = document.getElementById('bk-tables-sel');
+  if (!db) {
+    sel.innerHTML = '<option value="" disabled>Select a database above…</option>';
+    sel.disabled = true;
+    return;
+  }
+  sel.innerHTML = '<option value="" disabled>Loading tables…</option>';
+  sel.disabled = true;
   dorisSQL(db, 'SHOW TABLES').then(function(res) {
     var tables = res.rows.map(function(r) { return r[0]; });
-    if (!tables.length) { container.innerHTML = '<span class="hint" style="padding:10px 0">No tables in this database.</span>'; return; }
-    container.innerHTML = tables.map(function(t) {
-      var id = 'bk-t-' + t.replace(/[^A-Za-z0-9]/g, '_');
-      return '<label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer">' +
-        '<input type="checkbox" id="' + id + '" data-table="' + t + '" style="width:18px;height:18px;accent-color:#1F4FD8"> ' + t + '</label>';
-    }).join('');
+    if (!tables.length) {
+      sel.innerHTML = '<option value="" disabled>No tables in this database</option>';
+      sel.disabled = true;
+      return;
+    }
+    sel.innerHTML = '';
+    tables.forEach(function(t) {
+      var o = document.createElement('option'); o.value = t; o.textContent = t;
+      sel.appendChild(o);
+    });
+    sel.disabled = false;
   }).catch(function(e) {
     console.warn('updateBkTables failed:', e);
-    container.innerHTML = '<span class="hint" style="padding:10px 0;color:#B42318">Could not load tables.</span>';
+    sel.innerHTML = '<option value="" disabled>Could not load tables</option>';
+    sel.disabled = true;
   });
 }
 
@@ -855,16 +872,16 @@ function setSchedMsg(msg, isErr) {
 function saveSched() {
   var freq = state.freq, ret = state.ret;
   setSchedMsg('Saving…', false);
-  var upsertSql = "INSERT INTO cache_system.backup_schedule (id,freq,retain_days) " +
-    "VALUES ('1','" + freq + "'," + ret + ") " +
-    "ON DUPLICATE KEY UPDATE freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW()";
-  dorisSQL('cache_system', upsertSql)
+  var updateSql = "UPDATE cache_system.backup_schedule " +
+    "SET freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW() " +
+    "WHERE id='1'";
+  dorisSQL('cache_system', updateSql)
     .then(function() {
       setSchedMsg(freq === 'off' ? 'Automatic backups turned off.'
         : 'Automatic ' + freq + ' backups on · keep ' + ret + ' days. Saved ✓', false);
     })
     .catch(function(e) {
-      setSchedMsg('Could not save — run 14_setup_backup.sh first. (' + e.message + ')', true);
+      setSchedMsg('Could not save schedule: ' + e.message, true);
     });
 }
 
@@ -898,17 +915,15 @@ function doBackup() {
   var lab = document.getElementById('bk-lab').value.trim() || (db + '_' + today());
   if (!db) { showBkMsg('Select a database first.', true); return; }
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(lab)) { showBkMsg('Snapshot name: letters, numbers, underscores only.', true); return; }
-  var picked = [];
-  Array.from(document.getElementById('bk-tables-list').querySelectorAll('input[type=checkbox]'))
-    .forEach(function(cb) { if (cb.checked) picked.push(cb.dataset.table); });
+  var bkSel = document.getElementById('bk-tables-sel');
+  var picked = Array.from(bkSel.selectedOptions).map(function(o) { return o.value; });
   var onClause = picked.length ? ' ON (' + picked.map(function(t) { return '`' + t + '`'; }).join(', ') + ')' : '';
   var sql = "BACKUP SNAPSHOT `" + db + "`.`" + lab + "` TO `sd_backup_repo`" + onClause + " PROPERTIES ('type'='full')";
   showBkMsg('Submitting backup…', false);
   document.getElementById('bk-lab').value = '';
   dorisSQL(db, sql).then(function() {
     showBkMsg('Backup ' + lab + ' started → s3://xdatatoiceberg1/stardata-backups/. Updating status below…', false);
-    Array.from(document.getElementById('bk-tables-list').querySelectorAll('input[type=checkbox]'))
-      .forEach(function(cb) { cb.checked = false; });
+    Array.from(bkSel.options).forEach(function(o) { o.selected = false; });
     loadBackupHistory();
     startBkPoller();
   }).catch(function(e) { showBkMsg('Backup failed: ' + e.message, true); });
@@ -1040,38 +1055,61 @@ function doRestore() {
 // ============================================================
 // PITR — Point-in-time Recovery
 // ============================================================
+
+// Populate the PITR database dropdown directly from Doris (internal catalog only).
 function initPitrDbDropdown() {
   var sel = document.getElementById('pitr-db');
-  var dbs = [], seen = {};
-  state.snapshots.forEach(function(s) {
-    if (s.db && !seen[s.db] && s.status === 'Completed') { seen[s.db] = 1; dbs.push(s.db); }
-  });
-  Array.from(document.getElementById('bk-db').options).forEach(function(o) {
-    if (o.value && !seen[o.value]) { seen[o.value] = 1; dbs.push(o.value); }
-  });
   var cur = sel.value;
-  sel.innerHTML = '<option value="">Select database…</option>';
-  dbs.sort().forEach(function(db) {
-    var o = document.createElement('option'); o.value = db; o.textContent = db;
-    if (db === cur) o.selected = true; sel.appendChild(o);
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME = 'internal' ORDER BY SCHEMA_NAME"
+  ).then(function(res) {
+    var dbs = res.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
+    sel.innerHTML = '<option value="">Select database…</option>';
+    dbs.forEach(function(db) {
+      var o = document.createElement('option'); o.value = db; o.textContent = db;
+      if (db === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+  }).catch(function() {
+    if (!sel.options.length || (sel.options.length === 1 && !sel.options[0].value)) {
+      sel.innerHTML = '<option value="">Could not load databases</option>';
+    }
   });
 }
 
-function loadPitrSnapshots() {
+// Called when user changes the PITR database dropdown.
+function onPitrDbChange() {
   var db = document.getElementById('pitr-db').value;
   var snapSel = document.getElementById('pitr-snap');
+  var tablesSel = document.getElementById('pitr-tables-sel');
   var btn = document.getElementById('pitr-restore-btn');
+
   snapSel.innerHTML = '<option value="">Loading…</option>';
-  snapSel.disabled = true; btn.disabled = true; btn.style.opacity = '.5';
-  document.getElementById('pitr-tables-list').innerHTML =
-    '<span class="hint" style="padding:8px 0">Select a snapshot above to see its tables.</span>';
+  snapSel.disabled = true;
+  tablesSel.innerHTML = '<option value="" disabled>Select a snapshot above…</option>';
+  tablesSel.disabled = true;
+  btn.disabled = true; btn.style.opacity = '.5';
   setPitrMsg('', false);
-  if (!db) { snapSel.innerHTML = '<option value="">— select a database first —</option>'; return; }
-  var snaps = state.snapshots.filter(function(s) { return s.db === db && s.status === 'Completed'; });
-  if (!snaps.length) {
-    snapSel.innerHTML = '<option value="">No snapshots found for ' + db + '</option>';
-    setPitrMsg('No completed snapshots for ' + db + '. Take a backup first.', true); return;
+
+  if (!db) {
+    snapSel.innerHTML = '<option value="">— select a database first —</option>';
+    return;
   }
+
+  var snaps = state.snapshots.filter(function(s) {
+    return s.db === db && s.status === 'Completed';
+  });
+
+  if (!snaps.length) {
+    snapSel.innerHTML = '<option value="">No snapshots for ' + db + ' — take a backup first</option>';
+    snapSel.disabled = true;
+    setPitrMsg('No completed snapshots for ' + db + '. Take a backup first.', true);
+    return;
+  }
+
   snapSel.innerHTML = '';
   snaps.forEach(function(s) {
     var o = document.createElement('option');
@@ -1082,51 +1120,64 @@ function loadPitrSnapshots() {
   });
   snapSel.disabled = false;
   snapSel.selectedIndex = 0;
-  loadPitrTables();
+  onPitrSnapChange();
 }
 
-function loadPitrTables() {
+// Called when user changes the PITR snapshot dropdown.
+function onPitrSnapChange() {
   var val = document.getElementById('pitr-snap').value;
+  var db  = document.getElementById('pitr-db').value;
+  var tablesSel = document.getElementById('pitr-tables-sel');
   var btn = document.getElementById('pitr-restore-btn');
-  var container = document.getElementById('pitr-tables-list');
+
   if (!val) {
+    tablesSel.innerHTML = '<option value="" disabled>Select a snapshot above…</option>';
+    tablesSel.disabled = true;
     btn.disabled = true; btn.style.opacity = '.5';
-    container.innerHTML = '<span class="hint" style="padding:8px 0">Select a snapshot above.</span>'; return;
+    return;
   }
-  var parts = val.split('|');
+
+  var parts     = val.split('|');
   var tablesRaw = parts[2] || '';
-  var db = document.getElementById('pitr-db').value;
-  var renderCheckboxes = function(tables) {
-    container.innerHTML = tables.map(function(t) {
-      var id = 'pitr-t-' + t.replace(/[^A-Za-z0-9]/g, '_');
-      return '<label style="display:flex;align-items:center;gap:8px;min-height:38px;font:500 14px Inter,sans-serif;cursor:pointer">' +
-        '<input type="checkbox" id="' + id + '" data-table="' + t + '" style="width:18px;height:18px;accent-color:#1F4FD8"> ' + t + '</label>';
-    }).join('');
+
+  var fillSelect = function(tables) {
+    tablesSel.innerHTML = '';
+    if (!tables.length) {
+      tablesSel.innerHTML = '<option value="" disabled>No tables found</option>';
+      tablesSel.disabled = true;
+      return;
+    }
+    tables.forEach(function(t) {
+      var o = document.createElement('option'); o.value = t; o.textContent = t;
+      tablesSel.appendChild(o);
+    });
+    tablesSel.disabled = false;
+    btn.disabled = false; btn.style.opacity = '1';
+    setPitrMsg('', false);
   };
+
   if (tablesRaw) {
-    renderCheckboxes(tablesRaw.split(',').map(function(t) { return t.trim(); }).filter(Boolean));
+    fillSelect(tablesRaw.split(',').map(function(t) { return t.trim(); }).filter(Boolean));
   } else {
-    container.innerHTML = '<span class="hint" style="padding:8px 0">Loading tables…</span>';
+    tablesSel.innerHTML = '<option value="" disabled>Loading tables…</option>';
+    tablesSel.disabled = true;
     dorisSQL(db, 'SHOW TABLES').then(function(res) {
-      var tables = res.rows.map(function(r) { return r[0]; });
-      if (!tables.length) { container.innerHTML = '<span class="hint" style="padding:8px 0">No tables found.</span>'; return; }
-      renderCheckboxes(tables);
+      fillSelect(res.rows.map(function(r) { return r[0]; }));
     }).catch(function() {
-      container.innerHTML = '<span class="hint" style="padding:8px 0;color:#B42318">Could not load tables.</span>';
+      tablesSel.innerHTML = '<option value="" disabled>Could not load tables</option>';
+      tablesSel.disabled = true;
+      setPitrMsg('Could not load tables from Doris.', true);
     });
   }
-  btn.disabled = false; btn.style.opacity = '1';
-  setPitrMsg('', false);
 }
 
 function startPitrRestore() {
-  var db = document.getElementById('pitr-db').value;
+  var db  = document.getElementById('pitr-db').value;
   var val = document.getElementById('pitr-snap').value;
   if (!db || !val) { setPitrMsg('Select a database and snapshot first.', true); return; }
   var parts = val.split('|');
-  var pickedTables = [];
-  Array.from(document.getElementById('pitr-tables-list').querySelectorAll('input[type=checkbox]'))
-    .forEach(function(cb) { if (cb.checked) pickedTables.push(cb.dataset.table); });
+  var tablesSel = document.getElementById('pitr-tables-sel');
+  var pickedTables = Array.from(tablesSel.selectedOptions).map(function(o) { return o.value; });
   openRestorePanel(parts[0] || '', db, parts[1] || '', pickedTables.length ? pickedTables : null);
 }
 
