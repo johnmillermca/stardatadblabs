@@ -122,25 +122,12 @@ a:hover{color:#163BA6}
   <section id="wh-catalog" aria-labelledby="h-cat" class="panel">
     <div style="display:flex;flex-direction:column;gap:6px">
       <h2 id="h-cat" style="margin:0;font:700 22px Inter,sans-serif">Data catalog</h2>
-      <span class="hint">Every database and table in your warehouse and connected sources.</span>
+      <span class="hint">Every native database and table in your warehouse, loaded live from Doris.</span>
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
       <div style="display:flex;flex-direction:column;gap:6px">
         <label class="lbl" for="ct-q">Search</label>
         <input class="inp" id="ct-q" type="search" placeholder="Table or database name" oninput="filterCatalog()">
-      </div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <label class="lbl" for="ct-src">Source</label>
-        <select class="inp" id="ct-src" onchange="filterCatalog()">
-          <option value="all">All sources</option>
-          <option value="warehouse">Warehouse</option>
-          <option value="polaris">Lakehouse</option>
-          <option value="databricks">Databricks</option>
-          <option value="postgres">PostgreSQL</option>
-          <option value="oracle">Oracle</option>
-          <option value="mongodb">MongoDB</option>
-          <option value="snowflake">Snowflake</option>
-        </select>
       </div>
       <div style="display:flex;flex-direction:column;gap:6px">
         <label class="lbl" for="ct-db">Database</label>
@@ -150,15 +137,22 @@ a:hover{color:#163BA6}
       </div>
     </div>
     <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
-      <table style="width:100%;border-collapse:collapse;min-width:900px">
+      <table style="width:100%;border-collapse:collapse;min-width:760px">
         <thead><tr>
-          <th class="th">Table</th><th class="th">Database</th><th class="th">Source</th>
-          <th class="th">Format</th><th class="th">Cold storage</th><th class="th">Last updated</th>
+          <th class="th">Table</th><th class="th">Database</th>
+          <th class="th">Engine</th><th class="th">Rows</th><th class="th">Size</th>
         </tr></thead>
-        <tbody id="catalog-body"></tbody>
+        <tbody id="catalog-body">
+          <tr><td colspan="5" class="empty">Loading tables…</td></tr>
+        </tbody>
       </table>
     </div>
-    <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    <!-- Pagination -->
+    <div id="catalog-pager" style="display:flex;align-items:center;gap:12px;justify-content:flex-end">
+      <span id="catalog-pager-info" style="font:400 13px Inter,sans-serif;color:#57606a"></span>
+      <button id="catalog-prev" class="btn" onclick="catalogPage(-1)" disabled>← Prev</button>
+      <button id="catalog-next" class="btn" onclick="catalogPage(1)"  disabled>Next →</button>
+    </div>
   </section>
 
   <!-- Backup & recovery -->
@@ -353,34 +347,8 @@ a:hover{color:#163BA6}
 // ============================================================
 // DATA  — external catalog sources (Data sources tab)
 // ============================================================
-var CATALOG_TABLES = [
-  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'events',       fmt:'Native',     cold:'After 1 day' },
-  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'lookup_table', fmt:'Native',     cold:'After 1 day' },
-  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'store_sales',  fmt:'Iceberg',    cold:'Object storage' },
-  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'inventory',    fmt:'Iceberg',    cold:'Object storage' },
-  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_sales',    fmt:'Iceberg',    cold:'Object storage' },
-  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_returns',  fmt:'Iceberg',    cold:'Object storage' },
-  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'customers',    fmt:'Delta Lake', cold:'Object storage' },
-  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'product',      fmt:'Delta Lake', cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'products',     fmt:'CDC (live)', cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'product_reviews',  fmt:'CDC (live)', cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'warehouse',    fmt:'CDC (live)', cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'income_band',  fmt:'CDC (live)', cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'CUSTOMERS',    fmt:'CDC (live)', cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'ORDERS',       fmt:'CDC (live)', cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'PRODUCTS',     fmt:'CDC (live)', cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'products',     fmt:'CDC (live)', cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'product_reviews', fmt:'CDC (live)', cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
-  { src:'snowflake', srcName:'Snowflake',  db:'COMPUTE_WH',    t:'(live query — tables load on connect)', fmt:'Native JDBC', cold:'N/A (live)' },
-];
+// CATALOG_TABLES is populated dynamically by loadCatalog() from live Doris queries.
+var CATALOG_TABLES = [];
 
 var SOURCES = [
   { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables',             canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
@@ -482,45 +450,117 @@ function unique(arr, k) {
   return o;
 }
 
+// ============================================================
+// DATA CATALOG — live loader + pagination
+// ============================================================
+var catalogState = { page: 0, filtered: [] };
+var CATALOG_PAGE_SIZE = 10;
+
+// Called once on boot — queries information_schema.tables for all
+// native (internal catalog) tables, skipping system DBs.
+function loadCatalog() {
+  dorisSQL('information_schema',
+    "SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.ENGINE, t.TABLE_ROWS, t.DATA_LENGTH " +
+    "FROM information_schema.tables t " +
+    "WHERE t.TABLE_CATALOG = 'internal' " +
+    "AND t.TABLE_SCHEMA NOT IN " +
+    "('information_schema','mysql','performance_schema','__internal_schema','cache_system') " +
+    "ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME",
+    5000
+  ).then(function(res) {
+    CATALOG_TABLES = res.rows.map(function(r) {
+      var sizeBytes = parseInt(r[4]) || 0;
+      var sizeFmt = sizeBytes === 0 ? '—'
+                  : sizeBytes < 1024 ? sizeBytes + ' B'
+                  : sizeBytes < 1048576 ? (sizeBytes/1024).toFixed(1) + ' KB'
+                  : sizeBytes < 1073741824 ? (sizeBytes/1048576).toFixed(1) + ' MB'
+                  : (sizeBytes/1073741824).toFixed(2) + ' GB';
+      return {
+        db:     r[0],
+        t:      r[1],
+        engine: r[2] || 'OLAP',
+        rows:   r[3] != null ? Number(r[3]).toLocaleString() : '—',
+        size:   sizeFmt,
+      };
+    });
+
+    // Populate database dropdown
+    var dbs = [];
+    var seen = {};
+    CATALOG_TABLES.forEach(function(r) { if (!seen[r.db]) { seen[r.db] = 1; dbs.push(r.db); } });
+    var dbSel = document.getElementById('ct-db');
+    var cur = dbSel.value;
+    dbSel.innerHTML = '<option value="all">All databases</option>';
+    dbs.forEach(function(d) {
+      var o = document.createElement('option'); o.value = d; o.textContent = d;
+      if (d === cur) o.selected = true;
+      dbSel.appendChild(o);
+    });
+
+    filterCatalog();
+  }).catch(function(e) {
+    console.warn('loadCatalog failed:', e);
+    document.getElementById('catalog-body').innerHTML =
+      '<tr><td colspan="5" class="empty" style="color:#B42318">Could not load tables from Doris.</td></tr>';
+  });
+}
+
 function filterCatalog() {
-  state.catalogSrc = document.getElementById('ct-src').value;
-  state.catalogDb  = document.getElementById('ct-db').value;
-  var inSrc = CATALOG_TABLES.filter(function(r) {
-    return state.catalogSrc === 'all' || r.src === state.catalogSrc;
+  state.catalogDb = document.getElementById('ct-db').value;
+  var q = document.getElementById('ct-q').value.trim().toLowerCase();
+  var db = state.catalogDb;
+  catalogState.filtered = CATALOG_TABLES.filter(function(r) {
+    return (db === 'all' || r.db === db) &&
+           (!q || (r.db + '.' + r.t).toLowerCase().indexOf(q) >= 0);
   });
-  var dbs = unique(inSrc, 'db');
-  var dbSel = document.getElementById('ct-db');
-  var cur = dbSel.value;
-  dbSel.innerHTML = '<option value="all">All databases</option>';
-  dbs.forEach(function(d) {
-    var o = document.createElement('option');
-    o.value = d; o.textContent = d;
-    if (d === cur) o.selected = true;
-    dbSel.appendChild(o);
-  });
-  state.catalogDb = dbSel.value;
+  catalogState.page = 0;
   renderCatalog();
 }
 
 function renderCatalog() {
-  var src = state.catalogSrc, db = state.catalogDb;
-  var q = document.getElementById('ct-q').value.trim().toLowerCase();
-  var rows = CATALOG_TABLES.filter(function(r) {
-    return (src === 'all' || r.src === src) &&
-           (db  === 'all' || r.db  === db)  &&
-           (!q || (r.db + '.' + r.t).toLowerCase().indexOf(q) >= 0);
-  });
+  var rows  = catalogState.filtered;
+  var total = rows.length;
+  var page  = catalogState.page;
+  var start = page * CATALOG_PAGE_SIZE;
+  var end   = Math.min(start + CATALOG_PAGE_SIZE, total);
+  var slice = rows.slice(start, end);
+
   var tbody = document.getElementById('catalog-body');
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">No tables match. Clear the search or pick another source.</td></tr>';
-    return;
+  if (!total) {
+    tbody.innerHTML = CATALOG_TABLES.length
+      ? '<tr><td colspan="5" class="empty">No tables match. Clear the search or pick another database.</td></tr>'
+      : '<tr><td colspan="5" class="empty">Loading tables…</td></tr>';
+  } else {
+    tbody.innerHTML = slice.map(function(r) {
+      return '<tr>' +
+        '<td class="td" style="font-weight:600">' + r.t + '</td>' +
+        '<td class="td">' + r.db + '</td>' +
+        '<td class="td">' + r.engine + '</td>' +
+        '<td class="td" style="text-align:right;padding-right:16px">' + r.rows + '</td>' +
+        '<td class="td" style="text-align:right;padding-right:16px">' + r.size + '</td>' +
+        '</tr>';
+    }).join('');
   }
-  tbody.innerHTML = rows.map(function(r) {
-    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td>' +
-      '<td class="td">' + r.db + '</td><td class="td">' + r.srcName + '</td>' +
-      '<td class="td">' + r.fmt + '</td><td class="td">' + r.cold + '</td>' +
-      '<td class="td" style="color:#9AA3B0">—</td></tr>';
-  }).join('');
+
+  // Pager
+  var info  = document.getElementById('catalog-pager-info');
+  var prev  = document.getElementById('catalog-prev');
+  var next  = document.getElementById('catalog-next');
+  if (total > 0) {
+    info.textContent = (start + 1) + '–' + end + ' of ' + total + ' tables';
+  } else {
+    info.textContent = '';
+  }
+  prev.disabled = (page === 0);
+  next.disabled = (end >= total);
+}
+
+function catalogPage(dir) {
+  var total = catalogState.filtered.length;
+  var newPage = catalogState.page + dir;
+  if (newPage < 0 || newPage * CATALOG_PAGE_SIZE >= total) return;
+  catalogState.page = newPage;
+  renderCatalog();
 }
 
 // ============================================================
@@ -1280,17 +1320,19 @@ function renderSrcTables() {
 // BOOT
 // ============================================================
 (function init() {
-  renderCatalog();
   renderSnapshots();   // show "No snapshots" until history loads
 
   // Load real data from Doris
-  loadBkDatabases();   // populate DB dropdown + tables
+  loadCatalog();       // populate data catalog from live Doris tables
+  loadBkDatabases();   // populate backup DB dropdown + tables
   loadBackupHistory(); // populate snapshots table
   loadSavedSchedule(); // restore saved autobackup settings
   loadKpis();
 
-  // Refresh KPIs and snapshot status every 30 s
+  // Refresh every 30 s
   setInterval(function() { loadKpis(); loadBackupHistory(); }, 30000);
+  // Refresh catalog every 5 min (tables don't change that often)
+  setInterval(function() { loadCatalog(); }, 300000);
 })();
 </script>
 </body>
