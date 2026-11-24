@@ -356,7 +356,7 @@ var SOURCES = [
   { id:'pg_cache_testing',    name:'PostgreSQL', kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['public'] },
   { id:'oracle_cache_testing',name:'Oracle',     kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['CACHE_TESTING'] },
   { id:'mongodb',             name:'MongoDB',    kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['cache_testing'] },
-  { id:'snowflake',           name:'Snowflake',  kind:'Live JDBC query (no copy)',  canSync:false, freshCycle:'Live — no local copy',               dbs:['EVENTS','PUBLIC'] },
+  { id:'snowflake',           name:'Snowflake',  kind:'Live JDBC query (no copy)',  canSync:true,  freshCycle:'Live — no local copy',               dbs:['EVENTS','PUBLIC'] },
 ];
 
 // App state
