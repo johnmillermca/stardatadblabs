@@ -1,8 +1,9 @@
 ---
 # webconsole-proxy — nginx DaemonSet on master.local (hostNetwork, port 80)
-# Routes two domains:
+# Routes three domains through a single shared oauth2-proxy (one session cookie):
 #   auth.stardatadb.com      → Pocket ID (access namespace)
-#   console.stardatadb.com   → oauth2-proxy → console-spa (access namespace)
+#   console.stardatadb.com   → oauth2-proxy → spa-router → console-spa (access namespace)
+#   stardata.stardatadb.com  → oauth2-proxy → spa-router → stardata-spa (access namespace)
 #
 # www.stardatadb.com is served directly from S3 via Cloudflare DNS (no tunnel).
 # Cloudflare sits in front and terminates TLS; traffic arrives here on HTTP.
@@ -64,6 +65,43 @@ data:
         }
 
         # All other traffic: gate through oauth2-proxy
+        location / {
+            set $oauth2_proxy "console-oauth2-proxy.access.svc.cluster.local";
+            proxy_pass         http://$oauth2_proxy:80;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto https;
+            proxy_buffering    off;
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+            add_header Pragma        "no-cache" always;
+            add_header Expires       "0" always;
+        }
+
+        location /healthz {
+            access_log off;
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+    }
+
+    # ── stardata.stardatadb.com → same oauth2-proxy → spa-router → stardata-spa
+    # Uses the identical console-oauth2-proxy. Cookie is scoped to .stardatadb.com
+    # so a session from console carries over — zero re-authentication required.
+    server {
+        listen 80;
+        server_name stardata.stardatadb.com;
+
+        location /oauth2/ {
+            set $oauth2_proxy "console-oauth2-proxy.access.svc.cluster.local";
+            proxy_pass         http://$oauth2_proxy:80;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto https;
+            proxy_buffering    off;
+        }
+
         location / {
             set $oauth2_proxy "console-oauth2-proxy.access.svc.cluster.local";
             proxy_pass         http://$oauth2_proxy:80;
