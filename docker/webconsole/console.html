@@ -1,57 +1,246 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>StarData Console</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StarData · Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{
-  font-family:-apple-system,"Segoe UI",system-ui,sans-serif;
-  background:#0f1117;color:#e8eaf0;min-height:100vh;
-  display:flex;align-items:center;justify-content:center;
-}
-.card{
-  background:#16181f;border:1px solid #2a2d38;border-radius:14px;
-  padding:48px 40px;width:100%;max-width:420px;text-align:center;
-}
-.logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:32px}
-.logo-text{font-size:24px;font-weight:800;color:#e8eaf0;letter-spacing:-.02em}
-.title{font-size:20px;font-weight:700;margin-bottom:10px}
-.sub{font-size:14px;color:#6b7280;line-height:1.6;margin-bottom:32px}
-.btn{
-  display:inline-flex;align-items:center;justify-content:center;
-  padding:11px 28px;border-radius:7px;font-size:14px;font-weight:600;
-  background:#3346C4;color:#fff;text-decoration:none;border:none;cursor:pointer;
-  transition:background .12s;
-}
-.btn:hover{background:#4458e0}
-.signout{display:block;margin-top:16px;font-size:13px;color:#6b7280;text-decoration:none}
-.signout:hover{color:#e8eaf0}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F4F6F9;font-family:Inter,system-ui,sans-serif;color:#14171C;min-height:100vh;display:flex;flex-wrap:wrap}
+a{color:#1F4FD8;text-decoration:none}
+a:hover{color:#163BA6}
+
+.nav{display:flex;align-items:center;gap:14px;min-height:48px;padding:0 14px;border-radius:10px;font:500 15px Inter,sans-serif;color:#2B313B;text-decoration:none;transition:background .12s}
+.nav:hover{background:#EEF1F5;color:#14171C}
+.navon{background:#E8EEFC;color:#1F3FB8;font-weight:600}
+.navon:hover{background:#E8EEFC;color:#1F3FB8}
+.sect{font:700 11px Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#9AA3B0;padding:16px 14px 4px}
+
+.card{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.badge{padding:4px 10px;border-radius:999px;background:#E8EEFC;color:#1F3FB8;font:600 12px Inter,sans-serif;white-space:nowrap}
+.mval{font:700 20px Inter,sans-serif;color:#14171C}
+.mlabel{font:400 13px Inter,sans-serif;color:#4F5866}
+.btnp{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF;font:600 14px Inter,sans-serif;cursor:pointer;text-decoration:none}
+.btnp:hover{background:#163BA6;border-color:#163BA6;color:#FFFFFF}
+.btnout{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer;text-decoration:none}
+.btnout:hover{background:#EEF1F5}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="logo">
-    <svg width="34" height="34" viewBox="0 0 48 48" fill="none">
-      <circle cx="24" cy="24" r="22" fill="#1e1440" stroke="#a78bfa" stroke-width="1.5"/>
-      <ellipse cx="24" cy="17" rx="7.5" ry="2.8" fill="#3346C4" stroke="#a5b4fc" stroke-width="1.4"/>
-      <rect x="16.5" y="17" width="15" height="10" fill="#2a3baa" stroke="#a5b4fc" stroke-width="1.4"/>
-      <ellipse cx="24" cy="27" rx="7.5" ry="2.8" fill="#3346C4" stroke="#a5b4fc" stroke-width="1.4"/>
-      <line x1="17" y1="22" x2="31" y2="22" stroke="#a5b4fc" stroke-width="1" opacity=".6"/>
-      <path d="M8 30 Q13 40 24 41 Q35 40 40 30 Z" fill="rgba(51,70,196,.3)"/>
-      <g transform="translate(34,12)">
-        <path d="M0,-5 L1.2,-1.2 L5,0 L1.2,1.2 L0,5 L-1.2,1.2 L-5,0 L-1.2,-1.2Z" fill="#e0e7ff"/>
-      </g>
-    </svg>
-    <span class="logo-text">StarData</span>
+
+<!-- sidebar -->
+<aside style="flex:1 1 260px;max-width:300px;background:#FFFFFF;border-right:1px solid #E1E6ED;padding:20px 16px 32px;display:flex;flex-direction:column;gap:4px;min-height:100vh">
+  <div style="display:flex;align-items:center;gap:10px;padding:4px 14px 18px">
+    <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#14171C"/><path d="M16 7l2.6 5.6 6.1.7-4.5 4.1 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.1 6.1-.7z" fill="#FFFFFF"/></svg>
+    <div style="display:flex;flex-direction:column">
+      <span style="font:700 17px Inter,sans-serif">StarData</span>
+      <span style="font:400 12px Inter,sans-serif;color:#4F5866">Console</span>
+    </div>
   </div>
 
-  <div class="title">Welcome to StarData Console</div>
-  <div class="sub">You are signed in. The console is coming soon.</div>
+  <nav aria-label="Components" style="display:flex;flex-direction:column;gap:2px">
+    <a class="nav navon" href="/console.html" aria-current="page">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
+      Home
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v4a4 4 0 0 0 4 4h4a4 4 0 0 1 4 2"/></svg>
+      ETL Studio
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+      Documents
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8M16 7.5l-3 8M8.5 6h7"/></svg>
+      StarGraph
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+      Monitoring
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6.5 10.5l4-4M6.5 13.5l4 4"/><path d="M18 9l1 2.5L21.5 12 19 13l-1 2.5-1-2.5-2.5-1 2.5-.5z"/></svg>
+      GraphRAG
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v15H6a2 2 0 0 0-2 2z"/><path d="M4 20a2 2 0 0 0 2 1h12v-3"/><circle cx="11" cy="10" r="3"/><path d="M13.2 12.2L15.5 14.5"/></svg>
+      OpenRAG
+    </a>
+    <!-- StarData → goes to stardata.stardatadb.com -->
+    <a class="nav" href="https://stardata.stardatadb.com">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+      StarData
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
+      QuerySpace
+    </a>
+  </nav>
 
-  <a href="https://auth.stardatadb.com/logout" class="btn">Sign out</a>
-  <a href="https://www.stardatadb.com" class="signout">Back to home</a>
-</div>
+  <div class="sect">Access control</div>
+  <nav aria-label="Access control" style="display:flex;flex-direction:column;gap:2px">
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/></svg>
+      <span style="flex:1">Members</span>
+      <span style="min-width:24px;height:24px;border-radius:999px;background:#B23C0E;color:#FFFFFF;font:700 12px Inter,sans-serif;display:inline-flex;align-items:center;justify-content:center" aria-label="2 waiting">2</span>
+    </a>
+    <a class="nav" href="#">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      Access
+    </a>
+  </nav>
+
+  <!-- Sign out — bottom of sidebar -->
+  <div style="margin-top:auto;padding-top:16px;border-top:1px solid #E1E6ED">
+    <a class="nav" href="/auth/sign-out" style="color:#4F5866">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      Sign out
+    </a>
+  </div>
+</aside>
+
+<!-- main -->
+<main style="flex:999 1 640px;min-width:0;padding:40px 48px 64px;display:flex;flex-direction:column;gap:28px;max-width:1180px">
+
+  <div style="display:flex;flex-direction:column;gap:8px">
+    <h1 style="margin:0;font:700 38px Inter,sans-serif;letter-spacing:-0.01em">Welcome back, John</h1>
+    <span style="font:400 17px Inter,sans-serif;color:#4F5866">You see a tile for each component you have a role for.</span>
+  </div>
+
+  <!-- pending members banner -->
+  <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;padding:18px 22px;background:#FDF3E7;border:1px solid #F0D3AE;border-radius:14px">
+    <div style="display:flex;align-items:center;gap:14px;font:400 15px Inter,sans-serif;color:#5A2C00">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#B23C0E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/></svg>
+      <span><strong style="color:#8A2C05">2 people are waiting for access.</strong> Approve them and choose a level for each component.</span>
+    </div>
+    <a href="#" class="btnout" style="border-color:#E0B07A;color:#8A2C05">Review requests</a>
+  </div>
+
+  <!-- component tiles -->
+  <section aria-labelledby="h-comp" style="display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px">
+      <h2 id="h-comp" style="margin:0;font:700 22px Inter,sans-serif">Your components</h2>
+      <span class="mlabel">Figures appear once each component is connected.</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px">
+
+      <!-- StarData tile — links to stardata.stardatadb.com -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span style="font:700 20px Inter,sans-serif">StarData</span>
+          <span class="badge">engineer</span>
+        </div>
+        <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Warehouse and lakehouse: catalog, backups and connected data sources.</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Service status</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Storage used</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last backup</span></div>
+        </div>
+        <div style="margin-top:auto">
+          <a class="btnp" href="https://stardata.stardatadb.com">Open StarData</a>
+        </div>
+      </div>
+
+      <!-- ETL Studio -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span style="font:700 20px Inter,sans-serif">ETL Studio</span>
+          <span class="badge">admin</span>
+        </div>
+        <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Flink and SQLMesh canvases, CDC, schedules and document sources.</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Pipelines running</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Failed runs (24h)</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Next run</span></div>
+        </div>
+        <div style="margin-top:auto"><a class="btnp" href="#">Open ETL Studio</a></div>
+      </div>
+
+      <!-- Documents -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span style="font:700 20px Inter,sans-serif">Documents</span>
+        </div>
+        <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Upload and manage the documents your search and RAG apps use.</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Documents</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Waiting to process</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last upload</span></div>
+        </div>
+        <div style="margin-top:auto"><a class="btnp" href="#">Open Documents</a></div>
+      </div>
+
+      <!-- StarGraph -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span style="font:700 20px Inter,sans-serif">StarGraph</span>
+          <span class="badge">engineer</span>
+        </div>
+        <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Memgraph graph from Iceberg tables. Query, explore and download.</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Nodes</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Relationships</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last build</span></div>
+        </div>
+        <div style="margin-top:auto"><a class="btnp" href="#">Open StarGraph</a></div>
+      </div>
+
+      <!-- Monitoring -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span style="font:700 20px Inter,sans-serif">Monitoring</span>
+        </div>
+        <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Health, alerts and incidents across every component.</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Open alerts</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Healthy components</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last incident</span></div>
+        </div>
+        <div style="margin-top:auto"><a class="btnp" href="#">Open Monitoring</a></div>
+      </div>
+
+      <!-- QuerySpace -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <span style="font:700 20px Inter,sans-serif">QuerySpace</span>
+        </div>
+        <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Write, save and share SQL queries against your warehouse and sources.</span>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Saved queries</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Queries today</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Shared with you</span></div>
+        </div>
+        <div style="margin-top:auto"><a class="btnout" href="#">Open QuerySpace</a></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- access + activity -->
+  <div style="display:flex;flex-wrap:wrap;gap:18px">
+    <section aria-labelledby="h-acc" class="card" style="flex:1 1 400px">
+      <h2 id="h-acc" style="margin:0;font:700 20px Inter,sans-serif">Your access</h2>
+      <div style="display:flex;flex-direction:column">
+        <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span style="color:#4F5866">Platform</span><span style="font-weight:700">Owner</span></div>
+        <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span style="color:#4F5866">Signed in with</span><span>Password and authenticator app</span></div>
+        <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0"><span style="color:#4F5866">Session ends</span><span>After 1 day idle or 7 days total</span></div>
+      </div>
+      <span style="font:400 13px Inter,sans-serif;color:#4F5866">Roles are set by an Owner or Admin. <a href="#">Change your password</a> on the sign-in page.</span>
+    </section>
+    <section aria-labelledby="h-act" class="card" style="flex:1 1 400px">
+      <h2 id="h-act" style="margin:0;font:700 20px Inter,sans-serif">Recent activity</h2>
+      <div style="display:flex;flex-direction:column">
+        <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span>Approved Priya Shah as StarData analyst</span><span style="color:#4F5866;white-space:nowrap">Yesterday</span></div>
+        <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0"><span>Issued a new app password for reporting-bi</span><span style="color:#4F5866;white-space:nowrap">Nov 2</span></div>
+      </div>
+      <a href="#" style="font:500 14px Inter,sans-serif">See all activity in Access</a>
+    </section>
+  </div>
+
+</main>
 </body>
 </html>

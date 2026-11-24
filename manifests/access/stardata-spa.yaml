@@ -1,0 +1,127 @@
+# =============================================================================
+# stardata-spa — serves stardata.html (Warehouse + Data sources).
+# Namespace  : access  (same as console-spa)
+# Hostname   : stardata.stardatadb.com  (via nginx-proxy vhost)
+# Nodes      : worker2, worker3, worker4  (tolerate dedicated=stardata taint)
+# Replicas   : 3  (one per worker, spread evenly)
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stardata-spa-conf
+  namespace: access
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name stardata.stardatadb.com _;
+
+        root /usr/share/nginx/html;
+
+        location / {
+            try_files $uri /stardata.html;
+        }
+
+        location ~* \.html$ {
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+            add_header Pragma        "no-cache" always;
+            add_header Expires       "0" always;
+            try_files $uri /stardata.html;
+        }
+
+        location /healthz {
+            access_log off;
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stardata-spa
+  namespace: access
+  labels:
+    app: stardata-spa
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: stardata-spa
+  template:
+    metadata:
+      labels:
+        app: stardata-spa
+    spec:
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: stardata
+          effect: NoSchedule
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: stardata-spa
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2.local
+                      - worker3.local
+                      - worker4.local
+      containers:
+        - name: nginx
+          image: 192.168.1.50:30500/webconsole:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: stardata-spa-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stardata-spa
+  namespace: access
+  labels:
+    app: stardata-spa
+spec:
+  type: ClusterIP
+  selector:
+    app: stardata-spa
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

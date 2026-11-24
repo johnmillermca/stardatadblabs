@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StarData · Warehouse & Data sources</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F4F6F9;font-family:Inter,system-ui,sans-serif;color:#14171C;min-height:100vh}
+a{color:#1F4FD8;text-decoration:none}
+a:hover{color:#163BA6}
+.lbl{font:600 13px Inter,sans-serif;color:#2B313B}
+.hint{font:400 13px/1.5 Inter,sans-serif;color:#4F5866}
+.card{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.panel{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:28px;display:flex;flex-direction:column;gap:18px}
+.kpi{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:6px}
+.inp{box-sizing:border-box;width:100%;height:40px;padding:0 12px;border:1px solid #C4CCD8;border-radius:8px;background:#FFFFFF;font:400 14px Inter,sans-serif;color:#14171C}
+.inp:focus{outline:2px solid #1F4FD8;outline-offset:1px;border-color:#1F4FD8}
+.btnp{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF;font:600 14px Inter,sans-serif;cursor:pointer}
+.btnp:hover{background:#163BA6}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer}
+.btn:hover{background:#EEF1F5}
+.btnd{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #B42318;background:#FFFFFF;color:#B42318;font:600 14px Inter,sans-serif;cursor:pointer}
+.btnd:hover{background:#FFF5F5}
+.th{padding:10px 14px;text-align:left;font:600 11px Inter,sans-serif;color:#4F5866;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #E1E6ED;white-space:nowrap;background:#FAFBFD}
+.td{padding:11px 14px;border-bottom:1px solid #EEF1F5;font:400 14px Inter,sans-serif;color:#14171C}
+.empty{padding:28px 14px;text-align:center;font:400 14px Inter,sans-serif;color:#4F5866}
+.tab{display:inline-flex;align-items:center;min-height:44px;padding:0 18px;font:500 15px Inter,sans-serif;color:#4F5866;text-decoration:none;border-bottom:3px solid transparent;cursor:pointer;background:none;border-left:none;border-right:none;border-top:none}
+.tab:hover{color:#14171C}
+.tab-on{font-weight:600;color:#14171C;border-bottom:3px solid #1F4FD8}
+.sub{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;border-radius:8px;font:600 13px Inter,sans-serif;color:#2B313B;text-decoration:none}
+.sub:hover{background:#EEF1F5}
+.pill-on{min-height:36px;padding:0 14px;border-radius:8px;cursor:pointer;font:600 14px Inter,sans-serif;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF}
+.pill-off{min-height:36px;padding:0 14px;border-radius:8px;cursor:pointer;font:600 14px Inter,sans-serif;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C}
+.pill-on:hover{background:#163BA6;border-color:#163BA6}
+.pill-off:hover{background:#EEF1F5}
+.dot-grey{width:9px;height:9px;border-radius:50%;background:#9AA3B0;display:inline-block}
+.avatar{width:32px;height:32px;border-radius:50%;background:#DCE7F7;color:#163BA6;display:inline-flex;align-items:center;justify-content:center;font:700 12px Inter,sans-serif;flex-shrink:0}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ── -->
+<header style="background:#FFFFFF;border-bottom:1px solid #E1E6ED;position:sticky;top:0;z-index:100">
+  <div style="max-width:1360px;margin:0 auto;padding:14px 32px 0;display:flex;flex-direction:column;gap:0">
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding-bottom:12px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#14171C"/><path d="M16 7l2.6 5.6 6.1.7-4.5 4.1 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.1 6.1-.7z" fill="#FFFFFF"/></svg>
+        <span style="font:700 18px Inter,sans-serif">StarData</span>
+        <span style="font:500 14px Inter,sans-serif;color:#4F5866;padding-left:12px;border-left:1px solid #E1E6ED">Acme Corp</span>
+      </div>
+      <!-- right: avatar + sign out -->
+      <div style="display:flex;align-items:center;gap:14px">
+        <span style="display:inline-flex;align-items:center;gap:8px;font:500 13px Inter,sans-serif;color:#2B313B">
+          <span class="avatar">JD</span>Admin
+        </span>
+        <a href="http://console.stardatadb.com/auth/sign-out"
+           style="display:inline-flex;align-items:center;gap:6px;font:500 13px Inter,sans-serif;color:#4F5866;padding:6px 12px;border:1px solid #E1E6ED;border-radius:8px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Sign out
+        </a>
+      </div>
+    </div>
+    <!-- tabs -->
+    <nav aria-label="StarData" style="display:flex;gap:4px">
+      <a href="http://console.stardatadb.com"
+         style="display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:0 18px 0 0;margin-right:8px;border-right:1px solid #E1E6ED;font:500 15px Inter,sans-serif;color:#4F5866;text-decoration:none;border-bottom:3px solid transparent">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Home
+      </a>
+      <button class="tab tab-on" id="tab-warehouse" onclick="showTab('warehouse')">Warehouse</button>
+      <button class="tab" id="tab-lakehouse" onclick="showTab('lakehouse')">Data sources</button>
+    </nav>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════
+     WAREHOUSE
+     ══════════════════════════════════════════════════════════ -->
+<div id="sub-warehouse">
+<main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+  <nav aria-label="On this page" style="display:flex;flex-wrap:wrap;gap:6px">
+    <a class="sub" href="#wh-overview">Overview</a>
+    <a class="sub" href="#wh-catalog">Data catalog</a>
+    <a class="sub" href="#wh-backup">Backup &amp; recovery</a>
+  </nav>
+
+  <!-- Overview KPIs -->
+  <section id="wh-overview" aria-labelledby="h-ov" style="display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px">
+      <h1 id="h-ov" style="margin:0;font:700 26px Inter,sans-serif">Overview</h1>
+      <span class="hint">Live values appear once the console is connected to your workspace.</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+      <div class="kpi">
+        <span class="lbl">Service status</span>
+        <span style="display:inline-flex;align-items:center;gap:8px;font:700 24px Inter,sans-serif"><span class="dot-grey"></span>—</span>
+        <span class="hint">Healthy, Degraded or Outage, against your SLA</span>
+      </div>
+      <div class="kpi">
+        <span class="lbl">Storage used</span>
+        <span style="font:700 24px Inter,sans-serif">—</span>
+        <span class="hint">Hot: — · Cold (moved after 1 day): —</span>
+      </div>
+      <div class="kpi">
+        <span class="lbl">Last backup</span>
+        <span id="kpi-last-backup" style="font:700 24px Inter,sans-serif">None yet</span>
+        <span id="kpi-last-backup-hint" class="hint">Automatic backups are off</span>
+      </div>
+      <div class="kpi">
+        <span class="lbl">Data freshness</span>
+        <span style="font:700 24px Inter,sans-serif">—</span>
+        <span class="hint">Oldest source sync · <a href="#" onclick="showTab('lakehouse');return false;">View data sources</a></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Data catalog -->
+  <section id="wh-catalog" aria-labelledby="h-cat" class="panel">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <h2 id="h-cat" style="margin:0;font:700 22px Inter,sans-serif">Data catalog</h2>
+      <span class="hint">Every database and table in your warehouse and connected sources.</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="ct-q">Search</label>
+        <input class="inp" id="ct-q" type="search" placeholder="Table or database name" oninput="filterCatalog()">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="ct-src">Source</label>
+        <select class="inp" id="ct-src" onchange="filterCatalog()">
+          <option value="all">All sources</option>
+          <option value="warehouse">Warehouse</option>
+          <option value="polaris">Lakehouse</option>
+          <option value="databricks">Databricks</option>
+          <option value="postgres">PostgreSQL</option>
+          <option value="oracle">Oracle</option>
+          <option value="mongodb">MongoDB</option>
+          <option value="snowflake">Snowflake</option>
+        </select>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="ct-db">Database</label>
+        <select class="inp" id="ct-db" onchange="filterCatalog()">
+          <option value="all">All databases</option>
+        </select>
+      </div>
+    </div>
+    <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;min-width:900px">
+        <thead><tr>
+          <th class="th">Table</th><th class="th">Database</th><th class="th">Source</th>
+          <th class="th">Format</th><th class="th">Cold storage</th><th class="th">Last updated</th>
+        </tr></thead>
+        <tbody id="catalog-body"></tbody>
+      </table>
+    </div>
+    <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+  </section>
+
+  <!-- Backup & recovery -->
+  <section id="wh-backup" aria-labelledby="h-bk" class="panel">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <h2 id="h-bk" style="margin:0;font:700 22px Inter,sans-serif">Backup &amp; recovery</h2>
+      <span class="hint">Back up a database or chosen tables, keep snapshots on a schedule, and restore any snapshot.</span>
+    </div>
+
+    <div style="display:flex;flex-wrap:wrap;gap:24px">
+      <!-- Back up now -->
+      <div style="flex:2 1 500px;min-width:0;display:flex;flex-direction:column;gap:14px">
+        <span style="font:700 16px Inter,sans-serif">Back up now</span>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="bk-db">Database</label>
+            <select class="inp" id="bk-db"><option value="mydb">mydb</option></select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="bk-lab">Snapshot name</label>
+            <input class="inp" id="bk-lab" type="text" placeholder="mydb_2026_11_23">
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <span class="lbl">Tables (leave all unticked to back up the whole database)</span>
+          <div style="display:flex;flex-wrap:wrap;gap:4px 20px">
+            <label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer"><input type="checkbox" id="bk-t-events" style="width:18px;height:18px;accent-color:#1F4FD8"> events</label>
+            <label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer"><input type="checkbox" id="bk-t-lookup" style="width:18px;height:18px;accent-color:#1F4FD8"> lookup_table</label>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btnp" onclick="doBackup()">Back up now</button>
+          <span id="bk-msg" style="font:500 14px Inter,sans-serif"></span>
+        </div>
+      </div>
+      <!-- Auto backups -->
+      <div style="flex:1 1 300px;min-width:0;display:flex;flex-direction:column;gap:14px;padding:20px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:12px">
+        <span style="font:700 16px Inter,sans-serif">Automatic backups</span>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <span class="lbl">Frequency</span>
+          <div style="display:flex;flex-wrap:wrap;gap:8px" id="freq-group">
+            <button class="pill-on" data-freq="off" onclick="setPill('freq',this)">Off</button>
+            <button class="pill-off" data-freq="daily" onclick="setPill('freq',this)">Daily</button>
+            <button class="pill-off" data-freq="weekly" onclick="setPill('freq',this)">Weekly</button>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <span class="lbl">Keep snapshots for</span>
+          <div style="display:flex;flex-wrap:wrap;gap:8px" id="ret-group">
+            <button class="pill-off" data-ret="7" onclick="setPill('ret',this)">7 days</button>
+            <button class="pill-on" data-ret="14" onclick="setPill('ret',this)">14 days</button>
+            <button class="pill-off" data-ret="30" onclick="setPill('ret',this)">30 days</button>
+          </div>
+        </div>
+        <div><button class="btn" onclick="saveSched()">Save schedule</button></div>
+      </div>
+    </div>
+
+    <span style="font:700 16px Inter,sans-serif">Snapshots</span>
+    <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;min-width:720px">
+        <thead><tr>
+          <th class="th">Snapshot</th><th class="th">Database</th><th class="th">Tables</th>
+          <th class="th">Taken</th><th class="th">Status</th>
+          <th class="th"><span style="position:absolute;left:-9999px">Actions</span></th>
+        </tr></thead>
+        <tbody id="snapshots-body">
+          <tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Restore confirm panel -->
+    <div id="restore-panel" style="display:none;flex-direction:column;gap:12px;padding:20px;background:#FFF6F5;border:1px solid #F1C4BF;border-radius:12px">
+      <span style="font:700 16px Inter,sans-serif">Restore <span id="rs-label"></span></span>
+      <span class="hint">This replaces the current data in <span id="rs-what"></span> with the snapshot. Changes since the snapshot will be lost.</span>
+      <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+        <div style="flex:1 1 260px;display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="rs-cf">Type the snapshot name to confirm</label>
+          <input class="inp" id="rs-cf" type="text" placeholder="">
+        </div>
+        <button class="btnd" onclick="doRestore()">Restore</button>
+        <button class="btn" onclick="cancelRestore()">Cancel</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     DATA SOURCES (LAKEHOUSE)
+     ══════════════════════════════════════════════════════════ -->
+<div id="sub-lakehouse" style="display:none">
+<main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+  <section aria-labelledby="h-src" style="display:flex;flex-direction:column;gap:14px">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <h1 id="h-src" style="margin:0;font:700 26px Inter,sans-serif">Connected sources</h1>
+      <span class="hint">Lakehouse sources are copied into open Iceberg tables and kept fresh on a schedule. Snowflake is queried live.</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px" id="sources-grid"></div>
+    <span id="src-msg" style="font:500 14px Inter,sans-serif;color:#17663A;display:none"></span>
+  </section>
+
+  <section aria-labelledby="h-tb" class="panel">
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h2 id="h-tb" style="margin:0;font:700 22px Inter,sans-serif">Select a source above</h2>
+        <span class="hint" id="sel-hint"></span>
+      </div>
+      <div style="flex:0 1 240px;display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="src-db">Database</label>
+        <select class="inp" id="src-db" onchange="filterSrcTables()">
+          <option value="all">All databases</option>
+        </select>
+      </div>
+    </div>
+    <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;min-width:720px">
+        <thead><tr>
+          <th class="th">Table</th><th class="th">Database</th>
+          <th class="th">Format</th><th class="th">Last updated</th><th class="th">Size</th>
+        </tr></thead>
+        <tbody id="src-tables-body">
+          <tr><td colspan="5" class="empty">Select a source above to see its tables.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+  </section>
+
+</main>
+</div>
+
+<script>
+// ── DATA ────────────────────────────────────────────────────
+var CATALOG_TABLES = [
+  { src:'warehouse', srcName:'Warehouse',         db:'mydb',           t:'events',                                  fmt:'Native',      cold:'After 1 day' },
+  { src:'warehouse', srcName:'Warehouse',         db:'mydb',           t:'lookup_table',                            fmt:'Native',      cold:'After 1 day' },
+  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'store_sales',                             fmt:'Iceberg',     cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'inventory',                               fmt:'Iceberg',     cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'web_sales',                               fmt:'Iceberg',     cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'web_returns',                             fmt:'Iceberg',     cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks',        db:'lakehouse_db',   t:'customers',                               fmt:'Delta Lake',  cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks',        db:'lakehouse_db',   t:'product',                                 fmt:'Delta Lake',  cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'customers',                               fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'orders',                                  fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'products',                                fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'order_items',                             fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'inventory_events',                        fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'product_reviews',                         fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',            db:'tpcds',          t:'warehouse',                               fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',            db:'tpcds',          t:'income_band',                             fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',            db:'CACHE_TESTING',  t:'CUSTOMERS',                               fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',            db:'CACHE_TESTING',  t:'ORDERS',                                  fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',            db:'CACHE_TESTING',  t:'PRODUCTS',                                fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'customers',                               fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'orders',                                  fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'products',                                fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'product_reviews',                         fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'order_items',                             fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'inventory_events',                        fmt:'CDC (live)',  cold:'Object storage' },
+  { src:'snowflake', srcName:'Snowflake',         db:'COMPUTE_WH',     t:'(live query — tables load on connect)',   fmt:'Native JDBC', cold:'N/A (live)' },
+];
+
+var SOURCES = [
+  { id:'polaris',    name:'Lakehouse',   kind:'Iceberg tables',              canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
+  { id:'databricks', name:'Databricks',  kind:'Delta Lake tables via JDBC',  canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
+  { id:'postgres',   name:'PostgreSQL',  kind:'CDC via Debezium → Iceberg',  canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['public'] },
+  { id:'oracle',     name:'Oracle',      kind:'CDC via Debezium → Iceberg',  canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['tpcds','CACHE_TESTING'] },
+  { id:'mongodb',    name:'MongoDB',     kind:'CDC via Debezium → Iceberg',  canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['cache_testing'] },
+  { id:'snowflake',  name:'Snowflake',   kind:'Live JDBC query (no copy)',    canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
+];
+
+var state = {
+  snapshots:[], freq:'off', ret:14, restoreTarget:null,
+  selSrc:'polaris', selDb:'all', synced:{},
+  catalogSrc:'all', catalogDb:'all',
+};
+
+// ── TAB ─────────────────────────────────────────────────────
+function showTab(tab) {
+  document.getElementById('sub-warehouse').style.display  = tab==='warehouse' ? 'block' : 'none';
+  document.getElementById('sub-lakehouse').style.display  = tab==='lakehouse' ? 'block' : 'none';
+  document.getElementById('tab-warehouse').className = 'tab' + (tab==='warehouse' ? ' tab-on' : '');
+  document.getElementById('tab-lakehouse').className = 'tab' + (tab==='lakehouse' ? ' tab-on' : '');
+  if (tab==='lakehouse') renderSources();
+}
+
+// ── CATALOG ──────────────────────────────────────────────────
+function unique(arr, k) {
+  var s={}, o=[]; arr.forEach(function(r){ if(!s[r[k]]){s[r[k]]=1;o.push(r[k]);} }); return o;
+}
+
+function filterCatalog() {
+  state.catalogSrc = document.getElementById('ct-src').value;
+  state.catalogDb  = document.getElementById('ct-db').value;
+  var inSrc = CATALOG_TABLES.filter(function(r){ return state.catalogSrc==='all'||r.src===state.catalogSrc; });
+  var dbs = unique(inSrc,'db');
+  var dbSel = document.getElementById('ct-db');
+  var cur = dbSel.value;
+  dbSel.innerHTML = '<option value="all">All databases</option>';
+  dbs.forEach(function(d){ var o=document.createElement('option');o.value=d;o.textContent=d;if(d===cur)o.selected=true;dbSel.appendChild(o); });
+  state.catalogDb = dbSel.value;
+  renderCatalog();
+}
+
+function renderCatalog() {
+  var src=state.catalogSrc, db=state.catalogDb;
+  var q = document.getElementById('ct-q').value.trim().toLowerCase();
+  var rows = CATALOG_TABLES.filter(function(r){
+    return (src==='all'||r.src===src) && (db==='all'||r.db===db) && (!q||(r.db+'.'+r.t).toLowerCase().indexOf(q)>=0);
+  });
+  var tbody = document.getElementById('catalog-body');
+  if (!rows.length){ tbody.innerHTML='<tr><td colspan="6" class="empty">No tables match. Clear the search or pick another source.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(function(r){
+    return '<tr><td class="td" style="font-weight:600">'+r.t+'</td><td class="td">'+r.db+'</td><td class="td">'+r.srcName+'</td><td class="td">'+r.fmt+'</td><td class="td">'+r.cold+'</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  }).join('');
+}
+
+// ── BACKUP ───────────────────────────────────────────────────
+function setPill(group, btn) {
+  var gid = group==='freq' ? 'freq-group' : 'ret-group';
+  Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b){ b.className='pill-off'; });
+  btn.className='pill-on';
+  if(group==='freq') state.freq=btn.dataset.freq; else state.ret=parseInt(btn.dataset.ret);
+}
+
+function saveSched() {
+  var msg = state.freq==='off' ? 'Automatic backups are off.'
+    : 'Automatic '+state.freq+' backups on, kept for '+state.ret+' days.';
+  setBkMsg(msg, false);
+}
+
+function setBkMsg(msg, err) {
+  var el=document.getElementById('bk-msg');
+  el.textContent=msg; el.style.color=err?'#B42318':'#17663A';
+}
+
+function doBackup() {
+  var db  = document.getElementById('bk-db').value;
+  var lab = document.getElementById('bk-lab').value.trim() || (db+'_'+new Date().toISOString().slice(0,10).replace(/-/g,'_'));
+  if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(lab)){ setBkMsg('Snapshot names can use letters, numbers and underscores only.',true); return; }
+  if(state.snapshots.some(function(s){ return s.label===lab; })){ setBkMsg('A snapshot called '+lab+' already exists.',true); return; }
+  var picked=[];
+  if(document.getElementById('bk-t-events').checked) picked.push('events');
+  if(document.getElementById('bk-t-lookup').checked) picked.push('lookup_table');
+  state.snapshots.push({ label:lab, db:db, tables:picked.length?picked.join(', '):'All tables', how:'Manual', status:'Completed' });
+  document.getElementById('bk-lab').value='';
+  document.getElementById('bk-t-events').checked=false;
+  document.getElementById('bk-t-lookup').checked=false;
+  setBkMsg('Backup '+lab+' started. It appears as Completed when done.',false);
+  renderSnapshots(); updateKpis();
+}
+
+function renderSnapshots() {
+  var tbody=document.getElementById('snapshots-body');
+  if(!state.snapshots.length){ tbody.innerHTML='<tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>'; return; }
+  tbody.innerHTML=state.snapshots.map(function(r){
+    var c=r.status==='Restoring'?'#8A4B00':r.status==='Completed'?'#17663A':'#4F5866';
+    return '<tr><td class="td" style="font-weight:600">'+r.label+'</td><td class="td">'+r.db+'</td><td class="td">'+r.tables+'</td>'
+      +'<td class="td">'+r.how+'</td><td class="td" style="font-weight:600;color:'+c+'">'+r.status+'</td>'
+      +'<td class="td" style="text-align:right"><button class="btn" onclick="startRestore(\''+r.label+'\')">Restore…</button></td></tr>';
+  }).join('');
+}
+
+function updateKpis() {
+  if(!state.snapshots.length) return;
+  var last=state.snapshots[state.snapshots.length-1];
+  document.getElementById('kpi-last-backup').textContent=last.label;
+  document.getElementById('kpi-last-backup-hint').textContent=last.db+' · '+last.tables;
+}
+
+function startRestore(label) {
+  state.restoreTarget=label;
+  var snap=state.snapshots.find(function(s){ return s.label===label; });
+  document.getElementById('rs-label').textContent=label;
+  document.getElementById('rs-what').textContent=snap?(snap.tables==='All tables'?'all of '+snap.db:snap.db+' ('+snap.tables+')'):label;
+  document.getElementById('rs-cf').value='';
+  document.getElementById('rs-cf').placeholder=label;
+  var p=document.getElementById('restore-panel'); p.style.display='flex'; p.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function cancelRestore(){ state.restoreTarget=null; document.getElementById('restore-panel').style.display='none'; }
+function doRestore() {
+  var cf=document.getElementById('rs-cf').value.trim();
+  if(!state.restoreTarget||cf!==state.restoreTarget){ setBkMsg('Not restored: type the snapshot name exactly to confirm.',true); return; }
+  state.snapshots=state.snapshots.map(function(s){ return s.label===state.restoreTarget?Object.assign({},s,{status:'Restoring'}):s; });
+  renderSnapshots(); cancelRestore();
+  setBkMsg('Restoring '+state.restoreTarget+'. You will be notified when it finishes.',false);
+  state.restoreTarget=null;
+}
+
+// ── SOURCES ──────────────────────────────────────────────────
+function renderSources() {
+  var grid=document.getElementById('sources-grid');
+  grid.innerHTML=SOURCES.map(function(s){
+    var synced=state.synced[s.id];
+    var border=s.id===state.selSrc?'2px solid #1F4FD8':'1px solid #E1E6ED';
+    return '<div style="background:#FFFFFF;border:'+border+';border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;cursor:pointer" onclick="selectSource(\''+s.id+'\')">'+
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">'+
+        '<div style="display:flex;flex-direction:column;gap:2px"><span style="font:700 17px Inter,sans-serif">'+s.name+'</span><span class="hint">'+s.kind+'</span></div>'+
+        '<span style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="dot-grey"></span>Status —</span>'+
+      '</div>'+
+      '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">'+
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Last sync</span><span style="font:500 14px Inter,sans-serif">'+(synced||'—')+'</span></div>'+
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Freshness</span><span style="font:500 14px Inter,sans-serif">'+s.freshCycle+'</span></div>'+
+      '</div>'+
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">'+
+        '<button class="btn" onclick="event.stopPropagation();selectSource(\''+s.id+'\')">View tables</button>'+
+        (s.canSync?'<button class="btn" onclick="event.stopPropagation();syncSource(\''+s.id+'\')">Sync now</button>':'')+
+      '</div></div>';
+  }).join('');
+  renderSrcTables();
+}
+
+function selectSource(id) { state.selSrc=id; state.selDb='all'; renderSources(); }
+
+function syncSource(id) {
+  var now=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  state.synced[id]='Just now ('+now+')';
+  var src=SOURCES.find(function(s){ return s.id===id; });
+  var el=document.getElementById('src-msg');
+  el.textContent=(src?src.name:id)+' sync triggered.'; el.style.display='block';
+  setTimeout(function(){ el.style.display='none'; },4000);
+  renderSources();
+}
+
+function filterSrcTables() { state.selDb=document.getElementById('src-db').value; renderSrcTables(); }
+
+function renderSrcTables() {
+  var src=SOURCES.find(function(s){ return s.id===state.selSrc; });
+  if(!src) return;
+  document.getElementById('h-tb').textContent=src.name+' tables';
+  document.getElementById('sel-hint').textContent=src.kind+' · '+src.freshCycle;
+  var dbSel=document.getElementById('src-db');
+  dbSel.innerHTML='<option value="all">All databases</option>';
+  src.dbs.forEach(function(d){ var o=document.createElement('option');o.value=d;o.textContent=d;if(d===state.selDb)o.selected=true;dbSel.appendChild(o); });
+  var rows=CATALOG_TABLES.filter(function(r){ return r.src===state.selSrc&&(state.selDb==='all'||r.db===state.selDb); });
+  var tbody=document.getElementById('src-tables-body');
+  if(!rows.length){ tbody.innerHTML='<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>'; return; }
+  tbody.innerHTML=rows.map(function(r){
+    return '<tr><td class="td" style="font-weight:600">'+r.t+'</td><td class="td">'+r.db+'</td><td class="td">'+r.fmt+'</td><td class="td" style="color:#9AA3B0">—</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  }).join('');
+}
+
+// ── BOOT ─────────────────────────────────────────────────────
+renderCatalog();
+renderSnapshots();
+</script>
+</body>
+</html>

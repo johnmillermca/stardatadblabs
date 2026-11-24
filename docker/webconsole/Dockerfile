@@ -10,6 +10,7 @@ COPY nginx.conf /etc/nginx/conf.d/webconsole.conf
 COPY index.html     /usr/share/nginx/html/index.html
 COPY stargraph.html /usr/share/nginx/html/stargraph.html
 COPY console.html   /usr/share/nginx/html/console.html
+COPY stardata.html  /usr/share/nginx/html/stardata.html
 
 EXPOSE 80
 
