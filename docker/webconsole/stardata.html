@@ -351,12 +351,12 @@ a:hover{color:#163BA6}
 var CATALOG_TABLES = [];
 
 var SOURCES = [
-  { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables via JDBC',    canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
-  { id:'databricks', name:'Databricks', kind:'Delta Lake tables via JDBC', canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
-  { id:'postgres',   name:'PostgreSQL', kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['public'] },
-  { id:'oracle',     name:'Oracle',     kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['tpcds','CACHE_TESTING'] },
-  { id:'mongodb',    name:'MongoDB',    kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['cache_testing'] },
-  { id:'snowflake',  name:'Snowflake',  kind:'Live JDBC query (no copy)',  canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
+  { id:'polaris',             name:'Lakehouse',  kind:'Iceberg tables via JDBC',    canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
+  { id:'databricks',          name:'Databricks', kind:'Delta Lake tables via JDBC', canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db','default','demo'] },
+  { id:'pg_cache_testing',    name:'PostgreSQL', kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['public'] },
+  { id:'oracle_cache_testing',name:'Oracle',     kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['CACHE_TESTING'] },
+  { id:'mongodb',             name:'MongoDB',    kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['cache_testing'] },
+  { id:'snowflake',           name:'Snowflake',  kind:'Live JDBC query (no copy)',  canSync:false, freshCycle:'Live — no local copy',               dbs:['EVENTS','PUBLIC'] },
 ];
 
 // App state
@@ -371,7 +371,7 @@ var state = {
   restoreTables: null, // null = whole DB, or array of table names
   bkPollerTimer: null, // polling interval for in-progress backups
   // catalog / data sources
-  selSrc: 'polaris', selDb: 'all', synced: {},
+  selSrc: 'polaris', selDb: 'all', synced: {}, srcStatus: {},
   catalogSrc: 'all', catalogDb: 'all',
 };
 
@@ -438,7 +438,7 @@ function showTab(tab) {
   document.getElementById('sub-lakehouse').style.display = tab === 'lakehouse' ? 'block' : 'none';
   document.getElementById('tab-warehouse').className = 'tab' + (tab === 'warehouse' ? ' tab-on' : '');
   document.getElementById('tab-lakehouse').className = 'tab' + (tab === 'lakehouse' ? ' tab-on' : '');
-  if (tab === 'lakehouse') renderSources();
+  if (tab === 'lakehouse') { renderSources(); checkSourceStatuses(); }
 }
 
 // ============================================================
@@ -1254,10 +1254,13 @@ function renderSources() {
   grid.innerHTML = SOURCES.map(function(s) {
     var synced = state.synced[s.id];
     var border = s.id === state.selSrc ? '2px solid #1F4FD8' : '1px solid #E1E6ED';
+    var statusOk = state.srcStatus[s.id];
+    var dotCls  = statusOk === true ? 'dot-green' : statusOk === false ? 'dot-red' : 'dot-grey';
+    var statusTxt = statusOk === true ? 'Connected' : statusOk === false ? 'Unreachable' : '—';
     return '<div style="background:#FFFFFF;border:' + border + ';border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;cursor:pointer" onclick="selectSource(\'' + s.id + '\')">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="display:flex;flex-direction:column;gap:2px"><span style="font:700 17px Inter,sans-serif">' + s.name + '</span><span class="hint">' + s.kind + '</span></div>' +
-        '<span style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="dot-grey"></span>Status —</span>' +
+        '<span id="src-status-' + s.id + '" style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="' + dotCls + '"></span>Status ' + statusTxt + '</span>' +
       '</div>' +
       '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">' +
         '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Last sync</span><span style="font:500 14px Inter,sans-serif">' + (synced || '—') + '</span></div>' +
@@ -1269,6 +1272,23 @@ function renderSources() {
       '</div></div>';
   }).join('');
   renderSrcTables();
+}
+
+// Ping every catalog in parallel via SHOW DATABASES FROM <catalog>
+function checkSourceStatuses() {
+  SOURCES.forEach(function(s) {
+    // Skip polaris — it uses internal Doris catalog, always available
+    if (s.id === 'polaris') { state.srcStatus[s.id] = true; return; }
+    dorisSQL('information_schema', 'SHOW DATABASES FROM ' + s.id, 1)
+      .then(function() {
+        state.srcStatus[s.id] = true;
+        renderSources();
+      })
+      .catch(function() {
+        state.srcStatus[s.id] = false;
+        renderSources();
+      });
+  });
 }
 
 function selectSource(id) {
