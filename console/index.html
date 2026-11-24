@@ -931,36 +931,73 @@ function doBackup() {
 
 // ============================================================
 // BACKUP — LOAD HISTORY
+// SHOW BACKUP is per-DB in Doris — returns empty from information_schema.
+// Query every native DB in parallel and merge.
 // ============================================================
 function loadBackupHistory() {
-  dorisSQL('information_schema', 'SHOW BACKUP', 500).then(function(res) {
-    var idx = res.idx;
-    var snapCol  = idx['SnapshotName'] != null ? idx['SnapshotName'] : 1;
-    var dbCol    = idx['DbName']       != null ? idx['DbName']       : 2;
-    var stateCol = idx['State']        != null ? idx['State']        : 3;
-    var objsCol  = idx['BackupObjs']   != null ? idx['BackupObjs']   : 4;
-    var finCol   = idx['FinishedTime'] != null ? idx['FinishedTime'] : 8;
-    var createCol= idx['CreateTime']   != null ? idx['CreateTime']   : 5;
-    state.snapshots = res.rows.map(function(r) {
-      var rawState  = (r[stateCol] || '').trim();
-      var stLabel   = rawState === 'FINISHED' ? 'Completed' : rawState === 'PENDING' ? 'Pending'
-                    : rawState === 'UPLOADING' ? 'Uploading' : rawState === 'CANCELLED' ? 'Cancelled' : rawState || 'Unknown';
-      var dbName    = (r[dbCol] || '').replace(/^default_cluster:/, '');
-      var createRaw = r[createCol] || '';
-      return {
-        label:      r[snapCol] || '—',
-        db:         dbName,
-        tables:     (r[objsCol] || '').trim() || 'All tables',
-        how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
-        taken:      r[finCol] || createRaw || '',
-        createTime: createRaw,
-        status:     stLabel,
-        rawState:   rawState,
-      };
-    }).reverse();
-    renderSnapshots();
-    updateKpisFromHistory();
-    initPitrDbDropdown();
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
+  ).then(function(dbRes) {
+    var dbs = dbRes.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
+
+    if (!dbs.length) { renderSnapshots(); return; }
+
+    var promises = dbs.map(function(db) {
+      return dorisSQL(db, 'SHOW BACKUP', 200).catch(function() { return { rows: [], idx: {} }; });
+    });
+
+    Promise.all(promises).then(function(results) {
+      var allRows = [];
+      var seen = {};
+
+      results.forEach(function(res) {
+        var idx = res.idx;
+        var jobCol   = idx['JobId']        != null ? idx['JobId']        : 0;
+        var snapCol  = idx['SnapshotName'] != null ? idx['SnapshotName'] : 1;
+        var dbCol    = idx['DbName']       != null ? idx['DbName']       : 2;
+        var stateCol = idx['State']        != null ? idx['State']        : 3;
+        var objsCol  = idx['BackupObjs']   != null ? idx['BackupObjs']   : 4;
+        var createCol= idx['CreateTime']   != null ? idx['CreateTime']   : 5;
+        var finCol   = idx['FinishedTime'] != null ? idx['FinishedTime'] : 8;
+
+        res.rows.forEach(function(r) {
+          var jobId = r[jobCol] || '';
+          if (jobId && seen[jobId]) return;
+          if (jobId) seen[jobId] = 1;
+
+          var rawState  = (r[stateCol] || '').trim();
+          var createRaw = r[createCol] || '';
+          var stLabel   = rawState === 'FINISHED'  ? 'Completed'
+                        : rawState === 'PENDING'   ? 'Pending'
+                        : rawState === 'UPLOADING' ? 'Uploading'
+                        : rawState === 'CANCELLED' ? 'Cancelled'
+                        : rawState || 'Unknown';
+          var dbName = (r[dbCol] || '').replace(/^default_cluster:/, '');
+          allRows.push({
+            label:      r[snapCol] || '—',
+            db:         dbName,
+            tables:     (r[objsCol] || '').trim() || 'All tables',
+            how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+            taken:      r[finCol] || createRaw || '',
+            createTime: createRaw,
+            status:     stLabel,
+            rawState:   rawState,
+          });
+        });
+      });
+
+      allRows.sort(function(a, b) {
+        return (b.createTime || b.taken || '').localeCompare(a.createTime || a.taken || '');
+      });
+
+      state.snapshots = allRows;
+      renderSnapshots();
+      updateKpisFromHistory();
+      initPitrDbDropdown();
+    });
   }).catch(function(e) { console.warn('loadBackupHistory failed:', e); });
 }
 

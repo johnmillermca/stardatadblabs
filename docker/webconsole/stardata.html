@@ -747,53 +747,88 @@ function doBackup() {
 // Populates the Snapshots table with real data from Doris.
 // SHOW BACKUP returns one row per backup job across all DBs.
 // ============================================================
+// ============================================================
+// BACKUP — LOAD HISTORY
+// SHOW BACKUP is per-database in Doris — it returns nothing when
+// run against information_schema.  We must query every native DB
+// in parallel and merge the results.
+// ============================================================
 function loadBackupHistory() {
-  dorisSQL('information_schema', 'SHOW BACKUP', 500)
-    .then(function(res) {
-      // SHOW BACKUP columns (Doris 2.x):
-      //   JobId | SnapshotName | DbName | State | BackupObjs | CreateTime |
-      //   SnapshotFinishedTime | UploadFinishedTime | FinishedTime | UnfinishedTasks | Status
-      var idx = res.idx;
-      var snapCol  = idx['SnapshotName']         != null ? idx['SnapshotName']         : 1;
-      var dbCol    = idx['DbName']               != null ? idx['DbName']               : 2;
-      var stateCol = idx['State']                != null ? idx['State']                : 3;
-      var objsCol  = idx['BackupObjs']           != null ? idx['BackupObjs']           : 4;
-      var finCol   = idx['FinishedTime']         != null ? idx['FinishedTime']         : 8;
-      var createCol= idx['CreateTime']           != null ? idx['CreateTime']           : 5;
+  // 1. Get all native (internal-catalog) databases
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
+  ).then(function(dbRes) {
+    var dbs = dbRes.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
 
-      state.snapshots = res.rows.map(function(r) {
-        var rawState  = (r[stateCol] || '').trim();
-        var objs      = (r[objsCol]  || '').trim();
-        var createRaw = r[createCol] || '';
-        var takenRaw  = r[finCol] || createRaw || '';
-        // Normalise state label for display
-        var stLabel   = rawState === 'FINISHED' ? 'Completed'
-                      : rawState === 'PENDING'  ? 'Pending'
-                      : rawState === 'UPLOADING'? 'Uploading'
-                      : rawState === 'CANCELLED'? 'Cancelled'
-                      : rawState || 'Unknown';
-        // Strip the leading `default_cluster:` prefix Doris sometimes adds to DbName
-        var dbName = (r[dbCol] || '').replace(/^default_cluster:/, '');
-        return {
-          label:      r[snapCol] || '—',
-          db:         dbName,
-          tables:     objs || 'All tables',
-          how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
-          taken:      takenRaw,
-          createTime: createRaw,   // used as backup_timestamp in RESTORE (formatted with dashes)
-          status:     stLabel,
-          rawState:   rawState,
-        };
-      }).reverse(); // most recent first
+    if (!dbs.length) {
+      renderSnapshots();
+      return;
+    }
 
+    // 2. Fire SHOW BACKUP for each DB in parallel
+    var promises = dbs.map(function(db) {
+      return dorisSQL(db, 'SHOW BACKUP', 200).catch(function() { return { rows: [], idx: {} }; });
+    });
+
+    Promise.all(promises).then(function(results) {
+      // 3. Parse and merge rows from all DBs
+      var allRows = [];
+      var seen = {};   // deduplicate by JobId
+
+      results.forEach(function(res) {
+        var idx = res.idx;
+        var jobCol   = idx['JobId']            != null ? idx['JobId']            : 0;
+        var snapCol  = idx['SnapshotName']     != null ? idx['SnapshotName']     : 1;
+        var dbCol    = idx['DbName']           != null ? idx['DbName']           : 2;
+        var stateCol = idx['State']            != null ? idx['State']            : 3;
+        var objsCol  = idx['BackupObjs']       != null ? idx['BackupObjs']       : 4;
+        var createCol= idx['CreateTime']       != null ? idx['CreateTime']       : 5;
+        var finCol   = idx['FinishedTime']     != null ? idx['FinishedTime']     : 8;
+
+        res.rows.forEach(function(r) {
+          var jobId = r[jobCol] || '';
+          if (jobId && seen[jobId]) return;   // already added from another DB
+          if (jobId) seen[jobId] = 1;
+
+          var rawState  = (r[stateCol] || '').trim();
+          var objs      = (r[objsCol]  || '').trim();
+          var createRaw = r[createCol] || '';
+          var takenRaw  = r[finCol] || createRaw || '';
+          var stLabel   = rawState === 'FINISHED'  ? 'Completed'
+                        : rawState === 'PENDING'   ? 'Pending'
+                        : rawState === 'UPLOADING' ? 'Uploading'
+                        : rawState === 'CANCELLED' ? 'Cancelled'
+                        : rawState || 'Unknown';
+          var dbName = (r[dbCol] || '').replace(/^default_cluster:/, '');
+          allRows.push({
+            label:      r[snapCol] || '—',
+            db:         dbName,
+            tables:     objs || 'All tables',
+            how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+            taken:      takenRaw,
+            createTime: createRaw,
+            status:     stLabel,
+            rawState:   rawState,
+          });
+        });
+      });
+
+      // Sort newest first by createTime desc
+      allRows.sort(function(a, b) {
+        return (b.createTime || b.taken || '').localeCompare(a.createTime || a.taken || '');
+      });
+
+      state.snapshots = allRows;
       renderSnapshots();
       updateKpisFromHistory();
-      initPitrDbDropdown();  // keep PITR DB list in sync after each history load
-    })
-    .catch(function(e) {
-      console.warn('loadBackupHistory failed:', e);
-      // Don't wipe existing displayed snapshots on a poll failure
+      initPitrDbDropdown();
     });
+  }).catch(function(e) {
+    console.warn('loadBackupHistory failed:', e);
+  });
 }
 
 function startBkPoller() {
