@@ -174,25 +174,26 @@ a:hover{color:#163BA6}
         <span style="font:700 16px Inter,sans-serif">Back up now</span>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
           <div style="display:flex;flex-direction:column;gap:6px">
-            <label class="lbl" for="bk-db">Database</label>
-            <select class="inp" id="bk-db"><option value="mydb">mydb</option></select>
+              <label class="lbl" for="bk-db">Database</label>
+              <select class="inp" id="bk-db" onchange="updateBkTables()">
+                <option value="">Loading databases…</option>
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="lbl" for="bk-lab">Snapshot name</label>
+              <input class="inp" id="bk-lab" type="text" placeholder="mydb_2026_11_23">
+            </div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px">
-            <label class="lbl" for="bk-lab">Snapshot name</label>
-            <input class="inp" id="bk-lab" type="text" placeholder="mydb_2026_11_23">
+            <span class="lbl">Tables (leave all unticked to back up the whole database)</span>
+            <div id="bk-tables-list" style="display:flex;flex-wrap:wrap;gap:4px 20px">
+              <span class="hint" style="padding:10px 0">Select a database above to see its tables.</span>
+            </div>
           </div>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:6px">
-          <span class="lbl">Tables (leave all unticked to back up the whole database)</span>
-          <div style="display:flex;flex-wrap:wrap;gap:4px 20px">
-            <label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer"><input type="checkbox" id="bk-t-events" style="width:18px;height:18px;accent-color:#1F4FD8"> events</label>
-            <label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer"><input type="checkbox" id="bk-t-lookup" style="width:18px;height:18px;accent-color:#1F4FD8"> lookup_table</label>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button class="btnp" onclick="doBackup()">Back up now</button>
+            <span id="bk-msg" style="font:500 14px Inter,sans-serif"></span>
           </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px">
-          <button class="btnp" onclick="doBackup()">Back up now</button>
-          <span id="bk-msg" style="font:500 14px Inter,sans-serif"></span>
-        </div>
       </div>
       <!-- Auto backups -->
       <div style="flex:1 1 300px;min-width:0;display:flex;flex-direction:column;gap:14px;padding:20px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:12px">
@@ -295,315 +296,718 @@ a:hover{color:#163BA6}
 </div>
 
 <script>
-// ── DATA ────────────────────────────────────────────────────
+// ============================================================
+// DATA  — external catalog sources (Data sources tab)
+// ============================================================
 var CATALOG_TABLES = [
-  { src:'warehouse', srcName:'Warehouse',         db:'mydb',           t:'events',                                  fmt:'Native',      cold:'After 1 day' },
-  { src:'warehouse', srcName:'Warehouse',         db:'mydb',           t:'lookup_table',                            fmt:'Native',      cold:'After 1 day' },
-  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'store_sales',                             fmt:'Iceberg',     cold:'Object storage' },
-  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'inventory',                               fmt:'Iceberg',     cold:'Object storage' },
-  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'web_sales',                               fmt:'Iceberg',     cold:'Object storage' },
-  { src:'polaris',   srcName:'Lakehouse',         db:'tpcds_sf10tcl',  t:'web_returns',                             fmt:'Iceberg',     cold:'Object storage' },
-  { src:'databricks',srcName:'Databricks',        db:'lakehouse_db',   t:'customers',                               fmt:'Delta Lake',  cold:'Object storage' },
-  { src:'databricks',srcName:'Databricks',        db:'lakehouse_db',   t:'product',                                 fmt:'Delta Lake',  cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'customers',                               fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'orders',                                  fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'products',                                fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'order_items',                             fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'inventory_events',                        fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'postgres',  srcName:'PostgreSQL',        db:'public',         t:'product_reviews',                         fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',            db:'tpcds',          t:'warehouse',                               fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',            db:'tpcds',          t:'income_band',                             fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',            db:'CACHE_TESTING',  t:'CUSTOMERS',                               fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',            db:'CACHE_TESTING',  t:'ORDERS',                                  fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'oracle',    srcName:'Oracle',            db:'CACHE_TESTING',  t:'PRODUCTS',                                fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'customers',                               fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'orders',                                  fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'products',                                fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'product_reviews',                         fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'order_items',                             fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'mongodb',   srcName:'MongoDB',           db:'cache_testing',  t:'inventory_events',                        fmt:'CDC (live)',  cold:'Object storage' },
-  { src:'snowflake', srcName:'Snowflake',         db:'COMPUTE_WH',     t:'(live query — tables load on connect)',   fmt:'Native JDBC', cold:'N/A (live)' },
+  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'events',       fmt:'Native',     cold:'After 1 day' },
+  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'lookup_table', fmt:'Native',     cold:'After 1 day' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'store_sales',  fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'inventory',    fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_sales',    fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_returns',  fmt:'Iceberg',    cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'customers',    fmt:'Delta Lake', cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'product',      fmt:'Delta Lake', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'products',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'product_reviews',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'warehouse',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'income_band',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'CUSTOMERS',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'ORDERS',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'PRODUCTS',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'products',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'product_reviews', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'snowflake', srcName:'Snowflake',  db:'COMPUTE_WH',    t:'(live query — tables load on connect)', fmt:'Native JDBC', cold:'N/A (live)' },
 ];
 
 var SOURCES = [
-  { id:'polaris',    name:'Lakehouse',   kind:'Iceberg tables',              canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
-  { id:'databricks', name:'Databricks',  kind:'Delta Lake tables via JDBC',  canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
-  { id:'postgres',   name:'PostgreSQL',  kind:'CDC via Debezium → Iceberg',  canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['public'] },
-  { id:'oracle',     name:'Oracle',      kind:'CDC via Debezium → Iceberg',  canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['tpcds','CACHE_TESTING'] },
-  { id:'mongodb',    name:'MongoDB',     kind:'CDC via Debezium → Iceberg',  canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['cache_testing'] },
-  { id:'snowflake',  name:'Snowflake',   kind:'Live JDBC query (no copy)',    canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
+  { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables',             canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
+  { id:'databricks', name:'Databricks', kind:'Delta Lake tables via JDBC', canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
+  { id:'postgres',   name:'PostgreSQL', kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['public'] },
+  { id:'oracle',     name:'Oracle',     kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['tpcds','CACHE_TESTING'] },
+  { id:'mongodb',    name:'MongoDB',    kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['cache_testing'] },
+  { id:'snowflake',  name:'Snowflake',  kind:'Live JDBC query (no copy)',   canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
 ];
 
+// App state
 var state = {
-  snapshots:[], freq:'off', ret:14, restoreTarget:null,
-  selSrc:'polaris', selDb:'all', synced:{},
-  catalogSrc:'all', catalogDb:'all',
+  // backup
+  snapshots: [],       // loaded from SHOW BACKUP
+  freq: 'off',
+  ret: 14,
+  restoreTarget: null,
+  restoreTs: null,     // FinishedTime of the target snapshot (needed for RESTORE)
+  restoreDb: null,
+  restoreTables: null, // null = whole DB, or array of table names
+  bkPollerTimer: null, // polling interval for in-progress backups
+  // catalog / data sources
+  selSrc: 'polaris', selDb: 'all', synced: {},
+  catalogSrc: 'all', catalogDb: 'all',
 };
 
-// ── TAB ─────────────────────────────────────────────────────
-function showTab(tab) {
-  document.getElementById('sub-warehouse').style.display  = tab==='warehouse' ? 'block' : 'none';
-  document.getElementById('sub-lakehouse').style.display  = tab==='lakehouse' ? 'block' : 'none';
-  document.getElementById('tab-warehouse').className = 'tab' + (tab==='warehouse' ? ' tab-on' : '');
-  document.getElementById('tab-lakehouse').className = 'tab' + (tab==='lakehouse' ? ' tab-on' : '');
-  if (tab==='lakehouse') renderSources();
+// System and external-catalog DBs that must NEVER appear in backup dropdowns.
+// Doris internal catalog: internal.  External catalogs each own their own DBs
+// that live in polaris/databricks/postgres/oracle/mongodb catalogs — these
+// never appear in SHOW DATABASES on the internal catalog but we still guard
+// against any stray matches.
+var SKIP_DBS = {
+  'information_schema': 1,
+  'mysql':              1,
+  'performance_schema': 1,
+  '__internal_schema':  1,
+  // well-known system DBs we never want to snapshot
+  'cache_system':       1,
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
+function dorisSQL(db, stmt, limit) {
+  // POST to Doris FE HTTP SQL endpoint via nginx proxy.
+  // db   : Doris database context (use 'information_schema' for cross-db queries)
+  // stmt : SQL string
+  // limit: row limit (default 10 000)
+  return fetch('/api/doris/api/query/default_cluster/' + encodeURIComponent(db), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stmt: stmt, limit: limit || 10000 })
+  }).then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function(d) {
+    if (d.code !== 0) throw new Error(d.msg || 'Doris error code ' + d.code);
+    var rows = (d.data && d.data.data) ? d.data.data : [];
+    var meta = (d.data && d.data.meta) ? d.data.meta : [];
+    // Build column-name index for easy access
+    var idx = {};
+    meta.forEach(function(m, i) { idx[m.name] = i; });
+    return { rows: rows, idx: idx };
+  });
 }
 
-// ── CATALOG ──────────────────────────────────────────────────
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts);
+  if (isNaN(d)) return ts;
+  var s = Math.floor((Date.now() - d) / 1000);
+  if (s < 60)    return 'Just now';
+  if (s < 3600)  return Math.floor(s / 60) + ' min ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '_');
+}
+
+// ============================================================
+// TAB NAVIGATION
+// ============================================================
+function showTab(tab) {
+  document.getElementById('sub-warehouse').style.display = tab === 'warehouse' ? 'block' : 'none';
+  document.getElementById('sub-lakehouse').style.display = tab === 'lakehouse' ? 'block' : 'none';
+  document.getElementById('tab-warehouse').className = 'tab' + (tab === 'warehouse' ? ' tab-on' : '');
+  document.getElementById('tab-lakehouse').className = 'tab' + (tab === 'lakehouse' ? ' tab-on' : '');
+  if (tab === 'lakehouse') renderSources();
+}
+
+// ============================================================
+// DATA CATALOG  (static — updated separately via catalog refresh)
+// ============================================================
 function unique(arr, k) {
-  var s={}, o=[]; arr.forEach(function(r){ if(!s[r[k]]){s[r[k]]=1;o.push(r[k]);} }); return o;
+  var s = {}, o = [];
+  arr.forEach(function(r) { if (!s[r[k]]) { s[r[k]] = 1; o.push(r[k]); } });
+  return o;
 }
 
 function filterCatalog() {
   state.catalogSrc = document.getElementById('ct-src').value;
   state.catalogDb  = document.getElementById('ct-db').value;
-  var inSrc = CATALOG_TABLES.filter(function(r){ return state.catalogSrc==='all'||r.src===state.catalogSrc; });
-  var dbs = unique(inSrc,'db');
+  var inSrc = CATALOG_TABLES.filter(function(r) {
+    return state.catalogSrc === 'all' || r.src === state.catalogSrc;
+  });
+  var dbs = unique(inSrc, 'db');
   var dbSel = document.getElementById('ct-db');
   var cur = dbSel.value;
   dbSel.innerHTML = '<option value="all">All databases</option>';
-  dbs.forEach(function(d){ var o=document.createElement('option');o.value=d;o.textContent=d;if(d===cur)o.selected=true;dbSel.appendChild(o); });
+  dbs.forEach(function(d) {
+    var o = document.createElement('option');
+    o.value = d; o.textContent = d;
+    if (d === cur) o.selected = true;
+    dbSel.appendChild(o);
+  });
   state.catalogDb = dbSel.value;
   renderCatalog();
 }
 
 function renderCatalog() {
-  var src=state.catalogSrc, db=state.catalogDb;
+  var src = state.catalogSrc, db = state.catalogDb;
   var q = document.getElementById('ct-q').value.trim().toLowerCase();
-  var rows = CATALOG_TABLES.filter(function(r){
-    return (src==='all'||r.src===src) && (db==='all'||r.db===db) && (!q||(r.db+'.'+r.t).toLowerCase().indexOf(q)>=0);
+  var rows = CATALOG_TABLES.filter(function(r) {
+    return (src === 'all' || r.src === src) &&
+           (db  === 'all' || r.db  === db)  &&
+           (!q || (r.db + '.' + r.t).toLowerCase().indexOf(q) >= 0);
   });
   var tbody = document.getElementById('catalog-body');
-  if (!rows.length){ tbody.innerHTML='<tr><td colspan="6" class="empty">No tables match. Clear the search or pick another source.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(function(r){
-    return '<tr><td class="td" style="font-weight:600">'+r.t+'</td><td class="td">'+r.db+'</td><td class="td">'+r.srcName+'</td><td class="td">'+r.fmt+'</td><td class="td">'+r.cold+'</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No tables match. Clear the search or pick another source.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(r) {
+    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td>' +
+      '<td class="td">' + r.db + '</td><td class="td">' + r.srcName + '</td>' +
+      '<td class="td">' + r.fmt + '</td><td class="td">' + r.cold + '</td>' +
+      '<td class="td" style="color:#9AA3B0">—</td></tr>';
   }).join('');
 }
 
-// ── BACKUP ───────────────────────────────────────────────────
+// ============================================================
+// BACKUP — DATABASE LOADER
+// Queries Doris for all NATIVE (internal catalog) databases,
+// strips system/skip DBs, and populates both the backup DB
+// dropdown and the data catalog DB filter in real time.
+// ============================================================
+function loadBkDatabases() {
+  var sel = document.getElementById('bk-db');
+  sel.innerHTML = '<option value="">Loading…</option>';
+  sel.disabled = true;
+
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME = 'internal' " +
+    "ORDER BY SCHEMA_NAME"
+  ).then(function(res) {
+    var dbs = res.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
+
+    sel.innerHTML = '';
+    if (!dbs.length) {
+      sel.innerHTML = '<option value="">No native databases found</option>';
+      sel.disabled = true;
+      return;
+    }
+    dbs.forEach(function(db) {
+      var o = document.createElement('option');
+      o.value = db; o.textContent = db;
+      sel.appendChild(o);
+    });
+    sel.disabled = false;
+
+    // Auto-generate snapshot name for the first DB
+    autoFillSnapName();
+    // Load tables for the first DB
+    updateBkTables();
+  }).catch(function(e) {
+    console.warn('loadBkDatabases failed:', e);
+    // Fallback: show an empty select so the user knows something went wrong
+    sel.innerHTML = '<option value="">Could not load databases</option>';
+    sel.disabled = false;
+  });
+}
+
+function autoFillSnapName() {
+  var db  = document.getElementById('bk-db').value;
+  var lab = document.getElementById('bk-lab');
+  if (!lab.value && db) lab.placeholder = db + '_' + today();
+}
+
+// ============================================================
+// BACKUP — TABLE LOADER
+// Called whenever the DB dropdown changes.
+// Queries SHOW TABLES FROM <db> for native tables only.
+// ============================================================
+function updateBkTables() {
+  autoFillSnapName();
+  var db = document.getElementById('bk-db').value;
+  if (!db) return;
+
+  var container = document.getElementById('bk-tables-list');
+  container.innerHTML = '<span class="hint" style="padding:10px 0">Loading tables…</span>';
+
+  dorisSQL(db, 'SHOW TABLES').then(function(res) {
+    var tables = res.rows.map(function(r) { return r[0]; });
+    if (!tables.length) {
+      container.innerHTML = '<span class="hint" style="padding:10px 0">No tables in this database.</span>';
+      return;
+    }
+    container.innerHTML = tables.map(function(t) {
+      var id = 'bk-t-' + t.replace(/[^A-Za-z0-9]/g, '_');
+      return '<label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-table="' + t + '" ' +
+        'style="width:18px;height:18px;accent-color:#1F4FD8"> ' + t + '</label>';
+    }).join('');
+  }).catch(function(e) {
+    console.warn('updateBkTables failed:', e);
+    container.innerHTML = '<span class="hint" style="padding:10px 0;color:#B42318">Could not load tables.</span>';
+  });
+}
+
+// ============================================================
+// BACKUP — PILL TOGGLES (frequency / retention)
+// ============================================================
 function setPill(group, btn) {
-  var gid = group==='freq' ? 'freq-group' : 'ret-group';
-  Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b){ b.className='pill-off'; });
-  btn.className='pill-on';
-  if(group==='freq') state.freq=btn.dataset.freq; else state.ret=parseInt(btn.dataset.ret);
+  var gid = group === 'freq' ? 'freq-group' : 'ret-group';
+  Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b) {
+    b.className = 'pill-off';
+  });
+  btn.className = 'pill-on';
+  if (group === 'freq') state.freq = btn.dataset.freq;
+  else state.ret = parseInt(btn.dataset.ret);
 }
 
+// ============================================================
+// BACKUP — SAVE SCHEDULE
+// Persists freq + retain_days to cache_system.backup_schedule
+// via Doris HTTP SQL.  The autobackup CronJob reads this row.
+// ============================================================
 function saveSched() {
-  var msg = state.freq==='off' ? 'Automatic backups are off.'
-    : 'Automatic '+state.freq+' backups on, kept for '+state.ret+' days.';
-  setBkMsg(msg, false);
+  var freq = state.freq;
+  var ret  = state.ret;
+
+  // Update the schedule row (always id='1', seeded by setup script)
+  var sql = "UPDATE cache_system.backup_schedule " +
+    "SET freq='" + freq + "', retain_days=" + ret + ", " +
+    "updated_at=NOW() WHERE id='1'";
+
+  dorisSQL('cache_system', sql)
+    .then(function() {
+      var msg = freq === 'off'
+        ? 'Automatic backups turned off and saved.'
+        : 'Automatic ' + freq + ' backups on, keeping ' + ret + ' days of snapshots. Saved.';
+      setBkMsg(msg, false);
+    })
+    .catch(function(e) {
+      console.warn('saveSched failed:', e);
+      // Fallback: try INSERT if UPDATE found nothing (table not yet seeded)
+      var insertSql = "INSERT INTO cache_system.backup_schedule (id,freq,retain_days,databases) " +
+        "VALUES ('1','" + freq + "'," + ret + ",'') " +
+        "ON DUPLICATE KEY UPDATE freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW()";
+      dorisSQL('cache_system', insertSql)
+        .then(function() {
+          setBkMsg('Schedule saved (freq=' + freq + ', keep ' + ret + 'd).', false);
+        })
+        .catch(function(e2) {
+          setBkMsg('Could not save schedule: ' + e2.message, true);
+        });
+    });
 }
 
-function setBkMsg(msg, err) {
-  var el=document.getElementById('bk-msg');
-  el.textContent=msg; el.style.color=err?'#B42318':'#17663A';
+// ============================================================
+// BACKUP — LOAD SAVED SCHEDULE FROM DORIS ON PAGE LOAD
+// ============================================================
+function loadSavedSchedule() {
+  dorisSQL('cache_system',
+    "SELECT freq, retain_days FROM cache_system.backup_schedule WHERE id='1' LIMIT 1"
+  ).then(function(res) {
+    if (!res.rows.length) return;
+    var freq = res.rows[0][0] || 'off';
+    var ret  = parseInt(res.rows[0][1]) || 14;
+    state.freq = freq;
+    state.ret  = ret;
+
+    // Reflect in pill UI
+    ['freq-group', 'ret-group'].forEach(function(gid) {
+      Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b) {
+        b.className = 'pill-off';
+      });
+    });
+    var freqBtn = document.querySelector('#freq-group [data-freq="' + freq + '"]');
+    if (freqBtn) freqBtn.className = 'pill-on';
+    var retBtn  = document.querySelector('#ret-group [data-ret="' + ret + '"]');
+    if (retBtn)  retBtn.className  = 'pill-on';
+  }).catch(function() { /* table may not exist yet — silently ignore */ });
 }
 
+// ============================================================
+// BACKUP — SHOW MESSAGE
+// ============================================================
+function setBkMsg(msg, isErr) {
+  var el = document.getElementById('bk-msg');
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
+}
+
+// ============================================================
+// BACKUP — BACK UP NOW
+// Issues a real Doris BACKUP SNAPSHOT command to sd_backup_repo
+// (s3://xdatatoiceberg1/stardata-backups/).
+// ============================================================
 function doBackup() {
   var db  = document.getElementById('bk-db').value;
-  var lab = document.getElementById('bk-lab').value.trim() || (db+'_'+new Date().toISOString().slice(0,10).replace(/-/g,'_'));
-  if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(lab)){ setBkMsg('Snapshot names can use letters, numbers and underscores only.',true); return; }
-  if(state.snapshots.some(function(s){ return s.label===lab; })){ setBkMsg('A snapshot called '+lab+' already exists.',true); return; }
-  var picked=[];
-  if(document.getElementById('bk-t-events').checked) picked.push('events');
-  if(document.getElementById('bk-t-lookup').checked) picked.push('lookup_table');
-  state.snapshots.push({ label:lab, db:db, tables:picked.length?picked.join(', '):'All tables', how:'Manual', status:'Completed' });
-  document.getElementById('bk-lab').value='';
-  document.getElementById('bk-t-events').checked=false;
-  document.getElementById('bk-t-lookup').checked=false;
-  setBkMsg('Backup '+lab+' started. It appears as Completed when done.',false);
-  renderSnapshots(); updateKpis();
+  var lab = document.getElementById('bk-lab').value.trim() || (db + '_' + today());
+
+  if (!db)  { setBkMsg('Select a database first.', true); return; }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(lab)) {
+    setBkMsg('Snapshot name can only contain letters, numbers and underscores.', true);
+    return;
+  }
+
+  // Collect selected tables
+  var picked = [];
+  Array.from(document.getElementById('bk-tables-list').querySelectorAll('input[type=checkbox]'))
+    .forEach(function(cb) { if (cb.checked) picked.push(cb.dataset.table); });
+
+  // Build the BACKUP SQL
+  // Doris syntax: BACKUP SNAPSHOT `db`.`name` TO `repo` [ON (tbl1, tbl2)] PROPERTIES(...)
+  var onClause = '';
+  if (picked.length) {
+    onClause = ' ON (' + picked.map(function(t) { return '`' + t + '`'; }).join(', ') + ')';
+  }
+  var sql = "BACKUP SNAPSHOT `" + db + "`.`" + lab + "` TO `sd_backup_repo`" +
+            onClause + " PROPERTIES ('type'='full')";
+
+  setBkMsg('Submitting backup…', false);
+  document.getElementById('bk-lab').value = '';
+
+  dorisSQL(db, sql)
+    .then(function() {
+      setBkMsg('Backup ' + lab + ' started → s3://xdatatoiceberg1/stardata-backups/. ' +
+               'Status updates every 5 s below.', false);
+      // Uncheck all tables
+      Array.from(document.getElementById('bk-tables-list').querySelectorAll('input[type=checkbox]'))
+        .forEach(function(cb) { cb.checked = false; });
+      // Reload snapshot list immediately then poll until done
+      loadBackupHistory();
+      startBkPoller();
+    })
+    .catch(function(e) {
+      setBkMsg('Backup failed: ' + e.message, true);
+    });
 }
 
+// ============================================================
+// BACKUP — LOAD HISTORY FROM DORIS (SHOW BACKUP)
+// Populates the Snapshots table with real data from Doris.
+// SHOW BACKUP returns one row per backup job across all DBs.
+// ============================================================
+function loadBackupHistory() {
+  dorisSQL('information_schema', 'SHOW BACKUP', 500)
+    .then(function(res) {
+      // SHOW BACKUP columns (Doris 2.x):
+      //   JobId | SnapshotName | DbName | State | BackupObjs | CreateTime |
+      //   SnapshotFinishedTime | UploadFinishedTime | FinishedTime | UnfinishedTasks | Status
+      var idx = res.idx;
+      var snapCol  = idx['SnapshotName']         != null ? idx['SnapshotName']         : 1;
+      var dbCol    = idx['DbName']               != null ? idx['DbName']               : 2;
+      var stateCol = idx['State']                != null ? idx['State']                : 3;
+      var objsCol  = idx['BackupObjs']           != null ? idx['BackupObjs']           : 4;
+      var finCol   = idx['FinishedTime']         != null ? idx['FinishedTime']         : 8;
+      var createCol= idx['CreateTime']           != null ? idx['CreateTime']           : 5;
+
+      state.snapshots = res.rows.map(function(r) {
+        var rawState  = (r[stateCol] || '').trim();
+        var objs      = (r[objsCol]  || '').trim();
+        var takenRaw  = r[finCol] || r[createCol] || '';
+        // Normalise state label for display
+        var stLabel   = rawState === 'FINISHED' ? 'Completed'
+                      : rawState === 'PENDING'  ? 'Pending'
+                      : rawState === 'UPLOADING'? 'Uploading'
+                      : rawState === 'CANCELLED'? 'Cancelled'
+                      : rawState || 'Unknown';
+        // Strip the leading `default_cluster:` prefix Doris sometimes adds to DbName
+        var dbName = (r[dbCol] || '').replace(/^default_cluster:/, '');
+        return {
+          label:  r[snapCol] || '—',
+          db:     dbName,
+          tables: objs || 'All tables',
+          how:    stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+          taken:  takenRaw,
+          status: stLabel,
+          rawState: rawState,
+        };
+      }).reverse(); // most recent first
+
+      renderSnapshots();
+      updateKpisFromHistory();
+    })
+    .catch(function(e) {
+      console.warn('loadBackupHistory failed:', e);
+      // Don't wipe existing displayed snapshots on a poll failure
+    });
+}
+
+function startBkPoller() {
+  // Poll every 5 s until all jobs are in a terminal state
+  if (state.bkPollerTimer) return; // already polling
+  state.bkPollerTimer = setInterval(function() {
+    loadBackupHistory();
+    var allDone = state.snapshots.every(function(s) {
+      return s.rawState === 'FINISHED' || s.rawState === 'CANCELLED' || s.rawState === '';
+    });
+    if (allDone) {
+      clearInterval(state.bkPollerTimer);
+      state.bkPollerTimer = null;
+    }
+  }, 5000);
+}
+
+// ============================================================
+// BACKUP — RENDER SNAPSHOTS TABLE
+// ============================================================
 function renderSnapshots() {
-  var tbody=document.getElementById('snapshots-body');
-  if(!state.snapshots.length){ tbody.innerHTML='<tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>'; return; }
-  tbody.innerHTML=state.snapshots.map(function(r){
-    var c=r.status==='Restoring'?'#8A4B00':r.status==='Completed'?'#17663A':'#4F5866';
-    return '<tr><td class="td" style="font-weight:600">'+r.label+'</td><td class="td">'+r.db+'</td><td class="td">'+r.tables+'</td>'
-      +'<td class="td">'+r.how+'</td><td class="td" style="font-weight:600;color:'+c+'">'+r.status+'</td>'
-      +'<td class="td" style="text-align:right"><button class="btn" onclick="startRestore(\''+r.label+'\')">Restore…</button></td></tr>';
+  var tbody = document.getElementById('snapshots-body');
+  if (!state.snapshots.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.snapshots.map(function(r) {
+    var color = r.status === 'Completed' ? '#17663A'
+              : r.status === 'Restoring' ? '#8A4B00'
+              : r.status === 'Uploading' || r.status === 'Pending' ? '#1F4FD8'
+              : r.status === 'Cancelled' ? '#9AA3B0'
+              : '#4F5866';
+    var takenDisplay = r.taken ? fmtAgo(r.taken) : '—';
+    var restoreBtn = (r.status === 'Completed')
+      ? '<button class="btn" onclick="startRestore(\'' + r.label + '\',\'' +
+        r.db + '\',\'' + (r.taken || '') + '\',\'' +
+        (r.tables !== 'All tables' ? r.tables : '') + '\')">Restore…</button>'
+      : '';
+    return '<tr>' +
+      '<td class="td" style="font-weight:600">' + r.label + '</td>' +
+      '<td class="td">' + r.db + '</td>' +
+      '<td class="td" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + r.tables + '">' + r.tables + '</td>' +
+      '<td class="td">' + takenDisplay + '</td>' +
+      '<td class="td" style="font-weight:600;color:' + color + '">' + r.status + '</td>' +
+      '<td class="td" style="text-align:right">' + restoreBtn + '</td>' +
+      '</tr>';
   }).join('');
 }
 
-function updateKpis() {
-  if(!state.snapshots.length) return;
-  var last=state.snapshots[state.snapshots.length-1];
-  document.getElementById('kpi-last-backup').textContent=last.label;
-  document.getElementById('kpi-last-backup-hint').textContent=last.db+' · '+last.tables;
+function updateKpisFromHistory() {
+  var completed = state.snapshots.filter(function(s) { return s.status === 'Completed'; });
+  if (!completed.length) return;
+  var last = completed[0]; // already reversed so index 0 = most recent
+  document.getElementById('kpi-last-backup').textContent = last.taken ? fmtAgo(last.taken) : last.label;
+  document.getElementById('kpi-last-backup-hint').textContent = last.db + ' · ' + last.tables;
 }
 
-function startRestore(label) {
-  state.restoreTarget=label;
-  var snap=state.snapshots.find(function(s){ return s.label===label; });
-  document.getElementById('rs-label').textContent=label;
-  document.getElementById('rs-what').textContent=snap?(snap.tables==='All tables'?'all of '+snap.db:snap.db+' ('+snap.tables+')'):label;
-  document.getElementById('rs-cf').value='';
-  document.getElementById('rs-cf').placeholder=label;
-  var p=document.getElementById('restore-panel'); p.style.display='flex'; p.scrollIntoView({behavior:'smooth',block:'nearest'});
+// ============================================================
+// RESTORE — START (show confirmation panel)
+// ============================================================
+function startRestore(label, db, finishedTime, tablesStr) {
+  state.restoreTarget = label;
+  state.restoreTs     = finishedTime || '';
+  state.restoreDb     = db || '';
+  state.restoreTables = tablesStr ? tablesStr.split(',').map(function(t){ return t.trim(); }) : null;
+
+  document.getElementById('rs-label').textContent = label;
+  document.getElementById('rs-what').textContent  =
+    state.restoreTables && state.restoreTables.length
+      ? db + ' (' + state.restoreTables.join(', ') + ')'
+      : 'all of ' + db;
+  document.getElementById('rs-cf').value       = '';
+  document.getElementById('rs-cf').placeholder = label;
+
+  var p = document.getElementById('restore-panel');
+  p.style.display = 'flex';
+  p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
-function cancelRestore(){ state.restoreTarget=null; document.getElementById('restore-panel').style.display='none'; }
+
+function cancelRestore() {
+  state.restoreTarget = null;
+  document.getElementById('restore-panel').style.display = 'none';
+}
+
+// ============================================================
+// RESTORE — EXECUTE
+// Issues a real Doris RESTORE SNAPSHOT command.
+// Doris syntax:
+//   RESTORE SNAPSHOT `db`.`snap` FROM `repo`
+//   [ON (tbl1, tbl2)]
+//   PROPERTIES ('backup_timestamp'='...', 'replication_num'='1')
+// ============================================================
 function doRestore() {
-  var cf=document.getElementById('rs-cf').value.trim();
-  if(!state.restoreTarget||cf!==state.restoreTarget){ setBkMsg('Not restored: type the snapshot name exactly to confirm.',true); return; }
-  state.snapshots=state.snapshots.map(function(s){ return s.label===state.restoreTarget?Object.assign({},s,{status:'Restoring'}):s; });
-  renderSnapshots(); cancelRestore();
-  setBkMsg('Restoring '+state.restoreTarget+'. You will be notified when it finishes.',false);
-  state.restoreTarget=null;
+  var cf = document.getElementById('rs-cf').value.trim();
+  if (!state.restoreTarget || cf !== state.restoreTarget) {
+    setBkMsg('Not restored: type the snapshot name exactly to confirm.', true);
+    return;
+  }
+
+  var db    = state.restoreDb;
+  var label = state.restoreTarget;
+  var ts    = state.restoreTs;
+  var tables= state.restoreTables;
+
+  if (!db) { setBkMsg('Cannot restore: database name is missing.', true); return; }
+
+  var onClause = '';
+  if (tables && tables.length) {
+    onClause = ' ON (' + tables.map(function(t) { return '`' + t + '`'; }).join(', ') + ')';
+  }
+
+  var props = "'replication_num'='1'";
+  if (ts) props += ", 'backup_timestamp'='" + ts + "'";
+
+  var sql = "RESTORE SNAPSHOT `" + db + "`.`" + label + "` FROM `sd_backup_repo`" +
+            onClause + " PROPERTIES (" + props + ")";
+
+  cancelRestore();
+  setBkMsg('Submitting restore for ' + label + '…', false);
+
+  dorisSQL(db, sql)
+    .then(function() {
+      setBkMsg('Restore of ' + label + ' started. Polling status…', false);
+      // Mark status in UI immediately
+      state.snapshots = state.snapshots.map(function(s) {
+        return s.label === label ? Object.assign({}, s, { status: 'Restoring', rawState: 'RESTORING' }) : s;
+      });
+      renderSnapshots();
+      startBkPoller();
+    })
+    .catch(function(e) {
+      setBkMsg('Restore failed: ' + e.message, true);
+    });
 }
 
-// ── SOURCES ──────────────────────────────────────────────────
+// ============================================================
+// KPI LOADER  — service status, storage, last backup, freshness
+// ============================================================
+function loadKpis() {
+  // 1. Service status
+  fetch('/api/doris/api/health')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var ok = d && (d.status === 'OK' || d.code === 0);
+      document.getElementById('kpi-status-dot').className = ok ? 'dot-green' : 'dot-red';
+      document.getElementById('kpi-status-val').textContent = ok ? 'Healthy' : 'Degraded';
+    })
+    .catch(function() {
+      document.getElementById('kpi-status-dot').className = 'dot-red';
+      document.getElementById('kpi-status-val').textContent = 'Unreachable';
+    });
+
+  // 2. Storage used
+  fetch('/api/doris/api/show_proc?path=//backends')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var rows = d.data || []; var gb = 0;
+      rows.forEach(function(r) {
+        var m = (r[14] || '').trim().match(/([\d.]+)\s*(GB|TB|MB)/i);
+        if (m) {
+          var v = parseFloat(m[1]), u = m[2].toUpperCase();
+          gb += u === 'TB' ? v * 1024 : u === 'GB' ? v : v / 1024;
+        }
+      });
+      if (gb > 0) {
+        document.getElementById('kpi-storage').textContent =
+          gb >= 1024 ? (gb / 1024).toFixed(2) + ' TB' : gb.toFixed(1) + ' GB';
+        document.getElementById('kpi-storage-hint').textContent =
+          'Across ' + rows.length + ' backend node' + (rows.length !== 1 ? 's' : '');
+      }
+    })
+    .catch(function() {});
+
+  // 3. Last backup — driven by loadBackupHistory(), no extra call needed
+  //    (updateKpisFromHistory runs after every history load)
+
+  // 4. Data freshness
+  dorisSQL('information_schema',
+    "SELECT TABLE_SCHEMA, TABLE_NAME, UPDATE_TIME FROM information_schema.tables " +
+    "WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','__internal_schema') " +
+    "AND CATALOG_NAME = 'internal' AND UPDATE_TIME IS NOT NULL " +
+    "ORDER BY UPDATE_TIME DESC LIMIT 1", 1
+  ).then(function(res) {
+    if (!res.rows.length) return;
+    var ts = res.rows[0][res.idx['UPDATE_TIME'] != null ? res.idx['UPDATE_TIME'] : 2] || '';
+    if (ts) document.getElementById('kpi-freshness').textContent = fmtAgo(ts);
+  }).catch(function() {});
+}
+
+// ============================================================
+// DATA SOURCES  (Lakehouse tab)
+// ============================================================
 function renderSources() {
-  var grid=document.getElementById('sources-grid');
-  grid.innerHTML=SOURCES.map(function(s){
-    var synced=state.synced[s.id];
-    var border=s.id===state.selSrc?'2px solid #1F4FD8':'1px solid #E1E6ED';
-    return '<div style="background:#FFFFFF;border:'+border+';border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;cursor:pointer" onclick="selectSource(\''+s.id+'\')">'+
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">'+
-        '<div style="display:flex;flex-direction:column;gap:2px"><span style="font:700 17px Inter,sans-serif">'+s.name+'</span><span class="hint">'+s.kind+'</span></div>'+
-        '<span style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="dot-grey"></span>Status —</span>'+
-      '</div>'+
-      '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">'+
-        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Last sync</span><span style="font:500 14px Inter,sans-serif">'+(synced||'—')+'</span></div>'+
-        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Freshness</span><span style="font:500 14px Inter,sans-serif">'+s.freshCycle+'</span></div>'+
-      '</div>'+
-      '<div style="display:flex;flex-wrap:wrap;gap:8px">'+
-        '<button class="btn" onclick="event.stopPropagation();selectSource(\''+s.id+'\')">View tables</button>'+
-        (s.canSync?'<button class="btn" onclick="event.stopPropagation();syncSource(\''+s.id+'\')">Sync now</button>':'')+
+  var grid = document.getElementById('sources-grid');
+  grid.innerHTML = SOURCES.map(function(s) {
+    var synced = state.synced[s.id];
+    var border = s.id === state.selSrc ? '2px solid #1F4FD8' : '1px solid #E1E6ED';
+    return '<div style="background:#FFFFFF;border:' + border + ';border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;cursor:pointer" onclick="selectSource(\'' + s.id + '\')">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span style="font:700 17px Inter,sans-serif">' + s.name + '</span><span class="hint">' + s.kind + '</span></div>' +
+        '<span style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="dot-grey"></span>Status —</span>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Last sync</span><span style="font:500 14px Inter,sans-serif">' + (synced || '—') + '</span></div>' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Freshness</span><span style="font:500 14px Inter,sans-serif">' + s.freshCycle + '</span></div>' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button class="btn" onclick="event.stopPropagation();selectSource(\'' + s.id + '\')">View tables</button>' +
+        (s.canSync ? '<button class="btn" onclick="event.stopPropagation();syncSource(\'' + s.id + '\')">Sync now</button>' : '') +
       '</div></div>';
   }).join('');
   renderSrcTables();
 }
 
-function selectSource(id) { state.selSrc=id; state.selDb='all'; renderSources(); }
+function selectSource(id) {
+  state.selSrc = id; state.selDb = 'all';
+  renderSources(); renderSrcTables();
+}
 
 function syncSource(id) {
-  var now=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-  state.synced[id]='Just now ('+now+')';
-  var src=SOURCES.find(function(s){ return s.id===id; });
-  var el=document.getElementById('src-msg');
-  el.textContent=(src?src.name:id)+' sync triggered.'; el.style.display='block';
-  setTimeout(function(){ el.style.display='none'; },4000);
+  var now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  state.synced[id] = 'Just now (' + now + ')';
+  var el  = document.getElementById('src-msg');
+  var src = SOURCES.find(function(s) { return s.id === id; });
+  el.textContent = (src ? src.name : id) + ' sync triggered.';
+  el.style.display = 'block';
+  setTimeout(function() { el.style.display = 'none'; }, 4000);
   renderSources();
 }
 
-function filterSrcTables() { state.selDb=document.getElementById('src-db').value; renderSrcTables(); }
+function filterSrcTables() { state.selDb = document.getElementById('src-db').value; renderSrcTables(); }
 
 function renderSrcTables() {
-  var src=SOURCES.find(function(s){ return s.id===state.selSrc; });
-  if(!src) return;
-  document.getElementById('h-tb').textContent=src.name+' tables';
-  document.getElementById('sel-hint').textContent=src.kind+' · '+src.freshCycle;
-  var dbSel=document.getElementById('src-db');
-  dbSel.innerHTML='<option value="all">All databases</option>';
-  src.dbs.forEach(function(d){ var o=document.createElement('option');o.value=d;o.textContent=d;if(d===state.selDb)o.selected=true;dbSel.appendChild(o); });
-  var rows=CATALOG_TABLES.filter(function(r){ return r.src===state.selSrc&&(state.selDb==='all'||r.db===state.selDb); });
-  var tbody=document.getElementById('src-tables-body');
-  if(!rows.length){ tbody.innerHTML='<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>'; return; }
-  tbody.innerHTML=rows.map(function(r){
-    return '<tr><td class="td" style="font-weight:600">'+r.t+'</td><td class="td">'+r.db+'</td><td class="td">'+r.fmt+'</td><td class="td" style="color:#9AA3B0">—</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  var src = SOURCES.find(function(s) { return s.id === state.selSrc; });
+  if (!src) return;
+  document.getElementById('h-tb').textContent = src.name + ' tables';
+  document.getElementById('sel-hint').textContent = src.kind + ' · ' + src.freshCycle;
+  var dbSel = document.getElementById('src-db');
+  dbSel.innerHTML = '<option value="all">All databases</option>';
+  src.dbs.forEach(function(d) {
+    var o = document.createElement('option'); o.value = d; o.textContent = d;
+    if (d === state.selDb) o.selected = true;
+    dbSel.appendChild(o);
+  });
+  var rows = CATALOG_TABLES.filter(function(r) {
+    return r.src === state.selSrc && (state.selDb === 'all' || r.db === state.selDb);
+  });
+  var tbody = document.getElementById('src-tables-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(r) {
+    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td>' +
+      '<td class="td">' + r.db + '</td><td class="td">' + r.fmt + '</td>' +
+      '<td class="td" style="color:#9AA3B0">—</td><td class="td" style="color:#9AA3B0">—</td></tr>';
   }).join('');
 }
 
-// ── KPI LOADER ───────────────────────────────────────────────
-// All endpoints are proxied through /api/doris/ → stardata-api-proxy (prod).
-// stardata-api-proxy injects credentials from stardata-credentials secret.
-// Each fetch is independent; a failure leaves that card at its default value.
+// ============================================================
+// BOOT
+// ============================================================
+(function init() {
+  renderCatalog();
+  renderSnapshots();   // show "No snapshots" until history loads
 
-function fmtAgo(ts) {
-  if(!ts) return '—';
-  var d=new Date(ts); if(isNaN(d)) return ts;
-  var s=Math.floor((Date.now()-d)/1000);
-  if(s<60) return 'Just now';
-  if(s<3600) return Math.floor(s/60)+' min ago';
-  if(s<86400) return Math.floor(s/3600)+'h ago';
-  return Math.floor(s/86400)+'d ago';
-}
+  // Load real data from Doris
+  loadBkDatabases();   // populate DB dropdown + tables
+  loadBackupHistory(); // populate snapshots table
+  loadSavedSchedule(); // restore saved autobackup settings
+  loadKpis();
 
-function loadKpis() {
-  // 1. Service status
-  fetch('/api/doris/api/health')
-    .then(function(r){return r.json();})
-    .then(function(d){
-      var ok=d&&d.code===0;
-      document.getElementById('kpi-status-dot').className=ok?'dot-green':'dot-red';
-      document.getElementById('kpi-status-val').textContent=ok?'Healthy':'Degraded';
-    })
-    .catch(function(){
-      document.getElementById('kpi-status-dot').className='dot-red';
-      document.getElementById('kpi-status-val').textContent='Unreachable';
-    });
-
-  // 2. Storage used — /api/show_proc?path=//backends
-  // Response: array-of-arrays; col 14 = UsedCapacity string e.g. "859.157 GB"
-  fetch('/api/doris/api/show_proc?path=//backends')
-    .then(function(r){return r.json();})
-    .then(function(d){
-      var rows=d.data||[]; var gb=0;
-      rows.forEach(function(r){
-        var m=(r[14]||'').trim().match(/([\d.]+)\s*(GB|TB|MB)/i);
-        if(m){ var v=parseFloat(m[1]),u=m[2].toUpperCase();
-          gb+=u==='TB'?v*1024:u==='GB'?v:v/1024; }
-      });
-      if(gb>0){
-        document.getElementById('kpi-storage').textContent=
-          gb>=1024?(gb/1024).toFixed(2)+' TB':gb.toFixed(1)+' GB';
-        document.getElementById('kpi-storage-hint').textContent=
-          'Across '+rows.length+' backend node'+(rows.length!==1?'s':'');
-      }
-    })
-    .catch(function(){});
-
-  // 3. Last backup — SHOW BACKUP via HTTP SQL
-  fetch('/api/doris/api/query/default_cluster/information_schema',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({stmt:'SHOW BACKUP',limit:1})
-  })
-    .then(function(r){return r.json();})
-    .then(function(d){
-      var rows=d.data&&d.data.data?d.data.data:[];
-      var meta=d.data&&d.data.meta?d.data.meta:[];
-      if(!rows.length) return;
-      var idx={}; meta.forEach(function(m,i){idx[m.name]=i;});
-      var row=rows[rows.length-1];
-      var label=row[idx['SnapshotName']]||row[idx['Label']]||row[0]||'—';
-      var db=row[idx['DbName']]||'';
-      var st=row[idx['State']]||'';
-      var fin=row[idx['FinishedTime']]||'';
-      document.getElementById('kpi-last-backup').textContent=fin?fmtAgo(fin):label;
-      document.getElementById('kpi-last-backup-hint').textContent=(db?db+' · ':'')+( st||label);
-    })
-    .catch(function(){});
-
-  // 4. Data freshness — most recently updated table in information_schema
-  fetch('/api/doris/api/query/default_cluster/information_schema',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      stmt:"SELECT TABLE_SCHEMA,TABLE_NAME,UPDATE_TIME FROM information_schema.tables "+
-           "WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema') "+
-           "AND UPDATE_TIME IS NOT NULL ORDER BY UPDATE_TIME DESC LIMIT 1",
-      limit:1
-    })
-  })
-    .then(function(r){return r.json();})
-    .then(function(d){
-      var rows=d.data&&d.data.data?d.data.data:[];
-      var meta=d.data&&d.data.meta?d.data.meta:[];
-      if(!rows.length) return;
-      var idx={}; meta.forEach(function(m,i){idx[m.name]=i;});
-      var ts=rows[0][idx['UPDATE_TIME']]||'';
-      if(ts) document.getElementById('kpi-freshness').textContent=fmtAgo(ts);
-    })
-    .catch(function(){});
-}
-
-// ── BOOT ─────────────────────────────────────────────────────
-renderCatalog();
-renderSnapshots();
-loadKpis();
-setInterval(loadKpis,60000);
+  // Refresh KPIs and snapshot status every 30 s
+  setInterval(function() { loadKpis(); loadBackupHistory(); }, 30000);
+})();
 </script>
 </body>
 </html>

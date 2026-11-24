@@ -1,0 +1,216 @@
+---
+# =============================================================================
+# stardata-autobackup-cronjob.yaml
+# Runs every hour, reads cache_system.backup_schedule, and fires a Doris
+# BACKUP SNAPSHOT if the schedule is active and it is time for the next run.
+#
+# Logic inside the job pod:
+#   1. Read schedule row from cache_system.backup_schedule via mysql.
+#   2. If freq = 'off'  → exit 0 (no-op).
+#   3. Query SHOW BACKUP to find the most recent completed snapshot timestamp.
+#   4. Compare against freq (daily = 86400s, weekly = 604800s).
+#   5. If enough time has passed → issue BACKUP SNAPSHOT for each native DB.
+#   6. Prune snapshots older than retain_days by issuing DROP SNAPSHOT SQL.
+#
+# APPLY
+# ─────
+#   kubectl apply -f manifests/backup/stardata-autobackup-cronjob.yaml
+#
+# TRIGGER MANUALLY
+# ────────────────
+#   kubectl create job -n prod --from=cronjob/stardata-autobackup \
+#     stardata-autobackup-manual-$(date +%s)
+#
+# WATCH LOGS
+# ──────────
+#   kubectl logs -n prod -l job-name=<job-name> -f
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stardata-autobackup
+  namespace: prod
+  labels:
+    app: stardata-autobackup
+
+---
+# ---------------------------------------------------------------------------
+# CronJob — checks every hour, fires backup only when schedule says so
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stardata-autobackup
+  namespace: prod
+  labels:
+    app: stardata-autobackup
+spec:
+  # Run every hour — the script inside decides whether to actually back up.
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: stardata-autobackup
+        spec:
+          serviceAccountName: stardata-autobackup
+          restartPolicy: OnFailure
+
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: stardata
+              effect: NoSchedule
+
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: stardata
+                        operator: In
+                        values: ["true"]
+
+          containers:
+            - name: autobackup
+              image: 192.168.1.50:30500/library/bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  # ── Install mysql client ─────────────────────────────────────
+                  echo "[autobackup] Installing mysql client..."
+                  apt-get update -qq && apt-get install -y -qq default-mysql-client 2>/dev/null \
+                    || (apt-get install -y -qq mysql-client 2>/dev/null) \
+                    || true
+
+                  SD_HOST="${DORIS_HOST:-stardata-fe.prod.svc.cluster.local}"
+                  SD_PORT="${DORIS_PORT:-9030}"
+                  REPO="sd_backup_repo"
+
+                  mysql_q() {
+                    mysql -h "${SD_HOST}" -P "${SD_PORT}" \
+                          -u root -p"${DORIS_PASSWORD}" \
+                          --default-character-set=utf8mb4 \
+                          --batch --skip-column-names -e "$1" 2>/dev/null
+                  }
+
+                  # ── 1. Read schedule ─────────────────────────────────────────
+                  echo "[autobackup] Reading backup schedule..."
+                  SCHED=$(mysql_q "SELECT freq, retain_days, databases FROM cache_system.backup_schedule WHERE id='1' LIMIT 1" || true)
+                  if [[ -z "${SCHED}" ]]; then
+                    echo "[autobackup] No schedule row found — nothing to do."
+                    exit 0
+                  fi
+
+                  FREQ=$(echo "${SCHED}"       | awk '{print $1}')
+                  RETAIN=$(echo "${SCHED}"     | awk '{print $2}')
+                  DBS_JSON=$(echo "${SCHED}"   | cut -f3-)
+
+                  if [[ "${FREQ}" == "off" || -z "${FREQ}" ]]; then
+                    echo "[autobackup] Schedule is off — nothing to do."
+                    exit 0
+                  fi
+
+                  echo "[autobackup] Schedule: freq=${FREQ}, retain=${RETAIN} days"
+
+                  # ── 2. Check if enough time has passed since last backup ──────
+                  INTERVAL_S=86400
+                  if [[ "${FREQ}" == "weekly" ]]; then INTERVAL_S=604800; fi
+
+                  # Find timestamp of most recently FINISHED backup in SHOW BACKUP
+                  LAST_BACKUP_TS=$(mysql_q "SHOW BACKUP" 2>/dev/null \
+                    | awk -F'\t' 'NR>0 && $6!="" {print $6}' \
+                    | sort -r | head -1 || true)
+
+                  NOW_S=$(date +%s)
+                  if [[ -n "${LAST_BACKUP_TS}" ]]; then
+                    LAST_S=$(date -d "${LAST_BACKUP_TS}" +%s 2>/dev/null || echo 0)
+                    ELAPSED=$(( NOW_S - LAST_S ))
+                    if [[ "${ELAPSED}" -lt "${INTERVAL_S}" ]]; then
+                      NEXT=$(( INTERVAL_S - ELAPSED ))
+                      echo "[autobackup] Last backup was ${ELAPSED}s ago; next in ${NEXT}s. Skipping."
+                      exit 0
+                    fi
+                  fi
+
+                  # ── 3. Determine which databases to back up ──────────────────
+                  # DBS_JSON: either empty (all native) or JSON array e.g. '["mydb","analytics"]'
+                  DBLIST=""
+                  if [[ -n "${DBS_JSON}" && "${DBS_JSON}" != "null" && "${DBS_JSON}" != "[]" && "${DBS_JSON}" != "" ]]; then
+                    # Parse comma-separated from JSON array: strip [ " ] chars
+                    DBLIST=$(echo "${DBS_JSON}" | tr -d '[]"' | tr ',' ' ')
+                  fi
+
+                  if [[ -z "${DBLIST}" ]]; then
+                    # All native (non-external, non-system) databases
+                    DBLIST=$(mysql_q "SELECT SCHEMA_NAME FROM information_schema.schemata \
+                      WHERE CATALOG_NAME='internal' \
+                      AND SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','__internal_schema')" \
+                      | tr '\n' ' ' || true)
+                  fi
+
+                  if [[ -z "${DBLIST}" ]]; then
+                    echo "[autobackup] No databases found to back up."
+                    exit 0
+                  fi
+
+                  echo "[autobackup] Databases: ${DBLIST}"
+                  TIMESTAMP=$(date +%Y_%m_%d_%H%M)
+
+                  # ── 4. Fire BACKUP for each database ─────────────────────────
+                  for DB in ${DBLIST}; do
+                    SNAP="${DB}_auto_${TIMESTAMP}"
+                    echo "[autobackup] Backing up ${DB} as snapshot ${SNAP}..."
+                    mysql_q "BACKUP SNAPSHOT \`${DB}\`.\`${SNAP}\` TO \`${REPO}\` PROPERTIES ('type'='full')" \
+                      && echo "[autobackup] ✓ BACKUP issued for ${DB}" \
+                      || echo "[autobackup] ✗ BACKUP failed for ${DB} — continuing"
+                  done
+
+                  # ── 5. Prune old snapshots ────────────────────────────────────
+                  echo "[autobackup] Pruning snapshots older than ${RETAIN} days..."
+                  CUTOFF_S=$(( NOW_S - RETAIN * 86400 ))
+
+                  # SHOW BACKUP returns all backup jobs; prune completed ones past cutoff
+                  mysql_q "SHOW BACKUP" 2>/dev/null | while IFS=$'\t' read -r snapname dbname _ _ state fintime _rest; do
+                    [[ "${state}" == "FINISHED" || "${state}" == "COMPLETED" ]] || continue
+                    [[ -n "${fintime}" ]] || continue
+                    FIN_S=$(date -d "${fintime}" +%s 2>/dev/null || echo 0)
+                    if [[ "${FIN_S}" -lt "${CUTOFF_S}" ]]; then
+                      echo "[autobackup] Dropping old snapshot ${dbname}.${snapname} (finished ${fintime})"
+                      mysql_q "DROP SNAPSHOT \`${dbname}\`.\`${snapname}\` FROM \`${REPO}\`" || true
+                    fi
+                  done
+
+                  echo "[autobackup] Done."
+
+              env:
+                - name: DORIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: stardata-credentials
+                      key: admin-password
+                - name: DORIS_HOST
+                  value: "stardata-fe.prod.svc.cluster.local"
+                - name: DORIS_PORT
+                  value: "9030"
+
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi

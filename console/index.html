@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StarData · Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F4F6F9;font-family:Inter,system-ui,sans-serif;color:#14171C;min-height:100vh}
+a{color:#1F4FD8;text-decoration:none}
+a:hover{color:#163BA6}
+
+/* ── sidebar nav (home page) ── */
+.nav{display:flex;align-items:center;gap:14px;min-height:48px;padding:0 14px;border-radius:10px;font:500 15px Inter,sans-serif;color:#2B313B;text-decoration:none;transition:background .12s}
+.nav:hover{background:#EEF1F5;color:#14171C}
+.navon{background:#E8EEFC;color:#1F3FB8;font-weight:600}
+.navon:hover{background:#E8EEFC;color:#1F3FB8}
+.sect{font:700 11px Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#9AA3B0;padding:16px 14px 4px}
+
+/* ── cards ── */
+.card{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.panel{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:28px;display:flex;flex-direction:column;gap:18px}
+.kpi{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:6px}
+
+/* ── typography ── */
+.lbl{font:600 13px Inter,sans-serif;color:#2B313B}
+.hint{font:400 13px/1.5 Inter,sans-serif;color:#4F5866}
+.mval{font:700 20px Inter,sans-serif;color:#14171C}
+.mlabel{font:400 13px Inter,sans-serif;color:#4F5866}
+.badge{padding:4px 10px;border-radius:999px;background:#E8EEFC;color:#1F3FB8;font:600 12px Inter,sans-serif;white-space:nowrap}
+
+/* ── buttons ── */
+.btnp{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF;font:600 14px Inter,sans-serif;cursor:pointer;text-decoration:none}
+.btnp:hover{background:#163BA6;border-color:#163BA6;color:#FFFFFF}
+.btnout{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer;text-decoration:none}
+.btnout:hover{background:#EEF1F5}
+.btnd{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #B42318;background:#FFFFFF;color:#B42318;font:600 14px Inter,sans-serif;cursor:pointer}
+.btnd:hover{background:#FFF5F5}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer}
+.btn:hover{background:#EEF1F5}
+
+/* ── forms ── */
+.inp{box-sizing:border-box;width:100%;height:40px;padding:0 12px;border:1px solid #C4CCD8;border-radius:8px;background:#FFFFFF;font:400 14px Inter,sans-serif;color:#14171C}
+.inp:focus{outline:2px solid #1F4FD8;outline-offset:1px;border-color:#1F4FD8}
+
+/* ── table ── */
+.th{padding:10px 14px;text-align:left;font:600 11px Inter,sans-serif;color:#4F5866;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #E1E6ED;white-space:nowrap;background:#FAFBFD}
+.td{padding:11px 14px;border-bottom:1px solid #EEF1F5;font:400 14px Inter,sans-serif;color:#14171C}
+.empty{padding:28px 14px;text-align:center;font:400 14px Inter,sans-serif;color:#4F5866}
+
+/* ── header tabs ── */
+.tab{display:inline-flex;align-items:center;min-height:44px;padding:0 18px;font:500 15px Inter,sans-serif;color:#4F5866;text-decoration:none;border-bottom:3px solid transparent;transition:color .12s}
+.tab:hover{color:#14171C}
+.tab-on{font-weight:600;color:#14171C;border-bottom:3px solid #1F4FD8}
+
+/* ── sub-nav pills ── */
+.sub{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;border-radius:8px;font:600 13px Inter,sans-serif;color:#2B313B;text-decoration:none;border:1px solid transparent}
+.sub:hover{background:#EEF1F5}
+
+/* ── pill toggle ── */
+.pill-on{min-height:36px;padding:0 14px;border-radius:8px;cursor:pointer;font:600 14px Inter,sans-serif;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF}
+.pill-off{min-height:36px;padding:0 14px;border-radius:8px;cursor:pointer;font:600 14px Inter,sans-serif;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C}
+.pill-on:hover{background:#163BA6;border-color:#163BA6}
+.pill-off:hover{background:#EEF1F5}
+
+/* ── status dot ── */
+.dot-green{width:9px;height:9px;border-radius:50%;background:#17A34A;display:inline-block}
+.dot-orange{width:9px;height:9px;border-radius:50%;background:#D97706;display:inline-block}
+.dot-grey{width:9px;height:9px;border-radius:50%;background:#9AA3B0;display:inline-block}
+.dot-red{width:9px;height:9px;border-radius:50%;background:#B42318;display:inline-block}
+
+/* ── pages ── */
+.page{display:none}
+.page-active{display:block}
+
+/* ── avatar ── */
+.avatar{width:32px;height:32px;border-radius:50%;background:#DCE7F7;color:#163BA6;display:inline-flex;align-items:center;justify-content:center;font:700 12px Inter,sans-serif;flex-shrink:0}
+
+/* ── code block ── */
+.code{margin:0;padding:12px 16px;background:#11151C;color:#DCE3EE;border-radius:0 0 10px 10px;font:400 12.5px/1.6 'JetBrains Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto}
+.sc{border:1px solid #E1E6ED;border-radius:10px;background:#FAFBFD}
+.sc summary{cursor:pointer;min-height:40px;display:flex;align-items:center;padding:0 14px;font:600 13px Inter,sans-serif;color:#1F4FD8}
+</style>
+</head>
+<body>
+
+<!-- ================================================================
+     PAGE: home  (sidebar layout, same as dashboard design)
+     ================================================================ -->
+<div id="page-home" class="page page-active">
+<div style="display:flex;flex-wrap:wrap;min-height:100vh">
+
+  <!-- sidebar -->
+  <aside style="flex:1 1 260px;max-width:300px;background:#FFFFFF;border-right:1px solid #E1E6ED;padding:20px 16px 32px;display:flex;flex-direction:column;gap:4px">
+    <div style="display:flex;align-items:center;gap:10px;padding:4px 14px 18px">
+      <!-- StarData logo mark -->
+      <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#14171C"/><path d="M16 7l2.6 5.6 6.1.7-4.5 4.1 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.1 6.1-.7z" fill="#FFFFFF"/></svg>
+      <div style="display:flex;flex-direction:column">
+        <span style="font:700 17px Inter,sans-serif">StarData</span>
+        <span style="font:400 12px Inter,sans-serif;color:#4F5866">Console</span>
+      </div>
+    </div>
+
+    <nav aria-label="Components" style="display:flex;flex-direction:column;gap:2px">
+      <a class="nav navon" href="#" aria-current="page" data-nav="home" onclick="return false;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
+        Home
+      </a>
+      <a class="nav" href="#" data-nav="etl">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v4a4 4 0 0 0 4 4h4a4 4 0 0 1 4 2"/></svg>
+        ETL Studio
+      </a>
+      <a class="nav" href="#" data-nav="documents">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+        Documents
+      </a>
+      <a class="nav" href="#" data-nav="stargraph">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8M16 7.5l-3 8M8.5 6h7"/></svg>
+        StarGraph
+      </a>
+      <a class="nav" href="#" data-nav="monitoring">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+        Monitoring
+      </a>
+      <a class="nav" href="#" data-nav="graphrag">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6.5 10.5l4-4M6.5 13.5l4 4"/><path d="M18 9l1 2.5L21.5 12 19 13l-1 2.5-1-2.5-2.5-1 2.5-.5z"/></svg>
+        GraphRAG
+      </a>
+      <a class="nav" href="#" data-nav="openrag">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v15H6a2 2 0 0 0-2 2z"/><path d="M4 20a2 2 0 0 0 2 1h12v-3"/><circle cx="11" cy="10" r="3"/><path d="M13.2 12.2L15.5 14.5"/></svg>
+        OpenRAG
+      </a>
+      <a class="nav" href="#" data-nav="stardata" id="sidebar-stardata" onclick="goStardata(); return false;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+        StarData
+      </a>
+      <a class="nav" href="#" data-nav="queryspace">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
+        QuerySpace
+      </a>
+    </nav>
+
+    <div class="sect">Access control</div>
+    <nav aria-label="Access control" style="display:flex;flex-direction:column;gap:2px">
+      <a class="nav" href="#" data-nav="members">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/></svg>
+        <span style="flex:1">Members</span>
+        <span style="min-width:24px;height:24px;border-radius:999px;background:#B23C0E;color:#FFFFFF;font:700 12px Inter,sans-serif;display:inline-flex;align-items:center;justify-content:center" aria-label="2 waiting">2</span>
+      </a>
+      <a class="nav" href="#" data-nav="access">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+        Access
+      </a>
+    </nav>
+
+    <!-- sign-out at bottom -->
+    <div style="margin-top:auto;padding-top:16px;border-top:1px solid #E1E6ED">
+      <a class="nav" href="#" style="color:#4F5866" onclick="alert('Signed out'); return false;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Sign out
+      </a>
+    </div>
+  </aside>
+
+  <!-- main content -->
+  <main style="flex:999 1 640px;min-width:0;padding:40px 48px 64px;display:flex;flex-direction:column;gap:28px;max-width:1180px">
+
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <h1 style="margin:0;font:700 38px Inter,sans-serif;letter-spacing:-0.01em">Welcome back, John</h1>
+      <span style="font:400 17px Inter,sans-serif;color:#4F5866">You see a tile for each component you have a role for.</span>
+    </div>
+
+    <!-- pending members banner -->
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;padding:18px 22px;background:#FDF3E7;border:1px solid #F0D3AE;border-radius:14px">
+      <div style="display:flex;align-items:center;gap:14px;font:400 15px Inter,sans-serif;color:#5A2C00">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#B23C0E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/></svg>
+        <span><strong style="color:#8A2C05">2 people are waiting for access.</strong> Approve them and choose a level for each component.</span>
+      </div>
+      <a href="#" class="btnout" style="border-color:#E0B07A;color:#8A2C05" onclick="return false;">Review requests</a>
+    </div>
+
+    <!-- component tiles -->
+    <section aria-labelledby="h-comp" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px">
+        <h2 id="h-comp" style="margin:0;font:700 22px Inter,sans-serif">Your components</h2>
+        <span class="mlabel">Figures appear once each component is connected.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px">
+        <!-- StarData tile -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">StarData</span>
+            <span class="badge">engineer</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Warehouse and lakehouse: catalog, backups and connected data sources.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Service status</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Storage used</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last backup</span></div>
+          </div>
+          <div style="margin-top:auto">
+            <a class="btnp" href="#" onclick="goStardata(); return false;">Open StarData</a>
+          </div>
+        </div>
+        <!-- ETL Studio tile -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">ETL Studio</span>
+            <span class="badge">admin</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Flink and SQLMesh canvases, CDC, schedules and document sources.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Pipelines running</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Failed runs (24h)</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Next run</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open ETL Studio</a></div>
+        </div>
+        <!-- Documents -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">Documents</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Upload and manage the documents your search and RAG apps use.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Documents</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Waiting to process</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last upload</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open Documents</a></div>
+        </div>
+        <!-- StarGraph -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">StarGraph</span>
+            <span class="badge">engineer</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Memgraph graph from Iceberg tables. Query, explore and download.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Nodes</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Relationships</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last build</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open StarGraph</a></div>
+        </div>
+        <!-- Monitoring -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">Monitoring</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Health, alerts and incidents across every component.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Open alerts</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Healthy components</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last incident</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open Monitoring</a></div>
+        </div>
+        <!-- QuerySpace -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">QuerySpace</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Write, save and share SQL queries against your warehouse and sources.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Saved queries</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Queries today</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Shared with you</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnout" href="#" onclick="return false;">Open QuerySpace</a></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- access + activity cards -->
+    <div style="display:flex;flex-wrap:wrap;gap:18px">
+      <section aria-labelledby="h-acc" class="card" style="flex:1 1 400px">
+        <h2 id="h-acc" style="margin:0;font:700 20px Inter,sans-serif">Your access</h2>
+        <div style="display:flex;flex-direction:column">
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span style="color:#4F5866">Platform</span><span style="font-weight:700">Owner</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span style="color:#4F5866">Signed in with</span><span>Password and authenticator app</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0"><span style="color:#4F5866">Session ends</span><span>After 1 day idle or 7 days total</span></div>
+        </div>
+        <span style="font:400 13px Inter,sans-serif;color:#4F5866">Roles are set by an Owner or Admin. <a href="#" onclick="return false;">Change your password</a> on the sign-in page.</span>
+      </section>
+      <section aria-labelledby="h-act" class="card" style="flex:1 1 400px">
+        <h2 id="h-act" style="margin:0;font:700 20px Inter,sans-serif">Recent activity</h2>
+        <div style="display:flex;flex-direction:column">
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span>Approved Priya Shah as StarData analyst</span><span style="color:#4F5866;white-space:nowrap">Yesterday</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0"><span>Issued a new app password for reporting-bi</span><span style="color:#4F5866;white-space:nowrap">Nov 2</span></div>
+        </div>
+        <a href="#" style="font:500 14px Inter,sans-serif" onclick="return false;">See all activity in Access</a>
+      </section>
+    </div>
+
+  </main>
+</div>
+</div><!-- end page-home -->
+
+
+<!-- ================================================================
+     PAGE: stardata  (top-nav layout: Warehouse + Data sources tabs)
+     ================================================================ -->
+<div id="page-stardata" class="page">
+
+  <!-- top header -->
+  <header style="background:#FFFFFF;border-bottom:1px solid #E1E6ED;position:sticky;top:0;z-index:100">
+    <div style="max-width:1360px;margin:0 auto;padding:14px 32px 0;display:flex;flex-direction:column;gap:0">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding-bottom:12px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#14171C"/><path d="M16 7l2.6 5.6 6.1.7-4.5 4.1 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.1 6.1-.7z" fill="#FFFFFF"/></svg>
+          <span style="font:700 18px Inter,sans-serif">StarData</span>
+          <span style="font:500 14px Inter,sans-serif;color:#4F5866;padding-left:12px;border-left:1px solid #E1E6ED">Acme Corp</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <span style="display:inline-flex;align-items:center;gap:8px;font:500 13px Inter,sans-serif;color:#2B313B">
+            <span class="avatar">JD</span>Admin
+          </span>
+          <!-- Sign out -->
+          <a href="#" onclick="goHome(); return false;" style="display:inline-flex;align-items:center;gap:6px;font:500 13px Inter,sans-serif;color:#4F5866;padding:6px 12px;border:1px solid #E1E6ED;border-radius:8px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            Sign out
+          </a>
+        </div>
+      </div>
+      <!-- tabs -->
+      <nav aria-label="Console" style="display:flex;gap:4px">
+        <a href="#" onclick="goHome(); return false;" style="display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:0 18px 0 0;margin-right:8px;border-right:1px solid #E1E6ED;font:500 15px Inter,sans-serif;color:#4F5866;text-decoration:none;border-bottom:3px solid transparent">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Home
+        </a>
+        <a href="#" id="tab-warehouse" class="tab tab-on" onclick="showTab('warehouse'); return false;">Warehouse</a>
+        <a href="#" id="tab-lakehouse" class="tab" onclick="showTab('lakehouse'); return false;">Data sources</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ── WAREHOUSE SUB-PAGE ── -->
+  <div id="sub-warehouse" style="display:block">
+  <main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+    <nav aria-label="On this page" style="display:flex;flex-wrap:wrap;gap:6px">
+      <a class="sub" href="#wh-overview">Overview</a>
+      <a class="sub" href="#wh-catalog">Data catalog</a>
+      <a class="sub" href="#wh-backup">Backup &amp; recovery</a>
+    </nav>
+
+    <!-- Overview KPIs -->
+    <section id="wh-overview" aria-labelledby="h-ov" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px">
+        <h1 id="h-ov" style="margin:0;font:700 26px Inter,sans-serif">Overview</h1>
+        <span class="hint">Live values appear once the console is connected to your workspace.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+        <div class="kpi">
+          <span class="lbl">Service status</span>
+          <span id="kpi-status" style="display:inline-flex;align-items:center;gap:8px;font:700 24px Inter,sans-serif"><span id="kpi-status-dot" class="dot-grey"></span><span id="kpi-status-val">—</span></span>
+          <span class="hint">Healthy, Degraded or Outage, against your SLA</span>
+        </div>
+        <div class="kpi">
+          <span class="lbl">Storage used</span>
+          <span id="kpi-storage" style="font:700 24px Inter,sans-serif">—</span>
+          <span id="kpi-storage-hint" class="hint">Hot: — · Cold (moved after 1 day): —</span>
+        </div>
+        <div class="kpi">
+          <span class="lbl">Last backup</span>
+          <span id="kpi-last-backup" style="font:700 24px Inter,sans-serif">None yet</span>
+          <span id="kpi-last-backup-hint" class="hint">Automatic backups are off</span>
+        </div>
+        <div class="kpi">
+          <span class="lbl">Data freshness</span>
+          <span id="kpi-freshness" style="font:700 24px Inter,sans-serif">—</span>
+          <span class="hint">Oldest source sync · <a href="#" onclick="showTab('lakehouse'); return false;">View data sources</a></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Data catalog -->
+    <section id="wh-catalog" aria-labelledby="h-cat" class="panel">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h2 id="h-cat" style="margin:0;font:700 22px Inter,sans-serif">Data catalog</h2>
+        <span class="hint">Every database and table in your warehouse and connected sources.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="ct-q">Search</label>
+          <input class="inp" id="ct-q" type="search" placeholder="Table or database name" oninput="filterCatalog()">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="ct-src">Source</label>
+          <select class="inp" id="ct-src" onchange="filterCatalog()">
+            <option value="all">All sources</option>
+            <option value="warehouse">Warehouse</option>
+            <option value="polaris">Lakehouse</option>
+            <option value="databricks">Databricks</option>
+            <option value="postgres">PostgreSQL</option>
+            <option value="oracle">Oracle</option>
+            <option value="mongodb">MongoDB</option>
+            <option value="snowflake">Snowflake</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="ct-db">Database</label>
+          <select class="inp" id="ct-db" onchange="filterCatalog()">
+            <option value="all">All databases</option>
+          </select>
+        </div>
+      </div>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:900px">
+          <thead>
+            <tr>
+              <th class="th">Table</th>
+              <th class="th">Database</th>
+              <th class="th">Source</th>
+              <th class="th">Format</th>
+              <th class="th">Cold storage</th>
+              <th class="th">Last updated</th>
+            </tr>
+          </thead>
+          <tbody id="catalog-body"></tbody>
+        </table>
+      </div>
+      <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    </section>
+
+    <!-- Backup & recovery -->
+    <section id="wh-backup" aria-labelledby="h-bk" class="panel">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h2 id="h-bk" style="margin:0;font:700 22px Inter,sans-serif">Backup &amp; recovery</h2>
+        <span class="hint">Back up a database or chosen tables, keep snapshots on a schedule, and restore any snapshot.</span>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:24px">
+        <!-- Back up now -->
+        <div style="flex:2 1 500px;min-width:0;display:flex;flex-direction:column;gap:14px">
+          <span style="font:700 16px Inter,sans-serif">Back up now</span>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="lbl" for="bk-db">Database</label>
+              <select class="inp" id="bk-db" onchange="updateBkTables()">
+                <option value="">Loading databases…</option>
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="lbl" for="bk-lab">Snapshot name</label>
+              <input class="inp" id="bk-lab" type="text" placeholder="mydb_2026_11_23">
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span class="lbl">Tables (leave all unticked to back up the whole database)</span>
+            <div id="bk-tables-list" style="display:flex;flex-wrap:wrap;gap:4px 20px">
+              <span class="hint" style="padding:10px 0">Select a database above to see its tables.</span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button class="btnp" onclick="doBackup()">Back up now</button>
+            <span id="bk-msg" style="font:500 14px Inter,sans-serif"></span>
+          </div>
+        </div>
+
+        <!-- Auto backups -->
+        <div style="flex:1 1 300px;min-width:0;display:flex;flex-direction:column;gap:14px;padding:20px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:12px">
+          <span style="font:700 16px Inter,sans-serif">Automatic backups</span>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span class="lbl">Frequency</span>
+            <div style="display:flex;flex-wrap:wrap;gap:8px" id="freq-group">
+              <button class="pill-on" data-freq="off" onclick="setPill('freq',this)">Off</button>
+              <button class="pill-off" data-freq="daily" onclick="setPill('freq',this)">Daily</button>
+              <button class="pill-off" data-freq="weekly" onclick="setPill('freq',this)">Weekly</button>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span class="lbl">Keep snapshots for</span>
+            <div style="display:flex;flex-wrap:wrap;gap:8px" id="ret-group">
+              <button class="pill-off" data-ret="7" onclick="setPill('ret',this)">7 days</button>
+              <button class="pill-on" data-ret="14" onclick="setPill('ret',this)">14 days</button>
+              <button class="pill-off" data-ret="30" onclick="setPill('ret',this)">30 days</button>
+            </div>
+          </div>
+          <div><button class="btn" onclick="saveSched()">Save schedule</button></div>
+        </div>
+      </div>
+
+      <!-- Snapshots table -->
+      <span style="font:700 16px Inter,sans-serif">Snapshots</span>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:720px">
+          <thead>
+            <tr>
+              <th class="th">Snapshot</th>
+              <th class="th">Database</th>
+              <th class="th">Tables</th>
+              <th class="th">Taken</th>
+              <th class="th">Status</th>
+              <th class="th"><span style="position:absolute;left:-9999px">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="snapshots-body">
+            <tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Restore panel (shown when restoring) -->
+      <div id="restore-panel" style="display:none;flex-direction:column;gap:12px;padding:20px;background:#FFF6F5;border:1px solid #F1C4BF;border-radius:12px">
+        <span style="font:700 16px Inter,sans-serif">Restore <span id="rs-label"></span></span>
+        <span class="hint">This replaces the current data in <span id="rs-what"></span> with the data from this snapshot. Changes made since the snapshot will be lost.</span>
+        <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+          <div style="flex:1 1 260px;display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="rs-cf">Type the snapshot name to confirm</label>
+            <input class="inp" id="rs-cf" type="text" placeholder="">
+          </div>
+          <button class="btnd" onclick="doRestore()">Restore</button>
+          <button class="btn" onclick="cancelRestore()">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+  </div><!-- end sub-warehouse -->
+
+  <!-- ── DATA SOURCES / LAKEHOUSE SUB-PAGE ── -->
+  <div id="sub-lakehouse" style="display:none">
+  <main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+    <section aria-labelledby="h-src" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h1 id="h-src" style="margin:0;font:700 26px Inter,sans-serif">Connected sources</h1>
+        <span class="hint">Lakehouse sources are copied into open Iceberg tables and kept fresh on a schedule. Snowflake is queried live.</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px" id="sources-grid">
+        <!-- Rendered by JS -->
+      </div>
+      <span id="src-msg" style="font:500 14px Inter,sans-serif;color:#17663A;display:none"></span>
+    </section>
+
+    <!-- Tables panel for selected source -->
+    <section aria-labelledby="h-tb" class="panel">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <h2 id="h-tb" style="margin:0;font:700 22px Inter,sans-serif" id="sel-title">Select a source above</h2>
+          <span class="hint" id="sel-hint"></span>
+        </div>
+        <div style="flex:0 1 240px;display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="src-db">Database</label>
+          <select class="inp" id="src-db" onchange="filterSrcTables()">
+            <option value="all">All databases</option>
+          </select>
+        </div>
+      </div>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:720px">
+          <thead>
+            <tr>
+              <th class="th">Table</th>
+              <th class="th">Database</th>
+              <th class="th">Format</th>
+              <th class="th">Last updated</th>
+              <th class="th">Size</th>
+            </tr>
+          </thead>
+          <tbody id="src-tables-body">
+            <tr><td colspan="5" class="empty">Select a source above to see its tables.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    </section>
+
+  </main>
+  </div><!-- end sub-lakehouse -->
+
+</div><!-- end page-stardata -->
+
+
+<script>
+// ============================================================
+// DATA  — external catalog sources (Data sources tab)
+// ============================================================
+var CATALOG_TABLES = [
+  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'events',       fmt:'Native',     cold:'After 1 day' },
+  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'lookup_table', fmt:'Native',     cold:'After 1 day' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'store_sales',  fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'inventory',    fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_sales',    fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_returns',  fmt:'Iceberg',    cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'customers',    fmt:'Delta Lake', cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'product',      fmt:'Delta Lake', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'products',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'product_reviews',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'warehouse',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'income_band',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'CUSTOMERS',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'ORDERS',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'PRODUCTS',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'products',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'product_reviews', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'snowflake', srcName:'Snowflake',  db:'COMPUTE_WH',    t:'(live query — tables load on connect)', fmt:'Native JDBC', cold:'N/A (live)' },
+];
+
+var SOURCES = [
+  { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables',             canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
+  { id:'databricks', name:'Databricks', kind:'Delta Lake tables via JDBC', canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
+  { id:'postgres',   name:'PostgreSQL', kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['public'] },
+  { id:'oracle',     name:'Oracle',     kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['tpcds','CACHE_TESTING'] },
+  { id:'mongodb',    name:'MongoDB',    kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['cache_testing'] },
+  { id:'snowflake',  name:'Snowflake',  kind:'Live JDBC query (no copy)',   canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
+];
+
+// App state
+var state = {
+  snapshots: [], freq: 'off', ret: 14,
+  restoreTarget: null, restoreTs: null, restoreDb: null, restoreTables: null,
+  bkPollerTimer: null,
+  selSrc: 'polaris', selDb: 'all', synced: {},
+  catalogSrc: 'all', catalogDb: 'all', catalogQ: '',
+};
+
+var SKIP_DBS = {
+  'information_schema':1, 'mysql':1, 'performance_schema':1,
+  '__internal_schema':1, 'cache_system':1,
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
+function dorisSQL(db, stmt, limit) {
+  return fetch('/api/doris/api/query/default_cluster/' + encodeURIComponent(db), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stmt: stmt, limit: limit || 10000 })
+  }).then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function(d) {
+    if (d.code !== 0) throw new Error(d.msg || 'Doris error code ' + d.code);
+    var rows = (d.data && d.data.data) ? d.data.data : [];
+    var meta = (d.data && d.data.meta) ? d.data.meta : [];
+    var idx = {};
+    meta.forEach(function(m, i) { idx[m.name] = i; });
+    return { rows: rows, idx: idx };
+  });
+}
+
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts); if (isNaN(d)) return ts;
+  var s = Math.floor((Date.now() - d) / 1000);
+  if (s < 60) return 'Just now';
+  if (s < 3600) return Math.floor(s / 60) + ' min ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '_');
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function goHome() {
+  document.getElementById('page-home').className = 'page page-active';
+  document.getElementById('page-stardata').className = 'page';
+}
+
+function goStardata() {
+  document.getElementById('page-home').className = 'page';
+  document.getElementById('page-stardata').className = 'page page-active';
+  showTab('warehouse');
+  loadBkDatabases();
+  loadBackupHistory();
+  loadSavedSchedule();
+}
+
+function showTab(tab) {
+  document.getElementById('sub-warehouse').style.display = tab === 'warehouse' ? 'block' : 'none';
+  document.getElementById('sub-lakehouse').style.display = tab === 'lakehouse' ? 'block' : 'none';
+  document.getElementById('tab-warehouse').className = tab === 'warehouse' ? 'tab tab-on' : 'tab';
+  document.getElementById('tab-lakehouse').className = tab === 'lakehouse' ? 'tab tab-on' : 'tab';
+  if (tab === 'lakehouse') renderSources();
+}
+
+// ============================================================
+// CATALOG
+// ============================================================
+function uniqueVals(list, key) {
+  var seen = {}, out = [];
+  list.forEach(function(r) { if (!seen[r[key]]) { seen[r[key]] = 1; out.push(r[key]); } });
+  return out;
+}
+
+function filterCatalog() {
+  state.catalogSrc = document.getElementById('ct-src').value;
+  state.catalogQ   = document.getElementById('ct-q').value.trim().toLowerCase();
+  var inSrc = CATALOG_TABLES.filter(function(r) { return state.catalogSrc === 'all' || r.src === state.catalogSrc; });
+  var dbs = uniqueVals(inSrc, 'db');
+  var dbSel = document.getElementById('ct-db');
+  var curDb = dbSel.value;
+  dbSel.innerHTML = '<option value="all">All databases</option>';
+  dbs.forEach(function(d) {
+    var o = document.createElement('option'); o.value = d; o.textContent = d;
+    if (d === curDb) o.selected = true; dbSel.appendChild(o);
+  });
+  state.catalogDb = dbSel.value;
+  renderCatalog();
+}
+
+function renderCatalog() {
+  var src = state.catalogSrc, db = state.catalogDb, q = state.catalogQ;
+  var rows = CATALOG_TABLES.filter(function(r) {
+    return (src==='all'||r.src===src) && (db==='all'||r.db===db) && (!q||(r.db+'.'+r.t).toLowerCase().indexOf(q)>=0);
+  });
+  var tbody = document.getElementById('catalog-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No tables match. Clear the search or pick another source.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(r) {
+    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td><td class="td">' + r.db + '</td>' +
+      '<td class="td">' + r.srcName + '</td><td class="td">' + r.fmt + '</td>' +
+      '<td class="td">' + r.cold + '</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  }).join('');
+}
+
+// ============================================================
+// BACKUP — DATABASE LOADER
+// ============================================================
+function loadBkDatabases() {
+  var sel = document.getElementById('bk-db');
+  sel.innerHTML = '<option value="">Loading…</option>';
+  sel.disabled = true;
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
+  ).then(function(res) {
+    var dbs = res.rows.map(function(r) { return r[0]; }).filter(function(db) { return !SKIP_DBS[db]; });
+    sel.innerHTML = '';
+    if (!dbs.length) { sel.innerHTML = '<option value="">No native databases found</option>'; sel.disabled = true; return; }
+    dbs.forEach(function(db) {
+      var o = document.createElement('option'); o.value = db; o.textContent = db; sel.appendChild(o);
+    });
+    sel.disabled = false;
+    autoFillSnapName();
+    updateBkTables();
+  }).catch(function(e) {
+    console.warn('loadBkDatabases failed:', e);
+    sel.innerHTML = '<option value="">Could not load databases</option>';
+    sel.disabled = false;
+  });
+}
+
+function autoFillSnapName() {
+  var db = document.getElementById('bk-db').value;
+  var lab = document.getElementById('bk-lab');
+  if (!lab.value && db) lab.placeholder = db + '_' + today();
+}
+
+// ============================================================
+// BACKUP — TABLE LOADER
+// ============================================================
+function updateBkTables() {
+  autoFillSnapName();
+  var db = document.getElementById('bk-db').value;
+  if (!db) return;
+  var container = document.getElementById('bk-tables-list');
+  container.innerHTML = '<span class="hint" style="padding:10px 0">Loading tables…</span>';
+  dorisSQL(db, 'SHOW TABLES').then(function(res) {
+    var tables = res.rows.map(function(r) { return r[0]; });
+    if (!tables.length) { container.innerHTML = '<span class="hint" style="padding:10px 0">No tables in this database.</span>'; return; }
+    container.innerHTML = tables.map(function(t) {
+      var id = 'bk-t-' + t.replace(/[^A-Za-z0-9]/g, '_');
+      return '<label style="display:flex;align-items:center;gap:8px;min-height:40px;font:500 14px Inter,sans-serif;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-table="' + t + '" style="width:18px;height:18px;accent-color:#1F4FD8"> ' + t + '</label>';
+    }).join('');
+  }).catch(function(e) {
+    console.warn('updateBkTables failed:', e);
+    container.innerHTML = '<span class="hint" style="padding:10px 0;color:#B42318">Could not load tables.</span>';
+  });
+}
+
+// ============================================================
+// BACKUP — PILL TOGGLES
+// ============================================================
+function setPill(group, btn) {
+  var gid = group === 'freq' ? 'freq-group' : 'ret-group';
+  Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b) { b.className = 'pill-off'; });
+  btn.className = 'pill-on';
+  if (group === 'freq') state.freq = btn.dataset.freq;
+  else state.ret = parseInt(btn.dataset.ret);
+}
+
+// ============================================================
+// BACKUP — SAVE SCHEDULE
+// ============================================================
+function saveSched() {
+  var freq = state.freq, ret = state.ret;
+  var sql = "UPDATE cache_system.backup_schedule SET freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW() WHERE id='1'";
+  dorisSQL('cache_system', sql).then(function() {
+    showBkMsg(freq === 'off' ? 'Automatic backups turned off and saved.'
+      : 'Automatic ' + freq + ' backups on, keeping ' + ret + ' days. Saved.', false);
+  }).catch(function(e) {
+    var insertSql = "INSERT INTO cache_system.backup_schedule (id,freq,retain_days,databases) VALUES ('1','" + freq + "'," + ret + ",'') " +
+      "ON DUPLICATE KEY UPDATE freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW()";
+    dorisSQL('cache_system', insertSql)
+      .then(function() { showBkMsg('Schedule saved (freq=' + freq + ', keep ' + ret + 'd).', false); })
+      .catch(function(e2) { showBkMsg('Could not save schedule: ' + e2.message, true); });
+  });
+}
+
+function loadSavedSchedule() {
+  dorisSQL('cache_system', "SELECT freq, retain_days FROM cache_system.backup_schedule WHERE id='1' LIMIT 1")
+    .then(function(res) {
+      if (!res.rows.length) return;
+      var freq = res.rows[0][0] || 'off', ret = parseInt(res.rows[0][1]) || 14;
+      state.freq = freq; state.ret = ret;
+      ['freq-group','ret-group'].forEach(function(gid) {
+        Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b) { b.className = 'pill-off'; });
+      });
+      var fb = document.querySelector('#freq-group [data-freq="' + freq + '"]');
+      if (fb) fb.className = 'pill-on';
+      var rb = document.querySelector('#ret-group [data-ret="' + ret + '"]');
+      if (rb) rb.className = 'pill-on';
+    }).catch(function() {});
+}
+
+function showBkMsg(msg, isErr) {
+  var el = document.getElementById('bk-msg');
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
+}
+
+// ============================================================
+// BACKUP — BACK UP NOW
+// ============================================================
+function doBackup() {
+  var db  = document.getElementById('bk-db').value;
+  var lab = document.getElementById('bk-lab').value.trim() || (db + '_' + today());
+  if (!db) { showBkMsg('Select a database first.', true); return; }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(lab)) { showBkMsg('Snapshot name: letters, numbers, underscores only.', true); return; }
+  var picked = [];
+  Array.from(document.getElementById('bk-tables-list').querySelectorAll('input[type=checkbox]'))
+    .forEach(function(cb) { if (cb.checked) picked.push(cb.dataset.table); });
+  var onClause = picked.length ? ' ON (' + picked.map(function(t) { return '`' + t + '`'; }).join(', ') + ')' : '';
+  var sql = "BACKUP SNAPSHOT `" + db + "`.`" + lab + "` TO `sd_backup_repo`" + onClause + " PROPERTIES ('type'='full')";
+  showBkMsg('Submitting backup…', false);
+  document.getElementById('bk-lab').value = '';
+  dorisSQL(db, sql).then(function() {
+    showBkMsg('Backup ' + lab + ' started → s3://xdatatoiceberg1/stardata-backups/. Updating status below…', false);
+    Array.from(document.getElementById('bk-tables-list').querySelectorAll('input[type=checkbox]'))
+      .forEach(function(cb) { cb.checked = false; });
+    loadBackupHistory();
+    startBkPoller();
+  }).catch(function(e) { showBkMsg('Backup failed: ' + e.message, true); });
+}
+
+// ============================================================
+// BACKUP — LOAD HISTORY
+// ============================================================
+function loadBackupHistory() {
+  dorisSQL('information_schema', 'SHOW BACKUP', 500).then(function(res) {
+    var idx = res.idx;
+    var snapCol  = idx['SnapshotName'] != null ? idx['SnapshotName'] : 1;
+    var dbCol    = idx['DbName']       != null ? idx['DbName']       : 2;
+    var stateCol = idx['State']        != null ? idx['State']        : 3;
+    var objsCol  = idx['BackupObjs']   != null ? idx['BackupObjs']   : 4;
+    var finCol   = idx['FinishedTime'] != null ? idx['FinishedTime'] : 8;
+    var createCol= idx['CreateTime']   != null ? idx['CreateTime']   : 5;
+    state.snapshots = res.rows.map(function(r) {
+      var rawState = (r[stateCol] || '').trim();
+      var stLabel  = rawState === 'FINISHED' ? 'Completed' : rawState === 'PENDING' ? 'Pending'
+                   : rawState === 'UPLOADING' ? 'Uploading' : rawState === 'CANCELLED' ? 'Cancelled' : rawState || 'Unknown';
+      var dbName   = (r[dbCol] || '').replace(/^default_cluster:/, '');
+      return {
+        label: r[snapCol] || '—', db: dbName, tables: (r[objsCol] || '').trim() || 'All tables',
+        how: stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+        taken: r[finCol] || r[createCol] || '', status: stLabel, rawState: rawState,
+      };
+    }).reverse();
+    renderSnapshots();
+    updateKpisFromHistory();
+  }).catch(function(e) { console.warn('loadBackupHistory failed:', e); });
+}
+
+function startBkPoller() {
+  if (state.bkPollerTimer) return;
+  state.bkPollerTimer = setInterval(function() {
+    loadBackupHistory();
+    var allDone = state.snapshots.every(function(s) {
+      return s.rawState === 'FINISHED' || s.rawState === 'CANCELLED' || s.rawState === '';
+    });
+    if (allDone) { clearInterval(state.bkPollerTimer); state.bkPollerTimer = null; }
+  }, 5000);
+}
+
+function renderSnapshots() {
+  var tbody = document.getElementById('snapshots-body');
+  if (!state.snapshots.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.snapshots.map(function(r) {
+    var color = r.status === 'Completed' ? '#17663A' : r.status === 'Restoring' ? '#8A4B00'
+              : (r.status === 'Uploading' || r.status === 'Pending') ? '#1F4FD8'
+              : r.status === 'Cancelled' ? '#9AA3B0' : '#4F5866';
+    var restoreBtn = r.status === 'Completed'
+      ? '<button class="btn" onclick="startRestore(\'' + r.label + '\',\'' + r.db + '\',\'' + (r.taken||'') + '\',\'' + (r.tables !== 'All tables' ? r.tables : '') + '\')">Restore…</button>' : '';
+    return '<tr><td class="td" style="font-weight:600">' + r.label + '</td><td class="td">' + r.db + '</td>' +
+      '<td class="td" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + r.tables + '">' + r.tables + '</td>' +
+      '<td class="td">' + (r.taken ? fmtAgo(r.taken) : '—') + '</td>' +
+      '<td class="td" style="font-weight:600;color:' + color + '">' + r.status + '</td>' +
+      '<td class="td" style="text-align:right">' + restoreBtn + '</td></tr>';
+  }).join('');
+}
+
+function updateKpisFromHistory() {
+  var completed = state.snapshots.filter(function(s) { return s.status === 'Completed'; });
+  if (!completed.length) return;
+  var last = completed[0];
+  document.getElementById('kpi-last-backup').textContent = last.taken ? fmtAgo(last.taken) : last.label;
+  document.getElementById('kpi-last-backup-hint').textContent = last.db + ' · ' + last.tables;
+}
+
+// ============================================================
+// RESTORE
+// ============================================================
+function startRestore(label, db, finishedTime, tablesStr) {
+  state.restoreTarget = label; state.restoreTs = finishedTime || '';
+  state.restoreDb = db || '';
+  state.restoreTables = tablesStr ? tablesStr.split(',').map(function(t) { return t.trim(); }) : null;
+  document.getElementById('rs-label').textContent = label;
+  document.getElementById('rs-what').textContent = (state.restoreTables && state.restoreTables.length)
+    ? db + ' (' + state.restoreTables.join(', ') + ')' : 'all of ' + db;
+  document.getElementById('rs-cf').value = '';
+  document.getElementById('rs-cf').placeholder = label;
+  document.getElementById('restore-panel').style.display = 'flex';
+  document.getElementById('restore-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function cancelRestore() {
+  state.restoreTarget = null;
+  document.getElementById('restore-panel').style.display = 'none';
+}
+
+function doRestore() {
+  var cf = document.getElementById('rs-cf').value.trim();
+  if (!state.restoreTarget || cf !== state.restoreTarget) { showBkMsg('Type the snapshot name exactly to confirm.', true); return; }
+  var db = state.restoreDb, label = state.restoreTarget, ts = state.restoreTs, tables = state.restoreTables;
+  if (!db) { showBkMsg('Cannot restore: database name is missing.', true); return; }
+  var onClause = (tables && tables.length) ? ' ON (' + tables.map(function(t) { return '`' + t + '`'; }).join(', ') + ')' : '';
+  var props = "'replication_num'='1'" + (ts ? ", 'backup_timestamp'='" + ts + "'" : '');
+  var sql = "RESTORE SNAPSHOT `" + db + "`.`" + label + "` FROM `sd_backup_repo`" + onClause + " PROPERTIES (" + props + ")";
+  cancelRestore();
+  showBkMsg('Submitting restore for ' + label + '…', false);
+  dorisSQL(db, sql).then(function() {
+    showBkMsg('Restore of ' + label + ' started. Polling status…', false);
+    state.snapshots = state.snapshots.map(function(s) {
+      return s.label === label ? Object.assign({}, s, { status: 'Restoring', rawState: 'RESTORING' }) : s;
+    });
+    renderSnapshots();
+    startBkPoller();
+  }).catch(function(e) { showBkMsg('Restore failed: ' + e.message, true); });
+}
+
+// ============================================================
+// KPI LOADER
+// ============================================================
+function loadWarehouseKpis() {
+  fetch('/api/doris/api/health')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var ok = d && (d.status === 'OK' || d.code === 0);
+      document.getElementById('kpi-status-dot').className = ok ? 'dot-green' : 'dot-red';
+      document.getElementById('kpi-status-val').textContent = ok ? 'Healthy' : 'Degraded';
+    }).catch(function() {
+      document.getElementById('kpi-status-dot').className = 'dot-red';
+      document.getElementById('kpi-status-val').textContent = 'Unreachable';
+    });
+
+  fetch('/api/doris/api/show_proc?path=//backends')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var rows = d.data || [], totalGB = 0;
+      rows.forEach(function(row) {
+        var m = (row[14] || '').trim().match(/([\d.]+)\s*(GB|TB|MB)/i);
+        if (m) { var v = parseFloat(m[1]), u = m[2].toUpperCase();
+          totalGB += u === 'TB' ? v * 1024 : u === 'GB' ? v : v / 1024; }
+      });
+      if (totalGB > 0) {
+        document.getElementById('kpi-storage').textContent = totalGB >= 1024 ? (totalGB/1024).toFixed(2)+' TB' : totalGB.toFixed(1)+' GB';
+        document.getElementById('kpi-storage-hint').textContent = 'Across ' + rows.length + ' backend node' + (rows.length !== 1 ? 's' : '');
+      }
+    }).catch(function() {});
+
+  dorisSQL('information_schema',
+    "SELECT TABLE_SCHEMA, TABLE_NAME, UPDATE_TIME FROM information_schema.tables " +
+    "WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','__internal_schema') " +
+    "AND CATALOG_NAME='internal' AND UPDATE_TIME IS NOT NULL ORDER BY UPDATE_TIME DESC LIMIT 1", 1
+  ).then(function(res) {
+    if (!res.rows.length) return;
+    var ts = res.rows[0][res.idx['UPDATE_TIME'] != null ? res.idx['UPDATE_TIME'] : 2] || '';
+    if (ts) document.getElementById('kpi-freshness').textContent = fmtAgo(ts);
+  }).catch(function() {});
+}
+
+// ============================================================
+// DATA SOURCES (LAKEHOUSE)
+// ============================================================
+function renderSources() {
+  var grid = document.getElementById('sources-grid');
+  grid.innerHTML = SOURCES.map(function(s) {
+    var synced = state.synced[s.id];
+    var border = s.id === state.selSrc ? '2px solid #1F4FD8' : '1px solid #E1E6ED';
+    return '<div style="background:#FFFFFF;border:' + border + ';border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;cursor:pointer" onclick="selectSource(\'' + s.id + '\')">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span style="font:700 17px Inter,sans-serif">' + s.name + '</span><span class="hint">' + s.kind + '</span></div>' +
+        '<span style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="dot-grey"></span>Status —</span>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Last sync</span><span style="font:500 14px Inter,sans-serif">' + (synced||'—') + '</span></div>' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Freshness</span><span style="font:500 14px Inter,sans-serif">' + s.freshCycle + '</span></div>' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button class="btn" onclick="event.stopPropagation();selectSource(\'' + s.id + '\')">View tables</button>' +
+        (s.canSync ? '<button class="btn" onclick="event.stopPropagation();syncSource(\'' + s.id + '\')">Sync now</button>' : '') +
+      '</div></div>';
+  }).join('');
+  renderSrcTables();
+}
+
+function selectSource(id) { state.selSrc = id; state.selDb = 'all'; renderSources(); renderSrcTables(); }
+
+function syncSource(id) {
+  var now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  state.synced[id] = 'Just now (' + now + ')';
+  var el = document.getElementById('src-msg');
+  var src = SOURCES.find(function(s) { return s.id === id; });
+  el.textContent = (src ? src.name : id) + ' sync triggered.'; el.style.display = 'block';
+  setTimeout(function() { el.style.display = 'none'; }, 4000);
+  renderSources();
+}
+
+function filterSrcTables() { state.selDb = document.getElementById('src-db').value; renderSrcTables(); }
+
+function renderSrcTables() {
+  var src = SOURCES.find(function(s) { return s.id === state.selSrc; });
+  if (!src) return;
+  document.getElementById('h-tb').textContent = src.name + ' tables';
+  document.getElementById('sel-hint').textContent = src.kind + ' · ' + src.freshCycle;
+  var dbSel = document.getElementById('src-db');
+  dbSel.innerHTML = '<option value="all">All databases</option>';
+  src.dbs.forEach(function(d) {
+    var o = document.createElement('option'); o.value = d; o.textContent = d;
+    if (d === state.selDb) o.selected = true; dbSel.appendChild(o);
+  });
+  var rows = CATALOG_TABLES.filter(function(r) { return r.src === state.selSrc && (state.selDb === 'all' || r.db === state.selDb); });
+  var tbody = document.getElementById('src-tables-body');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(function(r) {
+    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td><td class="td">' + r.db + '</td>' +
+      '<td class="td">' + r.fmt + '</td><td class="td" style="color:#9AA3B0">—</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  }).join('');
+}
+
+// ============================================================
+// BOOT
+// ============================================================
+(function init() {
+  renderCatalog();
+  renderSnapshots();
+  loadWarehouseKpis();
+  setInterval(function() { loadWarehouseKpis(); loadBackupHistory(); }, 30000);
+})();
+</script>
+
+</body>
+</html>
