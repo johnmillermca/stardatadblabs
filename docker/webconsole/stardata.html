@@ -764,7 +764,8 @@ function loadBackupHistory() {
       state.snapshots = res.rows.map(function(r) {
         var rawState  = (r[stateCol] || '').trim();
         var objs      = (r[objsCol]  || '').trim();
-        var takenRaw  = r[finCol] || r[createCol] || '';
+        var createRaw = r[createCol] || '';
+        var takenRaw  = r[finCol] || createRaw || '';
         // Normalise state label for display
         var stLabel   = rawState === 'FINISHED' ? 'Completed'
                       : rawState === 'PENDING'  ? 'Pending'
@@ -774,13 +775,14 @@ function loadBackupHistory() {
         // Strip the leading `default_cluster:` prefix Doris sometimes adds to DbName
         var dbName = (r[dbCol] || '').replace(/^default_cluster:/, '');
         return {
-          label:  r[snapCol] || '—',
-          db:     dbName,
-          tables: objs || 'All tables',
-          how:    stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
-          taken:  takenRaw,
-          status: stLabel,
-          rawState: rawState,
+          label:      r[snapCol] || '—',
+          db:         dbName,
+          tables:     objs || 'All tables',
+          how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+          taken:      takenRaw,
+          createTime: createRaw,   // used as backup_timestamp in RESTORE (formatted with dashes)
+          status:     stLabel,
+          rawState:   rawState,
         };
       }).reverse(); // most recent first
 
@@ -827,7 +829,7 @@ function renderSnapshots() {
     var takenDisplay = r.taken ? fmtAgo(r.taken) : '—';
     var restoreBtn = (r.status === 'Completed')
       ? '<button class="btn" onclick="startRestore(\'' + r.label + '\',\'' +
-        r.db + '\',\'' + (r.taken || '') + '\',\'' +
+        r.db + '\',\'' + (r.createTime || r.taken || '') + '\',\'' +
         (r.tables !== 'All tables' ? r.tables : '') + '\')">Restore…</button>'
       : '';
     return '<tr>' +
@@ -925,10 +927,15 @@ function doRestore() {
     onClause = ' ON (' + tables.map(function(t) { return '`' + t + '`'; }).join(', ') + ')';
   }
 
-  // backup_timestamp pins the restore to a specific point in time.
-  // Without it Doris picks the latest snapshot for that name.
+  // backup_timestamp must be in YYYY-MM-DD-HH-MM-SS (all dashes) format —
+  // this is how Doris names the __info_ file on S3.
+  // ts here is the CreateTime from SHOW BACKUP (e.g. "2026-11-24 22:37:07").
   var props = "'replication_num'='1'";
-  if (ts) props += ", 'backup_timestamp'='" + ts + "'";
+  if (ts) {
+    // Convert "YYYY-MM-DD HH:MM:SS" → "YYYY-MM-DD-HH-MM-SS"
+    var tsFmt = ts.trim().replace(' ', '-').replace(/:/g, '-');
+    props += ", 'backup_timestamp'='" + tsFmt + "'";
+  }
 
   var sql = "RESTORE SNAPSHOT `" + db + "`.`" + label + "` FROM `sd_backup_repo`" +
             onClause + " PROPERTIES (" + props + ")";
@@ -1025,7 +1032,8 @@ function onPitrDbChange() {
     var takenLabel = s.taken
       ? new Date(s.taken).toLocaleString() + ' — ' + fmtAgo(s.taken)
       : s.label;
-    o.value = s.label + '|' + (s.taken || '') + '|' + (s.tables !== 'All tables' ? s.tables : '');
+    // value encodes: label|createTime|tables  (createTime used as backup_timestamp)
+    o.value = s.label + '|' + (s.createTime || s.taken || '') + '|' + (s.tables !== 'All tables' ? s.tables : '');
     o.textContent = takenLabel + ' (' + s.label + ')';
     snapSel.appendChild(o);
   });

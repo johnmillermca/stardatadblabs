@@ -942,14 +942,20 @@ function loadBackupHistory() {
     var finCol   = idx['FinishedTime'] != null ? idx['FinishedTime'] : 8;
     var createCol= idx['CreateTime']   != null ? idx['CreateTime']   : 5;
     state.snapshots = res.rows.map(function(r) {
-      var rawState = (r[stateCol] || '').trim();
-      var stLabel  = rawState === 'FINISHED' ? 'Completed' : rawState === 'PENDING' ? 'Pending'
-                   : rawState === 'UPLOADING' ? 'Uploading' : rawState === 'CANCELLED' ? 'Cancelled' : rawState || 'Unknown';
-      var dbName   = (r[dbCol] || '').replace(/^default_cluster:/, '');
+      var rawState  = (r[stateCol] || '').trim();
+      var stLabel   = rawState === 'FINISHED' ? 'Completed' : rawState === 'PENDING' ? 'Pending'
+                    : rawState === 'UPLOADING' ? 'Uploading' : rawState === 'CANCELLED' ? 'Cancelled' : rawState || 'Unknown';
+      var dbName    = (r[dbCol] || '').replace(/^default_cluster:/, '');
+      var createRaw = r[createCol] || '';
       return {
-        label: r[snapCol] || '—', db: dbName, tables: (r[objsCol] || '').trim() || 'All tables',
-        how: stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
-        taken: r[finCol] || r[createCol] || '', status: stLabel, rawState: rawState,
+        label:      r[snapCol] || '—',
+        db:         dbName,
+        tables:     (r[objsCol] || '').trim() || 'All tables',
+        how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+        taken:      r[finCol] || createRaw || '',
+        createTime: createRaw,
+        status:     stLabel,
+        rawState:   rawState,
       };
     }).reverse();
     renderSnapshots();
@@ -980,7 +986,7 @@ function renderSnapshots() {
               : (r.status === 'Uploading' || r.status === 'Pending') ? '#1F4FD8'
               : r.status === 'Cancelled' ? '#9AA3B0' : '#4F5866';
     var restoreBtn = r.status === 'Completed'
-      ? '<button class="btn" onclick="startRestore(\'' + r.label + '\',\'' + r.db + '\',\'' + (r.taken||'') + '\',\'' + (r.tables !== 'All tables' ? r.tables : '') + '\')">Restore…</button>' : '';
+      ? '<button class="btn" onclick="startRestore(\'' + r.label + '\',\'' + r.db + '\',\'' + (r.createTime||r.taken||'') + '\',\'' + (r.tables !== 'All tables' ? r.tables : '') + '\')">Restore…</button>' : '';
     return '<tr><td class="td" style="font-weight:600">' + r.label + '</td><td class="td">' + r.db + '</td>' +
       '<td class="td" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + r.tables + '">' + r.tables + '</td>' +
       '<td class="td">' + (r.taken ? fmtAgo(r.taken) : '—') + '</td>' +
@@ -1038,7 +1044,9 @@ function doRestore() {
   var db = state.restoreDb, label = state.restoreTarget, ts = state.restoreTs, tables = state.restoreTables;
   if (!db) { showBkMsg('Cannot restore: database name is missing.', true); return; }
   var onClause = (tables && tables.length) ? ' ON (' + tables.map(function(t) { return '`' + t + '`'; }).join(', ') + ')' : '';
-  var props = "'replication_num'='1'" + (ts ? ", 'backup_timestamp'='" + ts + "'" : '');
+  // backup_timestamp must be YYYY-MM-DD-HH-MM-SS (all dashes) to match S3 __info_ filename
+  var tsFmt = ts ? ts.trim().replace(' ', '-').replace(/:/g, '-') : '';
+  var props = "'replication_num'='1'" + (tsFmt ? ", 'backup_timestamp'='" + tsFmt + "'" : '');
   var sql = "RESTORE SNAPSHOT `" + db + "`.`" + label + "` FROM `sd_backup_repo`" + onClause + " PROPERTIES (" + props + ")";
   cancelRestore();
   showBkMsg('Submitting restore for ' + label + ' → ' + db + '…', false);
@@ -1114,7 +1122,8 @@ function onPitrDbChange() {
   snaps.forEach(function(s) {
     var o = document.createElement('option');
     var takenLabel = s.taken ? new Date(s.taken).toLocaleString() + ' — ' + fmtAgo(s.taken) : s.label;
-    o.value = s.label + '|' + (s.taken || '') + '|' + (s.tables !== 'All tables' ? s.tables : '');
+    // value encodes: label|createTime|tables  (createTime used as backup_timestamp)
+    o.value = s.label + '|' + (s.createTime || s.taken || '') + '|' + (s.tables !== 'All tables' ? s.tables : '');
     o.textContent = takenLabel + ' (' + s.label + ')';
     snapSel.appendChild(o);
   });
