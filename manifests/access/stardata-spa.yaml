@@ -22,11 +22,13 @@ data:
         root /usr/share/nginx/html;
 
         # Proxy /api/doris/<path> → Doris FE :<path>
-        # Literal proxy_pass with trailing slash strips /api/doris/ prefix.
-        # No variable, no rewrite — both drop proxy_set_header Authorization.
+        # Literal proxy_pass with trailing slash strips the /api/doris/ prefix.
+        # No Authorization header — root from the pod CIDR (10.244.x.x) connects
+        # to Doris FE without a password by default (Doris IP-based trust).
+        # Sending a password actually causes 401; omitting it returns 200.
         location /api/doris/ {
             proxy_pass            http://stardata-fe.prod.svc.cluster.local:8030/;
-            proxy_set_header      Authorization "Basic cm9vdDpQcml5YTE5ODI=";
+            proxy_set_header      Authorization "";
             proxy_set_header      Host          "stardata-fe.prod.svc.cluster.local";
             proxy_set_header      X-Real-IP     $remote_addr;
             proxy_http_version    1.1;
