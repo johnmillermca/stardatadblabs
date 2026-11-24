@@ -30,7 +30,7 @@
 --   SHOW REPOSITORIES;
 -- =============================================================================
 
-CREATE REPOSITORY IF NOT EXISTS sd_backup_repo
+CREATE REPOSITORY sd_backup_repo
 WITH S3
 ON LOCATION "s3://xdatatoiceberg1/stardata-backups"
 PROPERTIES (

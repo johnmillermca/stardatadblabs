@@ -214,17 +214,24 @@ a:hover{color:#163BA6}
             <button class="pill-off" data-ret="30" onclick="setPill('ret',this)">30 days</button>
           </div>
         </div>
-        <div><button class="btn" onclick="saveSched()">Save schedule</button></div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <button class="btn" onclick="saveSched()">Save schedule</button>
+          <span id="sched-msg" style="font:500 14px Inter,sans-serif"></span>
+        </div>
       </div>
     </div>
 
-    <span style="font:700 16px Inter,sans-serif">Snapshots</span>
+    <!-- ── Snapshots ─────────────────────────────────────── -->
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px">
+      <span style="font:700 16px Inter,sans-serif">Snapshots</span>
+      <span class="hint">Stored in s3://xdatatoiceberg1/stardata-backups/ · refreshed every 30 s</span>
+    </div>
     <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
-      <table style="width:100%;border-collapse:collapse;min-width:720px">
+      <table style="width:100%;border-collapse:collapse;min-width:760px">
         <thead><tr>
           <th class="th">Snapshot</th><th class="th">Database</th><th class="th">Tables</th>
           <th class="th">Taken</th><th class="th">Status</th>
-          <th class="th"><span style="position:absolute;left:-9999px">Actions</span></th>
+          <th class="th" style="text-align:right;padding-right:16px">Recovery</th>
         </tr></thead>
         <tbody id="snapshots-body">
           <tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>
@@ -232,10 +239,51 @@ a:hover{color:#163BA6}
       </table>
     </div>
 
-    <!-- Restore confirm panel -->
+    <!-- ── Point-in-time Recovery (PITR) ─────────────────── -->
+    <div style="display:flex;flex-direction:column;gap:14px;padding:20px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:12px">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font:700 16px Inter,sans-serif">Point-in-time recovery</span>
+        <span class="hint">Pick a database, choose a snapshot timestamp, then optionally narrow to specific tables. Leave tables unticked to restore the whole database.</span>
+      </div>
+
+      <!-- Step 1: DB + snapshot picker -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="pitr-db">Database</label>
+          <select class="inp" id="pitr-db" onchange="loadPitrSnapshots()">
+            <option value="">Select database…</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="pitr-snap">Snapshot (point in time)</label>
+          <select class="inp" id="pitr-snap" onchange="loadPitrTables()" disabled>
+            <option value="">— select a database first —</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Step 2: table picker -->
+      <div style="display:flex;flex-direction:column;gap:6px" id="pitr-tables-wrap" style="display:none">
+        <span class="lbl">Tables to restore <span style="font-weight:400;color:#4F5866">(leave all unticked to restore whole database)</span></span>
+        <div id="pitr-tables-list" style="display:flex;flex-wrap:wrap;gap:4px 20px">
+          <span class="hint" style="padding:8px 0">Select a snapshot above to see its tables.</span>
+        </div>
+      </div>
+
+      <!-- Step 3: confirm -->
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <button class="btnd" id="pitr-restore-btn" onclick="startPitrRestore()" disabled
+          style="opacity:.5">Restore to this point</button>
+        <span id="pitr-msg" style="font:500 14px Inter,sans-serif"></span>
+      </div>
+    </div>
+
+    <!-- ── Restore confirm panel (shared by snapshot row + PITR) ── -->
     <div id="restore-panel" style="display:none;flex-direction:column;gap:12px;padding:20px;background:#FFF6F5;border:1px solid #F1C4BF;border-radius:12px">
-      <span style="font:700 16px Inter,sans-serif">Restore <span id="rs-label"></span></span>
-      <span class="hint">This replaces the current data in <span id="rs-what"></span> with the snapshot. Changes since the snapshot will be lost.</span>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font:700 16px Inter,sans-serif">Confirm restore — <span id="rs-label"></span></span>
+        <span class="hint">Restoring <strong id="rs-what"></strong> to snapshot taken <strong id="rs-when"></strong>. Current data will be overwritten. This cannot be undone.</span>
+      </div>
       <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
         <div style="flex:1 1 260px;display:flex;flex-direction:column;gap:6px">
           <label class="lbl" for="rs-cf">Type the snapshot name to confirm</label>
@@ -569,35 +617,34 @@ function setPill(group, btn) {
 // Persists freq + retain_days to cache_system.backup_schedule
 // via Doris HTTP SQL.  The autobackup CronJob reads this row.
 // ============================================================
+function setSchedMsg(msg, isErr) {
+  var el = document.getElementById('sched-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
+}
+
 function saveSched() {
   var freq = state.freq;
   var ret  = state.ret;
 
-  // Update the schedule row (always id='1', seeded by setup script)
-  var sql = "UPDATE cache_system.backup_schedule " +
-    "SET freq='" + freq + "', retain_days=" + ret + ", " +
-    "updated_at=NOW() WHERE id='1'";
+  setSchedMsg('Saving…', false);
 
-  dorisSQL('cache_system', sql)
+  // Try UPDATE first (row seeded by setup script), then fall back to UPSERT
+  var upsertSql = "INSERT INTO cache_system.backup_schedule (id,freq,retain_days) " +
+    "VALUES ('1','" + freq + "'," + ret + ") " +
+    "ON DUPLICATE KEY UPDATE freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW()";
+
+  dorisSQL('cache_system', upsertSql)
     .then(function() {
       var msg = freq === 'off'
-        ? 'Automatic backups turned off and saved.'
-        : 'Automatic ' + freq + ' backups on, keeping ' + ret + ' days of snapshots. Saved.';
-      setBkMsg(msg, false);
+        ? 'Automatic backups turned off.'
+        : 'Automatic ' + freq + ' backups on · keep ' + ret + ' days. Saved ✓';
+      setSchedMsg(msg, false);
     })
     .catch(function(e) {
       console.warn('saveSched failed:', e);
-      // Fallback: try INSERT if UPDATE found nothing (table not yet seeded)
-      var insertSql = "INSERT INTO cache_system.backup_schedule (id,freq,retain_days,databases) " +
-        "VALUES ('1','" + freq + "'," + ret + ",'') " +
-        "ON DUPLICATE KEY UPDATE freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW()";
-      dorisSQL('cache_system', insertSql)
-        .then(function() {
-          setBkMsg('Schedule saved (freq=' + freq + ', keep ' + ret + 'd).', false);
-        })
-        .catch(function(e2) {
-          setBkMsg('Could not save schedule: ' + e2.message, true);
-        });
+      setSchedMsg('Could not save — run 14_setup_backup.sh first. (' + e.message + ')', true);
     });
 }
 
@@ -728,6 +775,7 @@ function loadBackupHistory() {
 
       renderSnapshots();
       updateKpisFromHistory();
+      initPitrDbDropdown();  // keep PITR DB list in sync after each history load
     })
     .catch(function(e) {
       console.warn('loadBackupHistory failed:', e);
@@ -791,19 +839,28 @@ function updateKpisFromHistory() {
 }
 
 // ============================================================
-// RESTORE — START (show confirmation panel)
+// RESTORE — shared confirm panel (used by both snapshot-row
+// restore and PITR)
 // ============================================================
-function startRestore(label, db, finishedTime, tablesStr) {
+
+// Open the confirm panel.
+// tables: null = whole DB, [] = whole DB, ['t1','t2'] = specific tables
+function openRestorePanel(label, db, finishedTime, tables) {
   state.restoreTarget = label;
   state.restoreTs     = finishedTime || '';
   state.restoreDb     = db || '';
-  state.restoreTables = tablesStr ? tablesStr.split(',').map(function(t){ return t.trim(); }) : null;
+  state.restoreTables = (tables && tables.length) ? tables : null;
+
+  var takenDisplay = finishedTime
+    ? new Date(finishedTime).toLocaleString() + ' (' + fmtAgo(finishedTime) + ')'
+    : '—';
 
   document.getElementById('rs-label').textContent = label;
-  document.getElementById('rs-what').textContent  =
-    state.restoreTables && state.restoreTables.length
-      ? db + ' (' + state.restoreTables.join(', ') + ')'
-      : 'all of ' + db;
+  document.getElementById('rs-what').innerHTML    =
+    state.restoreTables
+      ? '<code>' + db + '</code> — tables: ' + state.restoreTables.join(', ')
+      : 'all tables in <code>' + db + '</code>';
+  document.getElementById('rs-when').textContent  = takenDisplay;
   document.getElementById('rs-cf').value       = '';
   document.getElementById('rs-cf').placeholder = label;
 
@@ -812,9 +869,19 @@ function startRestore(label, db, finishedTime, tablesStr) {
   p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+// Called from the Snapshots table Restore button (whole DB restore)
+function startRestore(label, db, finishedTime, tablesStr) {
+  var tables = (tablesStr && tablesStr.trim())
+    ? tablesStr.split(',').map(function(t) { return t.trim(); }).filter(Boolean)
+    : null;
+  openRestorePanel(label, db, finishedTime, tables);
+}
+
 function cancelRestore() {
   state.restoreTarget = null;
   document.getElementById('restore-panel').style.display = 'none';
+  // Also clear PITR msg
+  setPitrMsg('', false);
 }
 
 // ============================================================
@@ -822,20 +889,23 @@ function cancelRestore() {
 // Issues a real Doris RESTORE SNAPSHOT command.
 // Doris syntax:
 //   RESTORE SNAPSHOT `db`.`snap` FROM `repo`
-//   [ON (tbl1, tbl2)]
-//   PROPERTIES ('backup_timestamp'='...', 'replication_num'='1')
+//   [ON (`tbl1`, `tbl2`)]
+//   PROPERTIES ('backup_timestamp'='YYYY-MM-DD HH:MM:SS',
+//               'replication_num'='1')
+// The backup_timestamp is the FinishedTime of the original
+// BACKUP job — this is what makes it point-in-time recovery.
 // ============================================================
 function doRestore() {
   var cf = document.getElementById('rs-cf').value.trim();
   if (!state.restoreTarget || cf !== state.restoreTarget) {
-    setBkMsg('Not restored: type the snapshot name exactly to confirm.', true);
+    setBkMsg('Type the exact snapshot name to confirm.', true);
     return;
   }
 
-  var db    = state.restoreDb;
-  var label = state.restoreTarget;
-  var ts    = state.restoreTs;
-  var tables= state.restoreTables;
+  var db     = state.restoreDb;
+  var label  = state.restoreTarget;
+  var ts     = state.restoreTs;
+  var tables = state.restoreTables;
 
   if (!db) { setBkMsg('Cannot restore: database name is missing.', true); return; }
 
@@ -844,6 +914,8 @@ function doRestore() {
     onClause = ' ON (' + tables.map(function(t) { return '`' + t + '`'; }).join(', ') + ')';
   }
 
+  // backup_timestamp pins the restore to a specific point in time.
+  // Without it Doris picks the latest snapshot for that name.
   var props = "'replication_num'='1'";
   if (ts) props += ", 'backup_timestamp'='" + ts + "'";
 
@@ -851,12 +923,11 @@ function doRestore() {
             onClause + " PROPERTIES (" + props + ")";
 
   cancelRestore();
-  setBkMsg('Submitting restore for ' + label + '…', false);
+  setBkMsg('Submitting restore for ' + label + ' → ' + db + '…', false);
 
   dorisSQL(db, sql)
     .then(function() {
-      setBkMsg('Restore of ' + label + ' started. Polling status…', false);
-      // Mark status in UI immediately
+      setBkMsg('✓ Restore of ' + label + ' started. Status updates every 5 s below.', false);
       state.snapshots = state.snapshots.map(function(s) {
         return s.label === label ? Object.assign({}, s, { status: 'Restoring', rawState: 'RESTORING' }) : s;
       });
@@ -866,6 +937,168 @@ function doRestore() {
     .catch(function(e) {
       setBkMsg('Restore failed: ' + e.message, true);
     });
+}
+
+// ============================================================
+// PITR — Point-in-time Recovery
+// Workflow:
+//   1. User picks DB → loadPitrSnapshots() fills the snapshot
+//      dropdown with all FINISHED snapshots for that DB,
+//      labelled with their timestamp.
+//   2. User picks a snapshot → loadPitrTables() shows the
+//      tables that were included in that snapshot so the user
+//      can optionally select a subset.
+//   3. User clicks "Restore to this point" → startPitrRestore()
+//      opens the shared confirm panel with the chosen args.
+// ============================================================
+
+// Populate the PITR database dropdown from the live backup history
+function initPitrDbDropdown() {
+  var sel = document.getElementById('pitr-db');
+  // Build unique DB list from already-loaded state.snapshots
+  var dbs = [];
+  var seen = {};
+  state.snapshots.forEach(function(s) {
+    if (s.db && !seen[s.db] && s.status === 'Completed') {
+      seen[s.db] = 1; dbs.push(s.db);
+    }
+  });
+  // Also add from the backup DB dropdown (native DBs from Doris)
+  Array.from(document.getElementById('bk-db').options).forEach(function(o) {
+    if (o.value && !seen[o.value]) { seen[o.value] = 1; dbs.push(o.value); }
+  });
+
+  var cur = sel.value;
+  sel.innerHTML = '<option value="">Select database…</option>';
+  dbs.sort().forEach(function(db) {
+    var o = document.createElement('option'); o.value = db; o.textContent = db;
+    if (db === cur) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+function loadPitrSnapshots() {
+  var db = document.getElementById('pitr-db').value;
+  var snapSel = document.getElementById('pitr-snap');
+  var btn = document.getElementById('pitr-restore-btn');
+  snapSel.innerHTML = '<option value="">Loading…</option>';
+  snapSel.disabled = true;
+  btn.disabled = true; btn.style.opacity = '.5';
+  document.getElementById('pitr-tables-list').innerHTML =
+    '<span class="hint" style="padding:8px 0">Select a snapshot above to see its tables.</span>';
+  setPitrMsg('', false);
+
+  if (!db) {
+    snapSel.innerHTML = '<option value="">— select a database first —</option>';
+    return;
+  }
+
+  // Filter completed snapshots for this DB from state (already loaded from SHOW BACKUP)
+  var snaps = state.snapshots.filter(function(s) {
+    return s.db === db && s.status === 'Completed';
+  });
+
+  if (!snaps.length) {
+    snapSel.innerHTML = '<option value="">No snapshots found for ' + db + '</option>';
+    snapSel.disabled = true;
+    setPitrMsg('No completed snapshots for ' + db + '. Take a backup first.', true);
+    return;
+  }
+
+  snapSel.innerHTML = '';
+  snaps.forEach(function(s) {
+    var o = document.createElement('option');
+    // value encodes label|finishedTime|tables (pipe-separated)
+    var takenLabel = s.taken
+      ? new Date(s.taken).toLocaleString() + ' — ' + fmtAgo(s.taken)
+      : s.label;
+    o.value = s.label + '|' + (s.taken || '') + '|' + (s.tables !== 'All tables' ? s.tables : '');
+    o.textContent = takenLabel + ' (' + s.label + ')';
+    snapSel.appendChild(o);
+  });
+  snapSel.disabled = false;
+
+  // Auto-select most recent (already sorted newest first)
+  snapSel.selectedIndex = 0;
+  loadPitrTables();
+}
+
+function loadPitrTables() {
+  var snapSel = document.getElementById('pitr-snap');
+  var val = snapSel.value;
+  var btn = document.getElementById('pitr-restore-btn');
+  var container = document.getElementById('pitr-tables-list');
+
+  if (!val) {
+    btn.disabled = true; btn.style.opacity = '.5';
+    container.innerHTML = '<span class="hint" style="padding:8px 0">Select a snapshot above.</span>';
+    return;
+  }
+
+  var parts    = val.split('|');
+  var snapLabel = parts[0] || '';
+  var snapTs    = parts[1] || '';
+  var tablesRaw = parts[2] || '';
+
+  // If the snapshot recorded specific tables, show them as checkboxes
+  // Otherwise show the live table list for the DB
+  var db = document.getElementById('pitr-db').value;
+
+  if (tablesRaw) {
+    // Snapshot covered specific tables — only offer those
+    var tables = tablesRaw.split(',').map(function(t) { return t.trim(); }).filter(Boolean);
+    container.innerHTML = tables.map(function(t) {
+      var id = 'pitr-t-' + t.replace(/[^A-Za-z0-9]/g, '_');
+      return '<label style="display:flex;align-items:center;gap:8px;min-height:38px;font:500 14px Inter,sans-serif;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-table="' + t + '" ' +
+        'style="width:18px;height:18px;accent-color:#1F4FD8"> ' + t + '</label>';
+    }).join('');
+  } else {
+    // Full DB snapshot — query live tables
+    container.innerHTML = '<span class="hint" style="padding:8px 0">Loading tables…</span>';
+    dorisSQL(db, 'SHOW TABLES').then(function(res) {
+      var tables = res.rows.map(function(r) { return r[0]; });
+      if (!tables.length) {
+        container.innerHTML = '<span class="hint" style="padding:8px 0">No tables found.</span>';
+        return;
+      }
+      container.innerHTML = tables.map(function(t) {
+        var id = 'pitr-t-' + t.replace(/[^A-Za-z0-9]/g, '_');
+        return '<label style="display:flex;align-items:center;gap:8px;min-height:38px;font:500 14px Inter,sans-serif;cursor:pointer">' +
+          '<input type="checkbox" id="' + id + '" data-table="' + t + '" ' +
+          'style="width:18px;height:18px;accent-color:#1F4FD8"> ' + t + '</label>';
+      }).join('');
+    }).catch(function() {
+      container.innerHTML = '<span class="hint" style="padding:8px 0;color:#B42318">Could not load tables.</span>';
+    });
+  }
+
+  btn.disabled = false; btn.style.opacity = '1';
+  setPitrMsg('', false);
+}
+
+function startPitrRestore() {
+  var db = document.getElementById('pitr-db').value;
+  var val = document.getElementById('pitr-snap').value;
+  if (!db || !val) { setPitrMsg('Select a database and snapshot first.', true); return; }
+
+  var parts     = val.split('|');
+  var snapLabel = parts[0] || '';
+  var snapTs    = parts[1] || '';
+
+  // Collect checked tables (empty = whole DB)
+  var pickedTables = [];
+  Array.from(document.getElementById('pitr-tables-list').querySelectorAll('input[type=checkbox]'))
+    .forEach(function(cb) { if (cb.checked) pickedTables.push(cb.dataset.table); });
+
+  openRestorePanel(snapLabel, db, snapTs, pickedTables.length ? pickedTables : null);
+}
+
+function setPitrMsg(msg, isErr) {
+  var el = document.getElementById('pitr-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
 }
 
 // ============================================================

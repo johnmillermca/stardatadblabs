@@ -27,12 +27,10 @@ CREATE DATABASE IF NOT EXISTS cache_system;
 --   updated_at      — when the schedule was last saved from the UI
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cache_system.backup_schedule (
-    id              VARCHAR(8)    NOT NULL,
-    freq            VARCHAR(16)   NOT NULL DEFAULT 'off',
-    retain_days     INT           NOT NULL DEFAULT 14,
-    databases       TEXT          NOT NULL DEFAULT '',
-    updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    ON UPDATE CURRENT_TIMESTAMP
+    id              VARCHAR(8)   NOT NULL,
+    freq            VARCHAR(16)  NOT NULL DEFAULT 'off',
+    retain_days     INT          NOT NULL DEFAULT 14,
+    updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 UNIQUE KEY(id)
 DISTRIBUTED BY HASH(id) BUCKETS 1
@@ -40,10 +38,10 @@ PROPERTIES (
     "replication_num" = "1"
 );
 
--- Seed the default (off) row so the UI can always UPDATE instead of INSERT.
-INSERT INTO cache_system.backup_schedule (id, freq, retain_days, databases)
-VALUES ('1', 'off', 14, '')
-ON DUPLICATE KEY UPDATE id = id;   -- no-op if already present
+-- Seed the default (off) row
+INSERT INTO cache_system.backup_schedule (id, freq, retain_days)
+VALUES ('1', 'off', 14)
+ON DUPLICATE KEY UPDATE id = id;
 
 -- Verify
 SELECT * FROM cache_system.backup_schedule;
