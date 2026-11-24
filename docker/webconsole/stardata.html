@@ -478,7 +478,7 @@ function loadCatalog() {
       return {
         db:     r[0],
         t:      r[1],
-        engine: r[2] || 'OLAP',
+        engine: 'StarData',
         rows:   r[3] != null ? Number(r[3]).toLocaleString() : '—',
         size:   sizeFmt,
       };
