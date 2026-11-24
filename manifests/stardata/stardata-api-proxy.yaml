@@ -1,0 +1,143 @@
+# =============================================================================
+# stardata-api-proxy — lightweight nginx reverse proxy for Doris FE REST API
+# Namespace : prod  (same namespace as stardata-credentials Secret)
+# Exposes   : ClusterIP :8080  (reachable as stardata-api-proxy.prod.svc.cluster.local)
+# Called by : stardata-spa (access namespace) via /api/doris/ location block
+#
+# No credentials are hardcoded anywhere.
+# An init container reads the admin-password from the stardata-credentials
+# Secret at pod startup, base64-encodes "root:<password>", and writes the
+# nginx config with the Authorization header value into an emptyDir volume.
+# The main nginx container then loads that generated config.
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stardata-api-proxy
+  namespace: prod
+  labels:
+    app: stardata-api-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stardata-api-proxy
+  template:
+    metadata:
+      labels:
+        app: stardata-api-proxy
+    spec:
+      # Run on the same nodes as the Doris FE pods for minimal latency
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: stardata
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: stardata
+                    operator: In
+                    values: ["true"]
+      # ── Init container: generate nginx config with live credential ────────
+      # Reads DORIS_PASSWORD from the mounted Secret, computes base64(root:<pw>),
+      # writes /etc/nginx/conf.d/default.conf into the shared emptyDir.
+      initContainers:
+        - name: gen-config
+          image: 192.168.1.50:30500/busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              TOKEN=$(echo -n "root:${DORIS_PASSWORD}" | base64 | tr -d '\n')
+              cat > /generated/default.conf <<EOF
+              # kube-dns resolver for variable-based proxy_pass
+              resolver 10.96.0.10 valid=30s ipv6=off;
+
+              server {
+                  listen 8080;
+                  server_name _;
+
+                  # ── Health probe ─────────────────────────────────────────
+                  location /healthz {
+                      access_log off;
+                      return 200 "ok\n";
+                      add_header Content-Type text/plain;
+                  }
+
+                  # ── Doris FE REST passthrough ────────────────────────────
+                  # Strips /api/doris/ prefix before forwarding.
+                  location /api/doris/ {
+                      set \$doris_fe "stardata-fe.prod.svc.cluster.local";
+                      rewrite ^/api/doris/(.*)$ /\$1 break;
+                      proxy_pass       http://\$doris_fe:8030;
+                      proxy_set_header Authorization "Basic ${TOKEN}";
+                      proxy_set_header Host          \$doris_fe;
+                      proxy_set_header X-Real-IP     \$remote_addr;
+                      add_header       Cache-Control "no-store" always;
+                  }
+              }
+              EOF
+              echo "[gen-config] nginx config written with live credential."
+          env:
+            - name: DORIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: stardata-credentials
+                  key: admin-password
+          volumeMounts:
+            - name: generated-conf
+              mountPath: /generated
+      # ── Main nginx container ──────────────────────────────────────────────
+      containers:
+        - name: nginx
+          image: 192.168.1.50:30500/webconsole:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: generated-conf
+              mountPath: /etc/nginx/conf.d
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 20
+      volumes:
+        - name: generated-conf
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stardata-api-proxy
+  namespace: prod
+  labels:
+    app: stardata-api-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: stardata-api-proxy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

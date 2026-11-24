@@ -97,13 +97,13 @@ a:hover{color:#163BA6}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
       <div class="kpi">
         <span class="lbl">Service status</span>
-        <span style="display:inline-flex;align-items:center;gap:8px;font:700 24px Inter,sans-serif"><span class="dot-grey"></span>—</span>
+        <span style="display:inline-flex;align-items:center;gap:8px;font:700 24px Inter,sans-serif"><span id="kpi-status-dot" class="dot-grey"></span><span id="kpi-status-val">—</span></span>
         <span class="hint">Healthy, Degraded or Outage, against your SLA</span>
       </div>
       <div class="kpi">
         <span class="lbl">Storage used</span>
-        <span style="font:700 24px Inter,sans-serif">—</span>
-        <span class="hint">Hot: — · Cold (moved after 1 day): —</span>
+        <span id="kpi-storage" style="font:700 24px Inter,sans-serif">—</span>
+        <span id="kpi-storage-hint" class="hint">Hot: — · Cold (moved after 1 day): —</span>
       </div>
       <div class="kpi">
         <span class="lbl">Last backup</span>
@@ -112,7 +112,7 @@ a:hover{color:#163BA6}
       </div>
       <div class="kpi">
         <span class="lbl">Data freshness</span>
-        <span style="font:700 24px Inter,sans-serif">—</span>
+        <span id="kpi-freshness" style="font:700 24px Inter,sans-serif">—</span>
         <span class="hint">Oldest source sync · <a href="#" onclick="showTab('lakehouse');return false;">View data sources</a></span>
       </div>
     </div>
@@ -505,9 +505,105 @@ function renderSrcTables() {
   }).join('');
 }
 
+// ── KPI LOADER ───────────────────────────────────────────────
+// All endpoints are proxied through /api/doris/ → stardata-api-proxy (prod).
+// stardata-api-proxy injects credentials from stardata-credentials secret.
+// Each fetch is independent; a failure leaves that card at its default value.
+
+function fmtAgo(ts) {
+  if(!ts) return '—';
+  var d=new Date(ts); if(isNaN(d)) return ts;
+  var s=Math.floor((Date.now()-d)/1000);
+  if(s<60) return 'Just now';
+  if(s<3600) return Math.floor(s/60)+' min ago';
+  if(s<86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+
+function loadKpis() {
+  // 1. Service status
+  fetch('/api/doris/api/health')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var ok=d&&d.code===0;
+      document.getElementById('kpi-status-dot').className=ok?'dot-green':'dot-red';
+      document.getElementById('kpi-status-val').textContent=ok?'Healthy':'Degraded';
+    })
+    .catch(function(){
+      document.getElementById('kpi-status-dot').className='dot-red';
+      document.getElementById('kpi-status-val').textContent='Unreachable';
+    });
+
+  // 2. Storage used — /api/show_proc?path=//backends
+  // Response: array-of-arrays; col 14 = UsedCapacity string e.g. "859.157 GB"
+  fetch('/api/doris/api/show_proc?path=//backends')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var rows=d.data||[]; var gb=0;
+      rows.forEach(function(r){
+        var m=(r[14]||'').trim().match(/([\d.]+)\s*(GB|TB|MB)/i);
+        if(m){ var v=parseFloat(m[1]),u=m[2].toUpperCase();
+          gb+=u==='TB'?v*1024:u==='GB'?v:v/1024; }
+      });
+      if(gb>0){
+        document.getElementById('kpi-storage').textContent=
+          gb>=1024?(gb/1024).toFixed(2)+' TB':gb.toFixed(1)+' GB';
+        document.getElementById('kpi-storage-hint').textContent=
+          'Across '+rows.length+' backend node'+(rows.length!==1?'s':'');
+      }
+    })
+    .catch(function(){});
+
+  // 3. Last backup — SHOW BACKUP via HTTP SQL
+  fetch('/api/doris/api/query/default_cluster/information_schema',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({stmt:'SHOW BACKUP',limit:1})
+  })
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var rows=d.data&&d.data.data?d.data.data:[];
+      var meta=d.data&&d.data.meta?d.data.meta:[];
+      if(!rows.length) return;
+      var idx={}; meta.forEach(function(m,i){idx[m.name]=i;});
+      var row=rows[rows.length-1];
+      var label=row[idx['SnapshotName']]||row[idx['Label']]||row[0]||'—';
+      var db=row[idx['DbName']]||'';
+      var st=row[idx['State']]||'';
+      var fin=row[idx['FinishedTime']]||'';
+      document.getElementById('kpi-last-backup').textContent=fin?fmtAgo(fin):label;
+      document.getElementById('kpi-last-backup-hint').textContent=(db?db+' · ':'')+( st||label);
+    })
+    .catch(function(){});
+
+  // 4. Data freshness — most recently updated table in information_schema
+  fetch('/api/doris/api/query/default_cluster/information_schema',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      stmt:"SELECT TABLE_SCHEMA,TABLE_NAME,UPDATE_TIME FROM information_schema.tables "+
+           "WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema') "+
+           "AND UPDATE_TIME IS NOT NULL ORDER BY UPDATE_TIME DESC LIMIT 1",
+      limit:1
+    })
+  })
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var rows=d.data&&d.data.data?d.data.data:[];
+      var meta=d.data&&d.data.meta?d.data.meta:[];
+      if(!rows.length) return;
+      var idx={}; meta.forEach(function(m,i){idx[m.name]=i;});
+      var ts=rows[0][idx['UPDATE_TIME']]||'';
+      if(ts) document.getElementById('kpi-freshness').textContent=fmtAgo(ts);
+    })
+    .catch(function(){});
+}
+
 // ── BOOT ─────────────────────────────────────────────────────
 renderCatalog();
 renderSnapshots();
+loadKpis();
+setInterval(loadKpis,60000);
 </script>
 </body>
 </html>

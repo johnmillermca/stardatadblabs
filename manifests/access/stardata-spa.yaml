@@ -13,11 +13,26 @@ metadata:
   namespace: access
 data:
   default.conf: |
+    # kube-dns resolver needed for variable-based proxy_pass to cluster services.
+    resolver 10.96.0.10 valid=30s ipv6=off;
+
     server {
         listen 80;
         server_name stardata.stardatadb.com _;
 
         root /usr/share/nginx/html;
+
+        # ── Doris FE REST proxy — used by the warehouse KPI cards ─────────────
+        # Forwards /api/doris/<path> to stardata-api-proxy in prod namespace.
+        # stardata-api-proxy handles auth dynamically from stardata-credentials.
+        # No credentials are stored here.
+        location /api/doris/ {
+            set $api_proxy "stardata-api-proxy.prod.svc.cluster.local";
+            proxy_pass       http://$api_proxy:8080/api/doris/;
+            proxy_set_header Host      $api_proxy;
+            proxy_set_header X-Real-IP $remote_addr;
+            add_header       Cache-Control "no-store" always;
+        }
 
         location / {
             try_files $uri /stardata.html;
