@@ -307,7 +307,7 @@ a:hover{color:#163BA6}
   <section aria-labelledby="h-src" style="display:flex;flex-direction:column;gap:14px">
     <div style="display:flex;flex-direction:column;gap:6px">
       <h1 id="h-src" style="margin:0;font:700 26px Inter,sans-serif">Connected sources</h1>
-      <span class="hint">Lakehouse sources are copied into open Iceberg tables and kept fresh on a schedule. Snowflake is queried live.</span>
+      <span class="hint">External sources are connected via JDBC and queried on a schedule. Snowflake is queried live with no local copy.</span>
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px" id="sources-grid"></div>
     <span id="src-msg" style="font:500 14px Inter,sans-serif;color:#17663A;display:none"></span>
@@ -351,12 +351,12 @@ a:hover{color:#163BA6}
 var CATALOG_TABLES = [];
 
 var SOURCES = [
-  { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables',             canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
+  { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables via JDBC',    canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
   { id:'databricks', name:'Databricks', kind:'Delta Lake tables via JDBC', canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
-  { id:'postgres',   name:'PostgreSQL', kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['public'] },
-  { id:'oracle',     name:'Oracle',     kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['tpcds','CACHE_TESTING'] },
-  { id:'mongodb',    name:'MongoDB',    kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['cache_testing'] },
-  { id:'snowflake',  name:'Snowflake',  kind:'Live JDBC query (no copy)',   canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
+  { id:'postgres',   name:'PostgreSQL', kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['public'] },
+  { id:'oracle',     name:'Oracle',     kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['tpcds','CACHE_TESTING'] },
+  { id:'mongodb',    name:'MongoDB',    kind:'Live query via JDBC',        canSync:true,  freshCycle:'Every 6 hours',                      dbs:['cache_testing'] },
+  { id:'snowflake',  name:'Snowflake',  kind:'Live JDBC query (no copy)',  canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
 ];
 
 // App state
