@@ -22,11 +22,10 @@ data:
         root /usr/share/nginx/html;
 
         # Proxy /api/doris/<path> → Doris FE :<path>
-        # Literal proxy_pass (no variable) + rewrite preserves proxy_set_header.
-        # Using a variable with rewrite..break drops Authorization — avoided here.
+        # Literal proxy_pass with trailing slash strips /api/doris/ prefix.
+        # No variable, no rewrite — both drop proxy_set_header Authorization.
         location /api/doris/ {
-            rewrite ^/api/doris/(.*)$ /$1 break;
-            proxy_pass            http://stardata-fe.prod.svc.cluster.local:8030;
+            proxy_pass            http://stardata-fe.prod.svc.cluster.local:8030/;
             proxy_set_header      Authorization "Basic cm9vdDpQcml5YTE5ODI=";
             proxy_set_header      Host          "stardata-fe.prod.svc.cluster.local";
             proxy_set_header      X-Real-IP     $remote_addr;
