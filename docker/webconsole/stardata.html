@@ -337,7 +337,7 @@ a:hover{color:#163BA6}
         </tbody>
       </table>
     </div>
-    <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    <span class="hint">Tables loaded live from the connected source via Doris JDBC catalog.</span>
   </section>
 
 </main>
@@ -1314,26 +1314,50 @@ function renderSrcTables() {
   if (!src) return;
   document.getElementById('h-tb').textContent = src.name + ' tables';
   document.getElementById('sel-hint').textContent = src.kind + ' · ' + src.freshCycle;
+
+  // Populate DB dropdown from source definition
   var dbSel = document.getElementById('src-db');
+  var curDb = state.selDb;
   dbSel.innerHTML = '<option value="all">All databases</option>';
   src.dbs.forEach(function(d) {
     var o = document.createElement('option'); o.value = d; o.textContent = d;
-    if (d === state.selDb) o.selected = true;
+    if (d === curDb) o.selected = true;
     dbSel.appendChild(o);
   });
-  var rows = CATALOG_TABLES.filter(function(r) {
-    return r.src === state.selSrc && (state.selDb === 'all' || r.db === state.selDb);
-  });
+
   var tbody = document.getElementById('src-tables-body');
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows.map(function(r) {
-    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td>' +
-      '<td class="td">' + r.db + '</td><td class="td">' + r.fmt + '</td>' +
-      '<td class="td" style="color:#9AA3B0">—</td><td class="td" style="color:#9AA3B0">—</td></tr>';
-  }).join('');
+  tbody.innerHTML = '<tr><td colspan="5" class="empty">Loading tables…</td></tr>';
+
+  // Determine which DBs to query
+  var dbs = (state.selDb === 'all') ? src.dbs : [state.selDb];
+
+  // Query live tables via SHOW TABLES FROM `catalog`.`db`
+  var promises = dbs.map(function(db) {
+    return dorisSQL('information_schema',
+      'SHOW TABLES FROM `' + src.id + '`.`' + db + '`', 500
+    ).then(function(res) {
+      return res.rows.map(function(r) { return { t: r[0], db: db }; });
+    }).catch(function() { return []; });
+  });
+
+  Promise.all(promises).then(function(results) {
+    var allRows = [];
+    results.forEach(function(rows) { allRows = allRows.concat(rows); });
+
+    if (!allRows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = allRows.map(function(r) {
+      return '<tr>' +
+        '<td class="td" style="font-weight:600">' + r.t + '</td>' +
+        '<td class="td">' + r.db + '</td>' +
+        '<td class="td">JDBC</td>' +
+        '<td class="td" style="color:#9AA3B0">—</td>' +
+        '<td class="td" style="color:#9AA3B0">—</td>' +
+        '</tr>';
+    }).join('');
+  });
 }
 
 // ============================================================
