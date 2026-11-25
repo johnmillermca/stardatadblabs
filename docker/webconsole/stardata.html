@@ -38,7 +38,15 @@ a:hover{color:#163BA6}
 .pill-on:hover{background:#163BA6;border-color:#163BA6}
 .pill-off:hover{background:#EEF1F5}
 .dot-grey{width:9px;height:9px;border-radius:50%;background:#9AA3B0;display:inline-block}
+.dot-green{width:9px;height:9px;border-radius:50%;background:#17A34A;display:inline-block}
+.dot-orange{width:9px;height:9px;border-radius:50%;background:#D97706;display:inline-block}
+.dot-red{width:9px;height:9px;border-radius:50%;background:#B42318;display:inline-block}
 .avatar{width:32px;height:32px;border-radius:50%;background:#DCE7F7;color:#163BA6;display:inline-flex;align-items:center;justify-content:center;font:700 12px Inter,sans-serif;flex-shrink:0}
+.btnout{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer}
+.btnout:hover{background:#EEF1F5}
+.badge-blue{padding:3px 10px;border-radius:999px;background:#E8EEFC;color:#1F3FB8;font:700 12px Inter,sans-serif;white-space:nowrap}
+.badge-red{padding:3px 10px;border-radius:999px;background:#FFF5F5;border:1px solid #F1C4BF;color:#B42318;font:700 12px Inter,sans-serif;white-space:nowrap}
+#modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;overflow-y:auto;padding:40px 20px}
 </style>
 </head>
 <body>
@@ -72,6 +80,7 @@ a:hover{color:#163BA6}
       </a>
       <button class="tab tab-on" id="tab-warehouse" onclick="showTab('warehouse')">Warehouse</button>
       <button class="tab" id="tab-lakehouse" onclick="showTab('lakehouse')">Data sources</button>
+      <button class="tab" id="tab-lhsync"    onclick="showTab('lhsync')">Lakehouse sync</button>
     </nav>
   </div>
 </header>
@@ -436,9 +445,12 @@ function today() {
 function showTab(tab) {
   document.getElementById('sub-warehouse').style.display = tab === 'warehouse' ? 'block' : 'none';
   document.getElementById('sub-lakehouse').style.display = tab === 'lakehouse' ? 'block' : 'none';
+  document.getElementById('sub-lhsync').style.display    = tab === 'lhsync'    ? 'block' : 'none';
   document.getElementById('tab-warehouse').className = 'tab' + (tab === 'warehouse' ? ' tab-on' : '');
   document.getElementById('tab-lakehouse').className = 'tab' + (tab === 'lakehouse' ? ' tab-on' : '');
+  document.getElementById('tab-lhsync').className    = 'tab' + (tab === 'lhsync'    ? ' tab-on' : '');
   if (tab === 'lakehouse') { renderSources(); checkSourceStatuses(); }
+  if (tab === 'lhsync')    { loadLhsTables(); }
 }
 
 // ============================================================
@@ -1361,6 +1373,657 @@ function renderSrcTables() {
 }
 
 // ============================================================
+// LAKEHOUSE SYNC — state
+// ============================================================
+var lhsState = {
+  selTable: null,     // the currently open detail entry
+  tables: [],         // loaded from cache_system control tables
+};
+
+// Modal state
+var cimState = {
+  resolvedAppDb:  null,
+  resolvedAppTbl: null,
+  eligibleEntry:  null,
+  colsValid:      false,
+  hasUnsupported: false,
+  icebergExists:  false,
+  reuseDrop:      null, // 'reuse'|'drop'|null
+};
+
+// Doris → Iceberg type mapping
+var DORIS_ICE_MAP = {
+  'BOOLEAN':'boolean','TINYINT':'int','SMALLINT':'int','INT':'int',
+  'BIGINT':'long','LARGEINT':'decimal(38,0)','FLOAT':'float','DOUBLE':'double',
+  'DATE':'date','DATETIMEV2':'timestamp','DATETIME':'timestamp',
+  'CHAR':'string','VARCHAR':'string','STRING':'string',
+  'JSON':'string','VARIANT':'string','IPV4':'string','IPV6':'string',
+  'ARRAY':'list','MAP':'map','STRUCT':'struct',
+};
+var DORIS_UNSUPPORTED = { 'HLL':1,'BITMAP':1,'QUANTILE_STATE':1,'AGG_STATE':1 };
+
+// ============================================================
+// LAKEHOUSE SYNC — load from Doris
+// ============================================================
+// Reads all cache_system tables (excluding *_log) and for each
+// queries the most recent control row to build the status list.
+function loadLhsTables() {
+  // 1. List all tables in cache_system
+  dorisSQL('cache_system',
+    "SELECT TABLE_NAME FROM information_schema.TABLES " +
+    "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME NOT LIKE '%\\_log' " +
+    "AND TABLE_NAME NOT IN ('backup_schedule','datetime_load_tracker','table_query_stats'," +
+    "'cache_eviction_log','table_cache_metrics','catalog_sync_log','query_block_log')" +
+    " ORDER BY TABLE_NAME"
+  ).then(function(res) {
+    var names = res.rows.map(function(r) { return r[0]; });
+    if (!names.length) { lhsState.tables = []; renderLhsTables(); return; }
+
+    // 2. For each table, query the latest completed batch row
+    var promises = names.map(function(tbl) {
+      return dorisSQL('cache_system',
+        "SELECT batch_id, database_name, table_name, batch_type, snap_id_from, snap_id_to," +
+        " row_count, status, started_at, finished_at, max_created_at, max_updated_at" +
+        " FROM cache_system.`" + tbl + "`" +
+        " ORDER BY batch_id DESC LIMIT 20"
+      ).then(function(r) {
+        return { tbl: tbl, res: r };
+      }).catch(function() { return { tbl: tbl, res: { rows: [], idx: {} } }; });
+    });
+
+    // 3. Also check for log tables (blocked state)
+    var logCheck = dorisSQL('cache_system',
+      "SELECT TABLE_NAME FROM information_schema.TABLES " +
+      "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME LIKE '%\\_log'" +
+      " AND TABLE_NAME NOT IN ('cache_eviction_log','query_block_log','catalog_sync_log')"
+    ).catch(function() { return { rows: [], idx: {} }; });
+
+    Promise.all([Promise.all(promises), logCheck]).then(function(both) {
+      var results = both[0], logRes = both[1];
+      var logTables = {};
+      logRes.rows.forEach(function(r) {
+        var n = r[0]; // e.g. orders_log
+        logTables[n.replace(/_log$/, '')] = 1;
+      });
+
+      lhsState.tables = results.map(function(item) {
+        var rows = item.res.rows, idx = item.res.idx;
+        if (!rows.length) {
+          return {
+            tbl: item.tbl, appDb: '—', appTbl: item.tbl,
+            target: '—', lastSnapId: 0, lastBatch: '—',
+            upserted: 0, deleted: 0, status: 'no batches',
+            blocked: !!logTables[item.tbl], blockedMsg: '',
+            batches: []
+          };
+        }
+        var col = function(name) { return idx[name] != null ? idx[name] : -1; };
+        var latest = rows[0];
+        var appDb  = latest[col('database_name')] || '—';
+        var appTbl = latest[col('table_name')]    || item.tbl;
+        var status = latest[col('status')]        || '—';
+        var snapTo = latest[col('snap_id_to')];
+
+        // aggregate upserted / deleted across all loaded batches
+        var upserted = 0, deleted = 0;
+        rows.forEach(function(r) {
+          var rc = parseInt(r[col('row_count')]) || 0;
+          var bt = r[col('batch_type')] || '';
+          if (bt === 'DELETE') deleted += rc; else upserted += rc;
+        });
+
+        var batches = rows.map(function(r) {
+          return {
+            id: r[col('batch_id')],
+            type: r[col('batch_type')]   || '—',
+            from: r[col('snap_id_from')] || 0,
+            to:   r[col('snap_id_to')]   || 0,
+            rows: parseInt(r[col('row_count')]) || 0,
+            maxCreated: r[col('max_created_at')] || '—',
+            maxUpdated: r[col('max_updated_at')] || '—',
+            status: r[col('status')]     || '—',
+            started:  r[col('started_at')]  || '—',
+            finished: r[col('finished_at')] || '—',
+          };
+        });
+
+        var ns = appDb !== '—' ? appDb + '_iceberg' : '—';
+        return {
+          tbl: item.tbl, appDb: appDb, appTbl: appTbl,
+          target: appDb !== '—' ? 'polaris.' + ns + '.' + appTbl : '—',
+          lastSnapId: snapTo || 0,
+          lastBatch: batches[0].finished !== '—' ? fmtAgo(batches[0].finished) : '—',
+          upserted: upserted, deleted: deleted,
+          status: status,
+          blocked: !!logTables[item.tbl],
+          blockedMsg: logTables[item.tbl] ? 'Error in cache_system.' + item.tbl + '_log — clear to resume' : '',
+          batches: batches,
+        };
+      });
+
+      // Populate DB filter
+      var dbs = {};
+      lhsState.tables.forEach(function(t) { if (t.appDb !== '—') dbs[t.appDb] = 1; });
+      var sel = document.getElementById('lhs-db-filter');
+      var cur = sel.value;
+      sel.innerHTML = '<option value="all">All databases</option>';
+      Object.keys(dbs).sort().forEach(function(db) {
+        var o = document.createElement('option'); o.value = db; o.textContent = db;
+        if (db === cur) o.selected = true;
+        sel.appendChild(o);
+      });
+
+      renderLhsTables();
+    });
+  }).catch(function(e) {
+    console.warn('loadLhsTables failed:', e);
+    lhsState.tables = [];
+    renderLhsTables();
+  });
+}
+
+function renderLhsTables() {
+  var filterDb = document.getElementById('lhs-db-filter').value;
+  var rows = lhsState.tables.filter(function(t) {
+    return filterDb === 'all' || t.appDb === filterDb;
+  });
+  var tbody = document.getElementById('lhs-tables-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No Iceberg tables synced yet. Click <strong>+ Create Iceberg Table</strong> to start.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(t) {
+    var sc = t.blocked        ? '#B42318'
+           : t.status === 'completed upsert' ? '#17663A'
+           : t.status === 'deleted'          ? '#17663A'
+           : t.status === 'running'          ? '#1F4FD8'
+           : t.status === 'delete_pending'   ? '#D97706'
+           : '#9AA3B0';
+    var badge = t.blocked
+      ? ' <span class="badge-red">Blocked</span>' : '';
+    return '<tr>' +
+      '<td class="td" style="font-weight:600">' + t.tbl + '</td>' +
+      '<td class="td">' + t.appDb + '</td>' +
+      '<td class="td" style="font:400 13px ui-monospace,monospace;color:#1F4FD8">' + t.target + '</td>' +
+      '<td class="td">' + t.lastBatch + '</td>' +
+      '<td class="td">' + t.upserted.toLocaleString() + '</td>' +
+      '<td class="td"><span style="font-weight:600;color:' + sc + '">' + t.status + '</span>' + badge + '</td>' +
+      '<td class="td" style="text-align:right"><button class="btn" onclick="openLhsDetail(\'' + t.tbl + '\')">Details</button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function openLhsDetail(tblName) {
+  var t = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+  if (!t) return;
+  lhsState.selTable = t;
+
+  document.getElementById('lhd-title').textContent = t.appDb + '.' + t.appTbl + '  →  ' + t.target;
+  document.getElementById('lhd-target').textContent = 'Source: ' + t.appDb + '.' + t.appTbl + '  ·  Target: ' + t.target;
+  document.getElementById('lhd-snapid').textContent = t.lastSnapId.toLocaleString();
+  document.getElementById('lhd-lastbatch').textContent = t.lastBatch;
+  document.getElementById('lhd-upserted').textContent = t.upserted.toLocaleString();
+  document.getElementById('lhd-deleted').textContent = t.deleted.toLocaleString();
+
+  var sc = t.blocked ? '#B42318'
+         : t.status === 'completed upsert' ? '#17663A'
+         : t.status === 'running'          ? '#1F4FD8'
+         : t.status === 'delete_pending'   ? '#D97706'
+         : t.status === 'failed'           ? '#B42318' : '#9AA3B0';
+  var statusEl = document.getElementById('lhd-status');
+  statusEl.style.color = sc;
+  statusEl.textContent = t.blocked ? 'Blocked' : t.status;
+
+  var banner = document.getElementById('lhd-blocked-banner');
+  if (t.blocked) {
+    banner.style.display = 'flex';
+    document.getElementById('lhd-blocked-msg').textContent = t.blockedMsg;
+  } else {
+    banner.style.display = 'none';
+  }
+  document.getElementById('lhd-clear-msg').textContent = '';
+
+  // Batch history
+  var bBody = document.getElementById('lhd-batches-body');
+  if (!t.batches.length) {
+    bBody.innerHTML = '<tr><td colspan="9" class="empty">No batches yet.</td></tr>';
+  } else {
+    bBody.innerHTML = t.batches.map(function(b) {
+      var bs = b.status === 'completed upsert' ? '#17663A'
+             : b.status === 'deleted'           ? '#17663A'
+             : b.status === 'running'            ? '#1F4FD8'
+             : b.status === 'failed'             ? '#B42318'
+             : b.status === 'delete_pending'     ? '#D97706' : '#9AA3B0';
+      var typeStyle = 'padding:2px 8px;border-radius:6px;font:700 11px Inter,sans-serif;background:#E8EEFC;color:#1F3FB8';
+      return '<tr>' +
+        '<td class="td">#' + b.id + '</td>' +
+        '<td class="td"><span style="' + typeStyle + '">' + b.type + '</span></td>' +
+        '<td class="td" style="font:400 13px ui-monospace,monospace">' +
+          Number(b.from).toLocaleString() + ' → ' + Number(b.to).toLocaleString() + '</td>' +
+        '<td class="td">' + Number(b.rows).toLocaleString() + '</td>' +
+        '<td class="td" style="color:#4F5866">' + b.maxCreated + '</td>' +
+        '<td class="td" style="color:#4F5866">' + b.maxUpdated + '</td>' +
+        '<td class="td" style="font-weight:600;color:' + bs + '">' + b.status + '</td>' +
+        '<td class="td" style="color:#9AA3B0;font-size:12px">' + b.started + '</td>' +
+        '<td class="td" style="color:#9AA3B0;font-size:12px">' + b.finished + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  var panel = document.getElementById('lhs-detail-panel');
+  panel.style.display = 'flex';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeLhsDetail() {
+  document.getElementById('lhs-detail-panel').style.display = 'none';
+  lhsState.selTable = null;
+}
+
+function clearSyncError() {
+  var t = lhsState.selTable;
+  if (!t) return;
+  var msgEl = document.getElementById('lhd-clear-msg');
+  msgEl.style.color = '#4F5866';
+  msgEl.textContent = 'Clearing…';
+  // TRUNCATE cache_system.<table>_log
+  dorisSQL('cache_system', 'TRUNCATE TABLE cache_system.`' + t.tbl + '_log`')
+    .then(function() {
+      msgEl.textContent = 'Log cleared. Sync will resume on next run.';
+      msgEl.style.color = '#17663A';
+      document.getElementById('lhd-blocked-banner').style.display = 'none';
+      t.blocked = false; t.blockedMsg = '';
+      t.status = 'completed upsert';
+      document.getElementById('lhd-status').textContent = 'completed upsert';
+      document.getElementById('lhd-status').style.color = '#17663A';
+      renderLhsTables();
+    })
+    .catch(function(e) {
+      msgEl.textContent = 'Could not clear log: ' + e.message;
+      msgEl.style.color = '#B42318';
+    });
+}
+
+// ============================================================
+// CREATE ICEBERG TABLE — modal
+// ============================================================
+function openCreateIceberg() {
+  cimState = { resolvedAppDb:null, resolvedAppTbl:null, eligibleEntry:null,
+               colsValid:false, hasUnsupported:false, icebergExists:false, reuseDrop:null };
+
+  // Build eligible list: tables in cache_system that are NOT already in lhsState.tables
+  var alreadySynced = {};
+  lhsState.tables.forEach(function(t) { alreadySynced[t.tbl] = 1; });
+
+  // Load candidates from cache_system — look for tables that have database_name and snap_id columns
+  // which signals they were created by the DDL mirror for an iceberg-type table
+  dorisSQL('cache_system',
+    "SELECT TABLE_NAME FROM information_schema.TABLES " +
+    "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME NOT LIKE '%\\_log'" +
+    " AND TABLE_NAME NOT IN ('backup_schedule','datetime_load_tracker','table_query_stats'," +
+    "'cache_eviction_log','table_cache_metrics','catalog_sync_log','query_block_log')" +
+    " ORDER BY TABLE_NAME"
+  ).then(function(res) {
+    var candidates = res.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(n) { return !alreadySynced[n]; });
+
+    var sel = document.getElementById('cim-table-sel');
+    sel.innerHTML = '<option value="">— select a table —</option>';
+    if (!candidates.length) {
+      sel.innerHTML = '<option value="" disabled>All eligible tables are already synced</option>';
+    } else {
+      candidates.forEach(function(n) {
+        var o = document.createElement('option'); o.value = n;
+        o.textContent = 'cache_system.' + n; sel.appendChild(o);
+      });
+    }
+  }).catch(function() {
+    document.getElementById('cim-table-sel').innerHTML =
+      '<option value="" disabled>Could not load tables from Doris</option>';
+  });
+
+  document.getElementById('cim-table-hint').textContent = '';
+  document.getElementById('cim-db-picker').style.display = 'none';
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-progress').style.display = 'none';
+  document.getElementById('cim-step1').style.display = 'flex';
+  document.getElementById('cim-create-msg').textContent = '';
+  document.getElementById('modal-backdrop').style.display = 'block';
+}
+
+function closeCreateIceberg() {
+  document.getElementById('modal-backdrop').style.display = 'none';
+}
+
+function cimDoneClose() {
+  closeCreateIceberg();
+  showTab('lhsync');
+}
+
+function onCimTableChange() {
+  var tbl = document.getElementById('cim-table-sel').value;
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-db-picker').style.display = 'none';
+  document.getElementById('cim-table-hint').textContent = '';
+  if (!tbl) return;
+
+  document.getElementById('cim-table-hint').textContent = 'Resolving source table…';
+
+  // Find app databases that have a table with this name (excluding system DBs)
+  dorisSQL('information_schema',
+    "SELECT TABLE_SCHEMA FROM information_schema.TABLES " +
+    "WHERE TABLE_NAME='" + tbl.replace(/'/g,"''") + "' " +
+    "AND TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema'," +
+    "'__internal_schema','cache_system') " +
+    "AND TABLE_CATALOG='internal'"
+  ).then(function(res) {
+    var dbs = res.rows.map(function(r) { return r[0]; });
+    if (!dbs.length) {
+      document.getElementById('cim-table-hint').textContent =
+        'Source table not found in any app database. Ensure the app table exists and has stardata.table_type=iceberg.';
+      return;
+    }
+    if (dbs.length > 1) {
+      // Show disambiguator
+      var sel = document.getElementById('cim-db-sel');
+      sel.innerHTML = '<option value="">— select —</option>';
+      dbs.forEach(function(db) {
+        var o = document.createElement('option'); o.value = db; o.textContent = db; sel.appendChild(o);
+      });
+      document.getElementById('cim-db-picker').style.display = 'flex';
+      document.getElementById('cim-table-hint').textContent =
+        'Multiple databases contain "' + tbl + '" — pick the source above.';
+      return;
+    }
+    // Single match — resolve directly
+    document.getElementById('cim-table-hint').textContent = 'Found in ' + dbs[0] + '. Checking eligibility…';
+    cimState.resolvedAppDb  = dbs[0];
+    cimState.resolvedAppTbl = tbl;
+    checkEligibilityAndPreview(dbs[0], tbl);
+  }).catch(function(e) {
+    document.getElementById('cim-table-hint').textContent = 'Lookup failed: ' + e.message;
+  });
+}
+
+function onCimDbPick() {
+  var db  = document.getElementById('cim-db-sel').value;
+  var tbl = document.getElementById('cim-table-sel').value;
+  if (!db || !tbl) return;
+  cimState.resolvedAppDb  = db;
+  cimState.resolvedAppTbl = tbl;
+  document.getElementById('cim-table-hint').textContent = 'Using ' + db + '.' + tbl + '. Checking eligibility…';
+  checkEligibilityAndPreview(db, tbl);
+}
+
+function checkEligibilityAndPreview(appDb, appTbl) {
+  // 1. Check iceberg property via SHOW CREATE TABLE
+  dorisSQL(appDb, 'SHOW CREATE TABLE `' + appDb + '`.`' + appTbl + '`')
+    .then(function(res) {
+      if (!res.rows.length) throw new Error('Could not read table DDL');
+      var ddl = (res.rows[0][1] || res.rows[0][res.idx['Create Table'] || 1] || '').toString();
+      if (ddl.indexOf('stardata.table_type') < 0 && ddl.indexOf('iceberg') < 0) {
+        document.getElementById('cim-table-hint').textContent =
+          '✗ Table ' + appDb + '.' + appTbl + ' does not have the stardata.table_type=iceberg property set.';
+        return;
+      }
+      // 2. Load column definitions
+      return dorisSQL(appDb, 'DESCRIBE `' + appDb + '`.`' + appTbl + '`')
+        .then(function(descRes) {
+          var cols = descRes.rows.map(function(r) {
+            var ci = descRes.idx;
+            return {
+              name:  r[ci['Field'] != null ? ci['Field'] : 0] || '',
+              doris: r[ci['Type']  != null ? ci['Type']  : 1] || '',
+            };
+          }).filter(function(c) { return c.name && !c.name.startsWith('__DORIS'); });
+
+          // Find PK from DDL (UNIQUE KEY clause)
+          var pkMatch = ddl.match(/UNIQUE KEY\s*\(([^)]+)\)/i);
+          var pk = pkMatch ? pkMatch[1].split(',').map(function(s) { return s.trim().replace(/`/g,''); }) : ['snap_id'];
+
+          var entry = { appDb: appDb, appTbl: appTbl, pk: pk, cols: cols };
+          cimState.eligibleEntry = entry;
+          renderCimPreview();
+        });
+    })
+    .catch(function(e) {
+      document.getElementById('cim-table-hint').textContent = 'Eligibility check failed: ' + e.message;
+    });
+}
+
+function renderCimPreview() {
+  var entry = cimState.eligibleEntry;
+  if (!entry) return;
+
+  var appDb  = entry.appDb;
+  var appTbl = entry.appTbl;
+  var target = 'polaris.' + appDb + '_iceberg.' + appTbl;
+
+  document.getElementById('cim-src-label').textContent = appDb + '.' + appTbl;
+  document.getElementById('cim-tgt-label').textContent = target;
+  document.getElementById('cim-pk-label').textContent  = entry.pk.join(', ');
+  document.getElementById('cim-table-hint').textContent = 'Resolved: ' + appDb + '.' + appTbl;
+
+  // Required column checks
+  var reqCols = ['snap_id','created_at','updated_at'];
+  var presentNames = entry.cols.map(function(c) { return c.name.toLowerCase(); });
+  var allPresent = true;
+  var checksHtml = reqCols.map(function(col) {
+    var ok = presentNames.indexOf(col) >= 0;
+    if (!ok) allPresent = false;
+    var bg    = ok ? '#ECFDF5' : '#FFF5F5';
+    var border= ok ? '#A7F3D0' : '#F1C4BF';
+    var color = ok ? '#065F46' : '#B42318';
+    var icon  = ok
+      ? '<polyline points="20 6 9 17 4 12"/>'
+      : '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>';
+    return '<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;font:600 13px Inter,sans-serif;background:' +
+      bg + ';border:1px solid ' + border + ';color:' + color + '">' +
+      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+      icon + '</svg>' + col + '</span>';
+  }).join('');
+  document.getElementById('cim-col-checks').innerHTML = checksHtml;
+  cimState.colsValid = allPresent;
+
+  // Type mapping
+  var hasUnsupported = false;
+  var mapRows = entry.cols.map(function(c) {
+    var base = c.doris.replace(/\(.*$/, '').replace(/\s.*/,'').toUpperCase();
+    var iceType = DORIS_ICE_MAP[base] || '—';
+    var unsup   = !!DORIS_UNSUPPORTED[base];
+    if (unsup) hasUnsupported = true;
+    var noteHtml = unsup
+      ? '<span style="color:#B42318;font-weight:600">Not supported — blocks creation</span>'
+      : '—';
+    return '<tr>' +
+      '<td class="td" style="font-weight:600">' + c.name + '</td>' +
+      '<td class="td" style="font:400 13px ui-monospace,monospace">' + c.doris + '</td>' +
+      '<td class="td" style="font:400 13px ui-monospace,monospace;color:' + (unsup ? '#B42318' : '#1F4FD8') + '">' +
+        (unsup ? '—' : iceType) + '</td>' +
+      '<td class="td">' + noteHtml + '</td></tr>';
+  }).join('');
+  cimState.hasUnsupported = hasUnsupported;
+  document.getElementById('cim-col-map-body').innerHTML = mapRows ||
+    '<tr><td colspan="4" class="empty">No columns.</td></tr>';
+
+  // Validation error
+  var errEl = document.getElementById('cim-validation-err');
+  if (!allPresent) {
+    errEl.style.display = 'block';
+    errEl.textContent = 'Required columns snap_id, created_at and updated_at must all be present before an Iceberg table can be created.';
+  } else if (hasUnsupported) {
+    errEl.style.display = 'block';
+    errEl.textContent = 'One or more columns use unsupported types (HLL, BITMAP, QUANTILE_STATE, AGG_STATE). Remove them from the table or they will block creation.';
+  } else {
+    errEl.style.display = 'none';
+  }
+
+  // Check if Iceberg table already exists in Polaris
+  dorisSQL('information_schema',
+    "SELECT TABLE_NAME FROM information_schema.TABLES " +
+    "WHERE TABLE_CATALOG='polaris' AND TABLE_SCHEMA='" + appDb + "_iceberg' " +
+    "AND TABLE_NAME='" + appTbl.replace(/'/g,"''") + "' LIMIT 1"
+  ).then(function(r) {
+    cimState.icebergExists = r.rows.length > 0;
+    var exWarn = document.getElementById('cim-exists-warn');
+    if (cimState.icebergExists) {
+      exWarn.style.display = 'flex';
+      document.getElementById('cim-exists-msg').textContent =
+        'polaris.' + appDb + '_iceberg.' + appTbl + ' already exists. Choose Reuse to sync into it, or Drop and recreate to start fresh.';
+    } else {
+      exWarn.style.display = 'none';
+      cimState.reuseDrop = null;
+    }
+    updateCimCreateBtn();
+  }).catch(function() {
+    cimState.icebergExists = false;
+    document.getElementById('cim-exists-warn').style.display = 'none';
+    updateCimCreateBtn();
+  });
+
+  document.getElementById('cim-preview').style.display = 'flex';
+}
+
+function updateCimCreateBtn() {
+  var canCreate = cimState.colsValid && !cimState.hasUnsupported &&
+                  (!cimState.icebergExists || cimState.reuseDrop !== null);
+  var btn = document.getElementById('cim-create-btn');
+  btn.disabled = !canCreate;
+  btn.style.opacity = canCreate ? '1' : '.5';
+}
+
+function cimChooseReuse() {
+  cimState.reuseDrop = 'reuse';
+  document.getElementById('cim-exists-warn').style.display = 'none';
+  updateCimCreateBtn();
+}
+function cimChooseDrop() {
+  cimState.reuseDrop = 'drop';
+  document.getElementById('cim-exists-warn').style.display = 'none';
+  updateCimCreateBtn();
+}
+
+function doCreateIceberg() {
+  if (!cimState.colsValid || cimState.hasUnsupported || !cimState.eligibleEntry) return;
+  var entry  = cimState.eligibleEntry;
+  var appDb  = entry.appDb;
+  var appTbl = entry.appTbl;
+  var nsName = appDb + '_iceberg';
+  var target = 'polaris.' + nsName + '.' + appTbl;
+
+  document.getElementById('cim-step1').style.display = 'none';
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-progress').style.display = 'flex';
+  document.getElementById('cim-done-btn').style.display = 'none';
+
+  // Build Iceberg CREATE TABLE columns
+  var colDefs = entry.cols.map(function(c) {
+    var base = c.doris.replace(/\(.*$/, '').replace(/\s.*/,'').toUpperCase();
+    var ice = DORIS_ICE_MAP[base] || 'string';
+    // Preserve precision for DECIMAL
+    if (base === 'DECIMAL') ice = 'decimal' + (c.doris.match(/\([^)]+\)/) || ['(18,0)'])[0];
+    return '  `' + c.name + '` ' + ice;
+  }).join(',\n');
+  var pkStr = entry.pk.map(function(p) { return '`' + p + '`'; }).join(', ');
+  var createTblSQL =
+    "CREATE TABLE IF NOT EXISTS `polaris`.`" + nsName + "`.`" + appTbl + "` (\n" +
+    colDefs + "\n)" +
+    "\nUSING iceberg\n" +
+    "TBLPROPERTIES ('format-version'='2','write.merge.mode'='merge-on-read')\n" +
+    "PARTITIONED BY (days(created_at))";
+
+  // Control table INSERT for INITIAL batch
+  var now = new Date().toISOString().replace('T',' ').slice(0,19);
+  var initBatchSQL =
+    "INSERT INTO cache_system.`" + appTbl + "` " +
+    "(batch_id, database_name, table_name, batch_type, snap_id_from, snap_id_to, " +
+    "row_count, status, started_at, finished_at) VALUES " +
+    "(1, '" + appDb + "', '" + appTbl + "', 'INITIAL', 0, 0, 0, 'running', '" + now + "', NULL)";
+
+  var steps = [
+    { label: 'Resolve source table (' + appDb + '.' + appTbl + ')',              sql: null },
+    { label: 'Check eligibility (stardata.table_type=iceberg)',                  sql: null },
+    { label: 'Validate columns (snap_id, created_at, updated_at, MOW)',          sql: null },
+    { label: 'Create namespace polaris.' + nsName,
+      sql:  'CREATE DATABASE IF NOT EXISTS `polaris`.`' + nsName + '`' },
+    { label: 'Build Iceberg schema (type mapping)',                               sql: null },
+    { label: 'CREATE TABLE ' + target + ' (format v2, partition by days(created_at))',
+      sql:  createTblSQL },
+    { label: 'Initialise cache_system.' + appTbl + ' — insert INITIAL batch row', sql: initBatchSQL },
+    { label: 'INITIAL batch queued (snap_id 0 → max)',                           sql: null },
+  ];
+
+  var list = document.getElementById('cim-steps-list');
+  list.innerHTML = steps.map(function(s, i) {
+    return '<div id="cim-step-' + i + '" style="display:flex;align-items:center;gap:10px;font:400 14px Inter,sans-serif;color:#9AA3B0">' +
+      '<span id="cim-sicon-' + i + '" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:#EEF1F5;display:inline-flex;align-items:center;justify-content:center"></span>' +
+      '<span>' + s.label + '</span></div>';
+  }).join('');
+
+  function runStep(i) {
+    if (i >= steps.length) {
+      // All done — add to lhsState.tables so it immediately shows in the list
+      lhsState.tables.unshift({
+        tbl: appTbl, appDb: appDb, appTbl: appTbl,
+        target: target, lastSnapId: 0, lastBatch: 'Just started',
+        upserted: 0, deleted: 0, status: 'running',
+        blocked: false, blockedMsg: '',
+        batches: [{ id:1, type:'INITIAL', from:0, to:0, rows:0,
+          maxCreated:'—', maxUpdated:'—', status:'running',
+          started: now, finished:'—' }]
+      });
+      var dbSel = document.getElementById('lhs-db-filter');
+      var alreadyHas = Array.from(dbSel.options).some(function(o) { return o.value === appDb; });
+      if (!alreadyHas) {
+        var o = document.createElement('option'); o.value = appDb; o.textContent = appDb;
+        dbSel.appendChild(o);
+      }
+      document.getElementById('cim-done-btn').style.display = 'inline-flex';
+      document.getElementById('cim-create-msg').textContent = '✓ Iceberg table created. INITIAL batch started.';
+      document.getElementById('cim-create-msg').style.color = '#17663A';
+      return;
+    }
+
+    var s = steps[i];
+    var iconEl = document.getElementById('cim-sicon-' + i);
+    var rowEl  = document.getElementById('cim-step-' + i);
+
+    iconEl.style.background = '#E8EEFC';
+    iconEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#1F4FD8" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>';
+    rowEl.style.color = '#14171C';
+
+    var execPromise = s.sql
+      ? dorisSQL(s.sql.startsWith('CREATE DATABASE') ? 'information_schema' : appDb, s.sql)
+          .catch(function(e) {
+            // "already exists" errors are acceptable for IF NOT EXISTS DDL
+            if (e.message && (e.message.indexOf('already exist') >= 0 ||
+                              e.message.indexOf('1050') >= 0)) return {};
+            throw e;
+          })
+      : Promise.resolve({});
+
+    execPromise.then(function() {
+      iconEl.style.background = '#ECFDF5';
+      iconEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#065F46" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+      rowEl.style.color = '#14171C';
+      setTimeout(function() { runStep(i + 1); }, 200);
+    }).catch(function(e) {
+      iconEl.style.background = '#FFF5F5';
+      iconEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      rowEl.style.color = '#B42318';
+      rowEl.querySelector('span:last-child').textContent += ' — ' + e.message;
+      document.getElementById('cim-done-btn').style.display = 'inline-flex';
+      document.getElementById('cim-done-btn').textContent = 'Close';
+      document.getElementById('cim-create-msg').textContent = 'Step ' + (i+1) + ' failed. See error above.';
+      document.getElementById('cim-create-msg').style.color = '#B42318';
+    });
+  }
+
+  runStep(0);
+}
+
+// ============================================================
 // BOOT
 // ============================================================
 (function init() {
@@ -1379,5 +2042,224 @@ function renderSrcTables() {
   setInterval(function() { loadCatalog(); }, 300000);
 })();
 </script>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     LAKEHOUSE SYNC SUB-PAGE
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="sub-lhsync" style="display:none">
+<main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+  <!-- Header row -->
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <h1 style="margin:0;font:700 26px Inter,sans-serif">Lakehouse tables</h1>
+      <span class="hint">Iceberg tables via Polaris · Incremental sync via snap_id · hot tables every 5 min</span>
+    </div>
+    <button class="btnp" onclick="openCreateIceberg()">+ Create Iceberg Table</button>
+  </div>
+
+  <!-- DB filter -->
+  <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <label class="lbl" for="lhs-db-filter">Database</label>
+      <select class="inp" id="lhs-db-filter" style="min-width:200px" onchange="renderLhsTables()">
+        <option value="all">All databases</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Synced tables list -->
+  <section class="panel" style="gap:12px">
+    <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+      <table style="width:100%;border-collapse:collapse;min-width:960px">
+        <thead><tr>
+          <th class="th">Table</th>
+          <th class="th">Database</th>
+          <th class="th">Target namespace</th>
+          <th class="th">Last updated</th>
+          <th class="th">Rows upserted</th>
+          <th class="th">Sync status</th>
+          <th class="th" style="text-align:right;padding-right:16px">Actions</th>
+        </tr></thead>
+        <tbody id="lhs-tables-body">
+          <tr><td colspan="7" class="empty">No Iceberg tables synced yet. Click <strong>+ Create Iceberg Table</strong> to start.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <span class="hint">Status loaded live from cache_system control tables. Refreshes every 30 s.</span>
+  </section>
+
+  <!-- Per-table detail panel (shown on Details click) -->
+  <section id="lhs-detail-panel" class="panel" style="display:none;gap:16px">
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px">
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <span style="font:700 18px Inter,sans-serif" id="lhd-title">—</span>
+        <span class="hint" id="lhd-target">—</span>
+      </div>
+      <button class="btn" onclick="closeLhsDetail()">Close</button>
+    </div>
+
+    <!-- KPI strip -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
+      <div class="kpi"><span class="lbl">Last snap_id</span><span id="lhd-snapid" style="font:700 20px Inter,sans-serif">—</span></div>
+      <div class="kpi"><span class="lbl">Last batch</span><span id="lhd-lastbatch" style="font:700 20px Inter,sans-serif">—</span></div>
+      <div class="kpi"><span class="lbl">Rows upserted</span><span id="lhd-upserted" style="font:700 20px Inter,sans-serif">—</span></div>
+      <div class="kpi"><span class="lbl">Rows deleted</span><span id="lhd-deleted" style="font:700 20px Inter,sans-serif">—</span></div>
+      <div class="kpi"><span class="lbl">Status</span><span id="lhd-status" style="font:700 18px Inter,sans-serif">—</span></div>
+    </div>
+
+    <!-- Blocked banner -->
+    <div id="lhd-blocked-banner" style="display:none;padding:14px 18px;background:#FFF5F5;border:1px solid #F1C4BF;border-radius:10px;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <svg style="flex-shrink:0;margin-top:1px" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font:700 14px Inter,sans-serif;color:#B42318">Sync blocked</span>
+          <span id="lhd-blocked-msg" style="font:400 14px Inter,sans-serif;color:#3A414D"></span>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="btnd" onclick="clearSyncError()">Clear error and resume</button>
+        <span id="lhd-clear-msg" style="font:500 13px Inter,sans-serif"></span>
+      </div>
+    </div>
+
+    <!-- Batch history -->
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <span style="font:700 15px Inter,sans-serif">Recent batches</span>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:900px">
+          <thead><tr>
+            <th class="th">Batch</th>
+            <th class="th">Type</th>
+            <th class="th">snap_id from → to</th>
+            <th class="th">Rows</th>
+            <th class="th">max(created_at)</th>
+            <th class="th">max(updated_at)</th>
+            <th class="th">Status</th>
+            <th class="th">Started</th>
+            <th class="th">Finished</th>
+          </tr></thead>
+          <tbody id="lhd-batches-body">
+            <tr><td colspan="9" class="empty">No batches yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+</div><!-- end sub-lhsync -->
+
+<!-- ═══════════════════════════════════════════════════════════════
+     CREATE ICEBERG TABLE MODAL
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="modal-backdrop" onclick="if(event.target===this)closeCreateIceberg()">
+  <div style="max-width:720px;margin:0 auto;background:#FFFFFF;border-radius:16px;padding:32px;display:flex;flex-direction:column;gap:22px" onclick="event.stopPropagation()">
+
+    <!-- Modal header -->
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font:700 22px Inter,sans-serif">Create Iceberg Table</span>
+        <span class="hint">Publish a Stardata native table to the Polaris catalog as an Iceberg table and start incremental sync. Only tables created with <code style="background:#F4F6F9;padding:1px 5px;border-radius:4px;font-size:12px">stardata.table_type=iceberg</code> appear here.</span>
+      </div>
+      <button onclick="closeCreateIceberg()" style="background:none;border:none;cursor:pointer;color:#4F5866;padding:4px;line-height:0;flex-shrink:0">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <!-- Step 1: table picker -->
+    <div id="cim-step1" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="cim-table-sel">Source table <span style="font-weight:400;color:#4F5866">— iceberg-eligible cache_system tables only</span></label>
+        <select class="inp" id="cim-table-sel" onchange="onCimTableChange()">
+          <option value="">Loading eligible tables…</option>
+        </select>
+        <span id="cim-table-hint" class="hint"></span>
+      </div>
+      <!-- DB disambiguator (shown when >1 app DB has the same table name) -->
+      <div id="cim-db-picker" style="display:none;flex-direction:column;gap:6px">
+        <label class="lbl" for="cim-db-sel" style="color:#B42318">More than one database has this table name — pick the source:</label>
+        <select class="inp" id="cim-db-sel" onchange="onCimDbPick()">
+          <option value="">— select —</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Preview (shown after table resolved) -->
+    <div id="cim-preview" style="display:none;flex-direction:column;gap:16px">
+      <!-- Source / target -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="padding:14px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:10px;display:flex;flex-direction:column;gap:4px">
+          <span class="lbl">Source (Stardata)</span>
+          <span id="cim-src-label" style="font:600 15px Inter,sans-serif;color:#14171C">—</span>
+        </div>
+        <div style="padding:14px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:10px;display:flex;flex-direction:column;gap:4px">
+          <span class="lbl">Target (Polaris Iceberg)</span>
+          <span id="cim-tgt-label" style="font:600 15px Inter,sans-serif;color:#1F4FD8">—</span>
+        </div>
+      </div>
+
+      <!-- Column checks -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font:700 14px Inter,sans-serif">Required column checks</span>
+        <div id="cim-col-checks" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+      </div>
+
+      <!-- Primary key -->
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font:700 14px Inter,sans-serif">Primary key (merge identifier)</span>
+        <span id="cim-pk-label" class="hint">—</span>
+      </div>
+
+      <!-- Type mapping -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font:700 14px Inter,sans-serif">Column type mapping</span>
+        <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+          <table style="width:100%;border-collapse:collapse;min-width:460px">
+            <thead><tr>
+              <th class="th">Column</th>
+              <th class="th">Doris type</th>
+              <th class="th">Iceberg type</th>
+              <th class="th">Note</th>
+            </tr></thead>
+            <tbody id="cim-col-map-body">
+              <tr><td colspan="4" class="empty">Select a table above.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Validation error -->
+      <div id="cim-validation-err" style="display:none;padding:12px 16px;background:#FFF5F5;border:1px solid #F1C4BF;border-radius:8px;font:500 14px Inter,sans-serif;color:#B42318"></div>
+
+      <!-- Iceberg already exists -->
+      <div id="cim-exists-warn" style="display:none;flex-direction:column;gap:8px;padding:12px 16px;background:#FDF3E7;border:1px solid #F0D3AE;border-radius:8px">
+        <span style="font:700 14px Inter,sans-serif;color:#8A4B00">&#9888; Iceberg table already exists in Polaris</span>
+        <span id="cim-exists-msg" class="hint"></span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="cimChooseReuse()">Reuse existing</button>
+          <button class="btnd" onclick="cimChooseDrop()">Drop and recreate</button>
+        </div>
+      </div>
+
+      <!-- Action buttons -->
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:4px;border-top:1px solid #EEF1F5">
+        <button class="btnp" id="cim-create-btn" onclick="doCreateIceberg()" disabled style="opacity:.5">Create and start sync</button>
+        <button class="btnout" onclick="closeCreateIceberg()">Cancel</button>
+        <span id="cim-create-msg" style="font:500 14px Inter,sans-serif"></span>
+      </div>
+    </div>
+
+    <!-- Progress (shown after Create clicked) -->
+    <div id="cim-progress" style="display:none;flex-direction:column;gap:14px">
+      <div id="cim-steps-list" style="display:flex;flex-direction:column;gap:10px"></div>
+      <div style="padding-top:8px">
+        <button class="btnout" id="cim-done-btn" onclick="cimDoneClose()" style="display:none">Done — go to Lakehouse sync</button>
+      </div>
+    </div>
+
+  </div>
+</div><!-- end modal-backdrop -->
+
 </body>
 </html>
