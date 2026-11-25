@@ -338,6 +338,11 @@ spec:
               RE_CREATED = re.compile(
                   r'(?:ADD\s+COLUMN\s+|,\s*|\(\s*)`([\w$]+)`[^,)]*?DATETIME[^,)]*?'
                   r'DEFAULT\s+CURRENT_TIMESTAMP(?![^,)]*?ON\s+UPDATE)', re.I)
+              # Detects an iceberg-type table by the injected snap_id AUTO_INCREMENT column.
+              # The FE patch strips stardata.table_type=iceberg from PROPERTIES before writing
+              # to the audit log, so we detect the iceberg schema via the snap_id signature instead.
+              RE_ICEBERG = re.compile(
+                  r'`snap_id`\s+BIGINT[^,)]*?AUTO_INCREMENT', re.I)
               RE_CREATE_TBL = re.compile(
                   r'\bCREATE\s+(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
                   r'`?([\w$]+)`?\.`?([\w$]+)`?', re.I)
@@ -365,7 +370,30 @@ spec:
                                               charset="utf8mb4")
                   return _conn
 
+              def _run_ddl(tbl, ddl, label):
+                  """Execute a DDL with retry logic. Returns True on success."""
+                  global _conn
+                  for attempt in range(1, 4):
+                      try:
+                          conn = get_conn()
+                          with conn.cursor() as cur:
+                              cur.execute(ddl)
+                          conn.commit()
+                          log.info(label)
+                          return True
+                      except Exception as e:
+                          log.warning(f"attempt {attempt} failed for {tbl}: {e}")
+                          try:
+                              _conn.close()
+                          except Exception:
+                              pass
+                          _conn = None
+                          time.sleep(attempt)
+                  log.error(f"gave up on {tbl}")
+                  return False
+
               def create_mirror(db, tbl, cre_col, upd_col):
+                  """Regular (non-iceberg) table: 6-column mirror schema."""
                   ddl = (
                       f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}` (\n"
                       f"  `database_name` VARCHAR(256) NULL,\n"
@@ -379,25 +407,53 @@ spec:
                       f"PROPERTIES (\"replication_num\"=\"1\","
                       f"\"enable_unique_key_merge_on_write\"=\"true\")"
                   )
-                  global _conn
-                  for attempt in range(1, 4):
-                      try:
-                          conn = get_conn()
-                          with conn.cursor() as cur:
-                              cur.execute(ddl)
-                          conn.commit()
-                          log.info(f"CREATED cache_system.{tbl} (source: {db}.{tbl}  cre={cre_col}  upd={upd_col})")
-                          return
-                      except Exception as e:
-                          log.warning(f"attempt {attempt} failed for cache_system.{tbl}: {e}")
-                          # Force reconnect on next attempt
-                          try:
-                              _conn.close()
-                          except Exception:
-                              pass
-                          _conn = None
-                          time.sleep(attempt)
-                  log.error(f"gave up creating cache_system.{tbl}")
+                  _run_ddl(tbl, ddl,
+                      f"CREATED cache_system.{tbl} (source: {db}.{tbl}  cre={cre_col}  upd={upd_col})")
+
+              def create_iceberg_mirror(db, tbl):
+                  """Iceberg table: 12-column batch-tracking schema + companion _log table."""
+                  ddl_main = (
+                      f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}` (\n"
+                      f"  `batch_id`       BIGINT        NOT NULL AUTO_INCREMENT,\n"
+                      f"  `database_name`  VARCHAR(256)  NOT NULL,\n"
+                      f"  `table_name`     VARCHAR(256)  NOT NULL,\n"
+                      f"  `batch_type`     VARCHAR(16)   NULL,\n"
+                      f"  `snap_id_from`   BIGINT        NULL,\n"
+                      f"  `snap_id_to`     BIGINT        NULL,\n"
+                      f"  `max_created_at` DATETIMEV2    NULL,\n"
+                      f"  `max_updated_at` DATETIMEV2    NULL,\n"
+                      f"  `row_count`      BIGINT        NULL,\n"
+                      f"  `status`         VARCHAR(32)   NULL,\n"
+                      f"  `started_at`     DATETIMEV2    NULL,\n"
+                      f"  `finished_at`    DATETIMEV2    NULL\n"
+                      f") UNIQUE KEY(`batch_id`)\n"
+                      f"DISTRIBUTED BY HASH(`batch_id`) BUCKETS 4\n"
+                      f"PROPERTIES (\"replication_num\"=\"1\","
+                      f"\"enable_unique_key_merge_on_write\"=\"true\")"
+                  )
+                  ddl_log = (
+                      f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}_log` (\n"
+                      f"  `log_id`           BIGINT        NOT NULL AUTO_INCREMENT,\n"
+                      f"  `batch_id`         BIGINT        NULL,\n"
+                      f"  `database_name`    VARCHAR(256)  NULL,\n"
+                      f"  `table_name`       VARCHAR(256)  NULL,\n"
+                      f"  `operation`        VARCHAR(16)   NULL,\n"
+                      f"  `snap_id_from`     BIGINT        NULL,\n"
+                      f"  `snap_id_to`       BIGINT        NULL,\n"
+                      f"  `error_code`       VARCHAR(32)   NULL,\n"
+                      f"  `error_message`    TEXT          NULL,\n"
+                      f"  `failed_statement` TEXT          NULL,\n"
+                      f"  `rows_attempted`   BIGINT        NULL,\n"
+                      f"  `logged_at`        DATETIMEV2    NULL\n"
+                      f") UNIQUE KEY(`log_id`)\n"
+                      f"DISTRIBUTED BY HASH(`log_id`) BUCKETS 4\n"
+                      f"PROPERTIES (\"replication_num\"=\"1\","
+                      f"\"enable_unique_key_merge_on_write\"=\"true\")"
+                  )
+                  if _run_ddl(tbl, ddl_main,
+                          f"CREATED cache_system.{tbl} iceberg batch-tracking (source: {db}.{tbl})"):
+                      _run_ddl(f"{tbl}_log", ddl_log,
+                          f"CREATED cache_system.{tbl}_log iceberg error-log (source: {db}.{tbl})")
 
               def process_line(line):
                   # Only act on successful CREATE or ALTER TABLE
@@ -429,7 +485,10 @@ spec:
                   if not cre_col:
                       return
 
-                  create_mirror(db, tbl, cre_col.group(1), upd_col.group(1))
+                  if RE_ICEBERG.search(stmt):
+                      create_iceberg_mirror(db, tbl)
+                  else:
+                      create_mirror(db, tbl, cre_col.group(1), upd_col.group(1))
 
               def tail_log(path):
                   """Open path, seek to end, yield lines. Reopen on rotation."""

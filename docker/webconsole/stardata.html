@@ -1446,12 +1446,39 @@ function loadLhsTables() {
         logTables[n.replace(/_log$/, '')] = 1;
       });
 
+      // For tables that exist but have no batch rows yet, resolve the appDb from
+      // information_schema (the app table was created in some user DB; cache_system
+      // is an empty shell). This fixes the "Database: —" display on fresh iceberg tables.
+      var noDataTbls = results
+        .filter(function(item) { return !item.res.rows.length; })
+        .map(function(item) { return item.tbl; });
+
+      var appDbLookup = {};
+      var lookupDone;
+      if (noDataTbls.length) {
+        var inList = noDataTbls.map(function(n) { return "'" + n.replace(/'/g,"''") + "'"; }).join(',');
+        lookupDone = dorisSQL('information_schema',
+          "SELECT TABLE_NAME, TABLE_SCHEMA FROM information_schema.TABLES " +
+          "WHERE TABLE_NAME IN (" + inList + ") " +
+          "AND TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema'," +
+          "'__internal_schema','cache_system') AND TABLE_CATALOG='internal'"
+        ).then(function(r) {
+          r.rows.forEach(function(row) { appDbLookup[row[0]] = row[1]; });
+        }).catch(function() {});
+      } else {
+        lookupDone = Promise.resolve();
+      }
+
+      lookupDone.then(function() {
       lhsState.tables = results.map(function(item) {
         var rows = item.res.rows, idx = item.res.idx;
         if (!rows.length) {
+          var resolvedDb = appDbLookup[item.tbl] || '—';
           return {
-            tbl: item.tbl, appDb: '—', appTbl: item.tbl,
-            target: '—', lastSnapId: 0, lastBatch: '—',
+            tbl: item.tbl, appDb: resolvedDb, appTbl: item.tbl,
+            target: resolvedDb !== '—'
+              ? 'polaris.' + resolvedDb + '_iceberg.' + item.tbl : '—',
+            lastSnapId: 0, lastBatch: '—',
             upserted: 0, deleted: 0, status: 'no batches',
             blocked: !!logTables[item.tbl], blockedMsg: '',
             batches: []
@@ -1514,6 +1541,7 @@ function loadLhsTables() {
       });
 
       renderLhsTables();
+      }); // end lookupDone.then
     });
   }).catch(function(e) {
     console.warn('loadLhsTables failed:', e);
@@ -1651,9 +1679,13 @@ function openCreateIceberg() {
   cimState = { resolvedAppDb:null, resolvedAppTbl:null, eligibleEntry:null,
                colsValid:false, hasUnsupported:false, icebergExists:false, reuseDrop:null };
 
-  // Build eligible list: tables in cache_system that are NOT already in lhsState.tables
+  // Build eligible list: exclude only tables that have already started syncing
+  // (have batch rows — status !== 'no batches'). Empty shells (appDb resolved or not)
+  // must still appear so the user can initiate their first sync.
   var alreadySynced = {};
-  lhsState.tables.forEach(function(t) { alreadySynced[t.tbl] = 1; });
+  lhsState.tables.forEach(function(t) {
+    if (t.status !== 'no batches') { alreadySynced[t.tbl] = 1; }
+  });
 
   // Load candidates from cache_system — look for tables that have database_name and snap_id columns
   // which signals they were created by the DDL mirror for an iceberg-type table
