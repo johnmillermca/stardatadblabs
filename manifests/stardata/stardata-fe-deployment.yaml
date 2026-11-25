@@ -338,11 +338,11 @@ spec:
               RE_CREATED = re.compile(
                   r'(?:ADD\s+COLUMN\s+|,\s*|\(\s*)`([\w$]+)`[^,)]*?DATETIME[^,)]*?'
                   r'DEFAULT\s+CURRENT_TIMESTAMP(?![^,)]*?ON\s+UPDATE)', re.I)
-              # Detects an iceberg-type table by the injected snap_id AUTO_INCREMENT column.
-              # The FE patch strips stardata.table_type=iceberg from PROPERTIES before writing
-              # to the audit log, so we detect the iceberg schema via the snap_id signature instead.
+              # Detects iceberg property in the original user SQL (PROPERTIES clause).
+              # The audit log records the RAW user SQL — not the post-injection DDL.
+              # So stardata.table_type=iceberg IS present in the Stmt= field.
               RE_ICEBERG = re.compile(
-                  r'`snap_id`\s+BIGINT[^,)]*?AUTO_INCREMENT', re.I)
+                  r'["\']stardata\.table_type["\']\s*=\s*["\']iceberg["\']', re.I)
               RE_CREATE_TBL = re.compile(
                   r'\bCREATE\s+(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
                   r'`?([\w$]+)`?\.`?([\w$]+)`?', re.I)
@@ -478,17 +478,21 @@ spec:
                   if db.lower() in SKIP_DBS:
                       return
 
+                  # Iceberg tables: audit log has the RAW user SQL — the FE patch injects
+                  # snap_id/created_at/updated_at after audit write, so those columns are
+                  # absent from the Stmt= field. Detect via the property the user typed.
+                  if RE_ICEBERG.search(stmt):
+                      create_iceberg_mirror(db, tbl)
+                      return
+
+                  # Regular tables: must have both created_at and updated_at column patterns
                   upd_col = RE_UPDATED.search(stmt)
                   if not upd_col:
                       return
                   cre_col = RE_CREATED.search(stmt)
                   if not cre_col:
                       return
-
-                  if RE_ICEBERG.search(stmt):
-                      create_iceberg_mirror(db, tbl)
-                  else:
-                      create_mirror(db, tbl, cre_col.group(1), upd_col.group(1))
+                  create_mirror(db, tbl, cre_col.group(1), upd_col.group(1))
 
               def tail_log(path):
                   """Open path, seek to end, yield lines. Reopen on rotation."""
