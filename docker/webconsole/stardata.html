@@ -2092,6 +2092,67 @@ function doCreateIceberg() {
   runStep(0);
 }
 
+
+// ============================================================
+// REGISTER CATALOG MODAL
+// ============================================================
+function openRegisterCatalog() {
+  document.getElementById('regcat-msg').style.display = 'none';
+  document.getElementById('regcat-backdrop').style.display = 'block';
+}
+
+function closeRegisterCatalog() {
+  document.getElementById('regcat-backdrop').style.display = 'none';
+}
+
+function doRegisterCatalog() {
+  var name       = document.getElementById('regcat-name').value.trim();
+  var uri        = document.getElementById('regcat-uri').value.trim();
+  var warehouse  = document.getElementById('regcat-warehouse').value.trim();
+  var credential = document.getElementById('regcat-credential').value.trim();
+  var scope      = document.getElementById('regcat-scope').value.trim();
+  var msgEl      = document.getElementById('regcat-msg');
+
+  if (!name || !uri || !warehouse || !credential) {
+    msgEl.style.display = 'block';
+    msgEl.style.background = '#FFF5F5';
+    msgEl.style.border = '1px solid #F1C4BF';
+    msgEl.style.color = '#B42318';
+    msgEl.textContent = 'Catalog name, URI, warehouse and credential are required.';
+    return;
+  }
+
+  msgEl.style.display = 'block';
+  msgEl.style.background = '#F7F9FC';
+  msgEl.style.border = '1px solid #E1E6ED';
+  msgEl.style.color = '#4F5866';
+  msgEl.textContent = 'Registering catalog…';
+
+  var sql = "CREATE CATALOG IF NOT EXISTS `" + name + "` PROPERTIES (" +
+    "'type'='iceberg'," +
+    "'iceberg.catalog.type'='rest'," +
+    "'uri'='" + uri + "'," +
+    "'warehouse'='" + warehouse + "'," +
+    "'credential'='" + credential + "'" +
+    (scope ? (",'scope'='" + scope + "'") : '') +
+    ")";
+
+  dorisSQL('information_schema', sql)
+    .then(function() {
+      msgEl.style.background = '#ECFDF5';
+      msgEl.style.border = '1px solid #A7F3D0';
+      msgEl.style.color = '#065F46';
+      msgEl.textContent = '✓ Catalog "' + name + '" registered successfully. You can now create Iceberg tables against it.';
+    })
+    .catch(function(e) {
+      msgEl.style.background = '#FFF5F5';
+      msgEl.style.border = '1px solid #F1C4BF';
+      msgEl.style.color = '#B42318';
+      msgEl.textContent = e.message;
+    });
+}
+
+
 // ============================================================
 // BOOT
 // ============================================================
@@ -2124,7 +2185,10 @@ function doCreateIceberg() {
       <h1 style="margin:0;font:700 26px Inter,sans-serif">Lakehouse tables</h1>
       <span class="hint">Iceberg tables via Polaris · Incremental sync via snap_id · hot tables every 5 min</span>
     </div>
-    <button class="btnp" onclick="openCreateIceberg()">+ Create Iceberg Table</button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btnout" onclick="openRegisterCatalog()">⚙ Register Catalog</button>
+      <button class="btnp"   onclick="openCreateIceberg()">+ Create Iceberg Table</button>
+    </div>
   </div>
 
   <!-- DB filter -->
@@ -2218,6 +2282,83 @@ function doCreateIceberg() {
 
 </main>
 </div><!-- end sub-lhsync -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     REGISTER CATALOG MODAL
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="regcat-backdrop" onclick="if(event.target===this)closeRegisterCatalog()"
+  style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;overflow-y:auto;padding:40px 20px">
+  <div style="max-width:620px;margin:0 auto;background:#FFFFFF;border-radius:16px;padding:32px;display:flex;flex-direction:column;gap:20px" onclick="event.stopPropagation()">
+
+    <!-- Header -->
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font:700 22px Inter,sans-serif">Register Iceberg Catalog</span>
+        <span class="hint">Register a Polaris REST catalog in Doris so Iceberg tables can be created and queried.</span>
+      </div>
+      <button onclick="closeRegisterCatalog()" style="background:none;border:none;cursor:pointer;color:#4F5866;padding:4px;line-height:0;flex-shrink:0">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <!-- Form -->
+    <div id="regcat-form" style="display:flex;flex-direction:column;gap:14px">
+
+      <!-- Catalog name + Type row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="regcat-name">Catalog name</label>
+          <input class="inp" type="text" id="regcat-name" placeholder="e.g. polaris" value="polaris">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="regcat-type">Catalog type</label>
+          <select class="inp" id="regcat-type">
+            <option value="rest">Iceberg REST (Polaris)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- URI -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="regcat-uri">REST URI <span style="font-weight:400;color:#57606a">— Polaris catalog API endpoint</span></label>
+        <input class="inp" type="text" id="regcat-uri" placeholder="http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+          value="http://polaris-rest.prod.svc.cluster.local:8181/api/catalog"
+          style="font:400 13px ui-monospace,monospace">
+      </div>
+
+      <!-- Warehouse -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="regcat-warehouse">Warehouse <span style="font-weight:400;color:#57606a">— Polaris warehouse name</span></label>
+        <input class="inp" type="text" id="regcat-warehouse" placeholder="e.g. stardata" value="stardata">
+      </div>
+
+      <!-- Credential -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="regcat-credential">Credential <span style="font-weight:400;color:#57606a">— client_id:client_secret</span></label>
+        <input class="inp" type="text" id="regcat-credential" placeholder="client_id:client_secret"
+          style="font:400 13px ui-monospace,monospace">
+      </div>
+
+      <!-- Scope -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="regcat-scope">Scope</label>
+        <input class="inp" type="text" id="regcat-scope" placeholder="e.g. PRINCIPAL_ROLE:ALL" value="PRINCIPAL_ROLE:ALL">
+      </div>
+
+      <!-- Error / success -->
+      <div id="regcat-msg" style="display:none;padding:12px 16px;border-radius:8px;font:500 14px Inter,sans-serif"></div>
+
+      <!-- Buttons -->
+      <div style="display:flex;align-items:center;gap:12px;padding-top:4px;border-top:1px solid #EEF1F5">
+        <button class="btnp" onclick="doRegisterCatalog()">Register catalog</button>
+        <button class="btnout" onclick="closeRegisterCatalog()">Cancel</button>
+      </div>
+    </div>
+
+  </div>
+</div><!-- end regcat-backdrop -->
+
 
 <!-- ═══════════════════════════════════════════════════════════════
      CREATE ICEBERG TABLE MODAL
