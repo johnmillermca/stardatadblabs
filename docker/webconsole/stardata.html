@@ -2002,8 +2002,6 @@ function doCreateIceberg() {
     { label: 'Resolve source table (' + appDb + '.' + appTbl + ')',              sql: null },
     { label: 'Check eligibility (stardata.table_type=iceberg)',                  sql: null },
     { label: 'Validate columns (snap_id, created_at, updated_at, MOW)',          sql: null },
-    { label: 'Create namespace ' + catalog + '.' + nsName,
-      sql:  'CREATE DATABASE IF NOT EXISTS `' + catalog + '`.`' + nsName + '`' },
     { label: 'Build Iceberg schema (type mapping)',                               sql: null },
     { label: 'CREATE TABLE ' + target + ' → ' + s3Loc + ' (format v2, partition days(created_at))',
       sql:  createTblSQL },
