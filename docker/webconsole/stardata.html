@@ -414,7 +414,10 @@ function dorisSQL(db, stmt, limit) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(function(d) {
-    if (d.code !== 0) throw new Error(d.msg || 'Doris error code ' + d.code);
+    if (d.code !== 0) {
+      var msg = d.msg || (d.data && d.data.type) || JSON.stringify(d);
+      throw new Error(msg);
+    }
     var rows = (d.data && d.data.data) ? d.data.data : [];
     var meta = (d.data && d.data.meta) ? d.data.meta : [];
     // Build column-name index for easy access
