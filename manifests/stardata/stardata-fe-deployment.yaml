@@ -492,35 +492,48 @@ spec:
                   statements that predate this sidecar's lifetime (e.g. executed
                   while the pod was restarting).  Feeds each row through the same
                   process_line() path so missed tables get their mirror created.
-                  Runs once at startup, before the file tail begins."""
+                  Runs once at startup, before the file tail begins.
+                  Column names confirmed from DESC __internal_schema.audit_log:
+                    time (datetime), state, stmt_type, stmt."""
                   log.info("Replaying historical DDL from __internal_schema.audit_log ...")
                   try:
                       conn = get_conn()
                       with conn.cursor() as cur:
                           cur.execute(
                               """
-                              SELECT stmt
+                              SELECT stmt_type, stmt
                               FROM __internal_schema.audit_log
                               WHERE (stmt LIKE '%CREATE TABLE%' OR stmt LIKE '%ALTER TABLE%')
                                 AND `state` = 'OK'
-                              ORDER BY event_time ASC
+                              ORDER BY `time` ASC
                               """
                           )
                           rows = cur.fetchall()
                       log.info(f"Replay: {len(rows)} candidate DDL row(s) found")
                       for row in rows:
-                          stmt = row[0] if isinstance(row, (list, tuple)) else list(row.values())[0]
+                          if isinstance(row, (list, tuple)):
+                              stmt_type_raw, stmt = row[0], row[1]
+                          else:
+                              stmt_type_raw = list(row.values())[0]
+                              stmt          = list(row.values())[1]
                           if not stmt:
                               continue
-                          # Reconstruct a minimal audit log line so process_line() can parse it.
-                          # __internal_schema.audit_log does not have StmtType, so derive it.
-                          stmt_upper = stmt.lstrip().upper()
-                          if stmt_upper.startswith("CREATE"):
+                          # stmt_type in audit_log is e.g. "CreateTable", "AlterTable" —
+                          # normalise to CREATE / ALTER to match process_line() expectations.
+                          st = (stmt_type_raw or "").upper()
+                          if "CREATE" in st:
                               stmt_type = "CREATE"
-                          elif stmt_upper.startswith("ALTER"):
+                          elif "ALTER" in st:
                               stmt_type = "ALTER"
                           else:
-                              continue
+                              # fall back: infer from the statement text itself
+                              stmt_upper = stmt.lstrip().upper()
+                              if stmt_upper.startswith("CREATE"):
+                                  stmt_type = "CREATE"
+                              elif stmt_upper.startswith("ALTER"):
+                                  stmt_type = "ALTER"
+                              else:
+                                  continue
                           synthetic = (
                               f"|StmtType={stmt_type}|State=OK|"
                               f"Stmt={stmt.replace(chr(10), ' ').replace(chr(9), ' ')}"
