@@ -1984,11 +1984,12 @@ function doCreateIceberg() {
   var createTblSQL =
     "CREATE TABLE IF NOT EXISTS `" + catalog + "`.`" + nsName + "`.`" + iceTbl + "` (\n" +
     colDefs + "\n)" +
-    "\nUSING iceberg\n" +
-    "TBLPROPERTIES ('format-version'='2','write.merge.mode'='merge-on-read'," +
+    "\nPROPERTIES (" +
+    "'format-version'='2'," +
+    "'write.merge.mode'='merge-on-read'," +
     "'write.object-storage.enabled'='true'," +
-    "'write.data.path'='" + s3Loc + "/" + nsName + "/" + iceTbl + "')\n" +
-    "PARTITIONED BY (days(created_at))";
+    "'write.data.path'='" + s3Loc + "/" + nsName + "/" + iceTbl + "'" +
+    ")";
 
   // Control table INSERT for INITIAL batch (cache_system key is always the source table name)
   var now = new Date().toISOString().replace('T',' ').slice(0,19);
@@ -2049,7 +2050,7 @@ function doCreateIceberg() {
     rowEl.style.color = '#14171C';
 
     var execPromise = s.sql
-      ? dorisSQL(s.sql.startsWith('CREATE DATABASE') ? 'information_schema' : appDb, s.sql)
+      ? dorisSQL(s.sql.startsWith('CREATE TABLE') ? 'information_schema' : appDb, s.sql)
           .catch(function(e) {
             // "already exists" errors are acceptable for IF NOT EXISTS DDL
             if (e.message && (e.message.indexOf('already exist') >= 0 ||
