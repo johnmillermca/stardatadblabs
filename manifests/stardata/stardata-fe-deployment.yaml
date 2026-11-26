@@ -330,11 +330,11 @@ spec:
               SKIP_DBS  = {"information_schema","mysql","performance_schema",
                            "cache_system","__internal_schema","doris_audit_db__"}
 
-              # Detects an iceberg-type table by the injected snap_id AUTO_INCREMENT column.
-              # The FE patch strips stardata.table_type=iceberg from PROPERTIES before writing
-              # to the audit log, so we detect the iceberg schema via the snap_id signature instead.
+              # Detects an iceberg-type table by the stardata.table_type=iceberg property.
+              # The audit log Stmt= contains the original user DDL (before the FE patch
+              # injects snap_id/created_at/updated_at), so we match on the PROPERTIES value.
               RE_ICEBERG = re.compile(
-                  r'`snap_id`\s+BIGINT[^,)]*?AUTO_INCREMENT', re.I)
+                  r'["\']stardata\.table_type["\']\s*=\s*["\']iceberg["\']', re.I)
               RE_CREATE_TBL = re.compile(
                   r'\bCREATE\s+(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
                   r'`?([\w$]+)`?\.`?([\w$]+)`?', re.I)
