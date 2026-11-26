@@ -330,19 +330,11 @@ spec:
               SKIP_DBS  = {"information_schema","mysql","performance_schema",
                            "cache_system","__internal_schema","doris_audit_db__"}
 
-              # Matches a column definition: (ADD COLUMN|,|\() `col` ... DATETIME ... DEFAULT CURRENT_TIMESTAMP ... ON UPDATE
-              RE_UPDATED = re.compile(
-                  r'(?:ADD\s+COLUMN\s+|,\s*|\(\s*)`([\w$]+)`[^,)]*?DATETIME[^,)]*?'
-                  r'DEFAULT\s+CURRENT_TIMESTAMP[^,)]*?ON\s+UPDATE\s+CURRENT_TIMESTAMP', re.I)
-              # Matches a column definition with DATETIME DEFAULT CURRENT_TIMESTAMP but NO ON UPDATE after it
-              RE_CREATED = re.compile(
-                  r'(?:ADD\s+COLUMN\s+|,\s*|\(\s*)`([\w$]+)`[^,)]*?DATETIME[^,)]*?'
-                  r'DEFAULT\s+CURRENT_TIMESTAMP(?![^,)]*?ON\s+UPDATE)', re.I)
-              # Detects iceberg property in the original user SQL (PROPERTIES clause).
-              # The audit log records the RAW user SQL — not the post-injection DDL.
-              # So stardata.table_type=iceberg IS present in the Stmt= field.
+              # Detects an iceberg-type table by the injected snap_id AUTO_INCREMENT column.
+              # The FE patch strips stardata.table_type=iceberg from PROPERTIES before writing
+              # to the audit log, so we detect the iceberg schema via the snap_id signature instead.
               RE_ICEBERG = re.compile(
-                  r'["\']stardata\.table_type["\']\s*=\s*["\']iceberg["\']', re.I)
+                  r'`snap_id`\s+BIGINT[^,)]*?AUTO_INCREMENT', re.I)
               RE_CREATE_TBL = re.compile(
                   r'\bCREATE\s+(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
                   r'`?([\w$]+)`?\.`?([\w$]+)`?', re.I)
@@ -391,24 +383,6 @@ spec:
                           time.sleep(attempt)
                   log.error(f"gave up on {tbl}")
                   return False
-
-              def create_mirror(db, tbl, cre_col, upd_col):
-                  """Regular (non-iceberg) table: 6-column mirror schema."""
-                  ddl = (
-                      f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}` (\n"
-                      f"  `database_name` VARCHAR(256) NULL,\n"
-                      f"  `table_name`    VARCHAR(256) NULL,\n"
-                      f"  `{cre_col}`     DATETIME     NULL,\n"
-                      f"  `{upd_col}`     DATETIME     NULL,\n"
-                      f"  `snap_id`       BIGINT       NULL,\n"
-                      f"  `status`        VARCHAR(32)  NULL\n"
-                      f") UNIQUE KEY(`database_name`,`table_name`)\n"
-                      f"DISTRIBUTED BY HASH(`database_name`) BUCKETS 4\n"
-                      f"PROPERTIES (\"replication_num\"=\"1\","
-                      f"\"enable_unique_key_merge_on_write\"=\"true\")"
-                  )
-                  _run_ddl(tbl, ddl,
-                      f"CREATED cache_system.{tbl} (source: {db}.{tbl}  cre={cre_col}  upd={upd_col})")
 
               def create_iceberg_mirror(db, tbl):
                   """Iceberg table: 12-column batch-tracking schema + companion _log table."""
@@ -478,27 +452,23 @@ spec:
                   if db.lower() in SKIP_DBS:
                       return
 
-                  # Iceberg tables: audit log has the RAW user SQL — the FE patch injects
-                  # snap_id/created_at/updated_at after audit write, so those columns are
-                  # absent from the Stmt= field. Detect via the property the user typed.
-                  if RE_ICEBERG.search(stmt):
-                      create_iceberg_mirror(db, tbl)
+                  # Only iceberg tables get a cache_system mirror.
+                  # The FE patch injects `snap_id` BIGINT AUTO_INCREMENT into every
+                  # table created with stardata.table_type=iceberg, and strips that
+                  # property before writing to the audit log — so snap_id presence
+                  # is the definitive iceberg signal.  Non-iceberg tables are ignored.
+                  if not RE_ICEBERG.search(stmt):
                       return
 
-                  # Regular tables: must have both created_at and updated_at column patterns
-                  upd_col = RE_UPDATED.search(stmt)
-                  if not upd_col:
-                      return
-                  cre_col = RE_CREATED.search(stmt)
-                  if not cre_col:
-                      return
-                  create_mirror(db, tbl, cre_col.group(1), upd_col.group(1))
+                  create_iceberg_mirror(db, tbl)
 
               def tail_log(path):
-                  """Open path, seek to end, yield lines. Reopen on rotation."""
+                  """Open path, read from start, then follow. Reopen on rotation."""
                   inode = os.stat(path).st_ino
                   f = open(path, "r")
-                  f.seek(0, 2)
+                  # Read from position 0 — not EOF — so lines written between FE
+                  # startup and sidecar startup are not missed. All mirror DDLs use
+                  # CREATE TABLE IF NOT EXISTS so replaying is safe.
                   while True:
                       line = f.readline()
                       if line:
@@ -517,14 +487,59 @@ spec:
                               f = open(path, "r")
                               inode = os.stat(path).st_ino
 
+              def replay_from_audit_table():
+                  """Query __internal_schema.audit_log for any CREATE/ALTER TABLE
+                  statements that predate this sidecar's lifetime (e.g. executed
+                  while the pod was restarting).  Feeds each row through the same
+                  process_line() path so missed tables get their mirror created.
+                  Runs once at startup, before the file tail begins."""
+                  log.info("Replaying historical DDL from __internal_schema.audit_log ...")
+                  try:
+                      conn = get_conn()
+                      with conn.cursor() as cur:
+                          cur.execute(
+                              """
+                              SELECT stmt
+                              FROM __internal_schema.audit_log
+                              WHERE (stmt LIKE '%CREATE TABLE%' OR stmt LIKE '%ALTER TABLE%')
+                                AND `state` = 'OK'
+                              ORDER BY event_time ASC
+                              """
+                          )
+                          rows = cur.fetchall()
+                      log.info(f"Replay: {len(rows)} candidate DDL row(s) found")
+                      for row in rows:
+                          stmt = row[0] if isinstance(row, (list, tuple)) else list(row.values())[0]
+                          if not stmt:
+                              continue
+                          # Reconstruct a minimal audit log line so process_line() can parse it.
+                          # __internal_schema.audit_log does not have StmtType, so derive it.
+                          stmt_upper = stmt.lstrip().upper()
+                          if stmt_upper.startswith("CREATE"):
+                              stmt_type = "CREATE"
+                          elif stmt_upper.startswith("ALTER"):
+                              stmt_type = "ALTER"
+                          else:
+                              continue
+                          synthetic = (
+                              f"|StmtType={stmt_type}|State=OK|"
+                              f"Stmt={stmt.replace(chr(10), ' ').replace(chr(9), ' ')}"
+                          )
+                          process_line(synthetic)
+                  except Exception as e:
+                      log.warning(f"Replay from audit table failed (non-fatal): {e}")
+
               log.info(f"Starting on pod={POD}")
               log.info(f"Waiting for audit log: {LOG_FILE}")
 
               # Wait for log file to appear (FE may still be starting)
               while not os.path.exists(LOG_FILE):
                   time.sleep(5)
-              log.info("Audit log found — tailing...")
+              log.info("Audit log found — replaying history then tailing...")
 
+              # Step 1: catch up on anything missed while this sidecar was not running
+              replay_from_audit_table()
+              # Step 2: follow the live file from position 0 (covers the current rotation)
               for line in tail_log(LOG_FILE):
                   process_line(line)
               PYEOF
