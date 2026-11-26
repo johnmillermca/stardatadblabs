@@ -1692,29 +1692,22 @@ function openCreateIceberg() {
   tblSel.innerHTML = '<option value="">— select a database first —</option>';
   tblSel.disabled = true;
 
-  // Reset S3 location to warehouse default
-  document.getElementById('cim-s3-loc').value = 's3://xdatatoiceberg1/warehouse/';
+  // Reset destination fields
+  document.getElementById('cim-ice-db').value  = '';
+  document.getElementById('cim-ice-tbl').value = '';
+  document.getElementById('cim-s3-loc').value  = 's3://xdatatoiceberg1/warehouse/';
 
-  // Load all native (internal catalog) databases into the DB dropdown
+  // Populate DB dropdown from CATALOG_TABLES (already loaded on page boot by loadCatalog())
   var dbSel = document.getElementById('cim-db-sel');
-  dbSel.innerHTML = '<option value="">Loading…</option>';
-  dbSel.disabled = true;
-  dorisSQL('information_schema',
-    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
-    "WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
-  ).then(function(res) {
-    var dbs = res.rows.map(function(r) { return r[0]; })
-      .filter(function(db) { return !SKIP_DBS[db]; });
-    dbSel.innerHTML = '<option value="">— select a database —</option>';
-    dbs.forEach(function(db) {
-      var o = document.createElement('option'); o.value = db; o.textContent = db;
-      dbSel.appendChild(o);
-    });
-    dbSel.disabled = false;
-  }).catch(function() {
-    dbSel.innerHTML = '<option value="">Could not load databases</option>';
-    dbSel.disabled = false;
+  var seenDbs = {};
+  var dbs = [];
+  CATALOG_TABLES.forEach(function(r) { if (!seenDbs[r.db]) { seenDbs[r.db] = 1; dbs.push(r.db); } });
+  dbSel.innerHTML = '<option value="">— select a database —</option>';
+  dbs.forEach(function(db) {
+    var o = document.createElement('option'); o.value = db; o.textContent = db;
+    dbSel.appendChild(o);
   });
+  dbSel.disabled = false;
 
   document.getElementById('modal-backdrop').style.display = 'block';
 }
@@ -1768,7 +1761,7 @@ function onCimDbChange() {
   });
 }
 
-// Called when user picks a table — run eligibility check and show preview
+// Called when user picks a table — auto-fill destination fields and run eligibility check
 function onCimTableChange() {
   var db  = document.getElementById('cim-db-sel').value;
   var tbl = document.getElementById('cim-table-sel').value;
@@ -1778,13 +1771,34 @@ function onCimTableChange() {
 
   cimState.resolvedAppDb  = db;
   cimState.resolvedAppTbl = tbl;
+
+  // Auto-fill destination fields (only if still empty / not manually edited)
+  var iceDbEl  = document.getElementById('cim-ice-db');
+  var iceTblEl = document.getElementById('cim-ice-tbl');
+  if (!iceDbEl.value)  iceDbEl.value  = db + '_iceberg';
+  if (!iceTblEl.value) iceTblEl.value = tbl;
+
   document.getElementById('cim-table-hint').textContent = 'Checking eligibility…';
   checkEligibilityAndPreview(db, tbl);
 }
 
+// Called when user edits Iceberg DB or table name — refresh preview target label
+function onCimDestChange() {
+  updateCimCreateBtn();
+  // If preview is already showing, refresh the target label live
+  if (document.getElementById('cim-preview').style.display !== 'none') {
+    var catalog = document.getElementById('cim-catalog-sel').value || 'polaris';
+    var iceDb   = document.getElementById('cim-ice-db').value.trim();
+    var iceTbl  = document.getElementById('cim-ice-tbl').value.trim();
+    var s3Loc   = document.getElementById('cim-s3-loc').value.trim();
+    var target  = catalog + '.' + (iceDb || '…') + '.' + (iceTbl || '…');
+    document.getElementById('cim-tgt-label').textContent = target + (s3Loc ? '  (' + s3Loc + ')' : '');
+  }
+}
+
 // Called when user changes the catalog dropdown
 function onCimCatalogChange() {
-  updateCimCreateBtn();
+  onCimDestChange();
 }
 
 function checkEligibilityAndPreview(appDb, appTbl) {
@@ -1831,8 +1845,9 @@ function renderCimPreview() {
   var appTbl  = entry.appTbl;
   var catalog = document.getElementById('cim-catalog-sel').value || 'polaris';
   var s3Loc   = (document.getElementById('cim-s3-loc').value || '').trim();
-  var nsName  = appDb + '_iceberg';
-  var target  = catalog + '.' + nsName + '.' + appTbl;
+  var nsName  = (document.getElementById('cim-ice-db').value  || '').trim() || appDb + '_iceberg';
+  var iceTbl  = (document.getElementById('cim-ice-tbl').value || '').trim() || appTbl;
+  var target  = catalog + '.' + nsName + '.' + iceTbl;
 
   document.getElementById('cim-src-label').textContent = appDb + '.' + appTbl;
   document.getElementById('cim-tgt-label').textContent = target + (s3Loc ? '  (' + s3Loc + ')' : '');
@@ -1897,7 +1912,7 @@ function renderCimPreview() {
   dorisSQL('information_schema',
     "SELECT TABLE_NAME FROM information_schema.TABLES " +
     "WHERE TABLE_CATALOG='" + catalog.replace(/'/g,"''") + "' AND TABLE_SCHEMA='" + nsName.replace(/'/g,"''") + "' " +
-    "AND TABLE_NAME='" + appTbl.replace(/'/g,"''") + "' LIMIT 1"
+    "AND TABLE_NAME='" + iceTbl.replace(/'/g,"''") + "' LIMIT 1"
   ).then(function(r) {
     cimState.icebergExists = r.rows.length > 0;
     var exWarn = document.getElementById('cim-exists-warn');
@@ -1920,10 +1935,12 @@ function renderCimPreview() {
 }
 
 function updateCimCreateBtn() {
-  var s3 = (document.getElementById('cim-s3-loc').value || '').trim();
+  var s3     = (document.getElementById('cim-s3-loc').value  || '').trim();
+  var iceDb  = (document.getElementById('cim-ice-db').value  || '').trim();
+  var iceTbl = (document.getElementById('cim-ice-tbl').value || '').trim();
   var canCreate = cimState.colsValid && !cimState.hasUnsupported &&
                   (!cimState.icebergExists || cimState.reuseDrop !== null) &&
-                  s3.length > 0;
+                  s3.length > 0 && iceDb.length > 0 && iceTbl.length > 0;
   var btn = document.getElementById('cim-create-btn');
   btn.disabled = !canCreate;
   btn.style.opacity = canCreate ? '1' : '.5';
@@ -1946,9 +1963,10 @@ function doCreateIceberg() {
   var appDb   = entry.appDb;
   var appTbl  = entry.appTbl;
   var catalog = document.getElementById('cim-catalog-sel').value || 'polaris';
-  var s3Loc   = (document.getElementById('cim-s3-loc').value || '').trim().replace(/\/$/, '');
-  var nsName  = appDb + '_iceberg';
-  var target  = catalog + '.' + nsName + '.' + appTbl;
+  var s3Loc   = (document.getElementById('cim-s3-loc').value  || '').trim().replace(/\/$/, '');
+  var nsName  = (document.getElementById('cim-ice-db').value  || '').trim() || appDb + '_iceberg';
+  var iceTbl  = (document.getElementById('cim-ice-tbl').value || '').trim() || appTbl;
+  var target  = catalog + '.' + nsName + '.' + iceTbl;
 
   document.getElementById('cim-step1').style.display = 'none';
   document.getElementById('cim-preview').style.display = 'none';
@@ -1964,15 +1982,15 @@ function doCreateIceberg() {
     return '  `' + c.name + '` ' + ice;
   }).join(',\n');
   var createTblSQL =
-    "CREATE TABLE IF NOT EXISTS `" + catalog + "`.`" + nsName + "`.`" + appTbl + "` (\n" +
+    "CREATE TABLE IF NOT EXISTS `" + catalog + "`.`" + nsName + "`.`" + iceTbl + "` (\n" +
     colDefs + "\n)" +
     "\nUSING iceberg\n" +
     "TBLPROPERTIES ('format-version'='2','write.merge.mode'='merge-on-read'," +
     "'write.object-storage.enabled'='true'," +
-    "'write.data.path'='" + s3Loc + "/" + nsName + "/" + appTbl + "')\n" +
+    "'write.data.path'='" + s3Loc + "/" + nsName + "/" + iceTbl + "')\n" +
     "PARTITIONED BY (days(created_at))";
 
-  // Control table INSERT for INITIAL batch
+  // Control table INSERT for INITIAL batch (cache_system key is always the source table name)
   var now = new Date().toISOString().replace('T',' ').slice(0,19);
   var initBatchSQL =
     "INSERT INTO cache_system.`" + appTbl + "` " +
@@ -2235,17 +2253,33 @@ function doCreateIceberg() {
 
       <!-- Destination section -->
       <div style="display:flex;flex-direction:column;gap:4px;padding-top:4px;border-top:1px solid #EEF1F5">
-        <span style="font:700 14px Inter,sans-serif;color:#14171C">Destination</span>
-        <span class="hint">Iceberg catalog and S3 warehouse location where the table will be created.</span>
+        <span style="font:700 14px Inter,sans-serif;color:#14171C">Destination (Iceberg)</span>
+        <span class="hint">The Iceberg catalog, namespace (database), table name, and S3 location where the table will be created. Auto-filled from the source — edit freely.</span>
       </div>
 
-      <!-- Catalog + S3 location row -->
-      <div style="display:grid;grid-template-columns:1fr 2fr;gap:12px">
+      <!-- Catalog + Iceberg DB name row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div style="display:flex;flex-direction:column;gap:6px">
           <label class="lbl" for="cim-catalog-sel">Catalog</label>
           <select class="inp" id="cim-catalog-sel" onchange="onCimCatalogChange()">
             <option value="polaris">polaris (Polaris REST)</option>
           </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-ice-db">Iceberg database (namespace) <span style="font-weight:400;color:#57606a">— created if not exists</span></label>
+          <input class="inp" type="text" id="cim-ice-db" placeholder="e.g. mydb_iceberg"
+            style="font:400 13px ui-monospace,monospace"
+            oninput="onCimDestChange()">
+        </div>
+      </div>
+
+      <!-- Iceberg table name + S3 location row -->
+      <div style="display:grid;grid-template-columns:1fr 2fr;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-ice-tbl">Iceberg table name</label>
+          <input class="inp" type="text" id="cim-ice-tbl" placeholder="e.g. customers"
+            style="font:400 13px ui-monospace,monospace"
+            oninput="onCimDestChange()">
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
           <label class="lbl" for="cim-s3-loc">S3 warehouse location</label>
