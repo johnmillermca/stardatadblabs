@@ -385,21 +385,28 @@ spec:
                   return False
 
               def create_iceberg_mirror(db, tbl):
-                  """Iceberg table: 12-column batch-tracking schema + companion _log table."""
+                  """Iceberg table: 13-column batch-tracking schema + companion _log table.
+                  Two independent cursors:
+                    snap_id_from/to      — UPSERT window (insert/update detection)
+                    delete_synced_until  — DELETE watermark (updated_at of last deleted row synced)
+                  Deletes in Doris MOW keep the original snap_id — only updated_at changes.
+                  Using updated_at as the delete cursor ensures every deleted row is caught
+                  regardless of when it was originally inserted."""
                   ddl_main = (
                       f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}` (\n"
-                      f"  `batch_id`       BIGINT        NOT NULL AUTO_INCREMENT,\n"
-                      f"  `database_name`  VARCHAR(256)  NOT NULL,\n"
-                      f"  `table_name`     VARCHAR(256)  NOT NULL,\n"
-                      f"  `batch_type`     VARCHAR(16)   NULL,\n"
-                      f"  `snap_id_from`   BIGINT        NULL,\n"
-                      f"  `snap_id_to`     BIGINT        NULL,\n"
-                      f"  `max_created_at` DATETIMEV2    NULL,\n"
-                      f"  `max_updated_at` DATETIMEV2    NULL,\n"
-                      f"  `row_count`      BIGINT        NULL,\n"
-                      f"  `status`         VARCHAR(32)   NULL,\n"
-                      f"  `started_at`     DATETIMEV2    NULL,\n"
-                      f"  `finished_at`    DATETIMEV2    NULL\n"
+                      f"  `batch_id`              BIGINT        NOT NULL AUTO_INCREMENT,\n"
+                      f"  `database_name`         VARCHAR(256)  NOT NULL,\n"
+                      f"  `table_name`            VARCHAR(256)  NOT NULL,\n"
+                      f"  `batch_type`            VARCHAR(16)   NULL,\n"
+                      f"  `snap_id_from`          BIGINT        NULL,\n"
+                      f"  `snap_id_to`            BIGINT        NULL,\n"
+                      f"  `delete_synced_until`   DATETIMEV2    NULL,\n"
+                      f"  `max_created_at`        DATETIMEV2    NULL,\n"
+                      f"  `max_updated_at`        DATETIMEV2    NULL,\n"
+                      f"  `row_count`             BIGINT        NULL,\n"
+                      f"  `status`                VARCHAR(32)   NULL,\n"
+                      f"  `started_at`            DATETIMEV2    NULL,\n"
+                      f"  `finished_at`           DATETIMEV2    NULL\n"
                       f") UNIQUE KEY(`batch_id`)\n"
                       f"DISTRIBUTED BY HASH(`batch_id`) BUCKETS 4\n"
                       f"PROPERTIES (\"replication_num\"=\"1\","
