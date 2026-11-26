@@ -1412,6 +1412,7 @@ function loadLhsTables() {
   dorisSQL('cache_system',
     "SELECT TABLE_NAME FROM information_schema.TABLES " +
     "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME NOT LIKE '%\\_log' " +
+    "AND TABLE_NAME NOT LIKE '%\\_deletes' " +
     "AND TABLE_NAME NOT IN ('backup_schedule','datetime_load_tracker','table_query_stats'," +
     "'cache_eviction_log','table_cache_metrics','catalog_sync_log','query_block_log')" +
     " ORDER BY TABLE_NAME"
@@ -1679,48 +1680,42 @@ function openCreateIceberg() {
   cimState = { resolvedAppDb:null, resolvedAppTbl:null, eligibleEntry:null,
                colsValid:false, hasUnsupported:false, icebergExists:false, reuseDrop:null };
 
-  // Build eligible list: exclude only tables that have already started syncing
-  // (have batch rows — status !== 'no batches'). Empty shells (appDb resolved or not)
-  // must still appear so the user can initiate their first sync.
-  var alreadySynced = {};
-  lhsState.tables.forEach(function(t) {
-    if (t.status !== 'no batches') { alreadySynced[t.tbl] = 1; }
-  });
-
-  // Load candidates from cache_system — look for tables that have database_name and snap_id columns
-  // which signals they were created by the DDL mirror for an iceberg-type table
-  dorisSQL('cache_system',
-    "SELECT TABLE_NAME FROM information_schema.TABLES " +
-    "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME NOT LIKE '%\\_log'" +
-    " AND TABLE_NAME NOT IN ('backup_schedule','datetime_load_tracker','table_query_stats'," +
-    "'cache_eviction_log','table_cache_metrics','catalog_sync_log','query_block_log')" +
-    " ORDER BY TABLE_NAME"
-  ).then(function(res) {
-    var candidates = res.rows
-      .map(function(r) { return r[0]; })
-      .filter(function(n) { return !alreadySynced[n]; });
-
-    var sel = document.getElementById('cim-table-sel');
-    sel.innerHTML = '<option value="">— select a table —</option>';
-    if (!candidates.length) {
-      sel.innerHTML = '<option value="" disabled>All eligible tables are already synced</option>';
-    } else {
-      candidates.forEach(function(n) {
-        var o = document.createElement('option'); o.value = n;
-        o.textContent = 'cache_system.' + n; sel.appendChild(o);
-      });
-    }
-  }).catch(function() {
-    document.getElementById('cim-table-sel').innerHTML =
-      '<option value="" disabled>Could not load tables from Doris</option>';
-  });
-
+  // Reset form fields
   document.getElementById('cim-table-hint').textContent = '';
-  document.getElementById('cim-db-picker').style.display = 'none';
   document.getElementById('cim-preview').style.display = 'none';
   document.getElementById('cim-progress').style.display = 'none';
   document.getElementById('cim-step1').style.display = 'flex';
   document.getElementById('cim-create-msg').textContent = '';
+
+  // Reset table dropdown until DB is chosen
+  var tblSel = document.getElementById('cim-table-sel');
+  tblSel.innerHTML = '<option value="">— select a database first —</option>';
+  tblSel.disabled = true;
+
+  // Reset S3 location to warehouse default
+  document.getElementById('cim-s3-loc').value = 's3://xdatatoiceberg1/warehouse/';
+
+  // Load all native (internal catalog) databases into the DB dropdown
+  var dbSel = document.getElementById('cim-db-sel');
+  dbSel.innerHTML = '<option value="">Loading…</option>';
+  dbSel.disabled = true;
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
+  ).then(function(res) {
+    var dbs = res.rows.map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
+    dbSel.innerHTML = '<option value="">— select a database —</option>';
+    dbs.forEach(function(db) {
+      var o = document.createElement('option'); o.value = db; o.textContent = db;
+      dbSel.appendChild(o);
+    });
+    dbSel.disabled = false;
+  }).catch(function() {
+    dbSel.innerHTML = '<option value="">Could not load databases</option>';
+    dbSel.disabled = false;
+  });
+
   document.getElementById('modal-backdrop').style.display = 'block';
 }
 
@@ -1733,59 +1728,63 @@ function cimDoneClose() {
   showTab('lhsync');
 }
 
-function onCimTableChange() {
-  var tbl = document.getElementById('cim-table-sel').value;
+// Called when user picks a database — load its tables into the Table dropdown
+function onCimDbChange() {
+  var db = document.getElementById('cim-db-sel').value;
+  var tblSel = document.getElementById('cim-table-sel');
+  cimState.resolvedAppDb  = null;
+  cimState.resolvedAppTbl = null;
   document.getElementById('cim-preview').style.display = 'none';
-  document.getElementById('cim-db-picker').style.display = 'none';
   document.getElementById('cim-table-hint').textContent = '';
-  if (!tbl) return;
 
-  document.getElementById('cim-table-hint').textContent = 'Resolving source table…';
+  if (!db) {
+    tblSel.innerHTML = '<option value="">— select a database first —</option>';
+    tblSel.disabled = true;
+    return;
+  }
 
-  // Find app databases that have a table with this name (excluding system DBs)
+  tblSel.innerHTML = '<option value="">Loading tables…</option>';
+  tblSel.disabled = true;
+
   dorisSQL('information_schema',
-    "SELECT TABLE_SCHEMA FROM information_schema.TABLES " +
-    "WHERE TABLE_NAME='" + tbl.replace(/'/g,"''") + "' " +
-    "AND TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema'," +
-    "'__internal_schema','cache_system') " +
-    "AND TABLE_CATALOG='internal'"
+    "SELECT TABLE_NAME FROM information_schema.TABLES " +
+    "WHERE TABLE_SCHEMA='" + db.replace(/'/g,"''") + "' " +
+    "AND TABLE_CATALOG='internal' ORDER BY TABLE_NAME"
   ).then(function(res) {
-    var dbs = res.rows.map(function(r) { return r[0]; });
-    if (!dbs.length) {
-      document.getElementById('cim-table-hint').textContent =
-        'Source table not found in any app database. Ensure the app table exists and has stardata.table_type=iceberg.';
-      return;
-    }
-    if (dbs.length > 1) {
-      // Show disambiguator
-      var sel = document.getElementById('cim-db-sel');
-      sel.innerHTML = '<option value="">— select —</option>';
-      dbs.forEach(function(db) {
-        var o = document.createElement('option'); o.value = db; o.textContent = db; sel.appendChild(o);
+    var tables = res.rows.map(function(r) { return r[0]; });
+    tblSel.innerHTML = '<option value="">— select a table —</option>';
+    if (!tables.length) {
+      tblSel.innerHTML = '<option value="">No tables found in ' + db + '</option>';
+    } else {
+      tables.forEach(function(t) {
+        var o = document.createElement('option'); o.value = t; o.textContent = t;
+        tblSel.appendChild(o);
       });
-      document.getElementById('cim-db-picker').style.display = 'flex';
-      document.getElementById('cim-table-hint').textContent =
-        'Multiple databases contain "' + tbl + '" — pick the source above.';
-      return;
     }
-    // Single match — resolve directly
-    document.getElementById('cim-table-hint').textContent = 'Found in ' + dbs[0] + '. Checking eligibility…';
-    cimState.resolvedAppDb  = dbs[0];
-    cimState.resolvedAppTbl = tbl;
-    checkEligibilityAndPreview(dbs[0], tbl);
-  }).catch(function(e) {
-    document.getElementById('cim-table-hint').textContent = 'Lookup failed: ' + e.message;
+    tblSel.disabled = false;
+  }).catch(function() {
+    tblSel.innerHTML = '<option value="">Could not load tables</option>';
+    tblSel.disabled = false;
   });
 }
 
-function onCimDbPick() {
+// Called when user picks a table — run eligibility check and show preview
+function onCimTableChange() {
   var db  = document.getElementById('cim-db-sel').value;
   var tbl = document.getElementById('cim-table-sel').value;
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-table-hint').textContent = '';
   if (!db || !tbl) return;
+
   cimState.resolvedAppDb  = db;
   cimState.resolvedAppTbl = tbl;
-  document.getElementById('cim-table-hint').textContent = 'Using ' + db + '.' + tbl + '. Checking eligibility…';
+  document.getElementById('cim-table-hint').textContent = 'Checking eligibility…';
   checkEligibilityAndPreview(db, tbl);
+}
+
+// Called when user changes the catalog dropdown
+function onCimCatalogChange() {
+  updateCimCreateBtn();
 }
 
 function checkEligibilityAndPreview(appDb, appTbl) {
@@ -1828,12 +1827,15 @@ function renderCimPreview() {
   var entry = cimState.eligibleEntry;
   if (!entry) return;
 
-  var appDb  = entry.appDb;
-  var appTbl = entry.appTbl;
-  var target = 'polaris.' + appDb + '_iceberg.' + appTbl;
+  var appDb   = entry.appDb;
+  var appTbl  = entry.appTbl;
+  var catalog = document.getElementById('cim-catalog-sel').value || 'polaris';
+  var s3Loc   = (document.getElementById('cim-s3-loc').value || '').trim();
+  var nsName  = appDb + '_iceberg';
+  var target  = catalog + '.' + nsName + '.' + appTbl;
 
   document.getElementById('cim-src-label').textContent = appDb + '.' + appTbl;
-  document.getElementById('cim-tgt-label').textContent = target;
+  document.getElementById('cim-tgt-label').textContent = target + (s3Loc ? '  (' + s3Loc + ')' : '');
   document.getElementById('cim-pk-label').textContent  = entry.pk.join(', ');
   document.getElementById('cim-table-hint').textContent = 'Resolved: ' + appDb + '.' + appTbl;
 
@@ -1891,10 +1893,10 @@ function renderCimPreview() {
     errEl.style.display = 'none';
   }
 
-  // Check if Iceberg table already exists in Polaris
+  // Check if Iceberg table already exists in selected catalog
   dorisSQL('information_schema',
     "SELECT TABLE_NAME FROM information_schema.TABLES " +
-    "WHERE TABLE_CATALOG='polaris' AND TABLE_SCHEMA='" + appDb + "_iceberg' " +
+    "WHERE TABLE_CATALOG='" + catalog.replace(/'/g,"''") + "' AND TABLE_SCHEMA='" + nsName.replace(/'/g,"''") + "' " +
     "AND TABLE_NAME='" + appTbl.replace(/'/g,"''") + "' LIMIT 1"
   ).then(function(r) {
     cimState.icebergExists = r.rows.length > 0;
@@ -1902,7 +1904,7 @@ function renderCimPreview() {
     if (cimState.icebergExists) {
       exWarn.style.display = 'flex';
       document.getElementById('cim-exists-msg').textContent =
-        'polaris.' + appDb + '_iceberg.' + appTbl + ' already exists. Choose Reuse to sync into it, or Drop and recreate to start fresh.';
+        target + ' already exists. Choose Reuse to sync into it, or Drop and recreate to start fresh.';
     } else {
       exWarn.style.display = 'none';
       cimState.reuseDrop = null;
@@ -1918,8 +1920,10 @@ function renderCimPreview() {
 }
 
 function updateCimCreateBtn() {
+  var s3 = (document.getElementById('cim-s3-loc').value || '').trim();
   var canCreate = cimState.colsValid && !cimState.hasUnsupported &&
-                  (!cimState.icebergExists || cimState.reuseDrop !== null);
+                  (!cimState.icebergExists || cimState.reuseDrop !== null) &&
+                  s3.length > 0;
   var btn = document.getElementById('cim-create-btn');
   btn.disabled = !canCreate;
   btn.style.opacity = canCreate ? '1' : '.5';
@@ -1938,11 +1942,13 @@ function cimChooseDrop() {
 
 function doCreateIceberg() {
   if (!cimState.colsValid || cimState.hasUnsupported || !cimState.eligibleEntry) return;
-  var entry  = cimState.eligibleEntry;
-  var appDb  = entry.appDb;
-  var appTbl = entry.appTbl;
-  var nsName = appDb + '_iceberg';
-  var target = 'polaris.' + nsName + '.' + appTbl;
+  var entry   = cimState.eligibleEntry;
+  var appDb   = entry.appDb;
+  var appTbl  = entry.appTbl;
+  var catalog = document.getElementById('cim-catalog-sel').value || 'polaris';
+  var s3Loc   = (document.getElementById('cim-s3-loc').value || '').trim().replace(/\/$/, '');
+  var nsName  = appDb + '_iceberg';
+  var target  = catalog + '.' + nsName + '.' + appTbl;
 
   document.getElementById('cim-step1').style.display = 'none';
   document.getElementById('cim-preview').style.display = 'none';
@@ -1957,12 +1963,13 @@ function doCreateIceberg() {
     if (base === 'DECIMAL') ice = 'decimal' + (c.doris.match(/\([^)]+\)/) || ['(18,0)'])[0];
     return '  `' + c.name + '` ' + ice;
   }).join(',\n');
-  var pkStr = entry.pk.map(function(p) { return '`' + p + '`'; }).join(', ');
   var createTblSQL =
-    "CREATE TABLE IF NOT EXISTS `polaris`.`" + nsName + "`.`" + appTbl + "` (\n" +
+    "CREATE TABLE IF NOT EXISTS `" + catalog + "`.`" + nsName + "`.`" + appTbl + "` (\n" +
     colDefs + "\n)" +
     "\nUSING iceberg\n" +
-    "TBLPROPERTIES ('format-version'='2','write.merge.mode'='merge-on-read')\n" +
+    "TBLPROPERTIES ('format-version'='2','write.merge.mode'='merge-on-read'," +
+    "'write.object-storage.enabled'='true'," +
+    "'write.data.path'='" + s3Loc + "/" + nsName + "/" + appTbl + "')\n" +
     "PARTITIONED BY (days(created_at))";
 
   // Control table INSERT for INITIAL batch
@@ -1977,10 +1984,10 @@ function doCreateIceberg() {
     { label: 'Resolve source table (' + appDb + '.' + appTbl + ')',              sql: null },
     { label: 'Check eligibility (stardata.table_type=iceberg)',                  sql: null },
     { label: 'Validate columns (snap_id, created_at, updated_at, MOW)',          sql: null },
-    { label: 'Create namespace polaris.' + nsName,
-      sql:  'CREATE DATABASE IF NOT EXISTS `polaris`.`' + nsName + '`' },
+    { label: 'Create namespace ' + catalog + '.' + nsName,
+      sql:  'CREATE DATABASE IF NOT EXISTS `' + catalog + '`.`' + nsName + '`' },
     { label: 'Build Iceberg schema (type mapping)',                               sql: null },
-    { label: 'CREATE TABLE ' + target + ' (format v2, partition by days(created_at))',
+    { label: 'CREATE TABLE ' + target + ' → ' + s3Loc + ' (format v2, partition days(created_at))',
       sql:  createTblSQL },
     { label: 'Initialise cache_system.' + appTbl + ' — insert INITIAL batch row', sql: initBatchSQL },
     { label: 'INITIAL batch queued (snap_id 0 → max)',                           sql: null },
@@ -2192,29 +2199,62 @@ function doCreateIceberg() {
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
       <div style="display:flex;flex-direction:column;gap:4px">
         <span style="font:700 22px Inter,sans-serif">Create Iceberg Table</span>
-        <span class="hint">Publish a Stardata native table to the Polaris catalog as an Iceberg table and start incremental sync. Only tables created with <code style="background:#F4F6F9;padding:1px 5px;border-radius:4px;font-size:12px">stardata.table_type=iceberg</code> appear here.</span>
+        <span class="hint">Publish a Stardata native table to the Polaris catalog as an Iceberg table and start incremental sync.</span>
       </div>
       <button onclick="closeCreateIceberg()" style="background:none;border:none;cursor:pointer;color:#4F5866;padding:4px;line-height:0;flex-shrink:0">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
 
-    <!-- Step 1: table picker -->
-    <div id="cim-step1" style="display:flex;flex-direction:column;gap:14px">
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <label class="lbl" for="cim-table-sel">Source table <span style="font-weight:400;color:#4F5866">— iceberg-eligible cache_system tables only</span></label>
-        <select class="inp" id="cim-table-sel" onchange="onCimTableChange()">
-          <option value="">Loading eligible tables…</option>
-        </select>
-        <span id="cim-table-hint" class="hint"></span>
+    <!-- Step 1: source + destination form -->
+    <div id="cim-step1" style="display:flex;flex-direction:column;gap:16px">
+
+      <!-- Source section -->
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font:700 14px Inter,sans-serif;color:#14171C">Source table</span>
+        <span class="hint">Select the Stardata native database and table to sync. The table must have <code style="background:#F4F6F9;padding:1px 4px;border-radius:4px;font-size:11px">stardata.table_type=iceberg</code> set.</span>
       </div>
-      <!-- DB disambiguator (shown when >1 app DB has the same table name) -->
-      <div id="cim-db-picker" style="display:none;flex-direction:column;gap:6px">
-        <label class="lbl" for="cim-db-sel" style="color:#B42318">More than one database has this table name — pick the source:</label>
-        <select class="inp" id="cim-db-sel" onchange="onCimDbPick()">
-          <option value="">— select —</option>
-        </select>
+
+      <!-- Database + Table row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-db-sel">Database</label>
+          <select class="inp" id="cim-db-sel" onchange="onCimDbChange()">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-table-sel">Table</label>
+          <select class="inp" id="cim-table-sel" onchange="onCimTableChange()" disabled>
+            <option value="">— select a database first —</option>
+          </select>
+        </div>
       </div>
+
+      <span id="cim-table-hint" class="hint"></span>
+
+      <!-- Destination section -->
+      <div style="display:flex;flex-direction:column;gap:4px;padding-top:4px;border-top:1px solid #EEF1F5">
+        <span style="font:700 14px Inter,sans-serif;color:#14171C">Destination</span>
+        <span class="hint">Iceberg catalog and S3 warehouse location where the table will be created.</span>
+      </div>
+
+      <!-- Catalog + S3 location row -->
+      <div style="display:grid;grid-template-columns:1fr 2fr;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-catalog-sel">Catalog</label>
+          <select class="inp" id="cim-catalog-sel" onchange="onCimCatalogChange()">
+            <option value="polaris">polaris (Polaris REST)</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-s3-loc">S3 warehouse location</label>
+          <input class="inp" type="text" id="cim-s3-loc" placeholder="s3://your-bucket/warehouse/"
+            style="font:400 13px ui-monospace,monospace"
+            oninput="updateCimCreateBtn()">
+        </div>
+      </div>
+
     </div>
 
     <!-- Preview (shown after table resolved) -->
