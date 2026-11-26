@@ -1714,6 +1714,22 @@ function openCreateIceberg() {
   });
   dbSel.disabled = false;
 
+  // Load catalogs from Doris live (SHOW CATALOGS) — exclude internal
+  var catSel = document.getElementById('cim-catalog-sel');
+  catSel.innerHTML = '<option value="">Loading…</option>';
+  dorisSQL('information_schema', 'SHOW CATALOGS')
+    .then(function(res) {
+      var cats = res.rows
+        .map(function(r) { return r[1] || r[0]; })  // CatalogName column
+        .filter(function(c) { return c && c !== 'internal'; });
+      catSel.innerHTML = cats.length
+        ? cats.map(function(c) { return '<option value="' + c + '">' + c + '</option>'; }).join('')
+        : '<option value="">No external catalogs found</option>';
+    })
+    .catch(function() {
+      catSel.innerHTML = '<option value="polaris">polaris</option>';
+    });
+
   document.getElementById('modal-backdrop').style.display = 'block';
 }
 
@@ -2152,6 +2168,39 @@ function doRegisterCatalog() {
     });
 }
 
+function doDropCatalog() {
+  var name  = document.getElementById('regcat-name').value.trim();
+  var msgEl = document.getElementById('regcat-msg');
+  if (!name) {
+    msgEl.style.display = 'block';
+    msgEl.style.background = '#FFF5F5';
+    msgEl.style.border = '1px solid #F1C4BF';
+    msgEl.style.color = '#B42318';
+    msgEl.textContent = 'Enter a catalog name to drop.';
+    return;
+  }
+  if (!confirm('Drop catalog "' + name + '" from Doris? This does not delete any data in S3 or Polaris.')) return;
+
+  msgEl.style.display = 'block';
+  msgEl.style.background = '#F7F9FC';
+  msgEl.style.border = '1px solid #E1E6ED';
+  msgEl.style.color = '#4F5866';
+  msgEl.textContent = 'Dropping catalog…';
+
+  dorisSQL('information_schema', 'DROP CATALOG IF EXISTS `' + name + '`')
+    .then(function() {
+      msgEl.style.background = '#ECFDF5';
+      msgEl.style.border = '1px solid #A7F3D0';
+      msgEl.style.color = '#065F46';
+      msgEl.textContent = '✓ Catalog "' + name + '" dropped from Doris.';
+    })
+    .catch(function(e) {
+      msgEl.style.background = '#FFF5F5';
+      msgEl.style.border = '1px solid #F1C4BF';
+      msgEl.style.color = '#B42318';
+      msgEl.textContent = e.message;
+    });
+}
 
 // ============================================================
 // BOOT
@@ -2350,8 +2399,9 @@ function doRegisterCatalog() {
       <div id="regcat-msg" style="display:none;padding:12px 16px;border-radius:8px;font:500 14px Inter,sans-serif"></div>
 
       <!-- Buttons -->
-      <div style="display:flex;align-items:center;gap:12px;padding-top:4px;border-top:1px solid #EEF1F5">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:4px;border-top:1px solid #EEF1F5">
         <button class="btnp" onclick="doRegisterCatalog()">Register catalog</button>
+        <button class="btnd" onclick="doDropCatalog()">Drop catalog</button>
         <button class="btnout" onclick="closeRegisterCatalog()">Cancel</button>
       </div>
     </div>
@@ -2415,7 +2465,7 @@ function doRegisterCatalog() {
         <div style="display:flex;flex-direction:column;gap:6px">
           <label class="lbl" for="cim-catalog-sel">Catalog</label>
           <select class="inp" id="cim-catalog-sel" onchange="onCimCatalogChange()">
-            <option value="polaris">polaris (Polaris REST)</option>
+            <option value="">Loading catalogs…</option>
           </select>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
