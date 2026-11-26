@@ -1686,6 +1686,8 @@ function openCreateIceberg() {
   document.getElementById('cim-progress').style.display = 'none';
   document.getElementById('cim-step1').style.display = 'flex';
   document.getElementById('cim-create-msg').textContent = '';
+  document.getElementById('cim-step-error').style.display = 'none';
+  document.getElementById('cim-step-error').textContent = '';
 
   // Reset table dropdown until DB is chosen
   var tblSel = document.getElementById('cim-table-sel');
@@ -2049,8 +2051,13 @@ function doCreateIceberg() {
     iconEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#1F4FD8" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>';
     rowEl.style.color = '#14171C';
 
+    // For CREATE TABLE use the catalog as DB context; for INSERT use appDb
+    var sqlCtx = s.sql
+      ? (s.sql.startsWith('CREATE TABLE') ? catalog : appDb)
+      : null;
+
     var execPromise = s.sql
-      ? dorisSQL(s.sql.startsWith('CREATE TABLE') ? 'information_schema' : appDb, s.sql)
+      ? dorisSQL(sqlCtx, s.sql)
           .catch(function(e) {
             // "already exists" errors are acceptable for IF NOT EXISTS DDL
             if (e.message && (e.message.indexOf('already exist') >= 0 ||
@@ -2068,10 +2075,13 @@ function doCreateIceberg() {
       iconEl.style.background = '#FFF5F5';
       iconEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
       rowEl.style.color = '#B42318';
-      rowEl.querySelector('span:last-child').textContent += ' — ' + e.message;
+      rowEl.querySelector('span:last-child').textContent += ' — Error';
+      var errBox = document.getElementById('cim-step-error');
+      errBox.style.display = 'block';
+      errBox.textContent = e.message;
       document.getElementById('cim-done-btn').style.display = 'inline-flex';
       document.getElementById('cim-done-btn').textContent = 'Close';
-      document.getElementById('cim-create-msg').textContent = 'Step ' + (i+1) + ' failed. See error above.';
+      document.getElementById('cim-create-msg').textContent = 'Step ' + (i+1) + ' failed.';
       document.getElementById('cim-create-msg').style.color = '#B42318';
     });
   }
@@ -2358,8 +2368,10 @@ function doCreateIceberg() {
     <!-- Progress (shown after Create clicked) -->
     <div id="cim-progress" style="display:none;flex-direction:column;gap:14px">
       <div id="cim-steps-list" style="display:flex;flex-direction:column;gap:10px"></div>
-      <div style="padding-top:8px">
+      <div id="cim-step-error" style="display:none;padding:12px 16px;background:#FFF5F5;border:1px solid #F1C4BF;border-radius:8px;font:400 13px ui-monospace,monospace;color:#B42318;word-break:break-all;white-space:pre-wrap"></div>
+      <div style="padding-top:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <button class="btnout" id="cim-done-btn" onclick="cimDoneClose()" style="display:none">Done — go to Lakehouse sync</button>
+        <span id="cim-create-msg" style="font:500 14px Inter,sans-serif"></span>
       </div>
     </div>
 
