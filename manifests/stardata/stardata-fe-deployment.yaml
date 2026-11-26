@@ -385,13 +385,38 @@ spec:
                   return False
 
               def create_iceberg_mirror(db, tbl):
-                  """Iceberg table: 13-column batch-tracking schema + companion _log table.
-                  Two independent cursors:
-                    snap_id_from/to      — UPSERT window (insert/update detection)
-                    delete_synced_until  — DELETE watermark (updated_at of last deleted row synced)
-                  Deletes in Doris MOW keep the original snap_id — only updated_at changes.
-                  Using updated_at as the delete cursor ensures every deleted row is caught
-                  regardless of when it was originally inserted."""
+                  """Create three cache_system tables for every iceberg-type app table.
+
+                  Three-table pattern (created once at DDL time, permanent for the table's lifetime):
+
+                  1. cache_system.<tbl>          — batch control ledger
+                     Tracks every UPSERT and DELETE batch run by the sync job.
+                     Two independent cursors:
+                       snap_id_from / snap_id_to    — UPSERT window (new/changed rows, by insert order)
+                       delete_synced_until          — DELETE watermark (max deleted_at already synced)
+                     The UPSERT cursor advances on snap_id because snap_id is AUTO_INCREMENT and
+                     never changes after insert — it reliably identifies new/changed rows.
+                     The DELETE cursor is kept SEPARATE because Doris MOW deletes set
+                     __DORIS_DELETE_SIGN__=1 on the ORIGINAL row; snap_id never changes on delete.
+                     Only deleted_at (written by the app into <tbl>_deletes) advances monotonically.
+
+                  2. cache_system.<tbl>_deletes   — append-only delete log (NEW)
+                     The APPLICATION writes one row here whenever it deletes a row from the main
+                     table. Schema mirrors the app table's PRIMARY KEY columns plus deleted_at.
+                     Partitioned by deleted_at day — sync job reads only the new partitions:
+                       SELECT <pk_cols> FROM cache_system.<tbl>_deletes
+                       WHERE deleted_at > :last_delete_watermark
+                         AND deleted_at <= :new_delete_watermark
+                     This avoids a full scan of the app table for __DORIS_DELETE_SIGN__=1 rows,
+                     which would touch every daily partition regardless of when rows were deleted.
+                     The sidecar creates it with (snap_id, deleted_at) as placeholders — the actual
+                     PK columns are determined from the app table schema when the sync job starts.
+
+                  3. cache_system.<tbl>_log       — error isolation log
+                     Sync job writes one row per failure. Presence of any row blocks sync for that
+                     table until an operator clears it from the console (TRUNCATE TABLE)."""
+
+                  # ── 1. Batch control ledger ───────────────────────────────────────────────
                   ddl_main = (
                       f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}` (\n"
                       f"  `batch_id`              BIGINT        NOT NULL AUTO_INCREMENT,\n"
@@ -412,20 +437,39 @@ spec:
                       f"PROPERTIES (\"replication_num\"=\"1\","
                       f"\"enable_unique_key_merge_on_write\"=\"true\")"
                   )
+                  # ── 2. Append-only delete log ─────────────────────────────────────────────
+                  # Partitioned by deleted_at day so the sync job only scans new partitions.
+                  # snap_id identifies the specific row version that was deleted.
+                  # The sync job resolves the full PK columns from DESCRIBE <app_db>.<tbl>
+                  # at startup — this table is intentionally minimal and append-only.
+                  # DUPLICATE KEY (not MOW) because the same snap_id could theoretically be
+                  # re-inserted after a DELETE (Doris recycles AUTO_INCREMENT on truncate).
+                  ddl_deletes = (
+                      f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}_deletes` (\n"
+                      f"  `snap_id`       BIGINT        NOT NULL,\n"
+                      f"  `deleted_at`    DATETIMEV2    NOT NULL DEFAULT CURRENT_TIMESTAMP\n"
+                      f") DUPLICATE KEY(`snap_id`)\n"
+                      f"AUTO PARTITION BY RANGE (date_trunc('day', `deleted_at`)) ()\n"
+                      f"DISTRIBUTED BY HASH(`snap_id`) BUCKETS AUTO\n"
+                      f"PROPERTIES (\"replication_num\"=\"1\")"
+                  )
+                  # ── 3. Error isolation log ────────────────────────────────────────────────
                   ddl_log = (
                       f"CREATE TABLE IF NOT EXISTS `cache_system`.`{tbl}_log` (\n"
-                      f"  `log_id`           BIGINT        NOT NULL AUTO_INCREMENT,\n"
-                      f"  `batch_id`         BIGINT        NULL,\n"
-                      f"  `database_name`    VARCHAR(256)  NULL,\n"
-                      f"  `table_name`       VARCHAR(256)  NULL,\n"
-                      f"  `operation`        VARCHAR(16)   NULL,\n"
-                      f"  `snap_id_from`     BIGINT        NULL,\n"
-                      f"  `snap_id_to`       BIGINT        NULL,\n"
-                      f"  `error_code`       VARCHAR(32)   NULL,\n"
-                      f"  `error_message`    TEXT          NULL,\n"
-                      f"  `failed_statement` TEXT          NULL,\n"
-                      f"  `rows_attempted`   BIGINT        NULL,\n"
-                      f"  `logged_at`        DATETIMEV2    NULL\n"
+                      f"  `log_id`              BIGINT        NOT NULL AUTO_INCREMENT,\n"
+                      f"  `batch_id`            BIGINT        NULL,\n"
+                      f"  `database_name`       VARCHAR(256)  NULL,\n"
+                      f"  `table_name`          VARCHAR(256)  NULL,\n"
+                      f"  `operation`           VARCHAR(16)   NULL,\n"
+                      f"  `snap_id_from`        BIGINT        NULL,\n"
+                      f"  `snap_id_to`          BIGINT        NULL,\n"
+                      f"  `delete_from_ts`      DATETIMEV2    NULL,\n"
+                      f"  `delete_to_ts`        DATETIMEV2    NULL,\n"
+                      f"  `error_code`          VARCHAR(32)   NULL,\n"
+                      f"  `error_message`       TEXT          NULL,\n"
+                      f"  `failed_statement`    TEXT          NULL,\n"
+                      f"  `rows_attempted`      BIGINT        NULL,\n"
+                      f"  `logged_at`           DATETIMEV2    NULL\n"
                       f") UNIQUE KEY(`log_id`)\n"
                       f"DISTRIBUTED BY HASH(`log_id`) BUCKETS 4\n"
                       f"PROPERTIES (\"replication_num\"=\"1\","
@@ -433,6 +477,8 @@ spec:
                   )
                   if _run_ddl(tbl, ddl_main,
                           f"CREATED cache_system.{tbl} iceberg batch-tracking (source: {db}.{tbl})"):
+                      _run_ddl(f"{tbl}_deletes", ddl_deletes,
+                          f"CREATED cache_system.{tbl}_deletes iceberg delete-log (source: {db}.{tbl})")
                       _run_ddl(f"{tbl}_log", ddl_log,
                           f"CREATED cache_system.{tbl}_log iceberg error-log (source: {db}.{tbl})")
 
