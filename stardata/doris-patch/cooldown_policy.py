@@ -58,8 +58,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("cooldown")
 
-# No-cooldown sentinel Doris uses when cooldown time is not set
-NO_COOLDOWN_SENTINEL = "9999-12-31 00:00:00"
+# No-cooldown sentinel Doris uses when cooldown time is not set.
+# Doris returns "9999-12-31 15:59:59" (UTC offset variant) so we match
+# only the date prefix to be timezone-offset-safe.
+NO_COOLDOWN_SENTINEL = "9999-12-31"
 
 
 def connect():

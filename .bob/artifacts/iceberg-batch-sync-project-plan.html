@@ -1,0 +1,265 @@
+
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Iceberg Batch Sync — Project Plan</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.6;color:#1f2328;background:#fff;padding:40px 24px 60px}
+.wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:32px}
+h1{font-size:22px;font-weight:700;letter-spacing:-.01em;color:#1f2328}
+h2{font-size:15px;font-weight:700;color:#1f2328;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #e5e7eb}
+h3{font-size:13px;font-weight:700;color:#3b82d4;margin:12px 0 4px}
+p,li{font-size:14px;color:#3a414d;line-height:1.65}
+ul,ol{padding-left:20px;display:flex;flex-direction:column;gap:4px}
+.section{display:flex;flex-direction:column;gap:10px}
+.card{background:#f7f8fa;border:1px solid #e5e7eb;border-radius:8px;padding:16px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:560px){.two-col{grid-template-columns:1fr}}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
+.bg-blue{background:#eff6ff;color:#1d4ed8}
+.bg-green{background:#f0fdf4;color:#166534}
+.bg-orange{background:#fff7ed;color:#9a3412}
+.bg-red{background:#fef2f2;color:#991b1b}
+.bg-purple{background:#f5f3ff;color:#5b21b6}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f7f8fa;text-align:left;padding:7px 10px;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#57606a;border-bottom:1px solid #e5e7eb}
+td{padding:7px 10px;border-bottom:1px solid #f0f1f3;color:#1f2328;vertical-align:top}
+tr:last-child td{border-bottom:none}
+.step{display:flex;gap:12px;align-items:flex-start}
+.step-num{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:#3b82d4;color:#fff;font:700 11px system-ui;display:flex;align-items:center;justify-content:center}
+.fix{background:#fffbeb;border-left:3px solid #f59e0b;padding:8px 12px;border-radius:0 6px 6px 0;font-size:13px;color:#78350f}
+.fix strong{font-weight:700}
+code{font-family:ui-monospace,monospace;font-size:12px;background:#f3f4f6;padding:1px 5px;border-radius:4px;color:#1f2328}
+.flow{display:flex;flex-direction:column;gap:6px}
+.flow-step{display:flex;align-items:center;gap:8px;font-size:13px}
+.flow-arrow{color:#9aa3b0;font-size:16px;line-height:1}
+.ok{color:#17a34a;font-weight:700}
+.warn{color:#d97706;font-weight:700}
+.err{color:#b42318;font-weight:700}
+footer{font-size:12px;color:#57606a;text-align:center;padding-top:24px;border-top:1px solid #e5e7eb;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div>
+    <h1>Iceberg Batch Sync — Project Plan</h1>
+    <p style="margin-top:6px;color:#57606a">Stardata (Apache Doris) → Polaris Iceberg catalog · Incremental sync via snap_id watermark · Console UI at <code>stardata.stardatadb.com</code></p>
+  </div>
+
+  
+  <div class="section">
+    <h2>What we are building</h2>
+    <div class="two-col">
+      <div class="card">
+        <h3>Console feature</h3>
+        <ul>
+          <li>New <strong>Lakehouse sync</strong> tab in <code>stardata.stardatadb.com</code></li>
+          <li>Table showing all synced Iceberg tables + live batch status</li>
+          <li><strong>+ Create Iceberg Table</strong> button → guided modal</li>
+          <li>Per-table detail panel: KPIs, batch history, Blocked badge</li>
+          <li>Clear error and resume action with confirmation</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Batch sync job</h3>
+        <ul>
+          <li>Reads from <code>cache_system.&lt;table&gt;</code> control rows</li>
+          <li>UPSERT batches: <code>MERGE INTO</code> Iceberg on primary key</li>
+          <li>DELETE batches: reads <code>__DORIS_DELETE_SIGN__=1</code></li>
+          <li>snap_id window: <code>(from, to]</code> — fixed before read</li>
+          <li>Error isolation: one failure blocks only that table</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  
+  <div class="section">
+    <h2>Key constraints and correctness fixes</h2>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="fix"><strong>#1 — No timestamp-based dedup.</strong> Two rows can share the same updated_at. Merge uses the app table's UNIQUE KEY columns (not timestamps). updated_at only decides which version wins in MATCHED.</div>
+      <div class="fix"><strong>#2 — Hidden columns filter.</strong> With show_hidden_columns=true Doris returns delete-marked rows. Upsert reads filter <code>__DORIS_DELETE_SIGN__=0</code>. Delete reads filter <code>=1</code>.</div>
+      <div class="fix"><strong>#3 — Delete window before compaction.</strong> Doris removes delete-sign rows during compaction. Delete batches run more frequently than compaction (hourly vs default 4-hour compaction).</div>
+      <div class="fix"><strong>#4 — Status written correctly.</strong> Status is set to <code>delete_pending</code> before the DELETE runs. Only set to <code>deleted</code> after Iceberg confirms commit. Failed state written on exception.</div>
+      <div class="fix"><strong>#5 — Exclusive lower bound.</strong> Next window uses <code>snap_id &gt; last_completed_to</code>, never <code>&gt;=</code>. Upper bound captured once at batch start to prevent moving target.</div>
+      <div class="fix"><strong>#6 — Fixed upper bound per batch.</strong> <code>SELECT max(snap_id)</code> captured before reading rows. All reads in the batch use this fixed <code>to</code> value.</div>
+      <div class="fix"><strong>#7 — Duplicate table name.</strong> If the same table name exists in more than one app database, the console shows a picker. The job also fails fast and surfaces this in the log.</div>
+    </div>
+  </div>
+
+  
+  <div class="section">
+    <h2>File being changed</h2>
+    <table>
+      <thead><tr><th>File</th><th>Role</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td><code>docker/webconsole/stardata.html</code></td><td>The actual deployed file at stardata.stardatadb.com</td><td>Add Lakehouse sync tab, HTML sections, CSS, JS</td></tr>
+        <tr><td><code>console/index.html</code></td><td>Dev prototype only — not served</td><td>Already modified; serves as reference</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:6px;color:#57606a">The Docker image (<code>docker/webconsole/Dockerfile</code>) copies <code>stardata.html</code> as <code>/usr/share/nginx/html/stardata.html</code>. The nginx vhost for <code>stardata.stardatadb.com</code> serves it at <code>/</code> and proxies <code>/api/doris/*</code> to <code>stardata-fe.prod:8030</code>.</p>
+  </div>
+
+  
+  <div class="section">
+    <h2>Data flow</h2>
+    <div class="card">
+      <div class="flow">
+        <div class="flow-step"><span class="ok">●</span> App table created with <code>PROPERTIES ("stardata.table_type"="iceberg")</code> in Stardata</div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> FE patch injects <code>snap_id</code>, <code>created_at</code>, <code>updated_at</code>, MOW, auto-partition</div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> DDL mirror sidecar creates empty <code>cache_system.&lt;table&gt;</code> tracking shell</div>
+        <div class="flow-step"><span class="warn">●</span> Nothing else happens — table is <em>Stardata only</em></div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> User opens <strong>Lakehouse sync</strong> tab, picks table, clicks <strong>Create Iceberg Table</strong></div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> Console validates: source resolution → eligibility → columns → type mapping</div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> Console creates: Polaris namespace <code>&lt;db&gt;_iceberg</code> → Iceberg table (v2, identifier fields) → initialises control rows</div>
+        <div class="flow-step"><span class="ok">●</span> Sync job picks up the table on its next run</div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> INITIAL batch: <code>snap_id 0 → max(snap_id)</code>, upserts all rows</div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> Incremental UPSERT batches every run: <code>snap_id &gt; last_to AND ≤ new_max</code>, <code>__DORIS_DELETE_SIGN__=0</code></div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> DELETE batches (same or next run): same window, <code>__DORIS_DELETE_SIGN__=1</code></div>
+        <div class="flow-step"><span class="ok">●</span> Control rows in <code>cache_system.&lt;table&gt;</code> track every batch</div>
+        <div class="flow-step"><span class="err">●</span> On failure: writes to <code>cache_system.&lt;table&gt;_log</code> → table is Blocked</div>
+        <div class="flow-step"><span class="flow-arrow">↓</span> Operator clears error from console → next run retries same window (idempotent)</div>
+      </div>
+    </div>
+  </div>
+
+  
+  <div class="section">
+    <h2>cache_system control table schema</h2>
+    <table>
+      <thead><tr><th>Column</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>batch_id</code></td><td>BIGINT</td><td>Increasing batch number — unique key</td></tr>
+        <tr><td><code>database_name</code></td><td>VARCHAR(128)</td><td>Source app database (e.g. <code>sales</code>)</td></tr>
+        <tr><td><code>table_name</code></td><td>VARCHAR(128)</td><td>Source app table (e.g. <code>orders</code>)</td></tr>
+        <tr><td><code>batch_type</code></td><td>VARCHAR(16)</td><td>INITIAL · UPSERT · DELETE</td></tr>
+        <tr><td><code>snap_id_from</code></td><td>BIGINT</td><td>Exclusive lower bound (0 for INITIAL)</td></tr>
+        <tr><td><code>snap_id_to</code></td><td>BIGINT</td><td>Inclusive upper bound, fixed at batch start</td></tr>
+        <tr><td><code>max_created_at</code></td><td>DATETIME(6)</td><td>max(created_at) in the window</td></tr>
+        <tr><td><code>max_updated_at</code></td><td>DATETIME(6)</td><td>max(updated_at) in the window</td></tr>
+        <tr><td><code>row_count</code></td><td>BIGINT</td><td>Rows upserted or deleted</td></tr>
+        <tr><td><code>status</code></td><td>VARCHAR(32)</td><td>running · completed upsert · delete_pending · deleted · failed</td></tr>
+        <tr><td><code>started_at</code></td><td>DATETIME(6)</td><td>Batch start timestamp</td></tr>
+        <tr><td><code>finished_at</code></td><td>DATETIME(6)</td><td>Batch finish timestamp</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  
+  <div class="section">
+    <h2>Incremental sync algorithm (per table, per run)</h2>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="step"><span class="step-num">1</span><div><strong>Gate check.</strong> If <code>cache_system.&lt;table&gt;_log</code> exists and has rows → mark Blocked, stop. Release advisory lock on exit.</div></div>
+      <div class="step"><span class="step-num">2</span><div><strong>Fix window.</strong> <code>from = max(snap_id_to) WHERE status IN ('completed upsert','deleted')</code>. <code>to = SELECT max(snap_id) FROM &lt;app_db&gt;.&lt;table&gt;</code>. If <code>to ≤ from</code> → nothing new, stop.</div></div>
+      <div class="step"><span class="step-num">3</span><div><strong>Record batch.</strong> INSERT control row: type=UPSERT (or INITIAL if from=0), snap_id_from, snap_id_to, max(created_at), max(updated_at), status=running.</div></div>
+      <div class="step"><span class="step-num">4</span><div><strong>Read changed rows.</strong> <code>SET show_hidden_columns=true</code> then <code>SELECT … WHERE snap_id &gt; :from AND snap_id &lt;= :to AND __DORIS_DELETE_SIGN__=0</code>.</div></div>
+      <div class="step"><span class="step-num">5</span><div><strong>MERGE INTO Iceberg.</strong> On primary key. MATCHED AND s.updated_at &gt;= t.updated_at → UPDATE SET *. NOT MATCHED → INSERT *.</div></div>
+      <div class="step"><span class="step-num">6</span><div><strong>Close upsert.</strong> On success → status=completed upsert. On failure → status=failed, write log row, stop.</div></div>
+      <div class="step"><span class="step-num">7</span><div><strong>Read deletes.</strong> <code>del_from = max(snap_id_to) WHERE batch_type='DELETE' AND status='deleted'</code>. Same <code>to</code>. SELECT PK cols WHERE <code>__DORIS_DELETE_SIGN__=1</code>.</div></div>
+      <div class="step"><span class="step-num">8</span><div><strong>Apply deletes.</strong> Insert DELETE control row with status=delete_pending. <code>DELETE FROM polaris.… WHERE (pk) IN (…)</code>. On success → status=deleted. On failure → status=failed, write log row, stop.</div></div>
+      <div class="step"><span class="step-num">9</span><div><strong>Repeat.</strong> Next run starts at the highest completed snap_id_to. No row is ever read twice.</div></div>
+    </div>
+  </div>
+
+  
+  <div class="section">
+    <h2>Doris → Iceberg type mapping</h2>
+    <table>
+      <thead><tr><th>Doris type</th><th>Iceberg type</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>BOOLEAN</td><td>boolean</td><td></td></tr>
+        <tr><td>TINYINT, SMALLINT, INT</td><td>int</td><td></td></tr>
+        <tr><td>BIGINT</td><td>long</td><td></td></tr>
+        <tr><td>LARGEINT</td><td>decimal(38,0)</td><td class="warn">Flag in preview if value may exceed 38 digits</td></tr>
+        <tr><td>FLOAT, DOUBLE</td><td>float, double</td><td></td></tr>
+        <tr><td>DECIMAL(p,s)</td><td>decimal(p,s)</td><td>p up to 38</td></tr>
+        <tr><td>DATE</td><td>date</td><td></td></tr>
+        <tr><td>DATETIME(n) / DATETIMEV2(n)</td><td>timestamp</td><td>No timezone; microsecond precision</td></tr>
+        <tr><td>CHAR, VARCHAR, STRING</td><td>string</td><td></td></tr>
+        <tr><td>JSON, VARIANT</td><td>string</td><td>Stored as JSON text</td></tr>
+        <tr><td>IPV4, IPV6</td><td>string</td><td></td></tr>
+        <tr><td>ARRAY&lt;T&gt;</td><td>list&lt;T&gt;</td><td>Inner type mapped recursively</td></tr>
+        <tr><td>MAP&lt;K,V&gt;</td><td>map&lt;K,V&gt;</td><td>Inner types mapped recursively</td></tr>
+        <tr><td>STRUCT&lt;…&gt;</td><td>struct&lt;…&gt;</td><td>Inner types mapped recursively</td></tr>
+        <tr><td class="err">HLL, BITMAP, QUANTILE_STATE, AGG_STATE</td><td class="err">Not supported</td><td class="err">Blocks creation — flagged red in preview</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  
+  <div class="section">
+    <h2>Console UI screens</h2>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="card">
+        <h3>Screen 1 — Lakehouse sync tab (list view)</h3>
+        <ul>
+          <li>Title: <strong>Lakehouse tables</strong> · subtitle: Iceberg tables via JDBC · Every 6 h · hot tables every 5 min</li>
+          <li>Database filter dropdown (populated from synced tables' app databases)</li>
+          <li><strong>+ Create Iceberg Table</strong> button (top right)</li>
+          <li>Table: TABLE · DATABASE · FORMAT · LAST UPDATED · SIZE · SYNC STATUS · ACTIONS</li>
+          <li>Status colours: green (completed upsert / deleted), blue (running), orange (delete_pending), red (failed / Blocked)</li>
+          <li>Blocked badge in red pill next to status text</li>
+          <li>Details button per row → opens detail panel below</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Screen 2 — Per-table detail panel</h3>
+        <ul>
+          <li>KPI strip: Last snap_id · Last batch time · Rows upserted · Rows deleted · Status</li>
+          <li>Blocked banner (red) with full error_message from <code>cache_system.&lt;table&gt;_log</code></li>
+          <li><strong>Clear error and resume</strong> → confirmation → truncates log table, re-enables sync</li>
+          <li>Recent batches table: Batch # · Type · snap_id from→to · Rows · max(created_at) · max(updated_at) · Status · Started · Finished</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Screen 3 — Create Iceberg Table modal</h3>
+        <ul>
+          <li>Step 1: Dropdown lists only iceberg-eligible <code>cache_system</code> tables (not already synced, not <code>*_log</code>)</li>
+          <li>DB disambiguation picker if same table name appears in multiple app databases</li>
+          <li>Preview: Source <code>sales.orders</code> → Target <code>polaris.sales_iceberg.orders</code></li>
+          <li>Column checks: snap_id ✅ · created_at ✅ · updated_at ✅ — red ✗ if missing, Create button disabled</li>
+          <li>Primary key (merge identifier) display</li>
+          <li>Column type mapping table with Doris → Iceberg types; unsupported types flagged red</li>
+          <li>If Iceberg table already exists: amber warning with Reuse existing / Drop and recreate</li>
+          <li><strong>Create and start sync</strong> → animated 8-step progress: resolve → eligibility → validate → namespace → schema → CREATE TABLE → init control → INITIAL batch</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  
+  <div class="section">
+    <h2>Live Doris queries the console makes</h2>
+    <table>
+      <thead><tr><th>Purpose</th><th>SQL</th><th>Via</th></tr></thead>
+      <tbody>
+        <tr><td>Load eligible tables</td><td><code>SELECT table_name, database_name FROM cache_system.&lt;*&gt;</code> + SHOW CREATE TABLE to check iceberg property</td><td>/api/doris/</td></tr>
+        <tr><td>Load sync status</td><td><code>SELECT * FROM cache_system.&lt;table&gt; ORDER BY batch_id DESC LIMIT 20</code></td><td>/api/doris/</td></tr>
+        <tr><td>Check error log</td><td><code>SELECT * FROM cache_system.&lt;table&gt;_log LIMIT 1</code></td><td>/api/doris/</td></tr>
+        <tr><td>Column inspection</td><td><code>DESCRIBE &lt;app_db&gt;.&lt;table&gt;</code></td><td>/api/doris/</td></tr>
+        <tr><td>Source resolution</td><td><code>SELECT TABLE_SCHEMA FROM information_schema.TABLES WHERE TABLE_NAME=?</code></td><td>/api/doris/</td></tr>
+        <tr><td>Create namespace</td><td><code>CREATE DATABASE IF NOT EXISTS polaris.&lt;db&gt;_iceberg</code></td><td>/api/doris/</td></tr>
+        <tr><td>Create Iceberg table</td><td><code>CREATE TABLE polaris.&lt;db&gt;_iceberg.&lt;tbl&gt; …</code></td><td>/api/doris/</td></tr>
+        <tr><td>Init control row</td><td><code>INSERT INTO cache_system.&lt;tbl&gt; (batch_id, …)</code></td><td>/api/doris/</td></tr>
+        <tr><td>Clear error log</td><td><code>TRUNCATE TABLE cache_system.&lt;tbl&gt;_log</code></td><td>/api/doris/</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  
+  <div class="section">
+    <h2>Out of scope</h2>
+    <ul>
+      <li>Ad-hoc SQL querying (handled by QuerySpace / SQL console)</li>
+      <li>Schema migration after first create (column adds/drops — open question)</li>
+      <li>Automatic table creation on stardata.table_type=iceberg property (must be triggered manually from console)</li>
+      <li>Multi-table parallelism (each table holds an advisory lock; runs sequentially per table)</li>
+    </ul>
+  </div>
+
+  <footer>Made with IBM Bob</footer>
+</div>
+</body>
+</html>

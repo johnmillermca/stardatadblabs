@@ -453,7 +453,7 @@ function showTab(tab) {
   document.getElementById('tab-lakehouse').className = 'tab' + (tab === 'lakehouse' ? ' tab-on' : '');
   document.getElementById('tab-lhsync').className    = 'tab' + (tab === 'lhsync'    ? ' tab-on' : '');
   if (tab === 'lakehouse') { renderSources(); checkSourceStatuses(); }
-  if (tab === 'lhsync')    { loadLhsTables(); }
+  if (tab === 'lhsync')    { loadLhsTables(); }   // loadLhsSchedules() is called inside loadLhsTables after render
 }
 
 // ============================================================
@@ -1405,9 +1405,94 @@ var LHS_INTERVALS = [
   { label: '12 h', ms: 43200000 },
 ];
 
+// ============================================================
+// SCHEDULE PERSISTENCE — cache_system.lhs_schedule via Doris HTTP SQL
+// ============================================================
+// INSERT via the Doris HTTP SQL endpoint (/api/query/) uses group commit
+// by default (group_commit_interval_ms = 10000 ms) — the endpoint waits
+// for the group commit window before returning, which causes apparent hangs.
+//
+// Fix: every INSERT carries the query hint:
+//   /*+ SET_VAR(enable_insert_group_commit=false) */
+// This forces an immediate single-row commit, bypassing the group commit
+// window entirely.  DELETE and SELECT are unaffected (no group commit).
+//
+// Pattern for upsert: DELETE existing row, then INSERT fresh row.
+// INSERT ... ON DUPLICATE KEY UPDATE is not needed because we always
+// DELETE first, making the subsequent INSERT unconditional.
+// ============================================================
+
+// Helper: build a forced-commit INSERT for lhs_schedule.
+function lhsSchedInsertSQL(tblName, ms, enabled) {
+  var safe = tblName.replace(/'/g, "''");
+  return "INSERT /*+ SET_VAR(enable_insert_group_commit=false) */ " +
+         "INTO cache_system.lhs_schedule (table_name, interval_ms, enabled, updated_at) " +
+         "VALUES ('" + safe + "', " + ms + ", " + (enabled ? 1 : 0) + ", NOW())";
+}
+
+// Helper: DELETE the existing row for a table (synchronous — returns promise).
+function lhsSchedDelete(tblName) {
+  var safe = tblName.replace(/'/g, "''");
+  return dorisSQL('cache_system',
+    "DELETE FROM cache_system.lhs_schedule WHERE table_name='" + safe + "'"
+  );
+}
+
+// ============================================================
+// lhsSaveInterval — saves the chosen interval for a table.
+// Preserves the current enabled value. Does NOT start any timer.
+// Called by: lhsChangeSched (per-row dropdown) and lhsApplyScheduleToSelected (bulk).
+function lhsSaveInterval(tblName, ms) {
+  var safe = tblName.replace(/'/g, "''");
+  // Read current enabled so we don't clobber it
+  dorisSQL('cache_system',
+    "SELECT enabled FROM cache_system.lhs_schedule WHERE table_name='" + safe + "' LIMIT 1"
+  ).then(function(r) {
+    var en = r.rows.length ? (r.rows[0][0] === 1 || r.rows[0][0] === '1') : false;
+    return lhsSchedDelete(tblName).then(function() {
+      return dorisSQL('cache_system', lhsSchedInsertSQL(tblName, ms, en));
+    });
+  }).catch(function(e) {
+    console.warn('lhsSaveInterval failed for ' + tblName + ':', e);
+  });
+  // Update UI immediately — optimistic, don't wait for DB round-trip
+  var sel = document.getElementById('lhs-sched-' + tblName);
+  if (sel) sel.value = String(ms);
+  lhsUpdateRowButtons(tblName);
+}
+
+// ============================================================
+// loadLhsSchedules — restore saved schedules after table list renders.
+// Reads cache_system.lhs_schedule and restores timers for enabled tables.
+// Called once after loadLhsTables() finishes building lhsState.tables.
+// Works for any existing or future table — no hardcoding.
+function loadLhsSchedules() {
+  dorisSQL('cache_system',
+    "SELECT table_name, interval_ms, enabled FROM cache_system.lhs_schedule"
+  ).then(function(res) {
+    var idx    = res.idx;
+    var tblCol = idx['table_name']  != null ? idx['table_name']  : 0;
+    var msCol  = idx['interval_ms'] != null ? idx['interval_ms'] : 1;
+    var enCol  = idx['enabled']     != null ? idx['enabled']     : 2;
+    res.rows.forEach(function(r) {
+      var tbl     = r[tblCol] || '';
+      var ms      = parseInt(r[msCol]) || 0;
+      var enabled = r[enCol] === 1 || r[enCol] === '1' || r[enCol] === true;
+      if (!tbl) return;
+      var sel = document.getElementById('lhs-sched-' + tbl);
+      if (sel) sel.value = String(ms);
+      if (enabled && ms > 0) lhsSetTimer(tbl, ms);
+      lhsUpdateRowButtons(tbl);
+    });
+  }).catch(function(e) {
+    console.warn('loadLhsSchedules failed:', e);
+  });
+}
+
+// ============================================================
 // Start (or restart) a per-table refresh timer.
 // If the table is blocked, the timer is not started — it will be
-// started automatically when clearSyncError() succeeds.
+// started automatically when lhsClearAndResume() succeeds.
 function lhsSetTimer(tblName, ms) {
   // Clear any existing timer for this table
   if (lhsRefreshTimers[tblName]) {
@@ -1551,6 +1636,10 @@ function lhsShowInlineBlockedBanner(tblName) {
 }
 
 // Clear error log for a table and restart its refresh timer.
+// ============================================================
+// lhsClearAndResume — clears the error log then restores the
+// schedule from cache_system.lhs_schedule (not from memory).
+// ============================================================
 function lhsClearAndResume(tblName) {
   var bannerId = 'lhs-inline-err-' + tblName;
   var bannerRow = document.getElementById(bannerId);
@@ -1558,17 +1647,22 @@ function lhsClearAndResume(tblName) {
     var btn = bannerRow.querySelector('button');
     if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
   }
-  dorisSQL('cache_system', 'TRUNCATE TABLE cache_system.`' + tblName + '_log`')
+  dorisSQL('cache_system', 'TRUNCATE TABLE cache_system.`' + tblName.replace(/`/g,'') + '_log`')
     .then(function() {
       var t = lhsState.tables.find(function(x) { return x.tbl === tblName; });
       if (t) { t.blocked = false; t.blockedMsg = ''; t.status = 'completed upsert'; }
       if (bannerRow) bannerRow.parentNode.removeChild(bannerRow);
       renderLhsTables();
-      // Resume timer at previously configured interval
-      var timer = lhsRefreshTimers[tblName];
-      var ms = timer ? timer.intervalMs : 0;
-      if (ms) lhsSetTimer(tblName, ms);
-      // If detail panel is open for this table, update it
+      // Restore schedule from Doris lhs_schedule.
+      var safeName = tblName.replace(/'/g, "''");
+      dorisSQL('cache_system',
+        "SELECT interval_ms, enabled FROM cache_system.lhs_schedule WHERE table_name='" + safeName + "' LIMIT 1"
+      ).then(function(r) {
+        var ms      = r.rows.length ? (parseInt(r.rows[0][0]) || 0) : 0;
+        var enabled = r.rows.length ? (r.rows[0][1] === 1 || r.rows[0][1] === '1' || r.rows[0][1] === true) : false;
+        if (enabled && ms > 0) lhsSetTimer(tblName, ms);
+        lhsUpdateRowButtons(tblName);
+      }).catch(function() { lhsUpdateRowButtons(tblName); });
       if (lhsState.selTable && lhsState.selTable.tbl === tblName) {
         openLhsDetail(tblName);
       }
@@ -1583,99 +1677,147 @@ function lhsClearAndResume(tblName) {
     });
 }
 
-// Apply a schedule to all currently selected tables.
+// ============================================================
+// lhsApplyScheduleToSelected — saves the chosen interval to DB
+// for every selected table.  Does NOT start any timer.
+// The user must press Start to begin syncing.
+// ============================================================
 function lhsApplyScheduleToSelected() {
   var ms = parseInt(document.getElementById('lhs-bulk-interval').value) || 0;
+  var count = 0;
   Object.keys(lhsSelected).forEach(function(tblName) {
     if (!lhsSelected[tblName]) return;
-    lhsSetTimer(tblName, ms);
-    // Update the per-row dropdown to match
-    var sel = document.getElementById('lhs-sched-' + tblName);
-    if (sel) sel.value = String(ms);
-    lhsUpdateRowButtons(tblName);
+    lhsSaveInterval(tblName, ms);  // persists interval_ms; does NOT touch enabled
+    count++;
   });
-  // Show brief confirmation
   var msg = document.getElementById('lhs-bulk-msg');
   if (msg) {
     var label = LHS_INTERVALS.find(function(x) { return x.ms === ms; });
-    msg.textContent = ms
-      ? '✓ Schedule set to ' + (label ? label.label : ms + ' ms') + ' for ' + Object.keys(lhsSelected).filter(function(k){return lhsSelected[k];}).length + ' table(s)'
-      : '✓ Refresh disabled for selected table(s)';
+    var intervalText = ms ? (label ? label.label : ms + ' ms') : 'disabled';
+    msg.textContent = count
+      ? '✓ Interval ' + intervalText + ' saved for ' + count + ' table(s) — press Start to begin syncing'
+      : '';
     msg.style.color = '#17663A';
-    setTimeout(function() { msg.textContent = ''; }, 3000);
+    setTimeout(function() { msg.textContent = ''; }, 4000);
   }
 }
 
-// Start the refresh timer for all selected tables using their current dropdown interval.
+// ============================================================
+// lhsBulkStartSelected — starts syncing all selected tables,
+// persisting enabled=TRUE for each.
+// ============================================================
 function lhsBulkStartSelected() {
   var count = 0;
   Object.keys(lhsSelected).forEach(function(tblName) {
     if (!lhsSelected[tblName]) return;
-    var sel = document.getElementById('lhs-sched-' + tblName);
-    var ms  = sel ? (parseInt(sel.value) || 0) : 0;
-    if (!ms) {
-      // If no interval chosen yet, default to 5 min
-      ms = 300000;
-      if (sel) sel.value = '300000';
-    }
-    lhsSetTimer(tblName, ms);
-    lhsUpdateRowButtons(tblName);
+    lhsStartRow(tblName);  // each Start persists and fires immediately
     count++;
   });
   var msg = document.getElementById('lhs-bulk-msg');
   if (msg) {
-    msg.textContent = '▶ Started refresh for ' + count + ' table(s)';
+    msg.textContent = count ? '▶ Started refresh for ' + count + ' table(s)' : '';
     msg.style.color = '#17663A';
     setTimeout(function() { msg.textContent = ''; }, 3000);
   }
-  renderLhsTables();
 }
 
-// Stop the refresh timer for all selected tables.
+// ============================================================
+// lhsBulkStopSelected — stops syncing all selected tables,
+// persisting enabled=FALSE for each.
+// ============================================================
 function lhsBulkStopSelected() {
   var count = 0;
   Object.keys(lhsSelected).forEach(function(tblName) {
     if (!lhsSelected[tblName]) return;
-    lhsSetTimer(tblName, 0); // 0 = clear timer
-    lhsUpdateRowButtons(tblName);
+    lhsStopRow(tblName);  // each Stop persists and clears the timer
     count++;
   });
   var msg = document.getElementById('lhs-bulk-msg');
   if (msg) {
-    msg.textContent = '⏹ Stopped refresh for ' + count + ' table(s)';
+    msg.textContent = count ? '⏹ Stopped refresh for ' + count + ' table(s)' : '';
     msg.style.color = '#B42318';
     setTimeout(function() { msg.textContent = ''; }, 3000);
   }
-  renderLhsTables();
 }
 
-// Start the refresh timer for a single table row (▶ button).
+// ============================================================
+// lhsStartRow — persists enabled=1 to Doris, starts live timer,
+// fires one immediate status check.
+// ============================================================
 function lhsStartRow(tblName) {
   var sel = document.getElementById('lhs-sched-' + tblName);
   var ms  = sel ? (parseInt(sel.value) || 0) : 0;
-  if (!ms) {
-    ms = 300000; // default 5 min if no interval selected
-    if (sel) sel.value = '300000';
+  if (!ms) return;
+
+  function doStart() {
+    lhsSetTimer(tblName, ms);
+    lhsUpdateRowButtons(tblName);
+    renderLhsTables();
+    loadSingleLhsTable(tblName);
   }
-  lhsSetTimer(tblName, ms);
-  lhsUpdateRowButtons(tblName);
-  renderLhsTables();
+  lhsSchedDelete(tblName)
+    .then(function() {
+      return dorisSQL('cache_system', lhsSchedInsertSQL(tblName, ms, true));
+    })
+    .then(doStart)
+    .catch(function(e) {
+      console.warn('lhsStartRow persist failed for ' + tblName + ':', e);
+      doStart(); // start timer even if DB write failed — degrade gracefully
+    });
 }
 
-// Stop the refresh timer for a single table row (⏹ button).
+// ============================================================
+// lhsStopRow — persists enabled=0 to Doris, clears live timer.
+// Any batch already in progress is allowed to finish.
+// ============================================================
 function lhsStopRow(tblName) {
-  lhsSetTimer(tblName, 0);
-  lhsUpdateRowButtons(tblName);
-  renderLhsTables();
+  var safe = tblName.replace(/'/g, "''");
+  // Read current interval_ms so we preserve it in the re-insert
+  dorisSQL('cache_system',
+    "SELECT interval_ms FROM cache_system.lhs_schedule WHERE table_name='" + safe + "' LIMIT 1"
+  ).then(function(r) {
+    var ms = r.rows.length ? (parseInt(r.rows[0][0]) || 0) : 0;
+    return lhsSchedDelete(tblName).then(function() {
+      return dorisSQL('cache_system', lhsSchedInsertSQL(tblName, ms, false));
+    });
+  }).then(function() {
+    lhsSetTimer(tblName, 0);
+    lhsUpdateRowButtons(tblName);
+    renderLhsTables();
+  }).catch(function(e) {
+    console.warn('lhsStopRow persist failed for ' + tblName + ':', e);
+    lhsSetTimer(tblName, 0);
+    lhsUpdateRowButtons(tblName);
+    renderLhsTables();
+  });
 }
 
-// Update the Start/Stop button states for a single row without full re-render.
+// ============================================================
+// lhsUpdateRowButtons — refreshes Start/Stop enabled states for
+// a single row without triggering a full table re-render.
+//
+// Start is enabled when ALL of these are true:
+//   • interval_ms > 0 (an interval is selected in the dropdown)
+//   • timer is not already active
+//   • table is not errored/blocked
+//
+// Stop is enabled when the timer is currently active.
+// ============================================================
 function lhsUpdateRowButtons(tblName) {
-  var timer = lhsRefreshTimers[tblName];
-  var active = timer && timer.timerId && timer.intervalMs > 0;
+  var timer   = lhsRefreshTimers[tblName];
+  var active  = !!(timer && timer.timerId && timer.intervalMs > 0);
+  var entry   = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+  var blocked = entry && entry.blocked;
+
+  // Read the current interval from the per-row dropdown
+  var sel = document.getElementById('lhs-sched-' + tblName);
+  var ms  = sel ? (parseInt(sel.value) || 0) : 0;
+
+  var canStart = !active && !blocked && ms > 0;
+
   var startBtn = document.getElementById('lhs-start-' + tblName);
   var stopBtn  = document.getElementById('lhs-stop-'  + tblName);
-  if (startBtn) startBtn.disabled = !!active;
+  if (startBtn) startBtn.disabled = !canStart;
   if (stopBtn)  stopBtn.disabled  = !active;
 }
 
@@ -1707,8 +1849,9 @@ function lhsToggleAll(checked) {
 }
 
 // Change schedule for a single table from its inline dropdown.
+// Saves the new interval to DB only — does NOT start or stop the timer.
 function lhsChangeSched(tblName, ms) {
-  lhsSetTimer(tblName, ms);
+  lhsSaveInterval(tblName, ms);
 }
 
 // Modal state
@@ -1745,7 +1888,7 @@ function loadLhsTables() {
     "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME NOT LIKE '%\\_log' " +
     "AND TABLE_NAME NOT LIKE '%\\_deletes' " +
     "AND TABLE_NAME NOT IN ('backup_schedule','datetime_load_tracker','table_query_stats'," +
-    "'cache_eviction_log','table_cache_metrics','catalog_sync_log','query_block_log')" +
+    "'cache_eviction_log','table_cache_metrics','catalog_sync_log','query_block_log','lhs_schedule')" +
     " ORDER BY TABLE_NAME"
   ).then(function(res) {
     var names = res.rows.map(function(r) { return r[0]; });
@@ -1912,6 +2055,10 @@ function loadLhsTables() {
           });
 
           renderLhsTables();
+          // Restore persisted schedules now that the table rows exist in the DOM.
+          // This is the correct place — DOM rows must exist before dropdowns/buttons
+          // can be updated, and this runs for every new table automatically.
+          loadLhsSchedules();
         }); // end sourceSnapQuery.then
 
       }); // end lookupDone.then
@@ -2155,7 +2302,7 @@ function clearSyncError() {
   msgEl.style.color = '#4F5866';
   msgEl.textContent = 'Clearing…';
   // TRUNCATE cache_system.<table>_log
-  dorisSQL('cache_system', 'TRUNCATE TABLE cache_system.`' + t.tbl + '_log`')
+  dorisSQL('cache_system', 'TRUNCATE TABLE cache_system.`' + t.tbl.replace(/`/g,'') + '_log`')
     .then(function() {
       msgEl.textContent = 'Log cleared. Sync will resume on next run.';
       msgEl.style.color = '#17663A';
@@ -2168,10 +2315,16 @@ function clearSyncError() {
       // Also remove any inline banner row in the main table
       var bannerRow = document.getElementById('lhs-inline-err-' + t.tbl);
       if (bannerRow) bannerRow.parentNode.removeChild(bannerRow);
-      // Resume refresh timer at previously configured interval
-      var timer = lhsRefreshTimers[t.tbl];
-      var ms = timer ? timer.intervalMs : 0;
-      if (ms) lhsSetTimer(t.tbl, ms);
+      // Restore schedule from Doris lhs_schedule.
+      var safeTbl = t.tbl.replace(/'/g, "''");
+      dorisSQL('cache_system',
+        "SELECT interval_ms, enabled FROM cache_system.lhs_schedule WHERE table_name='" + safeTbl + "' LIMIT 1"
+      ).then(function(r) {
+        var ms      = r.rows.length ? (parseInt(r.rows[0][0]) || 0) : 0;
+        var enabled = r.rows.length ? (r.rows[0][1] === 1 || r.rows[0][1] === '1' || r.rows[0][1] === true) : false;
+        if (enabled && ms > 0) lhsSetTimer(t.tbl, ms);
+        lhsUpdateRowButtons(t.tbl);
+      }).catch(function() { lhsUpdateRowButtons(t.tbl); });
     })
     .catch(function(e) {
       msgEl.textContent = 'Could not clear log: ' + e.message;

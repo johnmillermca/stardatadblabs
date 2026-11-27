@@ -155,6 +155,5 @@ spec:
                       REFRESH TABLE mongodb.cache_testing.product_reviews;
                       REFRESH TABLE mongodb.cache_testing.order_items;
                       REFRESH TABLE mongodb.cache_testing.inventory_events;
-                      REFRESH TABLE mongodb.cache_testing.customers;
                     "
                   echo "[$(date -u +%FT%TZ)] Table refresh complete."

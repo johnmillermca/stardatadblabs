@@ -36,6 +36,14 @@ data:
     enable_file_cache = true
     file_cache_path = [{"path":"/opt/apache-doris/be/storage/segment_cache","total_size":214748364800,"query_limit":53687091200}]
 
+    # ── Group commit disabled globally ───────────────────────────────────────
+    # Setting group_commit_max_wal_num_per_table=0 prevents the BE from opening
+    # any WAL-based group commit batches. This eliminates the root cause of hung
+    # transactions: without a group commit WAL buffer, every INSERT is written
+    # directly to the tablet and committed atomically — no open transaction window
+    # that can be orphaned when a client connection is interrupted.
+    group_commit_max_wal_num_per_table = 0
+
     JAVA_OPTS = "-Xmx1024m -DlogPath=$STARDATA_HOME/log/jni.log"
 ---
 # Headless service — required by StatefulSet for stable per-pod DNS

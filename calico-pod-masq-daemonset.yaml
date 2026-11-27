@@ -1,0 +1,114 @@
+---
+# calico-pod-masq DaemonSet
+# Problem: Calico BPF mode sets NATout=0 on local-node pod veth interfaces.
+#   Pods on the same node as the BPF program are NOT masqueraded by Calico.
+#   All nodes route internet via WiFi (wlp2s0/wlp3s0), so raw 10.244.x.x
+#   source IPs are dropped by the WiFi router.
+# Fix: persistent nftables masquerade rule on every node, via systemd oneshot.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calico-pod-masq
+  namespace: kube-system
+  labels:
+    app: calico-pod-masq
+spec:
+  selector:
+    matchLabels:
+      app: calico-pod-masq
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 3
+  template:
+    metadata:
+      labels:
+        app: calico-pod-masq
+    spec:
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - master2.local
+      initContainers:
+        - name: install-masq
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+          command:
+            - sh
+            - -c
+            - |
+              NM="nsenter -t 1 -m --"
+              NODE=$(cat /proc/1/root/etc/hostname 2>/dev/null)
+              echo "[calico-pod-masq] Starting on ${NODE}"
+
+              # ── 1. Detect the WiFi interface (wlp2s0 or wlp3s0) ──────────
+              WIFI=""
+              for iface in wlp2s0 wlp3s0; do
+                $NM ip link show "$iface" >/dev/null 2>&1 && { WIFI="$iface"; break; }
+              done
+              if [ -z "$WIFI" ]; then
+                echo "[calico-pod-masq] ERROR: no wifi interface found (checked wlp2s0 wlp3s0)"
+                exit 1
+              fi
+              echo "[calico-pod-masq] WiFi interface: ${WIFI}"
+
+              # ── 2. Write /etc/nftables.conf on host (no heredoc) ──────────
+              printf '#!/usr/sbin/nft -f\n# calico-pod-masq: masquerade pod CIDR traffic exiting via WiFi.\n# Calico BPF sets NATout=0 for local-node pods; host must masquerade.\n# Managed by calico-pod-masq DaemonSet -- do not edit manually.\ntable ip calico-pod-masq {\n    chain postrouting {\n        type nat hook postrouting priority srcnat + 10;\n        ip saddr 10.244.0.0/16 oifname "%s" masquerade\n    }\n}\n' "${WIFI}" > /host/etc/nftables.conf
+              echo "[calico-pod-masq] /etc/nftables.conf written (iface=${WIFI})"
+
+              # ── 3. Write systemd service on host ──────────────────────────
+              printf '[Unit]\nDescription=Masquerade Calico pod CIDR via WiFi (calico-pod-masq)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/sbin/nft -f /etc/nftables.conf\nExecStop=/usr/sbin/nft delete table ip calico-pod-masq\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' > /host/etc/systemd/system/calico-pod-masq.service
+              echo "[calico-pod-masq] systemd service written"
+
+              # ── 4. Enable symlink + daemon-reload + start ─────────────────
+              mkdir -p /host/etc/systemd/system/multi-user.target.wants
+              ln -sf /etc/systemd/system/calico-pod-masq.service \
+                /host/etc/systemd/system/multi-user.target.wants/calico-pod-masq.service 2>/dev/null || true
+              $NM systemctl daemon-reload 2>/dev/null || true
+              $NM systemctl start calico-pod-masq.service 2>/dev/null
+              STATUS=$($NM systemctl is-active calico-pod-masq.service 2>/dev/null)
+              echo "[calico-pod-masq] service status: ${STATUS}"
+
+              # ── 5. Verify rule is live ────────────────────────────────────
+              RULE=$($NM nft list table ip calico-pod-masq 2>/dev/null | grep masquerade || true)
+              if [ -n "$RULE" ]; then
+                echo "[calico-pod-masq] OK nftables masquerade rule active"
+              else
+                echo "[calico-pod-masq] WARNING rule not found, applying directly"
+                $NM nft -f /etc/nftables.conf 2>/dev/null || true
+              fi
+
+              echo "[calico-pod-masq] Done on ${NODE}."
+
+      containers:
+        - name: pause
+          image: 192.168.1.50:30500/busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /

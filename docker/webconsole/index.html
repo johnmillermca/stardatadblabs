@@ -1,271 +1,2010 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>StarDataLabs — Sign in</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StarData · Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F4F6F9;font-family:Inter,system-ui,sans-serif;color:#14171C;min-height:100vh}
+a{color:#1F4FD8;text-decoration:none}
+a:hover{color:#163BA6}
 
-    body {
-      font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
-      background: #0b0b0f;
-      color: #f0f0f5;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-      overflow: hidden;
-    }
+/* ── sidebar nav (home page) ── */
+.nav{display:flex;align-items:center;gap:14px;min-height:48px;padding:0 14px;border-radius:10px;font:500 15px Inter,sans-serif;color:#2B313B;text-decoration:none;transition:background .12s}
+.nav:hover{background:#EEF1F5;color:#14171C}
+.navon{background:#E8EEFC;color:#1F3FB8;font-weight:600}
+.navon:hover{background:#E8EEFC;color:#1F3FB8}
+.sect{font:700 11px Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#9AA3B0;padding:16px 14px 4px}
 
-    .bg-arc {
-      position: fixed; bottom: -120px; left: -120px;
-      width: 520px; height: 520px; border-radius: 50%;
-      border: 1.5px solid rgba(139,92,246,0.35);
-      pointer-events: none; z-index: 0;
-    }
-    .bg-arc::after {
-      content: ''; position: absolute;
-      top: 60px; left: 60px; right: 60px; bottom: 60px;
-      border-radius: 50%; border: 1px solid rgba(139,92,246,0.15);
-    }
-    .bg-glow {
-      position: fixed; bottom: -200px; left: -200px;
-      width: 700px; height: 700px; border-radius: 50%;
-      background: radial-gradient(circle, rgba(109,40,217,0.12) 0%, transparent 65%);
-      pointer-events: none; z-index: 0;
-    }
+/* ── cards ── */
+.card{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.panel{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:14px;padding:28px;display:flex;flex-direction:column;gap:18px}
+.kpi{background:#FFFFFF;border:1px solid #E1E6ED;border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:6px}
 
-    .corner-brand {
-      position: fixed; top: 22px; left: 28px;
-      display: flex; align-items: center; gap: 11px; z-index: 100;
-    }
-    .corner-brand svg.icon { width: 56px; height: 56px; flex-shrink: 0; }
-    .corner-brand .wordmark { display: flex; flex-direction: column; line-height: 1; }
-    .corner-brand .brand-line {
-      font-size: 16px; font-weight: 900; letter-spacing: 0.03em;
-      text-transform: uppercase; white-space: nowrap; color: #c8c8d4;
-    }
+/* ── typography ── */
+.lbl{font:600 13px Inter,sans-serif;color:#2B313B}
+.hint{font:400 13px/1.5 Inter,sans-serif;color:#4F5866}
+.mval{font:700 20px Inter,sans-serif;color:#14171C}
+.mlabel{font:400 13px Inter,sans-serif;color:#4F5866}
+.badge{padding:4px 10px;border-radius:999px;background:#E8EEFC;color:#1F3FB8;font:600 12px Inter,sans-serif;white-space:nowrap}
 
-    .center-wrap {
-      display: flex; flex-direction: column; align-items: center;
-      width: 100%; max-width: 680px; padding: 20px 24px 48px;
-      position: relative; z-index: 1; text-align: center;
-    }
+/* ── buttons ── */
+.btnp{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF;font:600 14px Inter,sans-serif;cursor:pointer;text-decoration:none}
+.btnp:hover{background:#163BA6;border-color:#163BA6;color:#FFFFFF}
+.btnout{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer;text-decoration:none}
+.btnout:hover{background:#EEF1F5}
+.btnd{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 18px;border-radius:8px;border:1px solid #B42318;background:#FFFFFF;color:#B42318;font:600 14px Inter,sans-serif;cursor:pointer}
+.btnd:hover{background:#FFF5F5}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C;font:600 14px Inter,sans-serif;cursor:pointer}
+.btn:hover{background:#EEF1F5}
 
-    .hero-brand { margin-bottom: 36px; }
-    .hero-brand .hero-name {
-      display: flex; align-items: baseline; justify-content: center;
-      white-space: nowrap; line-height: 1;
-    }
-    .hero-brand .h-star, .hero-brand .h-data, .hero-brand .h-labs {
-      font-size: 52px; font-weight: 900; color: #d4d4de; letter-spacing: -2px;
-    }
-    .hero-brand .h-sub {
-      display: block; font-size: 11px; font-weight: 700;
-      letter-spacing: 0.48em; color: #8b8ba0;
-      text-transform: uppercase; margin-top: 8px;
-    }
+/* ── forms ── */
+.inp{box-sizing:border-box;width:100%;height:40px;padding:0 12px;border:1px solid #C4CCD8;border-radius:8px;background:#FFFFFF;font:400 14px Inter,sans-serif;color:#14171C}
+.inp:focus{outline:2px solid #1F4FD8;outline-offset:1px;border-color:#1F4FD8}
 
-    .tech-pills {
-      display: flex; flex-wrap: wrap; justify-content: center;
-      gap: 8px; margin-top: 18px; margin-bottom: 36px;
-    }
-    .pill {
-      font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
-      padding: 4px 13px; border-radius: 20px; white-space: nowrap;
-    }
-    .pill-stream   { background: rgba(14,165,233,0.12);  color: #38bdf8; border: 1px solid rgba(14,165,233,0.3); }
-    .pill-etl      { background: rgba(139,92,246,0.12);  color: #a78bfa; border: 1px solid rgba(139,92,246,0.3); }
-    .pill-graphrag { background: rgba(109,40,217,0.15);  color: #c4b5fd; border: 1px solid rgba(109,40,217,0.35); }
-    .pill-openrag  { background: rgba(16,185,129,0.1);   color: #34d399; border: 1px solid rgba(16,185,129,0.28); }
-    .pill-lakehouse{ background: rgba(255,255,255,0.06); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); }
+/* ── table ── */
+.th{padding:10px 14px;text-align:left;font:600 11px Inter,sans-serif;color:#4F5866;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #E1E6ED;white-space:nowrap;background:#FAFBFD}
+.td{padding:11px 14px;border-bottom:1px solid #EEF1F5;font:400 14px Inter,sans-serif;color:#14171C}
+.empty{padding:28px 14px;text-align:center;font:400 14px Inter,sans-serif;color:#4F5866}
 
-    .card {
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 14px; width: 100%; max-width: 400px;
-      padding: 32px 32px 28px; backdrop-filter: blur(8px);
-    }
+/* ── header tabs ── */
+.tab{display:inline-flex;align-items:center;min-height:44px;padding:0 18px;font:500 15px Inter,sans-serif;color:#4F5866;text-decoration:none;border-bottom:3px solid transparent;transition:color .12s}
+.tab:hover{color:#14171C}
+.tab-on{font-weight:600;color:#14171C;border-bottom:3px solid #1F4FD8}
 
-    .tabs {
-      display: flex; border-bottom: 1px solid rgba(255,255,255,0.1);
-      margin-bottom: 28px;
-    }
-    .tab {
-      flex: 1; text-align: center; padding: 10px 0;
-      font-size: 14px; font-weight: 600; color: #6b7280;
-      cursor: pointer; border-bottom: 2px solid transparent;
-      transition: color 0.15s, border-color 0.15s; user-select: none;
-    }
-    .tab.active { color: #a78bfa; border-bottom-color: #7c3aed; }
-    .tab:hover:not(.active) { color: #d1d5db; }
+/* ── sub-nav pills ── */
+.sub{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;border-radius:8px;font:600 13px Inter,sans-serif;color:#2B313B;text-decoration:none;border:1px solid transparent}
+.sub:hover{background:#EEF1F5}
 
-    .panel { display: none; }
-    .panel.active { display: block; }
+/* ── pill toggle ── */
+.pill-on{min-height:36px;padding:0 14px;border-radius:8px;cursor:pointer;font:600 14px Inter,sans-serif;border:1px solid #1F4FD8;background:#1F4FD8;color:#FFFFFF}
+.pill-off{min-height:36px;padding:0 14px;border-radius:8px;cursor:pointer;font:600 14px Inter,sans-serif;border:1px solid #C4CCD8;background:#FFFFFF;color:#14171C}
+.pill-on:hover{background:#163BA6;border-color:#163BA6}
+.pill-off:hover{background:#EEF1F5}
 
-    .field { margin-bottom: 16px; }
-    label {
-      display: block; font-size: 13px; font-weight: 600;
-      color: #9ca3af; margin-bottom: 6px;
-    }
-    .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* ── status dot ── */
+.dot-green{width:9px;height:9px;border-radius:50%;background:#17A34A;display:inline-block}
+.dot-orange{width:9px;height:9px;border-radius:50%;background:#D97706;display:inline-block}
+.dot-grey{width:9px;height:9px;border-radius:50%;background:#9AA3B0;display:inline-block}
+.dot-red{width:9px;height:9px;border-radius:50%;background:#B42318;display:inline-block}
 
-    input {
-      width: 100%; padding: 9px 12px;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 7px; color: #f0f0f5; font-size: 14px;
-      outline: none; transition: border-color 0.15s, box-shadow 0.15s;
-    }
-    input:focus {
-      border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,0.18);
-    }
-    input::placeholder { color: #4b5563; }
+/* ── pages ── */
+.page{display:none}
+.page-active{display:block}
 
-    .btn {
-      width: 100%; padding: 10px; border: none; border-radius: 7px;
-      font-size: 14px; font-weight: 700; cursor: pointer; margin-top: 8px;
-      transition: background 0.15s, box-shadow 0.15s; letter-spacing: 0.02em;
-    }
-    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
-    .btn-primary {
-      background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%);
-      color: #fff; box-shadow: 0 2px 12px rgba(109,40,217,0.4);
-    }
-    .btn-primary:hover:not(:disabled) {
-      background: linear-gradient(135deg, #5b21b6 0%, #6d28d9 100%);
-      box-shadow: 0 4px 18px rgba(109,40,217,0.5);
-    }
-    .btn-secondary {
-      background: transparent; color: #a78bfa;
-      border: 1.5px solid rgba(139,92,246,0.4);
-    }
-    .btn-secondary:hover { background: rgba(139,92,246,0.08); border-color: #7c3aed; }
+/* ── avatar ── */
+.avatar{width:32px;height:32px;border-radius:50%;background:#DCE7F7;color:#163BA6;display:inline-flex;align-items:center;justify-content:center;font:700 12px Inter,sans-serif;flex-shrink:0}
 
-    .divider {
-      display: flex; align-items: center; gap: 10px;
-      margin: 20px 0; color: #374151; font-size: 12px;
-    }
-    .divider::before, .divider::after {
-      content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.08);
-    }
-
-    .msg {
-      margin-top: 12px; padding: 10px 14px; border-radius: 8px;
-      font-size: 13px; line-height: 1.5; text-align: left; display: none;
-    }
-    .msg-error  { background: rgba(239,68,68,0.1);  border: 1px solid rgba(239,68,68,0.3);  color: #fca5a5; }
-    .msg-success{ background: rgba(34,197,94,0.1);  border: 1px solid rgba(34,197,94,0.3);  color: #86efac; }
-
-    .page-footer {
-      margin-top: 28px; font-size: 11.5px; color: #374151;
-      text-align: center; letter-spacing: 0.03em;
-    }
-  </style>
+/* ── code block ── */
+.code{margin:0;padding:12px 16px;background:#11151C;color:#DCE3EE;border-radius:0 0 10px 10px;font:400 12.5px/1.6 'JetBrains Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto}
+.sc{border:1px solid #E1E6ED;border-radius:10px;background:#FAFBFD}
+.sc summary{cursor:pointer;min-height:40px;display:flex;align-items:center;padding:0 14px;font:600 13px Inter,sans-serif;color:#1F4FD8}
+</style>
 </head>
 <body>
 
-  <div class="bg-glow"></div>
-  <div class="bg-arc"></div>
+<!-- ================================================================
+     PAGE: home  (sidebar layout, same as dashboard design)
+     ================================================================ -->
+<div id="page-home" class="page page-active">
+<div style="display:flex;flex-wrap:wrap;min-height:100vh">
 
-  <!-- Corner logo -->
-  <div class="corner-brand">
-    <svg class="icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="24" cy="24" r="22" fill="#1e0a3c" stroke="#a78bfa" stroke-width="1.5"/>
-      <path d="M8 30 Q13 41 24 42.5 Q35 41 40 30 Z" fill="#3b0f8c"/>
-      <path d="M9 31.5 Q14 28 19 31.5 Q24 35 29 31.5 Q34 28 39 31.5" stroke="#c4b5fd" stroke-width="1.6" fill="none"/>
-      <path d="M10 35 Q15 32 20 35 Q25 38 30 35 Q35 32 38 35" stroke="#a78bfa" stroke-width="1.2" fill="none" opacity="0.7"/>
-      <ellipse cx="24" cy="17" rx="7.5" ry="2.8" fill="#5b21b6" stroke="#ddd6fe" stroke-width="1.5"/>
-      <rect x="16.5" y="17" width="15" height="10" fill="#4c1d95" stroke="#ddd6fe" stroke-width="1.5"/>
-      <ellipse cx="24" cy="27" rx="7.5" ry="2.8" fill="#5b21b6" stroke="#ddd6fe" stroke-width="1.5"/>
-      <line x1="17" y1="22" x2="31" y2="22" stroke="#ddd6fe" stroke-width="1" opacity="0.6"/>
-      <ellipse cx="35.5" cy="20.5" rx="4.5" ry="1.8" fill="#3b0f8c" stroke="#c4b5fd" stroke-width="1.3"/>
-      <rect x="31" y="20.5" width="9" height="6" fill="#2e0a6e" stroke="#c4b5fd" stroke-width="1.3"/>
-      <ellipse cx="35.5" cy="26.5" rx="4.5" ry="1.8" fill="#3b0f8c" stroke="#c4b5fd" stroke-width="1.3"/>
-      <line x1="4" y1="18" x2="14" y2="18" stroke="#e9d5ff" stroke-width="1.6" stroke-dasharray="2.5 1.5"/>
-      <line x1="4" y1="22" x2="14" y2="22" stroke="#c4b5fd" stroke-width="1.4" stroke-dasharray="2.5 1.5" opacity="0.75"/>
-      <polyline points="11.5,15.5 15.5,18 11.5,20.5" stroke="#e9d5ff" stroke-width="1.6" fill="none"/>
-      <g transform="translate(33,11)">
-        <path d="M0,-6 L1.4,-1.4 L6,0 L1.4,1.4 L0,6 L-1.4,1.4 L-6,0 L-1.4,-1.4 Z" fill="#f5f3ff"/>
-        <circle cx="0" cy="0" r="1.4" fill="#ffffff"/>
-      </g>
-      <g transform="translate(13,11)">
-        <path d="M0,-3.5 L0.8,-0.8 L3.5,0 L0.8,0.8 L0,3.5 L-0.8,0.8 L-3.5,0 L-0.8,-0.8 Z" fill="#ddd6fe"/>
-      </g>
-    </svg>
-    <div class="wordmark">
-      <span class="brand-line">StarDataLabs</span>
+  <!-- sidebar -->
+  <aside style="flex:1 1 260px;max-width:300px;background:#FFFFFF;border-right:1px solid #E1E6ED;padding:20px 16px 32px;display:flex;flex-direction:column;gap:4px">
+    <div style="display:flex;align-items:center;gap:10px;padding:4px 14px 18px">
+      <!-- StarData logo mark -->
+      <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#14171C"/><path d="M16 7l2.6 5.6 6.1.7-4.5 4.1 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.1 6.1-.7z" fill="#FFFFFF"/></svg>
+      <div style="display:flex;flex-direction:column">
+        <span style="font:700 17px Inter,sans-serif">StarData</span>
+        <span style="font:400 12px Inter,sans-serif;color:#4F5866">Console</span>
+      </div>
+    </div>
+
+    <nav aria-label="Components" style="display:flex;flex-direction:column;gap:2px">
+      <a class="nav navon" href="#" aria-current="page" data-nav="home" onclick="return false;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
+        Home
+      </a>
+      <a class="nav" href="#" data-nav="etl">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v4a4 4 0 0 0 4 4h4a4 4 0 0 1 4 2"/></svg>
+        ETL Studio
+      </a>
+      <a class="nav" href="#" data-nav="documents">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+        Documents
+      </a>
+      <a class="nav" href="#" data-nav="stargraph">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8M16 7.5l-3 8M8.5 6h7"/></svg>
+        StarGraph
+      </a>
+      <a class="nav" href="#" data-nav="monitoring">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+        Monitoring
+      </a>
+      <a class="nav" href="#" data-nav="graphrag">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6.5 10.5l4-4M6.5 13.5l4 4"/><path d="M18 9l1 2.5L21.5 12 19 13l-1 2.5-1-2.5-2.5-1 2.5-.5z"/></svg>
+        GraphRAG
+      </a>
+      <a class="nav" href="#" data-nav="openrag">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v15H6a2 2 0 0 0-2 2z"/><path d="M4 20a2 2 0 0 0 2 1h12v-3"/><circle cx="11" cy="10" r="3"/><path d="M13.2 12.2L15.5 14.5"/></svg>
+        OpenRAG
+      </a>
+      <a class="nav" href="#" data-nav="stardata" id="sidebar-stardata" onclick="goStardata(); return false;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+        StarData
+      </a>
+      <a class="nav" href="#" data-nav="queryspace">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
+        QuerySpace
+      </a>
+    </nav>
+
+    <div class="sect">Access control</div>
+    <nav aria-label="Access control" style="display:flex;flex-direction:column;gap:2px">
+      <a class="nav" href="#" data-nav="members">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/></svg>
+        <span style="flex:1">Members</span>
+        <span style="min-width:24px;height:24px;border-radius:999px;background:#B23C0E;color:#FFFFFF;font:700 12px Inter,sans-serif;display:inline-flex;align-items:center;justify-content:center" aria-label="2 waiting">2</span>
+      </a>
+      <a class="nav" href="#" data-nav="access">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+        Access
+      </a>
+    </nav>
+
+    <!-- sign-out at bottom -->
+    <div style="margin-top:auto;padding-top:16px;border-top:1px solid #E1E6ED">
+      <a class="nav" href="#" style="color:#4F5866" onclick="alert('Signed out'); return false;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Sign out
+      </a>
+    </div>
+  </aside>
+
+  <!-- main content -->
+  <main style="flex:999 1 640px;min-width:0;padding:40px 48px 64px;display:flex;flex-direction:column;gap:28px;max-width:1180px">
+
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <h1 style="margin:0;font:700 38px Inter,sans-serif;letter-spacing:-0.01em">Welcome back, John</h1>
+      <span style="font:400 17px Inter,sans-serif;color:#4F5866">You see a tile for each component you have a role for.</span>
+    </div>
+
+    <!-- pending members banner -->
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;padding:18px 22px;background:#FDF3E7;border:1px solid #F0D3AE;border-radius:14px">
+      <div style="display:flex;align-items:center;gap:14px;font:400 15px Inter,sans-serif;color:#5A2C00">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#B23C0E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/></svg>
+        <span><strong style="color:#8A2C05">2 people are waiting for access.</strong> Approve them and choose a level for each component.</span>
+      </div>
+      <a href="#" class="btnout" style="border-color:#E0B07A;color:#8A2C05" onclick="return false;">Review requests</a>
+    </div>
+
+    <!-- component tiles -->
+    <section aria-labelledby="h-comp" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px">
+        <h2 id="h-comp" style="margin:0;font:700 22px Inter,sans-serif">Your components</h2>
+        <span class="mlabel">Figures appear once each component is connected.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px">
+        <!-- StarData tile -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">StarData</span>
+            <span class="badge">engineer</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Warehouse and lakehouse: catalog, backups and connected data sources.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Service status</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Storage used</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last backup</span></div>
+          </div>
+          <div style="margin-top:auto">
+            <a class="btnp" href="#" onclick="goStardata(); return false;">Open StarData</a>
+          </div>
+        </div>
+        <!-- ETL Studio tile -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">ETL Studio</span>
+            <span class="badge">admin</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Flink and SQLMesh canvases, CDC, schedules and document sources.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Pipelines running</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Failed runs (24h)</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Next run</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open ETL Studio</a></div>
+        </div>
+        <!-- Documents -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">Documents</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Upload and manage the documents your search and RAG apps use.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Documents</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Waiting to process</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last upload</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open Documents</a></div>
+        </div>
+        <!-- StarGraph -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">StarGraph</span>
+            <span class="badge">engineer</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Memgraph graph from Iceberg tables. Query, explore and download.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Nodes</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Relationships</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last build</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open StarGraph</a></div>
+        </div>
+        <!-- Monitoring -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">Monitoring</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Health, alerts and incidents across every component.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Open alerts</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Healthy components</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Last incident</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnp" href="#" onclick="return false;">Open Monitoring</a></div>
+        </div>
+        <!-- QuerySpace -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <span style="font:700 20px Inter,sans-serif">QuerySpace</span>
+          </div>
+          <span style="font:400 14px/1.5 Inter,sans-serif;color:#3A414D">Write, save and share SQL queries against your warehouse and sources.</span>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:14px 0;border-top:1px solid #EEF1F5;border-bottom:1px solid #EEF1F5">
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Saved queries</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Queries today</span></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><span class="mval">—</span><span class="mlabel">Shared with you</span></div>
+          </div>
+          <div style="margin-top:auto"><a class="btnout" href="#" onclick="return false;">Open QuerySpace</a></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- access + activity cards -->
+    <div style="display:flex;flex-wrap:wrap;gap:18px">
+      <section aria-labelledby="h-acc" class="card" style="flex:1 1 400px">
+        <h2 id="h-acc" style="margin:0;font:700 20px Inter,sans-serif">Your access</h2>
+        <div style="display:flex;flex-direction:column">
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span style="color:#4F5866">Platform</span><span style="font-weight:700">Owner</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span style="color:#4F5866">Signed in with</span><span>Password and authenticator app</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0"><span style="color:#4F5866">Session ends</span><span>After 1 day idle or 7 days total</span></div>
+        </div>
+        <span style="font:400 13px Inter,sans-serif;color:#4F5866">Roles are set by an Owner or Admin. <a href="#" onclick="return false;">Change your password</a> on the sign-in page.</span>
+      </section>
+      <section aria-labelledby="h-act" class="card" style="flex:1 1 400px">
+        <h2 id="h-act" style="margin:0;font:700 20px Inter,sans-serif">Recent activity</h2>
+        <div style="display:flex;flex-direction:column">
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0;border-bottom:1px solid #EEF1F5"><span>Approved Priya Shah as StarData analyst</span><span style="color:#4F5866;white-space:nowrap">Yesterday</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;font:400 14px Inter,sans-serif;padding:8px 0"><span>Issued a new app password for reporting-bi</span><span style="color:#4F5866;white-space:nowrap">Nov 2</span></div>
+        </div>
+        <a href="#" style="font:500 14px Inter,sans-serif" onclick="return false;">See all activity in Access</a>
+      </section>
+    </div>
+
+  </main>
+</div>
+</div><!-- end page-home -->
+
+
+<!-- ================================================================
+     PAGE: stardata  (top-nav layout: Warehouse + Data sources tabs)
+     ================================================================ -->
+<div id="page-stardata" class="page">
+
+  <!-- top header -->
+  <header style="background:#FFFFFF;border-bottom:1px solid #E1E6ED;position:sticky;top:0;z-index:100">
+    <div style="max-width:1360px;margin:0 auto;padding:14px 32px 0;display:flex;flex-direction:column;gap:0">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding-bottom:12px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#14171C"/><path d="M16 7l2.6 5.6 6.1.7-4.5 4.1 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.1 6.1-.7z" fill="#FFFFFF"/></svg>
+          <span style="font:700 18px Inter,sans-serif">StarData</span>
+          <span style="font:500 14px Inter,sans-serif;color:#4F5866;padding-left:12px;border-left:1px solid #E1E6ED">Acme Corp</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <span style="display:inline-flex;align-items:center;gap:8px;font:500 13px Inter,sans-serif;color:#2B313B">
+            <span class="avatar">JD</span>Admin
+          </span>
+          <!-- Sign out -->
+          <a href="#" onclick="goHome(); return false;" style="display:inline-flex;align-items:center;gap:6px;font:500 13px Inter,sans-serif;color:#4F5866;padding:6px 12px;border:1px solid #E1E6ED;border-radius:8px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            Sign out
+          </a>
+        </div>
+      </div>
+      <!-- tabs -->
+      <nav aria-label="Console" style="display:flex;gap:4px">
+        <a href="#" onclick="goHome(); return false;" style="display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:0 18px 0 0;margin-right:8px;border-right:1px solid #E1E6ED;font:500 15px Inter,sans-serif;color:#4F5866;text-decoration:none;border-bottom:3px solid transparent">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Home
+        </a>
+        <a href="#" id="tab-warehouse" class="tab tab-on" onclick="showTab('warehouse'); return false;">Warehouse</a>
+        <a href="#" id="tab-lakehouse" class="tab" onclick="showTab('lakehouse'); return false;">Data sources</a>
+        <a href="#" id="tab-lhsync"    class="tab" onclick="showTab('lhsync');    return false;">Lakehouse sync</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ── WAREHOUSE SUB-PAGE ── -->
+  <div id="sub-warehouse" style="display:block">
+  <main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+    <nav aria-label="On this page" style="display:flex;flex-wrap:wrap;gap:6px">
+      <a class="sub" href="#wh-overview">Overview</a>
+      <a class="sub" href="#wh-catalog">Data catalog</a>
+      <a class="sub" href="#wh-backup">Backup &amp; recovery</a>
+    </nav>
+
+    <!-- Overview KPIs -->
+    <section id="wh-overview" aria-labelledby="h-ov" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px">
+        <h1 id="h-ov" style="margin:0;font:700 26px Inter,sans-serif">Overview</h1>
+        <span class="hint">Live values appear once the console is connected to your workspace.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+        <div class="kpi">
+          <span class="lbl">Service status</span>
+          <span id="kpi-status" style="display:inline-flex;align-items:center;gap:8px;font:700 24px Inter,sans-serif"><span id="kpi-status-dot" class="dot-grey"></span><span id="kpi-status-val">—</span></span>
+          <span class="hint">Healthy, Degraded or Outage, against your SLA</span>
+        </div>
+        <div class="kpi">
+          <span class="lbl">Storage used</span>
+          <span id="kpi-storage" style="font:700 24px Inter,sans-serif">—</span>
+          <span id="kpi-storage-hint" class="hint">Hot: — · Cold (moved after 1 day): —</span>
+        </div>
+        <div class="kpi">
+          <span class="lbl">Last backup</span>
+          <span id="kpi-last-backup" style="font:700 24px Inter,sans-serif">None yet</span>
+          <span id="kpi-last-backup-hint" class="hint">Automatic backups are off</span>
+        </div>
+        <div class="kpi">
+          <span class="lbl">Data freshness</span>
+          <span id="kpi-freshness" style="font:700 24px Inter,sans-serif">—</span>
+          <span class="hint">Oldest source sync · <a href="#" onclick="showTab('lakehouse'); return false;">View data sources</a></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Data catalog -->
+    <section id="wh-catalog" aria-labelledby="h-cat" class="panel">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h2 id="h-cat" style="margin:0;font:700 22px Inter,sans-serif">Data catalog</h2>
+        <span class="hint">Every database and table in your warehouse and connected sources.</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="ct-q">Search</label>
+          <input class="inp" id="ct-q" type="search" placeholder="Table or database name" oninput="filterCatalog()">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="ct-src">Source</label>
+          <select class="inp" id="ct-src" onchange="filterCatalog()">
+            <option value="all">All sources</option>
+            <option value="warehouse">Warehouse</option>
+            <option value="polaris">Lakehouse</option>
+            <option value="databricks">Databricks</option>
+            <option value="postgres">PostgreSQL</option>
+            <option value="oracle">Oracle</option>
+            <option value="mongodb">MongoDB</option>
+            <option value="snowflake">Snowflake</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="ct-db">Database</label>
+          <select class="inp" id="ct-db" onchange="filterCatalog()">
+            <option value="all">All databases</option>
+          </select>
+        </div>
+      </div>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:900px">
+          <thead>
+            <tr>
+              <th class="th">Table</th>
+              <th class="th">Database</th>
+              <th class="th">Source</th>
+              <th class="th">Format</th>
+              <th class="th">Cold storage</th>
+              <th class="th">Last updated</th>
+            </tr>
+          </thead>
+          <tbody id="catalog-body"></tbody>
+        </table>
+      </div>
+      <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    </section>
+
+    <!-- Backup & recovery -->
+    <section id="wh-backup" aria-labelledby="h-bk" class="panel">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h2 id="h-bk" style="margin:0;font:700 22px Inter,sans-serif">Backup &amp; recovery</h2>
+        <span class="hint">Back up a database or chosen tables, keep snapshots on a schedule, and restore any snapshot.</span>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:24px">
+        <!-- Back up now -->
+        <div style="flex:2 1 500px;min-width:0;display:flex;flex-direction:column;gap:14px">
+          <span style="font:700 16px Inter,sans-serif">Back up now</span>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="lbl" for="bk-db">Database</label>
+              <select class="inp" id="bk-db" onchange="updateBkTables()">
+                <option value="">Loading databases…</option>
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="lbl" for="bk-lab">Snapshot name</label>
+              <input class="inp" id="bk-lab" type="text" placeholder="mydb_2026_11_23">
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="bk-tables-sel">Tables
+              <span style="font-weight:400;color:#4F5866"> — hold Ctrl / ⌘ to pick multiple · leave blank to back up whole database</span>
+            </label>
+            <select class="inp" id="bk-tables-sel" multiple disabled
+              style="height:120px;padding:6px 8px;font:400 14px Inter,sans-serif">
+              <option value="" disabled>Select a database above…</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button class="btnp" onclick="doBackup()">Back up now</button>
+            <span id="bk-msg" style="font:500 14px Inter,sans-serif"></span>
+          </div>
+        </div>
+
+        <!-- Auto backups -->
+        <div style="flex:1 1 300px;min-width:0;display:flex;flex-direction:column;gap:14px;padding:20px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:12px">
+          <span style="font:700 16px Inter,sans-serif">Automatic backups</span>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span class="lbl">Frequency</span>
+            <div style="display:flex;flex-wrap:wrap;gap:8px" id="freq-group">
+              <button class="pill-on" data-freq="off" onclick="setPill('freq',this)">Off</button>
+              <button class="pill-off" data-freq="daily" onclick="setPill('freq',this)">Daily</button>
+              <button class="pill-off" data-freq="weekly" onclick="setPill('freq',this)">Weekly</button>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span class="lbl">Keep snapshots for</span>
+            <div style="display:flex;flex-wrap:wrap;gap:8px" id="ret-group">
+              <button class="pill-off" data-ret="7" onclick="setPill('ret',this)">7 days</button>
+              <button class="pill-on" data-ret="14" onclick="setPill('ret',this)">14 days</button>
+              <button class="pill-off" data-ret="30" onclick="setPill('ret',this)">30 days</button>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <button class="btn" onclick="saveSched()">Save schedule</button>
+            <span id="sched-msg" style="font:500 14px Inter,sans-serif"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Snapshots table -->
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px">
+        <span style="font:700 16px Inter,sans-serif">Snapshots</span>
+        <span class="hint">Stored in s3://xdatatoiceberg1/stardata-backups/ · refreshed every 30 s</span>
+      </div>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:760px">
+          <thead>
+            <tr>
+              <th class="th">Snapshot</th>
+              <th class="th">Database</th>
+              <th class="th">Tables</th>
+              <th class="th">Taken</th>
+              <th class="th">Status</th>
+              <th class="th" style="text-align:right;padding-right:16px">Recovery</th>
+            </tr>
+          </thead>
+          <tbody id="snapshots-body">
+            <tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Point-in-time Recovery (PITR) -->
+      <div style="display:flex;flex-direction:column;gap:14px;padding:20px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:12px">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font:700 16px Inter,sans-serif">Point-in-time recovery</span>
+          <span class="hint">Pick a database, choose a snapshot timestamp, then optionally narrow to specific tables. Leave tables unticked to restore the whole database.</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="pitr-db">1 · Database</label>
+            <select class="inp" id="pitr-db" onchange="onPitrDbChange()">
+              <option value="">Loading databases…</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="pitr-snap">2 · Snapshot (point in time)</label>
+            <select class="inp" id="pitr-snap" onchange="onPitrSnapChange()" disabled>
+              <option value="">— select a database first —</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="pitr-tables-sel">3 · Tables to restore
+            <span style="font-weight:400;color:#4F5866"> — hold Ctrl / ⌘ to pick multiple · leave blank to restore whole database</span>
+          </label>
+          <select class="inp" id="pitr-tables-sel" multiple disabled
+            style="height:120px;padding:6px 8px;font:400 14px Inter,sans-serif">
+            <option value="" disabled>Select a snapshot above…</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <button class="btnd" id="pitr-restore-btn" onclick="startPitrRestore()" disabled
+            style="opacity:.5">Restore to this point</button>
+          <span id="pitr-msg" style="font:500 14px Inter,sans-serif"></span>
+        </div>
+      </div>
+
+      <!-- Restore confirm panel (shared by snapshot row + PITR) -->
+      <div id="restore-panel" style="display:none;flex-direction:column;gap:12px;padding:20px;background:#FFF6F5;border:1px solid #F1C4BF;border-radius:12px">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font:700 16px Inter,sans-serif">Confirm restore — <span id="rs-label"></span></span>
+          <span class="hint">Restoring <strong id="rs-what"></strong> to snapshot taken <strong id="rs-when"></strong>. Current data will be overwritten. This cannot be undone.</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+          <div style="flex:1 1 260px;display:flex;flex-direction:column;gap:6px">
+            <label class="lbl" for="rs-cf">Type the snapshot name to confirm</label>
+            <input class="inp" id="rs-cf" type="text" placeholder="">
+          </div>
+          <button class="btnd" onclick="doRestore()">Restore</button>
+          <button class="btn" onclick="cancelRestore()">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+  </div><!-- end sub-warehouse -->
+
+  <!-- ── DATA SOURCES / LAKEHOUSE SUB-PAGE ── -->
+  <div id="sub-lakehouse" style="display:none">
+  <main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+    <section aria-labelledby="h-src" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h1 id="h-src" style="margin:0;font:700 26px Inter,sans-serif">Connected sources</h1>
+        <span class="hint">Lakehouse sources are copied into open Iceberg tables and kept fresh on a schedule. Snowflake is queried live.</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px" id="sources-grid">
+        <!-- Rendered by JS -->
+      </div>
+      <span id="src-msg" style="font:500 14px Inter,sans-serif;color:#17663A;display:none"></span>
+    </section>
+
+    <!-- Tables panel for selected source -->
+    <section aria-labelledby="h-tb" class="panel">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <h2 id="h-tb" style="margin:0;font:700 22px Inter,sans-serif" id="sel-title">Select a source above</h2>
+          <span class="hint" id="sel-hint"></span>
+        </div>
+        <div style="flex:0 1 240px;display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="src-db">Database</label>
+          <select class="inp" id="src-db" onchange="filterSrcTables()">
+            <option value="all">All databases</option>
+          </select>
+        </div>
+      </div>
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:720px">
+          <thead>
+            <tr>
+              <th class="th">Table</th>
+              <th class="th">Database</th>
+              <th class="th">Format</th>
+              <th class="th">Last updated</th>
+              <th class="th">Size</th>
+            </tr>
+          </thead>
+          <tbody id="src-tables-body">
+            <tr><td colspan="5" class="empty">Select a source above to see its tables.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    </section>
+
+  </main>
+  </div><!-- end sub-lakehouse -->
+
+  <!-- ── LAKEHOUSE SYNC SUB-PAGE ── -->
+  <div id="sub-lhsync" style="display:none">
+  <main style="max-width:1360px;margin:0 auto;padding:24px 32px 64px;display:flex;flex-direction:column;gap:24px">
+
+    <section aria-labelledby="h-lhs" style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <h1 id="h-lhs" style="margin:0;font:700 26px Inter,sans-serif">Lakehouse tables</h1>
+          <span class="hint">Iceberg tables via JDBC · Every 6 h · hot tables every 5 min</span>
+        </div>
+        <button class="btnp" id="btn-create-iceberg" onclick="openCreateIceberg()">+ Create Iceberg Table</button>
+      </div>
+
+      <!-- Database filter -->
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <label class="lbl" for="lhs-db-filter">Database</label>
+          <select class="inp" id="lhs-db-filter" style="min-width:200px" onchange="renderLhsTables()">
+            <option value="all">All databases</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Synced tables -->
+      <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;min-width:960px">
+          <thead>
+            <tr>
+              <th class="th">Table</th>
+              <th class="th">Database</th>
+              <th class="th">Format</th>
+              <th class="th">Last updated</th>
+              <th class="th">Size</th>
+              <th class="th">Sync status</th>
+              <th class="th" style="text-align:right;padding-right:16px">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="lhs-tables-body">
+            <tr><td colspan="7" class="empty">No tables found for this source.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <span class="hint">Table names are examples. Last updated and size load when connected.</span>
+    </section>
+
+    <!-- Per-table sync detail panel -->
+    <section id="lhs-detail-panel" class="panel" style="display:none">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font:700 18px Inter,sans-serif" id="lhd-title">—</span>
+          <span class="hint" id="lhd-target">—</span>
+        </div>
+        <button class="btn" onclick="closeLhsDetail()">Close</button>
+      </div>
+
+      <!-- KPI row -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px">
+        <div class="kpi"><span class="lbl">Last snap_id</span><span id="lhd-snapid" style="font:700 20px Inter,sans-serif">—</span></div>
+        <div class="kpi"><span class="lbl">Last batch</span><span id="lhd-lastbatch" style="font:700 20px Inter,sans-serif">—</span></div>
+        <div class="kpi"><span class="lbl">Rows upserted</span><span id="lhd-upserted" style="font:700 20px Inter,sans-serif">—</span></div>
+        <div class="kpi"><span class="lbl">Rows deleted</span><span id="lhd-deleted" style="font:700 20px Inter,sans-serif">—</span></div>
+        <div class="kpi"><span class="lbl">Status</span><span id="lhd-status" style="font:700 20px Inter,sans-serif">—</span></div>
+      </div>
+
+      <!-- Error / blocked banner -->
+      <div id="lhd-blocked-banner" style="display:none;padding:14px 18px;background:#FFF5F5;border:1px solid #F1C4BF;border-radius:10px;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="display:inline-flex;align-items:center;gap:6px;font:700 14px Inter,sans-serif;color:#B42318">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            Blocked
+          </span>
+          <span id="lhd-blocked-msg" style="font:400 14px Inter,sans-serif;color:#3A414D"></span>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btnd" onclick="clearSyncError()">Clear error and resume</button>
+          <span id="lhd-clear-msg" style="font:500 13px Inter,sans-serif;align-self:center"></span>
+        </div>
+      </div>
+
+      <!-- Batch history -->
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <span style="font:700 15px Inter,sans-serif">Recent batches</span>
+        <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+          <table style="width:100%;border-collapse:collapse;min-width:900px">
+            <thead>
+              <tr>
+                <th class="th">Batch</th>
+                <th class="th">Type</th>
+                <th class="th">snap_id from → to</th>
+                <th class="th">Rows</th>
+                <th class="th">max(created_at)</th>
+                <th class="th">max(updated_at)</th>
+                <th class="th">Status</th>
+                <th class="th">Started</th>
+                <th class="th">Finished</th>
+              </tr>
+            </thead>
+            <tbody id="lhd-batches-body">
+              <tr><td colspan="9" class="empty">No batches yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+  </div><!-- end sub-lhsync -->
+
+  <!-- ═══════════════════════════════════════════════════════════
+       CREATE ICEBERG TABLE MODAL
+       ═══════════════════════════════════════════════════════════ -->
+  <div id="modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;overflow-y:auto;padding:40px 20px" onclick="if(event.target===this)closeCreateIceberg()">
+    <div style="max-width:720px;margin:0 auto;background:#FFFFFF;border-radius:16px;padding:32px;display:flex;flex-direction:column;gap:22px" onclick="event.stopPropagation()">
+
+      <!-- Modal header -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font:700 22px Inter,sans-serif">Create Iceberg Table</span>
+          <span class="hint">Select a Stardata table to publish to the Polaris Iceberg catalog. Only tables created with <code style="background:#F4F6F9;padding:1px 5px;border-radius:4px;font-size:12px">stardata.table_type=iceberg</code> appear here.</span>
+        </div>
+        <button onclick="closeCreateIceberg()" style="background:none;border:none;cursor:pointer;color:#4F5866;padding:4px;line-height:0">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <!-- Step 1: table picker -->
+      <div id="cim-step1" style="display:flex;flex-direction:column;gap:14px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-table-sel">Source table <span style="font-weight:400;color:#4F5866">(cache_system — iceberg-eligible only)</span></label>
+          <select class="inp" id="cim-table-sel" onchange="onCimTableChange()">
+            <option value="">Loading eligible tables…</option>
+          </select>
+          <span id="cim-table-hint" class="hint"></span>
+        </div>
+
+        <!-- DB disambiguation (shown when >1 app DB matches) -->
+        <div id="cim-db-picker" style="display:none;flex-direction:column;gap:6px">
+          <label class="lbl" for="cim-db-sel">Source database <span style="font-weight:400;color:#B42318">— more than one database has this table name. Pick the source:</span></label>
+          <select class="inp" id="cim-db-sel" onchange="onCimDbPick()">
+            <option value="">— select —</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Preview panel (shown after table resolved) -->
+      <div id="cim-preview" style="display:none;flex-direction:column;gap:16px">
+
+        <!-- Source / target summary -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div style="padding:14px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:10px;display:flex;flex-direction:column;gap:4px">
+            <span class="lbl">Source (Stardata)</span>
+            <span id="cim-src-label" style="font:600 15px Inter,sans-serif;color:#14171C">—</span>
+          </div>
+          <div style="padding:14px;background:#F7F9FC;border:1px solid #E1E6ED;border-radius:10px;display:flex;flex-direction:column;gap:4px">
+            <span class="lbl">Target (Polaris Iceberg)</span>
+            <span id="cim-tgt-label" style="font:600 15px Inter,sans-serif;color:#1F4FD8">—</span>
+          </div>
+        </div>
+
+        <!-- Column checks -->
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <span style="font:700 14px Inter,sans-serif">Required column checks</span>
+          <div id="cim-col-checks" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+        </div>
+
+        <!-- Primary key -->
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font:700 14px Inter,sans-serif">Primary key (merge identifier)</span>
+          <span id="cim-pk-label" class="hint">—</span>
+        </div>
+
+        <!-- Type mapping table -->
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <span style="font:700 14px Inter,sans-serif">Column type mapping</span>
+          <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
+            <table style="width:100%;border-collapse:collapse;min-width:460px">
+              <thead>
+                <tr>
+                  <th class="th">Column</th>
+                  <th class="th">Doris type</th>
+                  <th class="th">Iceberg type</th>
+                  <th class="th">Note</th>
+                </tr>
+              </thead>
+              <tbody id="cim-col-map-body">
+                <tr><td colspan="4" class="empty">Select a table above.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Validation error message -->
+        <div id="cim-validation-err" style="display:none;padding:12px 16px;background:#FFF5F5;border:1px solid #F1C4BF;border-radius:8px;font:500 14px Inter,sans-serif;color:#B42318"></div>
+
+        <!-- Iceberg already exists warning -->
+        <div id="cim-exists-warn" style="display:none;flex-direction:column;gap:8px;padding:12px 16px;background:#FDF3E7;border:1px solid #F0D3AE;border-radius:8px">
+          <span style="font:700 14px Inter,sans-serif;color:#8A4B00">&#9888; Iceberg table already exists</span>
+          <span id="cim-exists-msg" class="hint"></span>
+          <div style="display:flex;gap:8px">
+            <button class="btn" onclick="cimChooseReuse()">Reuse existing</button>
+            <button class="btnd" onclick="cimChooseDrop()">Drop and recreate</button>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:4px;border-top:1px solid #EEF1F5">
+          <button class="btnp" id="cim-create-btn" onclick="doCreateIceberg()" disabled style="opacity:.5">Create and start sync</button>
+          <button class="btnout" onclick="closeCreateIceberg()">Cancel</button>
+          <span id="cim-create-msg" style="font:500 14px Inter,sans-serif"></span>
+        </div>
+      </div>
+
+      <!-- Progress / result (shown after Create clicked) -->
+      <div id="cim-progress" style="display:none;flex-direction:column;gap:14px">
+        <div id="cim-steps-list" style="display:flex;flex-direction:column;gap:8px"></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;padding-top:8px">
+          <button class="btnout" id="cim-done-btn" onclick="closeCreateIceberg()" style="display:none">Done</button>
+        </div>
+      </div>
+
     </div>
   </div>
 
-  <div class="center-wrap">
+</div><!-- end page-stardata -->
 
-    <!-- Hero brand -->
-    <div class="hero-brand">
-      <div class="hero-name">
-        <span class="h-star">Star</span><span class="h-data">Data</span><span class="h-labs">Labs</span>
-      </div>
-      <span class="h-sub">Realtime &middot; Agentic AI &middot; Lakehouse &middot; Extreme Performance</span>
-    </div>
 
-    <!-- Tech pills -->
-    <div class="tech-pills">
-      <span class="pill pill-stream">Realtime Streaming</span>
-      <span class="pill pill-etl">ETL / ELT</span>
-      <span class="pill pill-graphrag">GraphRAG</span>
-      <span class="pill pill-openrag">OpenRAG</span>
-      <span class="pill pill-lakehouse">Lakehouse</span>
-    </div>
+<script>
+// ============================================================
+// DATA  — external catalog sources (Data sources tab)
+// ============================================================
+var CATALOG_TABLES = [
+  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'events',       fmt:'Native',     cold:'After 1 day' },
+  { src:'warehouse', srcName:'Warehouse',  db:'mydb',          t:'lookup_table', fmt:'Native',     cold:'After 1 day' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'store_sales',  fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'inventory',    fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_sales',    fmt:'Iceberg',    cold:'Object storage' },
+  { src:'polaris',   srcName:'Lakehouse',  db:'tpcds_sf10tcl', t:'web_returns',  fmt:'Iceberg',    cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'customers',    fmt:'Delta Lake', cold:'Object storage' },
+  { src:'databricks',srcName:'Databricks', db:'lakehouse_db',  t:'product',      fmt:'Delta Lake', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'products',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'postgres',  srcName:'PostgreSQL', db:'public',        t:'product_reviews',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'warehouse',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'tpcds',         t:'income_band',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'CUSTOMERS',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'ORDERS',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'oracle',    srcName:'Oracle',     db:'CACHE_TESTING', t:'PRODUCTS',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'customers',    fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'orders',       fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'products',     fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'product_reviews', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'order_items',  fmt:'CDC (live)', cold:'Object storage' },
+  { src:'mongodb',   srcName:'MongoDB',    db:'cache_testing', t:'inventory_events', fmt:'CDC (live)', cold:'Object storage' },
+  { src:'snowflake', srcName:'Snowflake',  db:'COMPUTE_WH',    t:'(live query — tables load on connect)', fmt:'Native JDBC', cold:'N/A (live)' },
+];
 
-    <!-- Auth card -->
-    <div class="card">
-      <div class="tabs">
-        <div class="tab active" id="tab-signin" onclick="switchTab('signin')">Sign In</div>
-        <div class="tab"        id="tab-signup" onclick="switchTab('signup')">Sign Up</div>
-      </div>
+var SOURCES = [
+  { id:'polaris',    name:'Lakehouse',  kind:'Iceberg tables',             canSync:true,  freshCycle:'Every 6 h · hot tables every 5 min', dbs:['tpcds_sf10tcl'] },
+  { id:'databricks', name:'Databricks', kind:'Delta Lake tables via JDBC', canSync:true,  freshCycle:'Every 6 hours',                      dbs:['lakehouse_db'] },
+  { id:'postgres',   name:'PostgreSQL', kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['public'] },
+  { id:'oracle',     name:'Oracle',     kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['tpcds','CACHE_TESTING'] },
+  { id:'mongodb',    name:'MongoDB',    kind:'CDC via Debezium → Iceberg', canSync:true,  freshCycle:'Continuous (CDC stream)',             dbs:['cache_testing'] },
+  { id:'snowflake',  name:'Snowflake',  kind:'Live JDBC query (no copy)',   canSync:false, freshCycle:'Live — no local copy',               dbs:['COMPUTE_WH'] },
+];
 
-      <!-- ── Sign In ── -->
-      <div class="panel active" id="panel-signin">
-        <button class="btn btn-primary" id="si-btn" onclick="doSignIn()">Sign In</button>
-        <div class="divider">or</div>
-        <button class="btn btn-secondary" onclick="switchTab('signup')">Create an account</button>
-      </div>
+// App state
+var state = {
+  snapshots: [], freq: 'off', ret: 14,
+  restoreTarget: null, restoreTs: null, restoreDb: null, restoreTables: null,
+  bkPollerTimer: null,
+  selSrc: 'polaris', selDb: 'all', synced: {},
+  catalogSrc: 'all', catalogDb: 'all', catalogQ: '',
+};
 
-      <!-- ── Sign Up ── -->
-      <div class="panel" id="panel-signup">
-        <button class="btn btn-primary" id="su-btn" onclick="doSignUp()">Create an account</button>
-        <div class="divider">or</div>
-        <button class="btn btn-secondary" onclick="switchTab('signin')">Already have an account?</button>
-      </div>
-    </div>
+var SKIP_DBS = {
+  'information_schema':1, 'mysql':1, 'performance_schema':1,
+  '__internal_schema':1, 'cache_system':1,
+};
 
-    <p class="page-footer" style="margin-top:16px">www.stardatadb.com &nbsp;&bull;&nbsp; StarDataLabs Platform</p>
+// ============================================================
+// HELPERS
+// ============================================================
+function dorisSQL(db, stmt, limit) {
+  return fetch('/api/doris/api/query/default_cluster/' + encodeURIComponent(db), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stmt: stmt, limit: limit || 10000 })
+  }).then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function(d) {
+    if (d.code !== 0) throw new Error(d.msg || 'Doris error code ' + d.code);
+    var rows = (d.data && d.data.data) ? d.data.data : [];
+    var meta = (d.data && d.data.meta) ? d.data.meta : [];
+    var idx = {};
+    meta.forEach(function(m, i) { idx[m.name] = i; });
+    return { rows: rows, idx: idx };
+  });
+}
 
-  </div>
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts); if (isNaN(d)) return ts;
+  var s = Math.floor((Date.now() - d) / 1000);
+  if (s < 60) return 'Just now';
+  if (s < 3600) return Math.floor(s / 60) + ' min ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
 
-  <script>
-    // ── Tab switcher ──────────────────────────────────────────────
-    function switchTab(name) {
-      ['signin','signup'].forEach(function(t) {
-        document.getElementById('tab-'+t).classList.toggle('active', t === name);
-        document.getElementById('panel-'+t).classList.toggle('active', t === name);
+function today() {
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '_');
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function goHome() {
+  document.getElementById('page-home').className = 'page page-active';
+  document.getElementById('page-stardata').className = 'page';
+}
+
+function goStardata() {
+  document.getElementById('page-home').className = 'page';
+  document.getElementById('page-stardata').className = 'page page-active';
+  showTab('warehouse');
+  loadBkDatabases();
+  loadBackupHistory();
+  loadSavedSchedule();
+}
+
+function showTab(tab) {
+  document.getElementById('sub-warehouse').style.display = tab === 'warehouse' ? 'block' : 'none';
+  document.getElementById('sub-lakehouse').style.display = tab === 'lakehouse' ? 'block' : 'none';
+  document.getElementById('sub-lhsync').style.display    = tab === 'lhsync'    ? 'block' : 'none';
+  document.getElementById('tab-warehouse').className = tab === 'warehouse' ? 'tab tab-on' : 'tab';
+  document.getElementById('tab-lakehouse').className = tab === 'lakehouse' ? 'tab tab-on' : 'tab';
+  document.getElementById('tab-lhsync').className    = tab === 'lhsync'    ? 'tab tab-on' : 'tab';
+  if (tab === 'lakehouse') renderSources();
+  if (tab === 'lhsync')    initLhsync();
+}
+
+// ============================================================
+// CATALOG
+// ============================================================
+function uniqueVals(list, key) {
+  var seen = {}, out = [];
+  list.forEach(function(r) { if (!seen[r[key]]) { seen[r[key]] = 1; out.push(r[key]); } });
+  return out;
+}
+
+function filterCatalog() {
+  state.catalogSrc = document.getElementById('ct-src').value;
+  state.catalogQ   = document.getElementById('ct-q').value.trim().toLowerCase();
+  var inSrc = CATALOG_TABLES.filter(function(r) { return state.catalogSrc === 'all' || r.src === state.catalogSrc; });
+  var dbs = uniqueVals(inSrc, 'db');
+  var dbSel = document.getElementById('ct-db');
+  var curDb = dbSel.value;
+  dbSel.innerHTML = '<option value="all">All databases</option>';
+  dbs.forEach(function(d) {
+    var o = document.createElement('option'); o.value = d; o.textContent = d;
+    if (d === curDb) o.selected = true; dbSel.appendChild(o);
+  });
+  state.catalogDb = dbSel.value;
+  renderCatalog();
+}
+
+function renderCatalog() {
+  var src = state.catalogSrc, db = state.catalogDb, q = state.catalogQ;
+  var rows = CATALOG_TABLES.filter(function(r) {
+    return (src==='all'||r.src===src) && (db==='all'||r.db===db) && (!q||(r.db+'.'+r.t).toLowerCase().indexOf(q)>=0);
+  });
+  var tbody = document.getElementById('catalog-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No tables match. Clear the search or pick another source.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(r) {
+    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td><td class="td">' + r.db + '</td>' +
+      '<td class="td">' + r.srcName + '</td><td class="td">' + r.fmt + '</td>' +
+      '<td class="td">' + r.cold + '</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  }).join('');
+}
+
+// ============================================================
+// BACKUP — DATABASE LOADER
+// ============================================================
+function loadBkDatabases() {
+  var sel = document.getElementById('bk-db');
+  sel.innerHTML = '<option value="">Loading…</option>';
+  sel.disabled = true;
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
+  ).then(function(res) {
+    var dbs = res.rows.map(function(r) { return r[0]; }).filter(function(db) { return !SKIP_DBS[db]; });
+    sel.innerHTML = '';
+    if (!dbs.length) { sel.innerHTML = '<option value="">No native databases found</option>'; sel.disabled = true; return; }
+    dbs.forEach(function(db) {
+      var o = document.createElement('option'); o.value = db; o.textContent = db; sel.appendChild(o);
+    });
+    sel.disabled = false;
+    autoFillSnapName();
+    updateBkTables();
+  }).catch(function(e) {
+    console.warn('loadBkDatabases failed:', e);
+    sel.innerHTML = '<option value="">Could not load databases</option>';
+    sel.disabled = false;
+  });
+}
+
+function autoFillSnapName() {
+  var db = document.getElementById('bk-db').value;
+  var lab = document.getElementById('bk-lab');
+  if (!lab.value && db) lab.placeholder = db + '_' + today();
+}
+
+// ============================================================
+// BACKUP — TABLE LOADER
+// ============================================================
+function updateBkTables() {
+  autoFillSnapName();
+  var db = document.getElementById('bk-db').value;
+  var sel = document.getElementById('bk-tables-sel');
+  if (!db) {
+    sel.innerHTML = '<option value="" disabled>Select a database above…</option>';
+    sel.disabled = true;
+    return;
+  }
+  sel.innerHTML = '<option value="" disabled>Loading tables…</option>';
+  sel.disabled = true;
+  dorisSQL(db, 'SHOW TABLES').then(function(res) {
+    var tables = res.rows.map(function(r) { return r[0]; });
+    if (!tables.length) {
+      sel.innerHTML = '<option value="" disabled>No tables in this database</option>';
+      sel.disabled = true;
+      return;
+    }
+    sel.innerHTML = '';
+    tables.forEach(function(t) {
+      var o = document.createElement('option'); o.value = t; o.textContent = t;
+      sel.appendChild(o);
+    });
+    sel.disabled = false;
+  }).catch(function(e) {
+    console.warn('updateBkTables failed:', e);
+    sel.innerHTML = '<option value="" disabled>Could not load tables</option>';
+    sel.disabled = true;
+  });
+}
+
+// ============================================================
+// BACKUP — PILL TOGGLES
+// ============================================================
+function setPill(group, btn) {
+  var gid = group === 'freq' ? 'freq-group' : 'ret-group';
+  Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b) { b.className = 'pill-off'; });
+  btn.className = 'pill-on';
+  if (group === 'freq') state.freq = btn.dataset.freq;
+  else state.ret = parseInt(btn.dataset.ret);
+}
+
+// ============================================================
+// BACKUP — SAVE SCHEDULE
+// ============================================================
+function setSchedMsg(msg, isErr) {
+  var el = document.getElementById('sched-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
+}
+
+function saveSched() {
+  var freq = state.freq, ret = state.ret;
+  setSchedMsg('Saving…', false);
+  var updateSql = "UPDATE cache_system.backup_schedule " +
+    "SET freq='" + freq + "', retain_days=" + ret + ", updated_at=NOW() " +
+    "WHERE id='1'";
+  dorisSQL('cache_system', updateSql)
+    .then(function() {
+      setSchedMsg(freq === 'off' ? 'Automatic backups turned off.'
+        : 'Automatic ' + freq + ' backups on · keep ' + ret + ' days. Saved ✓', false);
+    })
+    .catch(function(e) {
+      setSchedMsg('Could not save schedule: ' + e.message, true);
+    });
+}
+
+function loadSavedSchedule() {
+  dorisSQL('cache_system', "SELECT freq, retain_days FROM cache_system.backup_schedule WHERE id='1' LIMIT 1")
+    .then(function(res) {
+      if (!res.rows.length) return;
+      var freq = res.rows[0][0] || 'off', ret = parseInt(res.rows[0][1]) || 14;
+      state.freq = freq; state.ret = ret;
+      ['freq-group','ret-group'].forEach(function(gid) {
+        Array.from(document.getElementById(gid).querySelectorAll('button')).forEach(function(b) { b.className = 'pill-off'; });
       });
-    }
+      var fb = document.querySelector('#freq-group [data-freq="' + freq + '"]');
+      if (fb) fb.className = 'pill-on';
+      var rb = document.querySelector('#ret-group [data-ret="' + ret + '"]');
+      if (rb) rb.className = 'pill-on';
+    }).catch(function() {});
+}
 
-    // Sign In — go directly to Pocket ID login page.
-    // After successful authentication Pocket ID redirects to console.stardatadb.com.
-    function doSignIn() {
-      window.location.href = 'https://auth.stardatadb.com';
-    }
+function showBkMsg(msg, isErr) {
+  var el = document.getElementById('bk-msg');
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
+}
 
-    // Sign Up — Pocket ID registration page.
-    function doSignUp() {
-      window.location.href = 'https://auth.stardatadb.com/register';
+// ============================================================
+// BACKUP — BACK UP NOW
+// ============================================================
+function doBackup() {
+  var db  = document.getElementById('bk-db').value;
+  var lab = document.getElementById('bk-lab').value.trim() || (db + '_' + today());
+  if (!db) { showBkMsg('Select a database first.', true); return; }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(lab)) { showBkMsg('Snapshot name: letters, numbers, underscores only.', true); return; }
+  var bkSel = document.getElementById('bk-tables-sel');
+  var picked = Array.from(bkSel.selectedOptions).map(function(o) { return o.value; });
+  var onClause = picked.length ? ' ON (' + picked.map(function(t) { return '`' + t + '`'; }).join(', ') + ')' : '';
+  var sql = "BACKUP SNAPSHOT `" + db + "`.`" + lab + "` TO `sd_backup_repo`" + onClause + " PROPERTIES ('type'='full')";
+  showBkMsg('Submitting backup…', false);
+  document.getElementById('bk-lab').value = '';
+  dorisSQL(db, sql).then(function() {
+    showBkMsg('Backup ' + lab + ' started → s3://xdatatoiceberg1/stardata-backups/. Updating status below…', false);
+    Array.from(bkSel.options).forEach(function(o) { o.selected = false; });
+    loadBackupHistory();
+    startBkPoller();
+  }).catch(function(e) { showBkMsg('Backup failed: ' + e.message, true); });
+}
+
+// ============================================================
+// BACKUP — LOAD HISTORY
+// SHOW BACKUP is per-DB in Doris — returns empty from information_schema.
+// Query every native DB in parallel and merge.
+// ============================================================
+function loadBackupHistory() {
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME='internal' ORDER BY SCHEMA_NAME"
+  ).then(function(dbRes) {
+    var dbs = dbRes.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
+
+    if (!dbs.length) { renderSnapshots(); return; }
+
+    var promises = dbs.map(function(db) {
+      return dorisSQL(db, 'SHOW BACKUP', 200).catch(function() { return { rows: [], idx: {} }; });
+    });
+
+    Promise.all(promises).then(function(results) {
+      var allRows = [];
+      var seen = {};
+
+      results.forEach(function(res) {
+        var idx = res.idx;
+        var jobCol   = idx['JobId']        != null ? idx['JobId']        : 0;
+        var snapCol  = idx['SnapshotName'] != null ? idx['SnapshotName'] : 1;
+        var dbCol    = idx['DbName']       != null ? idx['DbName']       : 2;
+        var stateCol = idx['State']        != null ? idx['State']        : 3;
+        var objsCol  = idx['BackupObjs']   != null ? idx['BackupObjs']   : 4;
+        var createCol= idx['CreateTime']   != null ? idx['CreateTime']   : 5;
+        var finCol   = idx['FinishedTime'] != null ? idx['FinishedTime'] : 8;
+
+        res.rows.forEach(function(r) {
+          var jobId = r[jobCol] || '';
+          if (jobId && seen[jobId]) return;
+          if (jobId) seen[jobId] = 1;
+
+          var rawState  = (r[stateCol] || '').trim();
+          var createRaw = r[createCol] || '';
+          var stLabel   = rawState === 'FINISHED'  ? 'Completed'
+                        : rawState === 'PENDING'   ? 'Pending'
+                        : rawState === 'UPLOADING' ? 'Uploading'
+                        : rawState === 'CANCELLED' ? 'Cancelled'
+                        : rawState || 'Unknown';
+          var dbName = (r[dbCol] || '').replace(/^default_cluster:/, '');
+          allRows.push({
+            label:      r[snapCol] || '—',
+            db:         dbName,
+            tables:     (r[objsCol] || '').trim() || 'All tables',
+            how:        stLabel === 'Completed' ? (dbName.indexOf('_auto_') >= 0 ? 'Auto' : 'Manual') : '—',
+            taken:      r[finCol] || createRaw || '',
+            createTime: createRaw,
+            status:     stLabel,
+            rawState:   rawState,
+          });
+        });
+      });
+
+      allRows.sort(function(a, b) {
+        return (b.createTime || b.taken || '').localeCompare(a.createTime || a.taken || '');
+      });
+
+      state.snapshots = allRows;
+      renderSnapshots();
+      updateKpisFromHistory();
+      initPitrDbDropdown();
+    });
+  }).catch(function(e) { console.warn('loadBackupHistory failed:', e); });
+}
+
+function startBkPoller() {
+  if (state.bkPollerTimer) return;
+  state.bkPollerTimer = setInterval(function() {
+    loadBackupHistory();
+    var allDone = state.snapshots.every(function(s) {
+      return s.rawState === 'FINISHED' || s.rawState === 'CANCELLED' || s.rawState === '';
+    });
+    if (allDone) { clearInterval(state.bkPollerTimer); state.bkPollerTimer = null; }
+  }, 5000);
+}
+
+function renderSnapshots() {
+  var tbody = document.getElementById('snapshots-body');
+  if (!state.snapshots.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No snapshots yet. Back up now or turn on automatic backups.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.snapshots.map(function(r) {
+    var color = r.status === 'Completed' ? '#17663A' : r.status === 'Restoring' ? '#8A4B00'
+              : (r.status === 'Uploading' || r.status === 'Pending') ? '#1F4FD8'
+              : r.status === 'Cancelled' ? '#9AA3B0' : '#4F5866';
+    var restoreBtn = r.status === 'Completed'
+      ? '<button class="btn" onclick="startRestore(\'' + r.label + '\',\'' + r.db + '\',\'' + (r.createTime||r.taken||'') + '\',\'' + (r.tables !== 'All tables' ? r.tables : '') + '\')">Restore…</button>' : '';
+    return '<tr><td class="td" style="font-weight:600">' + r.label + '</td><td class="td">' + r.db + '</td>' +
+      '<td class="td" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + r.tables + '">' + r.tables + '</td>' +
+      '<td class="td">' + (r.taken ? fmtAgo(r.taken) : '—') + '</td>' +
+      '<td class="td" style="font-weight:600;color:' + color + '">' + r.status + '</td>' +
+      '<td class="td" style="text-align:right">' + restoreBtn + '</td></tr>';
+  }).join('');
+}
+
+function updateKpisFromHistory() {
+  var completed = state.snapshots.filter(function(s) { return s.status === 'Completed'; });
+  if (!completed.length) return;
+  var last = completed[0];
+  document.getElementById('kpi-last-backup').textContent = last.taken ? fmtAgo(last.taken) : last.label;
+  document.getElementById('kpi-last-backup-hint').textContent = last.db + ' · ' + last.tables;
+}
+
+// ============================================================
+// RESTORE — shared confirm panel
+// ============================================================
+function openRestorePanel(label, db, finishedTime, tables) {
+  state.restoreTarget = label;
+  state.restoreTs     = finishedTime || '';
+  state.restoreDb     = db || '';
+  state.restoreTables = (tables && tables.length) ? tables : null;
+  var takenDisplay = finishedTime
+    ? new Date(finishedTime).toLocaleString() + ' (' + fmtAgo(finishedTime) + ')'
+    : '—';
+  document.getElementById('rs-label').textContent = label;
+  document.getElementById('rs-what').innerHTML = state.restoreTables
+    ? '<code>' + db + '</code> — tables: ' + state.restoreTables.join(', ')
+    : 'all tables in <code>' + db + '</code>';
+  document.getElementById('rs-when').textContent = takenDisplay;
+  document.getElementById('rs-cf').value = '';
+  document.getElementById('rs-cf').placeholder = label;
+  var p = document.getElementById('restore-panel');
+  p.style.display = 'flex';
+  p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function startRestore(label, db, finishedTime, tablesStr) {
+  var tables = (tablesStr && tablesStr.trim())
+    ? tablesStr.split(',').map(function(t) { return t.trim(); }).filter(Boolean) : null;
+  openRestorePanel(label, db, finishedTime, tables);
+}
+
+function cancelRestore() {
+  state.restoreTarget = null;
+  document.getElementById('restore-panel').style.display = 'none';
+  setPitrMsg('', false);
+}
+
+function doRestore() {
+  var cf = document.getElementById('rs-cf').value.trim();
+  if (!state.restoreTarget || cf !== state.restoreTarget) { showBkMsg('Type the exact snapshot name to confirm.', true); return; }
+  var db = state.restoreDb, label = state.restoreTarget, ts = state.restoreTs, tables = state.restoreTables;
+  if (!db) { showBkMsg('Cannot restore: database name is missing.', true); return; }
+  var onClause = (tables && tables.length) ? ' ON (' + tables.map(function(t) { return '`' + t + '`'; }).join(', ') + ')' : '';
+  // backup_timestamp must be YYYY-MM-DD-HH-MM-SS (all dashes) to match S3 __info_ filename
+  var tsFmt = ts ? ts.trim().replace(' ', '-').replace(/:/g, '-') : '';
+  var props = "'replication_num'='1'" + (tsFmt ? ", 'backup_timestamp'='" + tsFmt + "'" : '');
+  var sql = "RESTORE SNAPSHOT `" + db + "`.`" + label + "` FROM `sd_backup_repo`" + onClause + " PROPERTIES (" + props + ")";
+  cancelRestore();
+  showBkMsg('Submitting restore for ' + label + ' → ' + db + '…', false);
+  dorisSQL(db, sql).then(function() {
+    showBkMsg('✓ Restore of ' + label + ' started. Status updates every 5 s below.', false);
+    state.snapshots = state.snapshots.map(function(s) {
+      return s.label === label ? Object.assign({}, s, { status: 'Restoring', rawState: 'RESTORING' }) : s;
+    });
+    renderSnapshots();
+    startBkPoller();
+  }).catch(function(e) { showBkMsg('Restore failed: ' + e.message, true); });
+}
+
+// ============================================================
+// PITR — Point-in-time Recovery
+// ============================================================
+
+// Populate the PITR database dropdown directly from Doris (internal catalog only).
+function initPitrDbDropdown() {
+  var sel = document.getElementById('pitr-db');
+  var cur = sel.value;
+  dorisSQL('information_schema',
+    "SELECT SCHEMA_NAME FROM information_schema.schemata " +
+    "WHERE CATALOG_NAME = 'internal' ORDER BY SCHEMA_NAME"
+  ).then(function(res) {
+    var dbs = res.rows
+      .map(function(r) { return r[0]; })
+      .filter(function(db) { return !SKIP_DBS[db]; });
+    sel.innerHTML = '<option value="">Select database…</option>';
+    dbs.forEach(function(db) {
+      var o = document.createElement('option'); o.value = db; o.textContent = db;
+      if (db === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+  }).catch(function() {
+    if (!sel.options.length || (sel.options.length === 1 && !sel.options[0].value)) {
+      sel.innerHTML = '<option value="">Could not load databases</option>';
     }
-  </script>
+  });
+}
+
+// Called when user changes the PITR database dropdown.
+function onPitrDbChange() {
+  var db = document.getElementById('pitr-db').value;
+  var snapSel = document.getElementById('pitr-snap');
+  var tablesSel = document.getElementById('pitr-tables-sel');
+  var btn = document.getElementById('pitr-restore-btn');
+
+  snapSel.innerHTML = '<option value="">Loading…</option>';
+  snapSel.disabled = true;
+  tablesSel.innerHTML = '<option value="" disabled>Select a snapshot above…</option>';
+  tablesSel.disabled = true;
+  btn.disabled = true; btn.style.opacity = '.5';
+  setPitrMsg('', false);
+
+  if (!db) {
+    snapSel.innerHTML = '<option value="">— select a database first —</option>';
+    return;
+  }
+
+  var snaps = state.snapshots.filter(function(s) {
+    return s.db === db && s.status === 'Completed';
+  });
+
+  if (!snaps.length) {
+    snapSel.innerHTML = '<option value="">No snapshots for ' + db + ' — take a backup first</option>';
+    snapSel.disabled = true;
+    setPitrMsg('No completed snapshots for ' + db + '. Take a backup first.', true);
+    return;
+  }
+
+  snapSel.innerHTML = '';
+  snaps.forEach(function(s) {
+    var o = document.createElement('option');
+    var takenLabel = s.taken ? new Date(s.taken).toLocaleString() + ' — ' + fmtAgo(s.taken) : s.label;
+    // value encodes: label|createTime|tables  (createTime used as backup_timestamp)
+    o.value = s.label + '|' + (s.createTime || s.taken || '') + '|' + (s.tables !== 'All tables' ? s.tables : '');
+    o.textContent = takenLabel + ' (' + s.label + ')';
+    snapSel.appendChild(o);
+  });
+  snapSel.disabled = false;
+  snapSel.selectedIndex = 0;
+  onPitrSnapChange();
+}
+
+// Called when user changes the PITR snapshot dropdown.
+function onPitrSnapChange() {
+  var val = document.getElementById('pitr-snap').value;
+  var db  = document.getElementById('pitr-db').value;
+  var tablesSel = document.getElementById('pitr-tables-sel');
+  var btn = document.getElementById('pitr-restore-btn');
+
+  if (!val) {
+    tablesSel.innerHTML = '<option value="" disabled>Select a snapshot above…</option>';
+    tablesSel.disabled = true;
+    btn.disabled = true; btn.style.opacity = '.5';
+    return;
+  }
+
+  var parts     = val.split('|');
+  var tablesRaw = parts[2] || '';
+
+  var fillSelect = function(tables) {
+    tablesSel.innerHTML = '';
+    if (!tables.length) {
+      tablesSel.innerHTML = '<option value="" disabled>No tables found</option>';
+      tablesSel.disabled = true;
+      return;
+    }
+    tables.forEach(function(t) {
+      var o = document.createElement('option'); o.value = t; o.textContent = t;
+      tablesSel.appendChild(o);
+    });
+    tablesSel.disabled = false;
+    btn.disabled = false; btn.style.opacity = '1';
+    setPitrMsg('', false);
+  };
+
+  if (tablesRaw) {
+    fillSelect(tablesRaw.split(',').map(function(t) { return t.trim(); }).filter(Boolean));
+  } else {
+    tablesSel.innerHTML = '<option value="" disabled>Loading tables…</option>';
+    tablesSel.disabled = true;
+    dorisSQL(db, 'SHOW TABLES').then(function(res) {
+      fillSelect(res.rows.map(function(r) { return r[0]; }));
+    }).catch(function() {
+      tablesSel.innerHTML = '<option value="" disabled>Could not load tables</option>';
+      tablesSel.disabled = true;
+      setPitrMsg('Could not load tables from Doris.', true);
+    });
+  }
+}
+
+function startPitrRestore() {
+  var db  = document.getElementById('pitr-db').value;
+  var val = document.getElementById('pitr-snap').value;
+  if (!db || !val) { setPitrMsg('Select a database and snapshot first.', true); return; }
+  var parts = val.split('|');
+  var tablesSel = document.getElementById('pitr-tables-sel');
+  var pickedTables = Array.from(tablesSel.selectedOptions).map(function(o) { return o.value; });
+  openRestorePanel(parts[0] || '', db, parts[1] || '', pickedTables.length ? pickedTables : null);
+}
+
+function setPitrMsg(msg, isErr) {
+  var el = document.getElementById('pitr-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? '#B42318' : '#17663A';
+}
+
+// ============================================================
+// KPI LOADER
+// ============================================================
+function loadWarehouseKpis() {
+  fetch('/api/doris/api/health')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var ok = d && (d.status === 'OK' || d.code === 0);
+      document.getElementById('kpi-status-dot').className = ok ? 'dot-green' : 'dot-red';
+      document.getElementById('kpi-status-val').textContent = ok ? 'Healthy' : 'Degraded';
+    }).catch(function() {
+      document.getElementById('kpi-status-dot').className = 'dot-red';
+      document.getElementById('kpi-status-val').textContent = 'Unreachable';
+    });
+
+  fetch('/api/doris/api/show_proc?path=//backends')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var rows = d.data || [], totalGB = 0;
+      rows.forEach(function(row) {
+        var m = (row[14] || '').trim().match(/([\d.]+)\s*(GB|TB|MB)/i);
+        if (m) { var v = parseFloat(m[1]), u = m[2].toUpperCase();
+          totalGB += u === 'TB' ? v * 1024 : u === 'GB' ? v : v / 1024; }
+      });
+      if (totalGB > 0) {
+        document.getElementById('kpi-storage').textContent = totalGB >= 1024 ? (totalGB/1024).toFixed(2)+' TB' : totalGB.toFixed(1)+' GB';
+        document.getElementById('kpi-storage-hint').textContent = 'Across ' + rows.length + ' backend node' + (rows.length !== 1 ? 's' : '');
+      }
+    }).catch(function() {});
+
+  dorisSQL('information_schema',
+    "SELECT TABLE_SCHEMA, TABLE_NAME, UPDATE_TIME FROM information_schema.tables " +
+    "WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','__internal_schema') " +
+    "AND CATALOG_NAME='internal' AND UPDATE_TIME IS NOT NULL ORDER BY UPDATE_TIME DESC LIMIT 1", 1
+  ).then(function(res) {
+    if (!res.rows.length) return;
+    var ts = res.rows[0][res.idx['UPDATE_TIME'] != null ? res.idx['UPDATE_TIME'] : 2] || '';
+    if (ts) document.getElementById('kpi-freshness').textContent = fmtAgo(ts);
+  }).catch(function() {});
+}
+
+// ============================================================
+// DATA SOURCES (LAKEHOUSE)
+// ============================================================
+function renderSources() {
+  var grid = document.getElementById('sources-grid');
+  grid.innerHTML = SOURCES.map(function(s) {
+    var synced = state.synced[s.id];
+    var border = s.id === state.selSrc ? '2px solid #1F4FD8' : '1px solid #E1E6ED';
+    return '<div style="background:#FFFFFF;border:' + border + ';border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:14px;cursor:pointer" onclick="selectSource(\'' + s.id + '\')">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span style="font:700 17px Inter,sans-serif">' + s.name + '</span><span class="hint">' + s.kind + '</span></div>' +
+        '<span style="display:inline-flex;align-items:center;gap:6px;font:600 12px Inter,sans-serif;color:#4F5866"><span class="dot-grey"></span>Status —</span>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Last sync</span><span style="font:500 14px Inter,sans-serif">' + (synced||'—') + '</span></div>' +
+        '<div style="display:flex;flex-direction:column;gap:2px"><span class="lbl">Freshness</span><span style="font:500 14px Inter,sans-serif">' + s.freshCycle + '</span></div>' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button class="btn" onclick="event.stopPropagation();selectSource(\'' + s.id + '\')">View tables</button>' +
+        (s.canSync ? '<button class="btn" onclick="event.stopPropagation();syncSource(\'' + s.id + '\')">Sync now</button>' : '') +
+      '</div></div>';
+  }).join('');
+  renderSrcTables();
+}
+
+function selectSource(id) { state.selSrc = id; state.selDb = 'all'; renderSources(); renderSrcTables(); }
+
+function syncSource(id) {
+  var now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  state.synced[id] = 'Just now (' + now + ')';
+  var el = document.getElementById('src-msg');
+  var src = SOURCES.find(function(s) { return s.id === id; });
+  el.textContent = (src ? src.name : id) + ' sync triggered.'; el.style.display = 'block';
+  setTimeout(function() { el.style.display = 'none'; }, 4000);
+  renderSources();
+}
+
+function filterSrcTables() { state.selDb = document.getElementById('src-db').value; renderSrcTables(); }
+
+function renderSrcTables() {
+  var src = SOURCES.find(function(s) { return s.id === state.selSrc; });
+  if (!src) return;
+  document.getElementById('h-tb').textContent = src.name + ' tables';
+  document.getElementById('sel-hint').textContent = src.kind + ' · ' + src.freshCycle;
+  var dbSel = document.getElementById('src-db');
+  dbSel.innerHTML = '<option value="all">All databases</option>';
+  src.dbs.forEach(function(d) {
+    var o = document.createElement('option'); o.value = d; o.textContent = d;
+    if (d === state.selDb) o.selected = true; dbSel.appendChild(o);
+  });
+  var rows = CATALOG_TABLES.filter(function(r) { return r.src === state.selSrc && (state.selDb === 'all' || r.db === state.selDb); });
+  var tbody = document.getElementById('src-tables-body');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No tables found for this source.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(function(r) {
+    return '<tr><td class="td" style="font-weight:600">' + r.t + '</td><td class="td">' + r.db + '</td>' +
+      '<td class="td">' + r.fmt + '</td><td class="td" style="color:#9AA3B0">—</td><td class="td" style="color:#9AA3B0">—</td></tr>';
+  }).join('');
+}
+
+// ============================================================
+// LAKEHOUSE SYNC — data
+// ============================================================
+// Mock data for synced tables. In production this comes from
+// SELECT * FROM cache_system.<table_name> ORDER BY batch_id DESC.
+var LHS_SYNCED_TABLES = [
+  {
+    tbl: 'orders', appDb: 'sales', appTbl: 'orders',
+    target: 'polaris.sales_iceberg.orders',
+    lastSnapId: 8842301, lastBatch: '2 min ago', upserted: 128430, deleted: 312,
+    status: 'completed upsert', blocked: false, blockedMsg: '',
+    batches: [
+      { id:47, type:'UPSERT',  from:8800000, to:8842301, rows:1024, maxCreated:'2026-11-25 01:58:00', maxUpdated:'2026-11-25 01:58:12', status:'completed upsert', started:'2026-11-25 02:00:01', finished:'2026-11-25 02:00:14' },
+      { id:46, type:'DELETE',  from:8750000, to:8800000, rows:12,   maxCreated:'2026-11-25 01:48:00', maxUpdated:'2026-11-25 01:48:00', status:'deleted',          started:'2026-11-25 01:55:00', finished:'2026-11-25 01:55:02' },
+      { id:45, type:'UPSERT',  from:8750000, to:8800000, rows:950,  maxCreated:'2026-11-25 01:48:00', maxUpdated:'2026-11-25 01:48:33', status:'completed upsert', started:'2026-11-25 01:50:00', finished:'2026-11-25 01:50:11' },
+    ]
+  },
+  {
+    tbl: 'customers', appDb: 'sales', appTbl: 'customers',
+    target: 'polaris.sales_iceberg.customers',
+    lastSnapId: 4421088, lastBatch: '6 h ago', upserted: 54210, deleted: 88,
+    status: 'failed', blocked: true,
+    blockedMsg: 'MERGE INTO failed: schema mismatch on column "email_hash" — Iceberg type string, Doris type LARGEINT',
+    batches: [
+      { id:12, type:'UPSERT', from:4400000, to:4421088, rows:0, maxCreated:'2026-11-24 20:00:00', maxUpdated:'2026-11-24 20:00:00', status:'failed', started:'2026-11-24 20:00:05', finished:'2026-11-24 20:00:07' },
+      { id:11, type:'DELETE', from:4350000, to:4400000, rows:4, maxCreated:'2026-11-24 14:00:00', maxUpdated:'2026-11-24 14:00:00', status:'deleted', started:'2026-11-24 14:05:00', finished:'2026-11-24 14:05:01' },
+    ]
+  },
+  {
+    tbl: 'products', appDb: 'inventory', appTbl: 'products',
+    target: 'polaris.inventory_iceberg.products',
+    lastSnapId: 991200, lastBatch: '12 h ago', upserted: 8800, deleted: 20,
+    status: 'completed upsert', blocked: false, blockedMsg: '',
+    batches: [
+      { id:8, type:'UPSERT', from:988000, to:991200, rows:120, maxCreated:'2026-11-24 14:00:00', maxUpdated:'2026-11-24 14:00:40', status:'completed upsert', started:'2026-11-24 14:00:00', finished:'2026-11-24 14:00:03' },
+    ]
+  },
+];
+
+// Mock eligible (not-yet-synced) tables from cache_system with iceberg property
+var LHS_ELIGIBLE_TABLES = [
+  { cacheTable: 'events',        appDb: 'analytics', appTbl: 'events',
+    pk: ['snap_id'], cols: [
+      { name:'snap_id', doris:'BIGINT', ice:'long', note:'Auto-increment key' },
+      { name:'created_at', doris:'DATETIMEV2(0)', ice:'timestamp', note:'' },
+      { name:'updated_at', doris:'DATETIMEV2(0)', ice:'timestamp', note:'ON UPDATE' },
+      { name:'user_id', doris:'VARCHAR(64)', ice:'string', note:'' },
+      { name:'payload', doris:'JSON', ice:'string', note:'Stored as JSON text' },
+    ]
+  },
+  { cacheTable: 'store_sales',   appDb: 'tpcds', appTbl: 'store_sales',
+    pk: ['snap_id'], cols: [
+      { name:'snap_id', doris:'BIGINT', ice:'long', note:'Auto-increment key' },
+      { name:'created_at', doris:'DATETIMEV2(0)', ice:'timestamp', note:'' },
+      { name:'updated_at', doris:'DATETIMEV2(0)', ice:'timestamp', note:'ON UPDATE' },
+      { name:'ss_sold_date_sk', doris:'INT', ice:'int', note:'' },
+      { name:'ss_item_sk', doris:'BIGINT', ice:'long', note:'' },
+      { name:'ss_customer_sk', doris:'INT', ice:'int', note:'' },
+      { name:'ss_net_paid', doris:'DECIMAL(7,2)', ice:'decimal(7,2)', note:'' },
+    ]
+  },
+];
+
+var lhsState = {
+  selTable: null,   // LHS_SYNCED_TABLES entry
+};
+
+// modal state
+var cimState = {
+  selectedCacheTable: null,
+  resolvedAppDb: null,
+  resolvedAppTbl: null,
+  eligibleEntry: null,  // LHS_ELIGIBLE_TABLES entry
+  colsValid: false,
+  icebergExists: false,
+  reuseDrop: null,  // 'reuse'|'drop'|null
+};
+
+// ============================================================
+// LAKEHOUSE SYNC — rendering
+// ============================================================
+function initLhsync() {
+  // Populate the DB filter from synced tables
+  var dbs = {};
+  LHS_SYNCED_TABLES.forEach(function(t) { dbs[t.appDb] = 1; });
+  var sel = document.getElementById('lhs-db-filter');
+  sel.innerHTML = '<option value="all">All databases</option>';
+  Object.keys(dbs).sort().forEach(function(db) {
+    var o = document.createElement('option'); o.value = db; o.textContent = db; sel.appendChild(o);
+  });
+  renderLhsTables();
+}
+
+function renderLhsTables() {
+  var filterDb = document.getElementById('lhs-db-filter').value;
+  var rows = LHS_SYNCED_TABLES.filter(function(t) {
+    return filterDb === 'all' || t.appDb === filterDb;
+  });
+  var tbody = document.getElementById('lhs-tables-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No tables found for this source.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(t) {
+    var statusColor = t.blocked ? '#B42318'
+      : t.status === 'completed upsert' ? '#17663A'
+      : t.status === 'deleted'          ? '#17663A'
+      : t.status === 'running'          ? '#1F4FD8'
+      : '#D97706';
+    var blockedBadge = t.blocked
+      ? '<span style="margin-left:8px;padding:2px 8px;border-radius:999px;background:#FFF5F5;border:1px solid #F1C4BF;color:#B42318;font:700 11px Inter,sans-serif">Blocked</span>'
+      : '';
+    return '<tr>' +
+      '<td class="td" style="font-weight:600">' + t.tbl + '</td>' +
+      '<td class="td">' + t.appDb + '</td>' +
+      '<td class="td">Iceberg</td>' +
+      '<td class="td">' + t.lastBatch + '</td>' +
+      '<td class="td" style="color:#9AA3B0">—</td>' +
+      '<td class="td"><span style="color:' + statusColor + ';font-weight:600">' + t.status + '</span>' + blockedBadge + '</td>' +
+      '<td class="td" style="text-align:right"><button class="btn" onclick="openLhsDetail(\'' + t.tbl + '\')">Details</button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function openLhsDetail(tblName) {
+  var t = LHS_SYNCED_TABLES.find(function(x) { return x.tbl === tblName; });
+  if (!t) return;
+  lhsState.selTable = t;
+
+  document.getElementById('lhd-title').textContent = t.appDb + '.' + t.appTbl + ' → ' + t.target;
+  document.getElementById('lhd-target').textContent = 'Target: ' + t.target;
+  document.getElementById('lhd-snapid').textContent = t.lastSnapId.toLocaleString();
+  document.getElementById('lhd-lastbatch').textContent = t.lastBatch;
+  document.getElementById('lhd-upserted').textContent = t.upserted.toLocaleString();
+  document.getElementById('lhd-deleted').textContent = t.deleted.toLocaleString();
+
+  var statusColor = t.blocked ? '#B42318'
+    : t.status === 'completed upsert' ? '#17663A'
+    : t.status === 'running' ? '#1F4FD8' : '#D97706';
+  document.getElementById('lhd-status').style.color = statusColor;
+  document.getElementById('lhd-status').textContent = t.blocked ? 'Blocked' : t.status;
+
+  // Blocked banner
+  var banner = document.getElementById('lhd-blocked-banner');
+  if (t.blocked) {
+    banner.style.display = 'flex';
+    document.getElementById('lhd-blocked-msg').textContent = t.blockedMsg;
+  } else {
+    banner.style.display = 'none';
+  }
+  document.getElementById('lhd-clear-msg').textContent = '';
+
+  // Batch history
+  var batchBody = document.getElementById('lhd-batches-body');
+  if (!t.batches || !t.batches.length) {
+    batchBody.innerHTML = '<tr><td colspan="9" class="empty">No batches yet.</td></tr>';
+  } else {
+    batchBody.innerHTML = t.batches.map(function(b) {
+      var sc = b.status === 'completed upsert' ? '#17663A'
+             : b.status === 'deleted'           ? '#17663A'
+             : b.status === 'running'            ? '#1F4FD8'
+             : b.status === 'failed'             ? '#B42318' : '#D97706';
+      return '<tr>' +
+        '<td class="td">#' + b.id + '</td>' +
+        '<td class="td"><span style="padding:2px 8px;border-radius:6px;font:600 12px Inter,sans-serif;background:#E8EEFC;color:#1F3FB8">' + b.type + '</span></td>' +
+        '<td class="td" style="font:400 13px ui-monospace,monospace">' + b.from.toLocaleString() + ' → ' + b.to.toLocaleString() + '</td>' +
+        '<td class="td">' + b.rows.toLocaleString() + '</td>' +
+        '<td class="td" style="color:#4F5866">' + (b.maxCreated||'—') + '</td>' +
+        '<td class="td" style="color:#4F5866">' + (b.maxUpdated||'—') + '</td>' +
+        '<td class="td" style="color:' + sc + ';font-weight:600">' + b.status + '</td>' +
+        '<td class="td" style="color:#9AA3B0">' + (b.started||'—') + '</td>' +
+        '<td class="td" style="color:#9AA3B0">' + (b.finished||'—') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  var panel = document.getElementById('lhs-detail-panel');
+  panel.style.display = 'flex';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeLhsDetail() {
+  document.getElementById('lhs-detail-panel').style.display = 'none';
+  lhsState.selTable = null;
+}
+
+function clearSyncError() {
+  if (!lhsState.selTable) return;
+  // In production: TRUNCATE TABLE cache_system.<tbl>_log
+  lhsState.selTable.blocked = false;
+  lhsState.selTable.blockedMsg = '';
+  lhsState.selTable.status = 'completed upsert';
+  document.getElementById('lhd-clear-msg').textContent = 'Log cleared. Sync will resume on next run.';
+  document.getElementById('lhd-clear-msg').style.color = '#17663A';
+  document.getElementById('lhd-blocked-banner').style.display = 'none';
+  document.getElementById('lhd-status').textContent = 'completed upsert';
+  document.getElementById('lhd-status').style.color = '#17663A';
+  renderLhsTables();
+}
+
+// ============================================================
+// CREATE ICEBERG TABLE — modal
+// ============================================================
+function openCreateIceberg() {
+  // Reset state
+  cimState = { selectedCacheTable:null, resolvedAppDb:null, resolvedAppTbl:null, eligibleEntry:null, colsValid:false, icebergExists:false, reuseDrop:null };
+
+  // Determine which tables are already synced
+  var alreadySynced = {};
+  LHS_SYNCED_TABLES.forEach(function(t) { alreadySynced[t.tbl] = 1; });
+
+  var eligible = LHS_ELIGIBLE_TABLES.filter(function(e) { return !alreadySynced[e.cacheTable]; });
+
+  var sel = document.getElementById('cim-table-sel');
+  sel.innerHTML = '<option value="">— select a table —</option>';
+  if (!eligible.length) {
+    sel.innerHTML = '<option value="" disabled>All eligible tables are already synced</option>';
+  } else {
+    eligible.forEach(function(e) {
+      var o = document.createElement('option');
+      o.value = e.cacheTable;
+      o.textContent = 'cache_system.' + e.cacheTable + '  →  ' + e.appDb + '.' + e.appTbl;
+      sel.appendChild(o);
+    });
+  }
+
+  document.getElementById('cim-table-hint').textContent = '';
+  document.getElementById('cim-db-picker').style.display = 'none';
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-progress').style.display = 'none';
+  document.getElementById('cim-step1').style.display = 'flex';
+  document.getElementById('cim-create-msg').textContent = '';
+
+  document.getElementById('modal-backdrop').style.display = 'block';
+}
+
+function closeCreateIceberg() {
+  document.getElementById('modal-backdrop').style.display = 'none';
+}
+
+function onCimTableChange() {
+  var val = document.getElementById('cim-table-sel').value;
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-db-picker').style.display = 'none';
+  document.getElementById('cim-table-hint').textContent = '';
+  cimState.reuseDrop = null;
+
+  if (!val) return;
+
+  // Find the eligible entry
+  var entry = LHS_ELIGIBLE_TABLES.find(function(e) { return e.cacheTable === val; });
+  if (!entry) {
+    document.getElementById('cim-table-hint').textContent = 'Table not found in eligibility list.';
+    return;
+  }
+
+  // Simulate: check if more than one app db has this table name
+  // For the demo, each entry has exactly one appDb — single match.
+  cimState.selectedCacheTable = val;
+  cimState.eligibleEntry = entry;
+  cimState.resolvedAppDb  = entry.appDb;
+  cimState.resolvedAppTbl = entry.appTbl;
+
+  document.getElementById('cim-table-hint').textContent = 'Resolved: ' + entry.appDb + '.' + entry.appTbl;
+  renderCimPreview();
+}
+
+function onCimDbPick() {
+  var db = document.getElementById('cim-db-sel').value;
+  if (!db || !cimState.eligibleEntry) return;
+  cimState.resolvedAppDb = db;
+  renderCimPreview();
+}
+
+function renderCimPreview() {
+  var entry = cimState.eligibleEntry;
+  if (!entry) return;
+
+  var appDb  = cimState.resolvedAppDb;
+  var appTbl = cimState.resolvedAppTbl;
+  var nsName = appDb + '_iceberg';
+  var target = 'polaris.' + nsName + '.' + appTbl;
+
+  document.getElementById('cim-src-label').textContent = appDb + '.' + appTbl;
+  document.getElementById('cim-tgt-label').textContent = target;
+  document.getElementById('cim-pk-label').textContent  = entry.pk.join(', ');
+
+  // Required column checks
+  var reqCols = ['snap_id', 'created_at', 'updated_at'];
+  var presentCols = entry.cols.map(function(c) { return c.name.toLowerCase(); });
+  var allPresent = true;
+  var checksHtml = reqCols.map(function(col) {
+    var ok = presentCols.indexOf(col) >= 0;
+    if (!ok) allPresent = false;
+    return '<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;font:600 13px Inter,sans-serif;background:' +
+      (ok ? '#ECFDF5' : '#FFF5F5') + ';border:1px solid ' + (ok ? '#A7F3D0' : '#F1C4BF') + ';color:' + (ok ? '#065F46' : '#B42318') + '">' +
+      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+      (ok ? '<polyline points="20 6 9 17 4 12"/>' : '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>') +
+      '</svg>' + col + '</span>';
+  }).join('');
+  document.getElementById('cim-col-checks').innerHTML = checksHtml;
+  cimState.colsValid = allPresent;
+
+  // Type mapping table
+  var DORIS_TO_ICE = {
+    'BOOLEAN':'boolean', 'TINYINT':'int', 'SMALLINT':'int', 'INT':'int',
+    'BIGINT':'long', 'LARGEINT':'decimal(38,0)', 'FLOAT':'float', 'DOUBLE':'double',
+    'DATE':'date', 'DATETIMEV2':'timestamp', 'DATETIME':'timestamp',
+    'CHAR':'string', 'VARCHAR':'string', 'STRING':'string',
+    'JSON':'string', 'VARIANT':'string', 'IPV4':'string', 'IPV6':'string',
+  };
+  var UNSUPPORTED = ['HLL','BITMAP','QUANTILE_STATE','AGG_STATE'];
+  var mapRows = entry.cols.map(function(c) {
+    var baseType = c.doris.replace(/\(.*$/, '').toUpperCase();
+    var iceType = c.ice || DORIS_TO_ICE[baseType] || '—';
+    var unsup = UNSUPPORTED.indexOf(baseType) >= 0;
+    var noteHtml = unsup
+      ? '<span style="color:#B42318;font-weight:600">Not supported — column will block creation</span>'
+      : (c.note ? '<span style="color:#4F5866">' + c.note + '</span>' : '—');
+    return '<tr>' +
+      '<td class="td" style="font-weight:600">' + c.name + '</td>' +
+      '<td class="td" style="font:400 13px ui-monospace,monospace">' + c.doris + '</td>' +
+      '<td class="td" style="font:400 13px ui-monospace,monospace;color:#1F4FD8">' + iceType + '</td>' +
+      '<td class="td">' + noteHtml + '</td></tr>';
+  }).join('');
+  document.getElementById('cim-col-map-body').innerHTML = mapRows ||
+    '<tr><td colspan="4" class="empty">No columns.</td></tr>';
+
+  // Validation error
+  var errEl = document.getElementById('cim-validation-err');
+  if (!allPresent) {
+    errEl.style.display = 'block';
+    errEl.textContent = 'Required columns snap_id, created_at and updated_at must all be present. Table cannot be created until they are added.';
+  } else {
+    errEl.style.display = 'none';
+  }
+
+  // Iceberg exists check (simulated: false for demo)
+  cimState.icebergExists = false;
+  document.getElementById('cim-exists-warn').style.display = 'none';
+
+  // Enable/disable create button
+  var btn = document.getElementById('cim-create-btn');
+  var canCreate = allPresent && (!cimState.icebergExists || cimState.reuseDrop !== null);
+  btn.disabled = !canCreate;
+  btn.style.opacity = canCreate ? '1' : '.5';
+
+  document.getElementById('cim-preview').style.display = 'flex';
+}
+
+function cimChooseReuse() {
+  cimState.reuseDrop = 'reuse';
+  document.getElementById('cim-exists-warn').style.display = 'none';
+  var btn = document.getElementById('cim-create-btn');
+  btn.disabled = !cimState.colsValid;
+  btn.style.opacity = cimState.colsValid ? '1' : '.5';
+}
+function cimChooseDrop() {
+  cimState.reuseDrop = 'drop';
+  document.getElementById('cim-exists-warn').style.display = 'none';
+  var btn = document.getElementById('cim-create-btn');
+  btn.disabled = !cimState.colsValid;
+  btn.style.opacity = cimState.colsValid ? '1' : '.5';
+}
+
+function doCreateIceberg() {
+  if (!cimState.colsValid || !cimState.eligibleEntry) return;
+  var entry  = cimState.eligibleEntry;
+  var appDb  = cimState.resolvedAppDb;
+  var appTbl = cimState.resolvedAppTbl;
+  var target = 'polaris.' + appDb + '_iceberg.' + appTbl;
+
+  // Show progress panel
+  document.getElementById('cim-step1').style.display = 'none';
+  document.getElementById('cim-preview').style.display = 'none';
+  document.getElementById('cim-progress').style.display = 'flex';
+
+  var steps = [
+    { label: 'Resolve source table (' + appDb + '.' + appTbl + ')',         ok: true,  delay: 300  },
+    { label: 'Check eligibility (stardata.table_type=iceberg)',              ok: true,  delay: 500  },
+    { label: 'Validate columns (snap_id, created_at, updated_at, MOW)',      ok: true,  delay: 700  },
+    { label: 'Create namespace polaris.' + appDb + '_iceberg',               ok: true,  delay: 1200 },
+    { label: 'Build Iceberg schema (type mapping)',                          ok: true,  delay: 1600 },
+    { label: 'CREATE TABLE ' + target + ' (format v2, identifier fields)',   ok: true,  delay: 2200 },
+    { label: 'Initialise cache_system.' + appTbl + ' control table',         ok: true,  delay: 2800 },
+    { label: 'Start INITIAL batch (snap_id 0 → ' + entry.cols[0].name + ')', ok: true,  delay: 3600 },
+  ];
+
+  var list = document.getElementById('cim-steps-list');
+  list.innerHTML = steps.map(function(s, i) {
+    return '<div id="cim-step-' + i + '" style="display:flex;align-items:center;gap:10px;font:400 14px Inter,sans-serif;color:#9AA3B0">' +
+      '<span id="cim-step-icon-' + i + '" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:#EEF1F5;display:inline-flex;align-items:center;justify-content:center"></span>' +
+      '<span>' + s.label + '</span></div>';
+  }).join('');
+
+  function runStep(i) {
+    if (i >= steps.length) {
+      // All done — add to synced list
+      var newEntry = {
+        tbl: appTbl, appDb: appDb, appTbl: appTbl,
+        target: target,
+        lastSnapId: 0, lastBatch: 'Just started', upserted: 0, deleted: 0,
+        status: 'running', blocked: false, blockedMsg: '',
+        batches: [{ id:1, type:'INITIAL', from:0, to:0, rows:0, maxCreated:'—', maxUpdated:'—', status:'running', started: new Date().toISOString().replace('T',' ').slice(0,19), finished:'—' }]
+      };
+      LHS_SYNCED_TABLES.unshift(newEntry);
+      document.getElementById('cim-done-btn').style.display = 'inline-flex';
+      document.getElementById('cim-create-msg').textContent = '✓ Iceberg table created and initial sync started.';
+      document.getElementById('cim-create-msg').style.color = '#17663A';
+      return;
+    }
+    var s = steps[i];
+    var iconEl = document.getElementById('cim-step-icon-' + i);
+    var rowEl  = document.getElementById('cim-step-' + i);
+    // Show spinner
+    iconEl.style.background = '#E8EEFC';
+    iconEl.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1F4FD8" stroke-width="3" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>';
+    rowEl.style.color = '#14171C';
+    setTimeout(function() {
+      iconEl.style.background = s.ok ? '#ECFDF5' : '#FFF5F5';
+      iconEl.innerHTML = s.ok
+        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#065F46" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      rowEl.style.color = s.ok ? '#14171C' : '#B42318';
+      if (!s.ok) {
+        document.getElementById('cim-done-btn').style.display = 'inline-flex';
+        return;
+      }
+      runStep(i + 1);
+    }, i === 0 ? steps[0].delay : steps[i].delay - steps[i-1].delay);
+  }
+  runStep(0);
+}
+
+// ============================================================
+// BOOT
+// ============================================================
+(function init() {
+  renderCatalog();
+  renderSnapshots();
+  loadWarehouseKpis();
+  setInterval(function() { loadWarehouseKpis(); loadBackupHistory(); }, 30000);
+})();
+</script>
 
 </body>
 </html>

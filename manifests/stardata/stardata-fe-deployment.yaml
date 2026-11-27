@@ -106,6 +106,14 @@ data:
     # cardinality workloads across all databases.
     enable_auto_partition  = true
     max_auto_partition_num = 50000
+
+    # ── Load timeouts ────────────────────────────────────────────────────────
+    # Abort any INSERT that runs longer than 10 minutes (Iceberg writes on
+    # large batches can take several minutes to commit to S3).
+    # 120s was too tight and silently dropped large Iceberg INSERT batches.
+    insert_load_default_timeout_second  = 600
+    stream_load_default_timeout_second  = 300
+
 ---
 apiVersion: apps/v1
 kind: StatefulSet

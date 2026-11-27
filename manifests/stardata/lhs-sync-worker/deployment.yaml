@@ -1,0 +1,116 @@
+# =============================================================================
+# LHS Sync Sidecar — Kubernetes Deployment
+# Namespace : prod
+#
+# Runs sync_worker.py as a permanent single-replica Deployment.
+# The pod connects to Stardata FE on port 9030 (MySQL wire protocol) and
+# automatically syncs every iceberg-type table it discovers in cache_system
+# into the Polaris-backed Iceberg catalog — no restart or config change needed
+# when new tables are added.
+#
+# Deploy:
+#   kubectl apply -f manifests/stardata/lhs-sync-worker/deployment.yaml
+#
+# Logs:
+#   kubectl logs -n prod -l app=lhs-sync-worker -f
+#
+# Build + push image first:
+#   docker build -t 192.168.1.50:30500/lhs-sync-worker:python-v1 \
+#     manifests/stardata/lhs-sync-worker/
+#   docker push 192.168.1.50:30500/lhs-sync-worker:python-v1
+# =============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lhs-sync-worker
+  namespace: prod
+  labels:
+    app: lhs-sync-worker
+    component: sync-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lhs-sync-worker
+  # Recreate ensures only one worker runs at a time — no two pods can race on
+  # the same control table rows during a rollout.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lhs-sync-worker
+        component: sync-worker
+    spec:
+      # ── Tolerate the dedicated=stardata taint on worker nodes ─────────────
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "stardata"
+          effect: "NoSchedule"
+
+      # ── Prefer stardata nodes but do not require them ─────────────────────
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              preference:
+                matchExpressions:
+                  - key: stardata
+                    operator: In
+                    values: ["true"]
+
+      # Allow up to 120 s for in-flight SQL batches to complete on shutdown
+      terminationGracePeriodSeconds: 120
+
+      restartPolicy: Always
+
+      containers:
+        - name: sync-worker
+          image: 192.168.1.50:30500/lhs-sync-worker:python-v1
+          imagePullPolicy: Always
+
+          env:
+            # ── Stardata FE connection ──────────────────────────────────────
+            - name: STARDATA_HOST
+              value: "stardata-fe.prod.svc.cluster.local"
+            - name: STARDATA_PORT
+              value: "9030"
+            - name: STARDATA_USER
+              value: "root"
+            # Stardata FE root password is empty on this cluster.
+            # The stardata-credentials secret admin-password key is intentionally blank.
+            - name: STARDATA_PASSWORD
+              value: ""
+
+            # ── Sync cadence ────────────────────────────────────────────────
+            # 60 seconds between full discovery + sync ticks.
+            # Increase for lower-churn tables; decrease for near-realtime needs.
+            - name: POLL_INTERVAL_SECONDS
+              value: "60"
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+          # ── Liveness: the process must not hang for more than 10 minutes ──
+          # If sync_worker.py gets stuck (e.g. a SQL query never returns),
+          # Kubernetes will restart it after failureThreshold × periodSeconds.
+          livenessProbe:
+            exec:
+              # The worker writes a heartbeat file at the top of each tick.
+              # If the file is older than 10 minutes the pod is restarted.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  test -f /tmp/lhs_heartbeat && \
+                  test $(( $(date +%s) - $(date +%s -r /tmp/lhs_heartbeat) )) -lt 600
+            initialDelaySeconds: 90
+            periodSeconds: 60
+            failureThreshold: 3
