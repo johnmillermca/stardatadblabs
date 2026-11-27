@@ -415,7 +415,7 @@ function dorisSQL(db, stmt, limit) {
     return r.json();
   }).then(function(d) {
     if (d.code !== 0) {
-      var msg = d.msg || (d.data && d.data.type) || JSON.stringify(d);
+      var msg = (typeof d.data === 'string' && d.data) || d.msg || (d.data && d.data.type) || JSON.stringify(d);
       throw new Error(msg);
     }
     var rows = (d.data && d.data.data) ? d.data.data : [];
@@ -1383,6 +1383,331 @@ var lhsState = {
   tables: [],         // loaded from cache_system control tables
 };
 
+// Per-table refresh timers  { tblName: { timerId, intervalMs } }
+var lhsRefreshTimers = {};
+
+// Selected table names (multi-select checkboxes)
+var lhsSelected = {};
+
+// Refresh interval options  { label, ms }
+var LHS_INTERVALS = [
+  { label: '—',    ms: 0 },
+  { label: '1 m',  ms: 60000 },
+  { label: '5 m',  ms: 300000 },
+  { label: '10 m', ms: 600000 },
+  { label: '15 m', ms: 900000 },
+  { label: '30 m', ms: 1800000 },
+  { label: '45 m', ms: 2700000 },
+  { label: '60 m', ms: 3600000 },
+  { label: '2 h',  ms: 7200000 },
+  { label: '3 h',  ms: 10800000 },
+  { label: '6 h',  ms: 21600000 },
+  { label: '12 h', ms: 43200000 },
+];
+
+// Start (or restart) a per-table refresh timer.
+// If the table is blocked, the timer is not started — it will be
+// started automatically when clearSyncError() succeeds.
+function lhsSetTimer(tblName, ms) {
+  // Clear any existing timer for this table
+  if (lhsRefreshTimers[tblName]) {
+    clearInterval(lhsRefreshTimers[tblName].timerId);
+    lhsRefreshTimers[tblName] = null;
+  }
+  if (!ms) return; // 0 = disabled
+  var t = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+  if (t && t.blocked) return; // don't start while blocked
+  var id = setInterval(function() {
+    var entry = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+    if (entry && entry.blocked) {
+      // Table became blocked — pause timer
+      clearInterval(lhsRefreshTimers[tblName] && lhsRefreshTimers[tblName].timerId);
+      lhsRefreshTimers[tblName].timerId = null;
+      lhsShowInlineBlockedBanner(tblName);
+      return;
+    }
+    loadSingleLhsTable(tblName);
+  }, ms);
+  lhsRefreshTimers[tblName] = { timerId: id, intervalMs: ms };
+}
+
+// Reload status for one specific table (lighter than full loadLhsTables).
+// Reuses the same query as loadLhsTables but for a single table name.
+function loadSingleLhsTable(tblName) {
+  // Blocked only when the _log table has actual error rows (not just exists)
+  var logCheck = dorisSQL('cache_system',
+    "SELECT TABLE_NAME FROM information_schema.TABLES " +
+    "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME='" + tblName.replace(/'/g,"''") + "_log' " +
+    "AND TABLE_ROWS > 0"
+  ).catch(function() { return { rows: [], idx: {} }; });
+
+  var batchQuery = dorisSQL('cache_system',
+    "SELECT batch_id, database_name, table_name, batch_type, snap_id_from, snap_id_to," +
+    " row_count, status, started_at, finished_at, max_created_at, max_updated_at" +
+    " FROM cache_system.`" + tblName + "`" +
+    " ORDER BY batch_id DESC LIMIT 20"
+  ).catch(function() { return { rows: [], idx: {} }; });
+
+  Promise.all([batchQuery, logCheck]).then(function(both) {
+    var res = both[0], logRes = both[1];
+    var isBlocked = logRes.rows.length > 0;
+    var idx = res.idx;
+    var col = function(name) { return idx[name] != null ? idx[name] : -1; };
+    var rows = res.rows;
+
+    // Find and update the existing entry in lhsState.tables
+    var entry = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+    if (!entry) return;
+
+    if (!rows.length) {
+      entry.blocked = isBlocked;
+      entry.status = 'no batches';
+    } else {
+      var latest = rows[0];
+      entry.appDb  = latest[col('database_name')] || entry.appDb;
+      entry.appTbl = latest[col('table_name')]    || entry.appTbl;
+      entry.status = latest[col('status')]        || '—';
+      entry.lastSnapId = latest[col('snap_id_to')] || 0;
+      var upserted = 0, deleted = 0;
+      rows.forEach(function(r) {
+        var rc = parseInt(r[col('row_count')]) || 0;
+        var bt = r[col('batch_type')] || '';
+        if (bt === 'DELETE') deleted += rc; else upserted += rc;
+      });
+      entry.upserted = upserted;
+      entry.deleted  = deleted;
+      entry.lastBatch = rows[0][col('finished_at')] && rows[0][col('finished_at')] !== '—'
+        ? fmtAgo(rows[0][col('finished_at')]) : '—';
+      entry.blocked = isBlocked;
+      if (isBlocked) {
+        entry.blockedMsg = 'Error in cache_system.' + tblName + '_log — clear to resume';
+      }
+      entry.batches = rows.map(function(r) {
+        return {
+          id: r[col('batch_id')],
+          type: r[col('batch_type')]   || '—',
+          from: r[col('snap_id_from')] || 0,
+          to:   r[col('snap_id_to')]   || 0,
+          rows: parseInt(r[col('row_count')]) || 0,
+          maxCreated: r[col('max_created_at')] || '—',
+          maxUpdated: r[col('max_updated_at')] || '—',
+          status: r[col('status')]     || '—',
+          started:  r[col('started_at')]  || '—',
+          finished: r[col('finished_at')] || '—',
+        };
+      });
+    }
+
+    renderLhsTables();
+
+    // If blocked, pause timer and show inline banner
+    if (isBlocked) {
+      var timer = lhsRefreshTimers[tblName];
+      if (timer && timer.timerId) {
+        clearInterval(timer.timerId);
+        timer.timerId = null;
+      }
+      lhsShowInlineBlockedBanner(tblName);
+    }
+
+    // If detail panel is open for this table, refresh it too
+    if (lhsState.selTable && lhsState.selTable.tbl === tblName) {
+      openLhsDetail(tblName);
+    }
+  });
+}
+
+// Show or update the inline blocked banner row beneath a table row.
+function lhsShowInlineBlockedBanner(tblName) {
+  var bannerId = 'lhs-inline-err-' + tblName;
+  var existing = document.getElementById(bannerId);
+  if (existing) return; // already shown
+  // Insert a full-width error row after the table's row
+  var tbody = document.getElementById('lhs-tables-body');
+  if (!tbody) return;
+  var rows = tbody.querySelectorAll('tr[data-tbl]');
+  var target = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].getAttribute('data-tbl') === tblName) { target = rows[i]; break; }
+  }
+  if (!target) return;
+  var t = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+  var msg = t ? t.blockedMsg : 'Error in cache_system.' + tblName + '_log';
+  var tr = document.createElement('tr');
+  tr.id = bannerId;
+  tr.innerHTML = '<td colspan="9" style="padding:0">' +
+    '<div style="margin:0 0 2px;padding:10px 18px;background:#FFF5F5;border-top:1px solid #F1C4BF;' +
+    'border-bottom:1px solid #F1C4BF;display:flex;align-items:center;gap:12px;flex-wrap:wrap">' +
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+    '<span style="font:600 13px Inter,sans-serif;color:#B42318">Refresh paused — sync is blocked</span>' +
+    '<span style="font:400 13px Inter,sans-serif;color:#3A414D;flex:1">' + msg + '</span>' +
+    '<button class="btnd" style="min-height:30px;padding:0 12px;font-size:12px" ' +
+    'onclick="lhsClearAndResume(\'' + tblName + '\')">Clear error &amp; resume</button>' +
+    '</div></td>';
+  target.parentNode.insertBefore(tr, target.nextSibling);
+}
+
+// Clear error log for a table and restart its refresh timer.
+function lhsClearAndResume(tblName) {
+  var bannerId = 'lhs-inline-err-' + tblName;
+  var bannerRow = document.getElementById(bannerId);
+  if (bannerRow) {
+    var btn = bannerRow.querySelector('button');
+    if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
+  }
+  dorisSQL('cache_system', 'TRUNCATE TABLE cache_system.`' + tblName + '_log`')
+    .then(function() {
+      var t = lhsState.tables.find(function(x) { return x.tbl === tblName; });
+      if (t) { t.blocked = false; t.blockedMsg = ''; t.status = 'completed upsert'; }
+      if (bannerRow) bannerRow.parentNode.removeChild(bannerRow);
+      renderLhsTables();
+      // Resume timer at previously configured interval
+      var timer = lhsRefreshTimers[tblName];
+      var ms = timer ? timer.intervalMs : 0;
+      if (ms) lhsSetTimer(tblName, ms);
+      // If detail panel is open for this table, update it
+      if (lhsState.selTable && lhsState.selTable.tbl === tblName) {
+        openLhsDetail(tblName);
+      }
+    })
+    .catch(function(e) {
+      if (bannerRow) {
+        var btn = bannerRow.querySelector('button');
+        if (btn) { btn.disabled = false; btn.textContent = 'Clear error & resume'; }
+        var msg = bannerRow.querySelector('span[style*="color:#3A414D"]');
+        if (msg) msg.textContent = 'Could not clear: ' + e.message;
+      }
+    });
+}
+
+// Apply a schedule to all currently selected tables.
+function lhsApplyScheduleToSelected() {
+  var ms = parseInt(document.getElementById('lhs-bulk-interval').value) || 0;
+  Object.keys(lhsSelected).forEach(function(tblName) {
+    if (!lhsSelected[tblName]) return;
+    lhsSetTimer(tblName, ms);
+    // Update the per-row dropdown to match
+    var sel = document.getElementById('lhs-sched-' + tblName);
+    if (sel) sel.value = String(ms);
+    lhsUpdateRowButtons(tblName);
+  });
+  // Show brief confirmation
+  var msg = document.getElementById('lhs-bulk-msg');
+  if (msg) {
+    var label = LHS_INTERVALS.find(function(x) { return x.ms === ms; });
+    msg.textContent = ms
+      ? '✓ Schedule set to ' + (label ? label.label : ms + ' ms') + ' for ' + Object.keys(lhsSelected).filter(function(k){return lhsSelected[k];}).length + ' table(s)'
+      : '✓ Refresh disabled for selected table(s)';
+    msg.style.color = '#17663A';
+    setTimeout(function() { msg.textContent = ''; }, 3000);
+  }
+}
+
+// Start the refresh timer for all selected tables using their current dropdown interval.
+function lhsBulkStartSelected() {
+  var count = 0;
+  Object.keys(lhsSelected).forEach(function(tblName) {
+    if (!lhsSelected[tblName]) return;
+    var sel = document.getElementById('lhs-sched-' + tblName);
+    var ms  = sel ? (parseInt(sel.value) || 0) : 0;
+    if (!ms) {
+      // If no interval chosen yet, default to 5 min
+      ms = 300000;
+      if (sel) sel.value = '300000';
+    }
+    lhsSetTimer(tblName, ms);
+    lhsUpdateRowButtons(tblName);
+    count++;
+  });
+  var msg = document.getElementById('lhs-bulk-msg');
+  if (msg) {
+    msg.textContent = '▶ Started refresh for ' + count + ' table(s)';
+    msg.style.color = '#17663A';
+    setTimeout(function() { msg.textContent = ''; }, 3000);
+  }
+  renderLhsTables();
+}
+
+// Stop the refresh timer for all selected tables.
+function lhsBulkStopSelected() {
+  var count = 0;
+  Object.keys(lhsSelected).forEach(function(tblName) {
+    if (!lhsSelected[tblName]) return;
+    lhsSetTimer(tblName, 0); // 0 = clear timer
+    lhsUpdateRowButtons(tblName);
+    count++;
+  });
+  var msg = document.getElementById('lhs-bulk-msg');
+  if (msg) {
+    msg.textContent = '⏹ Stopped refresh for ' + count + ' table(s)';
+    msg.style.color = '#B42318';
+    setTimeout(function() { msg.textContent = ''; }, 3000);
+  }
+  renderLhsTables();
+}
+
+// Start the refresh timer for a single table row (▶ button).
+function lhsStartRow(tblName) {
+  var sel = document.getElementById('lhs-sched-' + tblName);
+  var ms  = sel ? (parseInt(sel.value) || 0) : 0;
+  if (!ms) {
+    ms = 300000; // default 5 min if no interval selected
+    if (sel) sel.value = '300000';
+  }
+  lhsSetTimer(tblName, ms);
+  lhsUpdateRowButtons(tblName);
+  renderLhsTables();
+}
+
+// Stop the refresh timer for a single table row (⏹ button).
+function lhsStopRow(tblName) {
+  lhsSetTimer(tblName, 0);
+  lhsUpdateRowButtons(tblName);
+  renderLhsTables();
+}
+
+// Update the Start/Stop button states for a single row without full re-render.
+function lhsUpdateRowButtons(tblName) {
+  var timer = lhsRefreshTimers[tblName];
+  var active = timer && timer.timerId && timer.intervalMs > 0;
+  var startBtn = document.getElementById('lhs-start-' + tblName);
+  var stopBtn  = document.getElementById('lhs-stop-'  + tblName);
+  if (startBtn) startBtn.disabled = !!active;
+  if (stopBtn)  stopBtn.disabled  = !active;
+}
+
+// Toggle checkbox for a table row.
+function lhsToggleSelect(tblName, checked) {
+  lhsSelected[tblName] = checked;
+  var allChecked = Object.keys(lhsSelected).every(function(k) { return lhsSelected[k]; });
+  var anyChecked = Object.keys(lhsSelected).some(function(k)  { return lhsSelected[k]; });
+  var master = document.getElementById('lhs-select-all');
+  if (master) {
+    master.checked = allChecked;
+    master.indeterminate = anyChecked && !allChecked;
+  }
+  ['lhs-bulk-apply','lhs-bulk-start','lhs-bulk-stop'].forEach(function(id) {
+    var btn = document.getElementById(id);
+    if (btn) btn.disabled = !anyChecked;
+  });
+}
+
+// Toggle all checkboxes.
+function lhsToggleAll(checked) {
+  lhsState.tables.forEach(function(t) { lhsSelected[t.tbl] = checked; });
+  var cbs = document.querySelectorAll('.lhs-row-cb');
+  cbs.forEach(function(cb) { cb.checked = checked; });
+  ['lhs-bulk-apply','lhs-bulk-start','lhs-bulk-stop'].forEach(function(id) {
+    var btn = document.getElementById(id);
+    if (btn) btn.disabled = !checked;
+  });
+}
+
+// Change schedule for a single table from its inline dropdown.
+function lhsChangeSched(tblName, ms) {
+  lhsSetTimer(tblName, ms);
+}
+
 // Modal state
 var cimState = {
   resolvedAppDb:  null,
@@ -1435,11 +1760,15 @@ function loadLhsTables() {
       }).catch(function() { return { tbl: tbl, res: { rows: [], idx: {} } }; });
     });
 
-    // 3. Also check for log tables (blocked state)
+    // 3. Check which tables have ROWS in their _log table (blocked state).
+    // The _log table always exists (created by DDL mirror sidecar) — only
+    // a table with actual error rows in it is considered blocked.
+    var logTblNames = names.map(function(n) { return "'" + n.replace(/'/g,"''") + "_log'"; }).join(',');
     var logCheck = dorisSQL('cache_system',
-      "SELECT TABLE_NAME FROM information_schema.TABLES " +
-      "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME LIKE '%\\_log'" +
-      " AND TABLE_NAME NOT IN ('cache_eviction_log','query_block_log','catalog_sync_log')"
+      "SELECT REPLACE(TABLE_NAME, '_log', '') AS base_tbl " +
+      "FROM information_schema.TABLES " +
+      "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME IN (" + logTblNames + ") " +
+      "AND TABLE_ROWS > 0"
     ).catch(function() { return { rows: [], idx: {} }; });
 
     Promise.all([Promise.all(promises), logCheck]).then(function(both) {
@@ -1554,6 +1883,47 @@ function loadLhsTables() {
   });
 }
 
+// ============================================================
+// LAKEHOUSE SYNC — status label helper
+// ============================================================
+// Returns { label, color, badge } for the Sync Status column.
+//
+// Three top-level states from the user's perspective:
+//   errored  — log table has rows (blocked)         → red
+//   running  — a per-table refresh timer is active  → blue
+//   stopped  — no timer set / schedule disabled     → grey
+//
+// The raw Doris batch status (completed upsert, delete_pending,
+// etc.) is secondary and shown in the per-table Details panel.
+// ============================================================
+function lhsStatusLabel(t) {
+  // 1. Errored: log table has rows — sync is blocked
+  if (t.blocked) {
+    return {
+      label: 'errored',
+      color: '#B42318',
+      badge: ' <span class="badge-red">Errored</span>'
+    };
+  }
+  // 2. Running: a refresh schedule timer is active for this table
+  var timer = lhsRefreshTimers[t.tbl];
+  var timerActive = timer && timer.timerId && timer.intervalMs > 0;
+  if (timerActive) {
+    return {
+      label: 'running',
+      color: '#1F4FD8',
+      badge: ''
+    };
+  }
+  // 3. Stopped: no timer — sync schedule not configured or manually disabled
+  return {
+    label: 'stopped',
+    color: '#9AA3B0',
+    badge: ''
+  };
+}
+
+
 function renderLhsTables() {
   var filterDb = document.getElementById('lhs-db-filter').value;
   var rows = lhsState.tables.filter(function(t) {
@@ -1561,28 +1931,81 @@ function renderLhsTables() {
   });
   var tbody = document.getElementById('lhs-tables-body');
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No Iceberg tables synced yet. Click <strong>+ Create Iceberg Table</strong> to start.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No Iceberg tables synced yet. Click <strong>+ Create Iceberg Table</strong> to start.</td></tr>';
     return;
   }
+  // Build interval options HTML once
+  var optHtml = LHS_INTERVALS.map(function(o) {
+    return '<option value="' + o.ms + '">' + o.label + '</option>';
+  }).join('');
+
   tbody.innerHTML = rows.map(function(t) {
-    var sc = t.blocked        ? '#B42318'
-           : t.status === 'completed upsert' ? '#17663A'
-           : t.status === 'deleted'          ? '#17663A'
-           : t.status === 'running'          ? '#1F4FD8'
-           : t.status === 'delete_pending'   ? '#D97706'
-           : '#9AA3B0';
-    var badge = t.blocked
-      ? ' <span class="badge-red">Blocked</span>' : '';
-    return '<tr>' +
+    var sl   = lhsStatusLabel(t);
+    var sc   = sl.color;
+    var badge = sl.badge;
+    var isChecked = lhsSelected[t.tbl] ? 'checked' : '';
+    // Current timer interval for this table (0 if none set)
+    var curMs = (lhsRefreshTimers[t.tbl] && lhsRefreshTimers[t.tbl].intervalMs) || 0;
+    // Always show dropdown + Start/Stop buttons.
+    // When blocked: dropdown and Start are disabled, Stop also disabled (nothing running).
+    var timerActive = !!(lhsRefreshTimers[t.tbl] && lhsRefreshTimers[t.tbl].timerId && lhsRefreshTimers[t.tbl].intervalMs > 0);
+    var canStart = !timerActive && !t.blocked;
+    var canStop  = timerActive;
+    // helper: button style based on enabled/disabled state
+    function btnStyle(enabledBorder, enabledBg, enabledColor, enabled) {
+      var border = enabled ? enabledBorder : '#C4CCD8';
+      var bg     = enabled ? enabledBg     : '#F7F8FA';
+      var color  = enabled ? enabledColor  : '#9AA3B0';
+      return 'display:inline-flex;align-items:center;min-height:28px;padding:0 9px;border-radius:6px;' +
+             'border:1px solid ' + border + ';background:' + bg + ';color:' + color + ';' +
+             'font:600 12px Inter,sans-serif;cursor:' + (enabled ? 'pointer' : 'default') + ';white-space:nowrap';
+    }
+    var schedCell =
+      '<div style="display:inline-flex;align-items:center;gap:5px;flex-wrap:nowrap">' +
+        '<select id="lhs-sched-' + t.tbl + '" ' +
+          'onchange="lhsChangeSched(\'' + t.tbl + '\',parseInt(this.value))" ' +
+          (t.blocked ? 'disabled ' : '') +
+          'style="font:400 13px Inter,sans-serif;border:1px solid #C4CCD8;border-radius:6px;padding:3px 6px;background:' + (t.blocked ? '#F7F8FA' : '#fff') + ';cursor:' + (t.blocked ? 'default' : 'pointer') + '">' +
+          optHtml.replace('value="' + curMs + '"', 'value="' + curMs + '" selected') +
+        '</select>' +
+        '<button id="lhs-start-' + t.tbl + '" onclick="lhsStartRow(\'' + t.tbl + '\')" ' +
+          (canStart ? '' : 'disabled ') +
+          'title="' + (t.blocked ? 'Clear error first' : 'Start refresh') + '" ' +
+          'style="' + btnStyle('#17663A', '#ECFDF5', '#17663A', canStart) + '">' +
+          '▶ Start</button>' +
+        '<button id="lhs-stop-' + t.tbl + '" onclick="lhsStopRow(\'' + t.tbl + '\')" ' +
+          (canStop ? '' : 'disabled ') +
+          'title="Stop refresh" ' +
+          'style="' + btnStyle('#B42318', '#FFF5F5', '#B42318', canStop) + '">' +
+          '⏹ Stop</button>' +
+      '</div>';
+    return '<tr data-tbl="' + t.tbl + '">' +
+      '<td class="td" style="width:36px;padding-left:14px">' +
+        '<input type="checkbox" class="lhs-row-cb" ' + isChecked + ' ' +
+        'onchange="lhsToggleSelect(\'' + t.tbl + '\',this.checked)" ' +
+        'style="width:15px;height:15px;cursor:pointer;accent-color:#1F4FD8">' +
+      '</td>' +
       '<td class="td" style="font-weight:600">' + t.tbl + '</td>' +
       '<td class="td">' + t.appDb + '</td>' +
       '<td class="td" style="font:400 13px ui-monospace,monospace;color:#1F4FD8">' + t.target + '</td>' +
       '<td class="td">' + t.lastBatch + '</td>' +
       '<td class="td">' + t.upserted.toLocaleString() + '</td>' +
-      '<td class="td"><span style="font-weight:600;color:' + sc + '">' + t.status + '</span>' + badge + '</td>' +
+      '<td class="td"><span style="font-weight:600;color:' + sc + '">' + sl.label + '</span>' + badge + '</td>' +
+      '<td class="td">' + schedCell + '</td>' +
       '<td class="td" style="text-align:right"><button class="btn" onclick="openLhsDetail(\'' + t.tbl + '\')">Details</button></td>' +
       '</tr>';
   }).join('');
+
+  // Sync master-checkbox state
+  var anyChecked = Object.keys(lhsSelected).some(function(k)  { return lhsSelected[k]; });
+  var allChecked = rows.length > 0 && rows.every(function(t)  { return lhsSelected[t.tbl]; });
+  var master = document.getElementById('lhs-select-all');
+  if (master) {
+    master.checked = allChecked;
+    master.indeterminate = anyChecked && !allChecked;
+  }
+  var applyBtn = document.getElementById('lhs-bulk-apply');
+  if (applyBtn) applyBtn.disabled = !anyChecked;
 }
 
 function openLhsDetail(tblName) {
@@ -1597,14 +2020,10 @@ function openLhsDetail(tblName) {
   document.getElementById('lhd-upserted').textContent = t.upserted.toLocaleString();
   document.getElementById('lhd-deleted').textContent = t.deleted.toLocaleString();
 
-  var sc = t.blocked ? '#B42318'
-         : t.status === 'completed upsert' ? '#17663A'
-         : t.status === 'running'          ? '#1F4FD8'
-         : t.status === 'delete_pending'   ? '#D97706'
-         : t.status === 'failed'           ? '#B42318' : '#9AA3B0';
+  var sl2 = lhsStatusLabel(t);
   var statusEl = document.getElementById('lhd-status');
-  statusEl.style.color = sc;
-  statusEl.textContent = t.blocked ? 'Blocked' : t.status;
+  statusEl.style.color = sl2.color;
+  statusEl.textContent = sl2.label;
 
   var banner = document.getElementById('lhd-blocked-banner');
   if (t.blocked) {
@@ -1669,6 +2088,13 @@ function clearSyncError() {
       document.getElementById('lhd-status').textContent = 'completed upsert';
       document.getElementById('lhd-status').style.color = '#17663A';
       renderLhsTables();
+      // Also remove any inline banner row in the main table
+      var bannerRow = document.getElementById('lhs-inline-err-' + t.tbl);
+      if (bannerRow) bannerRow.parentNode.removeChild(bannerRow);
+      // Resume refresh timer at previously configured interval
+      var timer = lhsRefreshTimers[t.tbl];
+      var ms = timer ? timer.intervalMs : 0;
+      if (ms) lhsSetTimer(t.tbl, ms);
     })
     .catch(function(e) {
       msgEl.textContent = 'Could not clear log: ' + e.message;
@@ -1823,35 +2249,38 @@ function onCimCatalogChange() {
 }
 
 function checkEligibilityAndPreview(appDb, appTbl) {
-  // 1. Check iceberg property via SHOW CREATE TABLE
-  dorisSQL(appDb, 'SHOW CREATE TABLE `' + appDb + '`.`' + appTbl + '`')
-    .then(function(res) {
-      if (!res.rows.length) throw new Error('Could not read table DDL');
-      var ddl = (res.rows[0][1] || res.rows[0][res.idx['Create Table'] || 1] || '').toString();
-      if (ddl.indexOf('stardata.table_type') < 0 && ddl.indexOf('iceberg') < 0) {
+  // Eligibility = table has snap_id, created_at, updated_at columns (auto-injected
+  // by Stardata only when created with table_type=iceberg). No DDL string check
+  // needed — column presence IS the proof of iceberg type.
+  dorisSQL(appDb, 'DESCRIBE `' + appDb + '`.`' + appTbl + '`')
+    .then(function(descRes) {
+      var cols = descRes.rows.map(function(r) {
+        var ci = descRes.idx;
+        return {
+          name:  r[ci['Field'] != null ? ci['Field'] : 0] || '',
+          doris: r[ci['Type']  != null ? ci['Type']  : 1] || '',
+        };
+      }).filter(function(c) { return c.name && !c.name.startsWith('__DORIS'); });
+
+      var colNames = cols.map(function(c) { return c.name.toLowerCase(); });
+      var required = ['snap_id', 'created_at', 'updated_at'];
+      var missing  = required.filter(function(col) { return colNames.indexOf(col) < 0; });
+
+      if (missing.length) {
         document.getElementById('cim-table-hint').textContent =
-          '✗ Table ' + appDb + '.' + appTbl + ' does not have the stardata.table_type=iceberg property set.';
+          '✗ Not an iceberg-type table — missing required column(s): ' + missing.join(', ');
         return;
       }
-      // 2. Load column definitions
-      return dorisSQL(appDb, 'DESCRIBE `' + appDb + '`.`' + appTbl + '`')
-        .then(function(descRes) {
-          var cols = descRes.rows.map(function(r) {
-            var ci = descRes.idx;
-            return {
-              name:  r[ci['Field'] != null ? ci['Field'] : 0] || '',
-              doris: r[ci['Type']  != null ? ci['Type']  : 1] || '',
-            };
-          }).filter(function(c) { return c.name && !c.name.startsWith('__DORIS'); });
 
-          // Find PK from DDL (UNIQUE KEY clause)
-          var pkMatch = ddl.match(/UNIQUE KEY\s*\(([^)]+)\)/i);
-          var pk = pkMatch ? pkMatch[1].split(',').map(function(s) { return s.trim().replace(/`/g,''); }) : ['snap_id'];
+      // Derive PK from UNIQUE KEY columns (snap_id + created_at for auto-partitioned tables)
+      var pkCols = cols.filter(function(c) {
+        return c.name === 'snap_id' || c.name === 'created_at';
+      }).map(function(c) { return c.name; });
+      var pk = pkCols.length ? pkCols : ['snap_id'];
 
-          var entry = { appDb: appDb, appTbl: appTbl, pk: pk, cols: cols };
-          cimState.eligibleEntry = entry;
-          renderCimPreview();
-        });
+      var entry = { appDb: appDb, appTbl: appTbl, pk: pk, cols: cols };
+      cimState.eligibleEntry = entry;
+      renderCimPreview();
     })
     .catch(function(e) {
       document.getElementById('cim-table-hint').textContent = 'Eligibility check failed: ' + e.message;
@@ -1994,23 +2423,29 @@ function doCreateIceberg() {
   document.getElementById('cim-progress').style.display = 'flex';
   document.getElementById('cim-done-btn').style.display = 'none';
 
-  // Build Iceberg CREATE TABLE columns
+  // Build Iceberg CREATE TABLE columns using Doris SQL types
+  // (Doris CREATE TABLE on an iceberg external catalog takes Doris types, not Iceberg types)
+  var DORIS_EXT_TYPE = {
+    'BOOLEAN':'BOOLEAN','TINYINT':'TINYINT','SMALLINT':'SMALLINT','INT':'INT',
+    'BIGINT':'BIGINT','LARGEINT':'LARGEINT','FLOAT':'FLOAT','DOUBLE':'DOUBLE',
+    'DATE':'DATE','DATETIME':'DATETIMEV2','DATETIMEV2':'DATETIMEV2','DATEV2':'DATE',
+    'CHAR':'STRING','VARCHAR':'STRING','STRING':'STRING',
+    'JSON':'STRING','VARIANT':'STRING','IPV4':'STRING','IPV6':'STRING',
+    'DECIMAL':'DECIMAL','DECIMALV3':'DECIMAL',
+  };
   var colDefs = entry.cols.map(function(c) {
     var base = c.doris.replace(/\(.*$/, '').replace(/\s.*/,'').toUpperCase();
-    var ice = DORIS_ICE_MAP[base] || 'string';
+    var extType = DORIS_EXT_TYPE[base] || 'STRING';
     // Preserve precision for DECIMAL
-    if (base === 'DECIMAL') ice = 'decimal' + (c.doris.match(/\([^)]+\)/) || ['(18,0)'])[0];
-    return '  `' + c.name + '` ' + ice;
+    if (base === 'DECIMAL' || base === 'DECIMALV3') {
+      extType = 'DECIMAL' + (c.doris.match(/\([^)]+\)/) || ['(18,2)'])[0];
+    }
+    return '  `' + c.name + '` ' + extType;
   }).join(',\n');
   var createTblSQL =
     "CREATE TABLE IF NOT EXISTS `" + catalog + "`.`" + nsName + "`.`" + iceTbl + "` (\n" +
     colDefs + "\n)" +
-    "\nPROPERTIES (" +
-    "'format-version'='2'," +
-    "'write.merge.mode'='merge-on-read'," +
-    "'write.object-storage.enabled'='true'," +
-    "'write.data.path'='" + s3Loc + "/" + nsName + "/" + iceTbl + "'" +
-    ")";
+    "\nPROPERTIES ('format-version'='2')";
 
   // Control table INSERT for INITIAL batch (cache_system key is always the source table name)
   var now = new Date().toISOString().replace('T',' ').slice(0,19);
@@ -2022,7 +2457,7 @@ function doCreateIceberg() {
 
   var steps = [
     { label: 'Resolve source table (' + appDb + '.' + appTbl + ')',              sql: null },
-    { label: 'Check eligibility (stardata.table_type=iceberg)',                  sql: null },
+    { label: 'Check eligibility (snap_id, created_at, updated_at present)',      sql: null },
     { label: 'Validate columns (snap_id, created_at, updated_at, MOW)',          sql: null },
     { label: 'Build Iceberg schema (type mapping)',                               sql: null },
     { label: 'CREATE TABLE ' + target + ' → ' + s3Loc + ' (format v2, partition days(created_at))',
@@ -2070,9 +2505,12 @@ function doCreateIceberg() {
     iconEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#1F4FD8" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>';
     rowEl.style.color = '#14171C';
 
-    // For CREATE TABLE use the catalog as DB context; for INSERT use appDb
+    // For DDL against external catalog (CREATE DATABASE / CREATE TABLE) use
+    // 'information_schema' as the HTTP API db context — the catalog name is
+    // fully-qualified inside the SQL itself and must NOT appear in the URL path.
+    // For DML against internal Doris tables (INSERT) use appDb.
     var sqlCtx = s.sql
-      ? (s.sql.startsWith('CREATE TABLE') ? catalog : appDb)
+      ? (s.sql.startsWith('CREATE') ? 'information_schema' : appDb)
       : null;
 
     var execPromise = s.sql
@@ -2127,14 +2565,17 @@ function doRegisterCatalog() {
   var warehouse  = document.getElementById('regcat-warehouse').value.trim();
   var credential = document.getElementById('regcat-credential').value.trim();
   var scope      = document.getElementById('regcat-scope').value.trim();
+  var s3Location = document.getElementById('regcat-s3').value.trim().replace(/\/$/, '');
+  var roleArn    = document.getElementById('regcat-role-arn').value.trim();
+  var region     = document.getElementById('regcat-region').value.trim() || 'us-east-2';
   var msgEl      = document.getElementById('regcat-msg');
 
-  if (!name || !uri || !warehouse || !credential) {
+  if (!name || !uri || !warehouse || !credential || !s3Location || !roleArn) {
     msgEl.style.display = 'block';
     msgEl.style.background = '#FFF5F5';
     msgEl.style.border = '1px solid #F1C4BF';
     msgEl.style.color = '#B42318';
-    msgEl.textContent = 'Catalog name, URI, warehouse and credential are required.';
+    msgEl.textContent = 'All fields except Scope are required.';
     return;
   }
 
@@ -2142,30 +2583,69 @@ function doRegisterCatalog() {
   msgEl.style.background = '#F7F9FC';
   msgEl.style.border = '1px solid #E1E6ED';
   msgEl.style.color = '#4F5866';
-  msgEl.textContent = 'Registering catalog…';
+  msgEl.textContent = 'Step 1/2 — Creating Polaris warehouse "' + warehouse + '"…';
 
-  var sql = "CREATE CATALOG IF NOT EXISTS `" + name + "` PROPERTIES (" +
-    "'type'='iceberg'," +
-    "'iceberg.catalog.type'='rest'," +
-    "'uri'='" + uri + "'," +
-    "'warehouse'='" + warehouse + "'," +
-    "'credential'='" + credential + "'" +
-    (scope ? (",'scope'='" + scope + "'") : '') +
-    ")";
+  // Step 1 — Create the warehouse in Polaris via management API
+  var warehousePayload = JSON.stringify({
+    catalog: {
+      type: 'INTERNAL',
+      name: warehouse,
+      properties: {
+        'default-base-location': s3Location + '/' + warehouse,
+        'client.region': region
+      },
+      storageConfigInfo: {
+        storageType: 'S3',
+        roleArn: roleArn,
+        externalId: 'polaris-iceberg',
+        allowedLocations: [s3Location + '/' + warehouse]
+      }
+    }
+  });
 
-  dorisSQL('information_schema', sql)
-    .then(function() {
-      msgEl.style.background = '#ECFDF5';
-      msgEl.style.border = '1px solid #A7F3D0';
-      msgEl.style.color = '#065F46';
-      msgEl.textContent = '✓ Catalog "' + name + '" registered successfully. You can now create Iceberg tables against it.';
-    })
-    .catch(function(e) {
-      msgEl.style.background = '#FFF5F5';
-      msgEl.style.border = '1px solid #F1C4BF';
-      msgEl.style.color = '#B42318';
-      msgEl.textContent = e.message;
-    });
+  fetch('/api/polaris/api/management/v1/catalogs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: warehousePayload
+  })
+  .then(function(r) {
+    // 200 = created, 409 = already exists — both are fine
+    if (!r.ok && r.status !== 409) {
+      return r.text().then(function(t) {
+        var msg = t;
+        try { msg = JSON.parse(t).error.message; } catch(e) {}
+        throw new Error('Polaris warehouse creation failed: ' + msg);
+      });
+    }
+    return r.status === 409 ? Promise.resolve() : r.json();
+  })
+  .then(function() {
+    msgEl.textContent = 'Step 2/2 — Registering catalog in Doris…';
+
+    // Step 2 — Register the Doris catalog pointing to this warehouse
+    var sql = "CREATE CATALOG IF NOT EXISTS `" + name + "` PROPERTIES (" +
+      "'type'='iceberg'," +
+      "'iceberg.catalog.type'='rest'," +
+      "'uri'='" + uri + "'," +
+      "'warehouse'='" + warehouse + "'," +
+      "'credential'='" + credential + "'" +
+      (scope ? (",'scope'='" + scope + "'") : '') +
+      ")";
+
+    return dorisSQL('information_schema', sql);
+  })
+  .then(function() {
+    msgEl.style.background = '#ECFDF5';
+    msgEl.style.border = '1px solid #A7F3D0';
+    msgEl.style.color = '#065F46';
+    msgEl.textContent = '✓ Polaris warehouse "' + warehouse + '" created and catalog "' + name + '" registered successfully.';
+  })
+  .catch(function(e) {
+    msgEl.style.background = '#FFF5F5';
+    msgEl.style.border = '1px solid #F1C4BF';
+    msgEl.style.color = '#B42318';
+    msgEl.textContent = e.message;
+  });
 }
 
 function doDropCatalog() {
@@ -2250,25 +2730,61 @@ function doDropCatalog() {
     </div>
   </div>
 
+  <!-- Multi-select bulk schedule toolbar -->
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;background:#F7F8FA;border:1px solid #E1E6ED;border-radius:10px">
+    <span style="font:600 13px Inter,sans-serif;color:#4F5866;white-space:nowrap">Set refresh schedule for selected:</span>
+    <select id="lhs-bulk-interval"
+      style="font:400 13px Inter,sans-serif;border:1px solid #C4CCD8;border-radius:6px;padding:4px 8px;background:#fff;cursor:pointer">
+      <option value="0">— disabled —</option>
+      <option value="60000">1 min</option>
+      <option value="300000">5 min</option>
+      <option value="600000">10 min</option>
+      <option value="900000">15 min</option>
+      <option value="1800000">30 min</option>
+      <option value="2700000">45 min</option>
+      <option value="3600000">60 min</option>
+      <option value="7200000">2 hours</option>
+      <option value="10800000">3 hours</option>
+      <option value="21600000">6 hours</option>
+      <option value="43200000">12 hours</option>
+    </select>
+    <button id="lhs-bulk-apply" class="btnp" onclick="lhsApplyScheduleToSelected()"
+      disabled
+      style="min-height:34px;padding:0 14px;font-size:13px">Apply to selected</button>
+    <button id="lhs-bulk-start"
+      onclick="lhsBulkStartSelected()" disabled
+      style="display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 14px;border-radius:8px;border:1px solid #17663A;background:#ECFDF5;color:#17663A;font:600 13px Inter,sans-serif;cursor:pointer;white-space:nowrap">▶ Start</button>
+    <button id="lhs-bulk-stop"
+      onclick="lhsBulkStopSelected()" disabled
+      style="display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 14px;border-radius:8px;border:1px solid #B42318;background:#FFF5F5;color:#B42318;font:600 13px Inter,sans-serif;cursor:pointer;white-space:nowrap">⏹ Stop</button>
+    <span id="lhs-bulk-msg" style="font:500 13px Inter,sans-serif"></span>
+    <span style="margin-left:auto;font:400 12px Inter,sans-serif;color:#9AA3B0">Select rows, pick interval, then Start / Stop.</span>
+  </div>
+
   <!-- Synced tables list -->
   <section class="panel" style="gap:12px">
     <div style="overflow-x:auto;border:1px solid #E1E6ED;border-radius:10px">
-      <table style="width:100%;border-collapse:collapse;min-width:960px">
+      <table style="width:100%;border-collapse:collapse;min-width:1100px">
         <thead><tr>
+          <th class="th" style="width:36px;padding-left:14px">
+            <input type="checkbox" id="lhs-select-all" onchange="lhsToggleAll(this.checked)"
+              style="width:15px;height:15px;cursor:pointer;accent-color:#1F4FD8" title="Select all">
+          </th>
           <th class="th">Table</th>
           <th class="th">Database</th>
           <th class="th">Target namespace</th>
           <th class="th">Last updated</th>
           <th class="th">Rows upserted</th>
           <th class="th">Sync status</th>
+          <th class="th">Refresh schedule</th>
           <th class="th" style="text-align:right;padding-right:16px">Actions</th>
         </tr></thead>
         <tbody id="lhs-tables-body">
-          <tr><td colspan="7" class="empty">No Iceberg tables synced yet. Click <strong>+ Create Iceberg Table</strong> to start.</td></tr>
+          <tr><td colspan="9" class="empty">No Iceberg tables synced yet. Click <strong>+ Create Iceberg Table</strong> to start.</td></tr>
         </tbody>
       </table>
     </div>
-    <span class="hint">Status loaded live from cache_system control tables. Refreshes every 30 s.</span>
+    <span class="hint">Status loaded live from cache_system control tables. Global status refreshes every 30 s · per-table schedule runs independently above.</span>
   </section>
 
   <!-- Per-table detail panel (shown on Details click) -->
@@ -2378,8 +2894,30 @@ function doDropCatalog() {
 
       <!-- Warehouse -->
       <div style="display:flex;flex-direction:column;gap:6px">
-        <label class="lbl" for="regcat-warehouse">Warehouse <span style="font-weight:400;color:#57606a">— Polaris warehouse name</span></label>
-        <input class="inp" type="text" id="regcat-warehouse" placeholder="e.g. stardata" value="stardata">
+        <label class="lbl" for="regcat-warehouse">Warehouse <span style="font-weight:400;color:#57606a">— name for the Polaris warehouse (will be created if it doesn't exist)</span></label>
+        <input class="inp" type="text" id="regcat-warehouse" placeholder="e.g. cache_testing_iceberg" value="">
+      </div>
+
+      <!-- S3 base location -->
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label class="lbl" for="regcat-s3">S3 base location <span style="font-weight:400;color:#57606a">— bucket root; warehouse subfolder is appended automatically</span></label>
+        <input class="inp" type="text" id="regcat-s3" placeholder="s3://xdatatoiceberg1/iceberg"
+          value="s3://xdatatoiceberg1/iceberg" style="font:400 13px ui-monospace,monospace">
+      </div>
+
+      <!-- IAM Role ARN + Region row -->
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="regcat-role-arn">IAM Role ARN</label>
+          <input class="inp" type="text" id="regcat-role-arn"
+            placeholder="arn:aws:iam::123456789:role/polaris-iceberg-role"
+            value="arn:aws:iam::586643076710:role/polaris-iceberg-role"
+            style="font:400 13px ui-monospace,monospace">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="lbl" for="regcat-region">AWS region</label>
+          <input class="inp" type="text" id="regcat-region" placeholder="us-east-2" value="us-east-2">
+        </div>
       </div>
 
       <!-- Credential -->
@@ -2433,7 +2971,7 @@ function doDropCatalog() {
       <!-- Source section -->
       <div style="display:flex;flex-direction:column;gap:4px">
         <span style="font:700 14px Inter,sans-serif;color:#14171C">Source table</span>
-        <span class="hint">Select the Stardata native database and table to sync. The table must have <code style="background:#F4F6F9;padding:1px 4px;border-radius:4px;font-size:11px">stardata.table_type=iceberg</code> set.</span>
+        <span class="hint">Select the Stardata native database and table to sync. Only tables with <code style="background:#F4F6F9;padding:1px 4px;border-radius:4px;font-size:11px">snap_id</code>, <code style="background:#F4F6F9;padding:1px 4px;border-radius:4px;font-size:11px">created_at</code> and <code style="background:#F4F6F9;padding:1px 4px;border-radius:4px;font-size:11px">updated_at</code> columns are eligible (iceberg-type tables).</span>
       </div>
 
       <!-- Database + Table row -->

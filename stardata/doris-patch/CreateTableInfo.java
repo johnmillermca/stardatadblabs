@@ -726,10 +726,14 @@ public class CreateTableInfo {
         UnboundSlot createdAtSlot = new UnboundSlot(ImmutableList.of("created_at"));
         StringLiteral dayLiteral  = new StringLiteral("day");
 
-        // date_trunc('day', `created_at`) — argument order matches Doris SQL syntax
+        // date_trunc(`created_at`, 'day') — column FIRST, unit SECOND.
+        // The FE's internal createPartition evaluator in 4.1.4.x-rc requires
+        // this order when evaluating the auto-partition expression during the
+        // BE→FE createPartition thrift callback. The SQL-layer accepts both
+        // orders, but the internal evaluator only accepts (datetime_col, unit).
         UnboundFunction dateTruncExpr = new UnboundFunction(
                 "date_trunc",
-                ImmutableList.of(dayLiteral, createdAtSlot)
+                ImmutableList.of(createdAtSlot, dayLiteral)
         );
 
         // isAutoPartition=true, type="RANGE", no static partition defs, one auto-expr
