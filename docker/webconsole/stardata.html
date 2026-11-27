@@ -1888,16 +1888,17 @@ function loadLhsTables() {
 // ============================================================
 // Returns { label, color, badge } for the Sync Status column.
 //
-// Three top-level states from the user's perspective:
-//   errored  — log table has rows (blocked)         → red
-//   running  — a per-table refresh timer is active  → blue
-//   stopped  — no timer set / schedule disabled     → grey
+// Status is derived from the ACTUAL Doris batch status stored
+// in cache_system (t.status), not from the browser timer.
 //
-// The raw Doris batch status (completed upsert, delete_pending,
-// etc.) is secondary and shown in the per-table Details panel.
+//   errored        — _log table has error rows            → red
+//   syncing        — latest batch is running/delete_pending → blue
+//   synced         — latest batch completed upsert/deleted → green
+//   failed         — latest batch status=failed           → red
+//   not synced yet — no batches have ever run             → grey
 // ============================================================
 function lhsStatusLabel(t) {
-  // 1. Errored: log table has rows — sync is blocked
+  // 1. Errored: _log table has actual error rows
   if (t.blocked) {
     return {
       label: 'errored',
@@ -1905,22 +1906,19 @@ function lhsStatusLabel(t) {
       badge: ' <span class="badge-red">Errored</span>'
     };
   }
-  // 2. Running: a refresh schedule timer is active for this table
-  var timer = lhsRefreshTimers[t.tbl];
-  var timerActive = timer && timer.timerId && timer.intervalMs > 0;
-  if (timerActive) {
-    return {
-      label: 'running',
-      color: '#1F4FD8',
-      badge: ''
-    };
+  // 2. Derive from actual Doris batch status
+  var s = t.status || '';
+  if (s === 'running' || s === 'delete_pending') {
+    return { label: 'syncing', color: '#1F4FD8', badge: '' };
   }
-  // 3. Stopped: no timer — sync schedule not configured or manually disabled
-  return {
-    label: 'stopped',
-    color: '#9AA3B0',
-    badge: ''
-  };
+  if (s === 'completed upsert' || s === 'deleted') {
+    return { label: 'synced', color: '#17663A', badge: '' };
+  }
+  if (s === 'failed') {
+    return { label: 'failed', color: '#B42318', badge: '' };
+  }
+  // no batches yet
+  return { label: 'not synced yet', color: '#9AA3B0', badge: '' };
 }
 
 
