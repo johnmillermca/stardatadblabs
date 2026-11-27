@@ -1432,9 +1432,7 @@ function lhsSetTimer(tblName, ms) {
 }
 
 // Reload status for one specific table (lighter than full loadLhsTables).
-// Reuses the same query as loadLhsTables but for a single table name.
 function loadSingleLhsTable(tblName) {
-  // Blocked only when the _log table has actual error rows (not just exists)
   var logCheck = dorisSQL('cache_system',
     "SELECT TABLE_NAME FROM information_schema.TABLES " +
     "WHERE TABLE_SCHEMA='cache_system' AND TABLE_NAME='" + tblName.replace(/'/g,"''") + "_log' " +
@@ -1455,7 +1453,6 @@ function loadSingleLhsTable(tblName) {
     var col = function(name) { return idx[name] != null ? idx[name] : -1; };
     var rows = res.rows;
 
-    // Find and update the existing entry in lhsState.tables
     var entry = lhsState.tables.find(function(x) { return x.tbl === tblName; });
     if (!entry) return;
 
@@ -1498,22 +1495,28 @@ function loadSingleLhsTable(tblName) {
       });
     }
 
-    renderLhsTables();
+    // Fetch MAX(snap_id) from the source app table
+    var appDb = entry.appDb;
+    var sourceSnapPromise = (appDb && appDb !== '—')
+      ? dorisSQL(appDb,
+          "SELECT IFNULL(MAX(snap_id),0) FROM `" + appDb.replace(/`/g,'') + "`.`" + tblName.replace(/`/g,'') + "`"
+        ).catch(function() { return { rows: [[0]] }; })
+      : Promise.resolve({ rows: [[0]] });
 
-    // If blocked, pause timer and show inline banner
-    if (isBlocked) {
-      var timer = lhsRefreshTimers[tblName];
-      if (timer && timer.timerId) {
-        clearInterval(timer.timerId);
-        timer.timerId = null;
+    sourceSnapPromise.then(function(sRes) {
+      entry.sourceSnapId = parseInt((sRes.rows[0] || [0])[0]) || 0;
+
+      renderLhsTables();
+
+      if (isBlocked) {
+        var timer = lhsRefreshTimers[tblName];
+        if (timer && timer.timerId) { clearInterval(timer.timerId); timer.timerId = null; }
+        lhsShowInlineBlockedBanner(tblName);
       }
-      lhsShowInlineBlockedBanner(tblName);
-    }
-
-    // If detail panel is open for this table, refresh it too
-    if (lhsState.selTable && lhsState.selTable.tbl === tblName) {
-      openLhsDetail(tblName);
-    }
+      if (lhsState.selTable && lhsState.selTable.tbl === tblName) {
+        openLhsDetail(tblName);
+      }
+    });
   });
 }
 
@@ -1748,7 +1751,7 @@ function loadLhsTables() {
     var names = res.rows.map(function(r) { return r[0]; });
     if (!names.length) { lhsState.tables = []; renderLhsTables(); return; }
 
-    // 2. For each table, query the latest completed batch row
+    // 2. For each table, query the latest 20 batch rows from cache_system
     var promises = names.map(function(tbl) {
       return dorisSQL('cache_system',
         "SELECT batch_id, database_name, table_name, batch_type, snap_id_from, snap_id_to," +
@@ -1760,9 +1763,7 @@ function loadLhsTables() {
       }).catch(function() { return { tbl: tbl, res: { rows: [], idx: {} } }; });
     });
 
-    // 3. Check which tables have ROWS in their _log table (blocked state).
-    // The _log table always exists (created by DDL mirror sidecar) — only
-    // a table with actual error rows in it is considered blocked.
+    // 3. Check which _log tables have actual error rows (blocked state)
     var logTblNames = names.map(function(n) { return "'" + n.replace(/'/g,"''") + "_log'"; }).join(',');
     var logCheck = dorisSQL('cache_system',
       "SELECT REPLACE(TABLE_NAME, '_log', '') AS base_tbl " +
@@ -1771,11 +1772,17 @@ function loadLhsTables() {
       "AND TABLE_ROWS > 0"
     ).catch(function() { return { rows: [], idx: {} }; });
 
+    // 4. Get MAX(snap_id) from every source app table in one UNION query.
+    // This tells us whether new data has arrived since the last sync batch.
+    // We need the appDb for each table — read from cache_system batch rows first,
+    // then do the source snap query after we know which db each table lives in.
+    // For now fire it after Promise.all resolves (we need appDb from batch rows).
+
     Promise.all([Promise.all(promises), logCheck]).then(function(both) {
       var results = both[0], logRes = both[1];
       var logTables = {};
       logRes.rows.forEach(function(r) {
-        var n = r[0]; // e.g. orders_log
+        var n = r[0];
         logTables[n.replace(/_log$/, '')] = 1;
       });
 
@@ -1803,77 +1810,110 @@ function loadLhsTables() {
       }
 
       lookupDone.then(function() {
-      lhsState.tables = results.map(function(item) {
-        var rows = item.res.rows, idx = item.res.idx;
-        if (!rows.length) {
-          var resolvedDb = appDbLookup[item.tbl] || '—';
+
+        // Build a preliminary table list (without sourceSnapId yet)
+        var preliminary = results.map(function(item) {
+          var rows = item.res.rows, idx = item.res.idx;
+          if (!rows.length) {
+            var resolvedDb = appDbLookup[item.tbl] || '—';
+            return {
+              tbl: item.tbl, appDb: resolvedDb, appTbl: item.tbl,
+              target: resolvedDb !== '—'
+                ? 'polaris.' + resolvedDb + '_iceberg.' + item.tbl : '—',
+              lastSnapId: 0, lastBatch: '—',
+              upserted: 0, deleted: 0, status: 'no batches',
+              sourceSnapId: null,
+              blocked: !!logTables[item.tbl], blockedMsg: '',
+              batches: []
+            };
+          }
+          var col = function(name) { return idx[name] != null ? idx[name] : -1; };
+          var latest = rows[0];
+          var appDb  = latest[col('database_name')] || '—';
+          var appTbl = latest[col('table_name')]    || item.tbl;
+          var status = latest[col('status')]        || '—';
+          var snapTo = latest[col('snap_id_to')];
+          var upserted = 0, deleted = 0;
+          rows.forEach(function(r) {
+            var rc = parseInt(r[col('row_count')]) || 0;
+            var bt = r[col('batch_type')] || '';
+            if (bt === 'DELETE') deleted += rc; else upserted += rc;
+          });
+          var batches = rows.map(function(r) {
+            return {
+              id: r[col('batch_id')],
+              type: r[col('batch_type')]   || '—',
+              from: r[col('snap_id_from')] || 0,
+              to:   r[col('snap_id_to')]   || 0,
+              rows: parseInt(r[col('row_count')]) || 0,
+              maxCreated: r[col('max_created_at')] || '—',
+              maxUpdated: r[col('max_updated_at')] || '—',
+              status: r[col('status')]     || '—',
+              started:  r[col('started_at')]  || '—',
+              finished: r[col('finished_at')] || '—',
+            };
+          });
+          var ns = appDb !== '—' ? appDb + '_iceberg' : '—';
           return {
-            tbl: item.tbl, appDb: resolvedDb, appTbl: item.tbl,
-            target: resolvedDb !== '—'
-              ? 'polaris.' + resolvedDb + '_iceberg.' + item.tbl : '—',
-            lastSnapId: 0, lastBatch: '—',
-            upserted: 0, deleted: 0, status: 'no batches',
-            blocked: !!logTables[item.tbl], blockedMsg: '',
-            batches: []
+            tbl: item.tbl, appDb: appDb, appTbl: appTbl,
+            target: appDb !== '—' ? 'polaris.' + ns + '.' + appTbl : '—',
+            lastSnapId: snapTo || 0,
+            lastBatch: batches[0].finished !== '—' ? fmtAgo(batches[0].finished) : '—',
+            upserted: upserted, deleted: deleted,
+            status: status,
+            sourceSnapId: null,   // filled in below
+            blocked: !!logTables[item.tbl],
+            blockedMsg: logTables[item.tbl] ? 'Error in cache_system.' + item.tbl + '_log — clear to resume' : '',
+            batches: batches,
           };
+        });
+
+        // 5. Query MAX(snap_id) from each source app table so we know
+        //    whether new data has arrived since the last sync batch.
+        //    Build one UNION SELECT for all tables that have a known appDb.
+        var knownDbTbls = preliminary.filter(function(t) { return t.appDb !== '—'; });
+        var sourceSnapQuery;
+        if (knownDbTbls.length) {
+          var unionParts = knownDbTbls.map(function(t) {
+            return "SELECT '" + t.tbl.replace(/'/g,"''") + "' AS tbl_name," +
+                   " IFNULL(MAX(snap_id), 0) AS max_snap" +
+                   " FROM `" + t.appDb.replace(/`/g,'') + "`.`" + t.tbl.replace(/`/g,'') + "`";
+          });
+          sourceSnapQuery = dorisSQL(knownDbTbls[0].appDb,
+            unionParts.join(' UNION ALL ')
+          ).catch(function() { return { rows: [] }; });
+        } else {
+          sourceSnapQuery = Promise.resolve({ rows: [] });
         }
-        var col = function(name) { return idx[name] != null ? idx[name] : -1; };
-        var latest = rows[0];
-        var appDb  = latest[col('database_name')] || '—';
-        var appTbl = latest[col('table_name')]    || item.tbl;
-        var status = latest[col('status')]        || '—';
-        var snapTo = latest[col('snap_id_to')];
 
-        // aggregate upserted / deleted across all loaded batches
-        var upserted = 0, deleted = 0;
-        rows.forEach(function(r) {
-          var rc = parseInt(r[col('row_count')]) || 0;
-          var bt = r[col('batch_type')] || '';
-          if (bt === 'DELETE') deleted += rc; else upserted += rc;
-        });
+        sourceSnapQuery.then(function(snapRes) {
+          // Map tbl_name → max_snap
+          var snapMap = {};
+          (snapRes.rows || []).forEach(function(r) {
+            snapMap[r[0]] = parseInt(r[1]) || 0;
+          });
+          // Attach sourceSnapId to each entry
+          preliminary.forEach(function(t) {
+            t.sourceSnapId = (snapMap[t.tbl] !== undefined) ? snapMap[t.tbl] : null;
+          });
 
-        var batches = rows.map(function(r) {
-          return {
-            id: r[col('batch_id')],
-            type: r[col('batch_type')]   || '—',
-            from: r[col('snap_id_from')] || 0,
-            to:   r[col('snap_id_to')]   || 0,
-            rows: parseInt(r[col('row_count')]) || 0,
-            maxCreated: r[col('max_created_at')] || '—',
-            maxUpdated: r[col('max_updated_at')] || '—',
-            status: r[col('status')]     || '—',
-            started:  r[col('started_at')]  || '—',
-            finished: r[col('finished_at')] || '—',
-          };
-        });
+          lhsState.tables = preliminary;
 
-        var ns = appDb !== '—' ? appDb + '_iceberg' : '—';
-        return {
-          tbl: item.tbl, appDb: appDb, appTbl: appTbl,
-          target: appDb !== '—' ? 'polaris.' + ns + '.' + appTbl : '—',
-          lastSnapId: snapTo || 0,
-          lastBatch: batches[0].finished !== '—' ? fmtAgo(batches[0].finished) : '—',
-          upserted: upserted, deleted: deleted,
-          status: status,
-          blocked: !!logTables[item.tbl],
-          blockedMsg: logTables[item.tbl] ? 'Error in cache_system.' + item.tbl + '_log — clear to resume' : '',
-          batches: batches,
-        };
-      });
+          // Populate DB filter
+          var dbs = {};
+          lhsState.tables.forEach(function(t) { if (t.appDb !== '—') dbs[t.appDb] = 1; });
+          var sel = document.getElementById('lhs-db-filter');
+          var cur = sel.value;
+          sel.innerHTML = '<option value="all">All databases</option>';
+          Object.keys(dbs).sort().forEach(function(db) {
+            var o = document.createElement('option'); o.value = db; o.textContent = db;
+            if (db === cur) o.selected = true;
+            sel.appendChild(o);
+          });
 
-      // Populate DB filter
-      var dbs = {};
-      lhsState.tables.forEach(function(t) { if (t.appDb !== '—') dbs[t.appDb] = 1; });
-      var sel = document.getElementById('lhs-db-filter');
-      var cur = sel.value;
-      sel.innerHTML = '<option value="all">All databases</option>';
-      Object.keys(dbs).sort().forEach(function(db) {
-        var o = document.createElement('option'); o.value = db; o.textContent = db;
-        if (db === cur) o.selected = true;
-        sel.appendChild(o);
-      });
+          renderLhsTables();
+        }); // end sourceSnapQuery.then
 
-      renderLhsTables();
       }); // end lookupDone.then
     });
   }).catch(function(e) {
@@ -1888,17 +1928,22 @@ function loadLhsTables() {
 // ============================================================
 // Returns { label, color, badge } for the Sync Status column.
 //
-// Status is derived from the ACTUAL Doris batch status stored
-// in cache_system (t.status), not from the browser timer.
+// All 7 states — grounded in real data, no guessing:
 //
-//   errored        — _log table has error rows            → red
-//   syncing        — latest batch is running/delete_pending → blue
-//   synced         — latest batch completed upsert/deleted → green
-//   failed         — latest batch status=failed           → red
-//   not synced yet — no batches have ever run             → grey
+//  errored       _log table has rows (sync worker wrote an error)      red
+//  syncing       latest batch status=running/delete_pending < 30min    blue
+//  stale         latest batch status=running but started > 30min ago   orange
+//                (sync worker crashed without updating the row)
+//  synced        latest batch completed AND snap_id_to = source max    green
+//  behind        latest batch completed BUT source has newer snap_ids  blue-teal
+//                (new data arrived since last sync, waiting for worker)
+//  failed        latest batch status=failed                            red
+//  never synced  no completed batch has ever run                       grey
 // ============================================================
+var LHS_STALE_MS = 30 * 60 * 1000; // 30 min — batch stuck longer than this = crashed
+
 function lhsStatusLabel(t) {
-  // 1. Errored: _log table has actual error rows
+  // 1. errored — _log table has actual error rows
   if (t.blocked) {
     return {
       label: 'errored',
@@ -1906,19 +1951,53 @@ function lhsStatusLabel(t) {
       badge: ' <span class="badge-red">Errored</span>'
     };
   }
-  // 2. Derive from actual Doris batch status
+
   var s = t.status || '';
+
+  // 2. syncing / stale — batch is in-progress
   if (s === 'running' || s === 'delete_pending') {
+    var startedAt = t.batches && t.batches[0] ? t.batches[0].started : '—';
+    var isStale = false;
+    if (startedAt && startedAt !== '—') {
+      var d = new Date(startedAt.replace(' ', 'T'));
+      if (!isNaN(d.getTime())) {
+        isStale = (Date.now() - d.getTime()) > LHS_STALE_MS;
+      }
+    }
+    if (isStale) {
+      return {
+        label: 'stale',
+        color: '#D97706',
+        badge: ' <span style="padding:3px 10px;border-radius:999px;background:#FFFBEB;border:1px solid #F59E0B;color:#D97706;font:700 12px Inter,sans-serif;white-space:nowrap">Stale</span>'
+      };
+    }
     return { label: 'syncing', color: '#1F4FD8', badge: '' };
   }
+
+  // 3. Last batch completed — now check if source has new data
   if (s === 'completed upsert' || s === 'deleted') {
+    var synced_to   = parseInt(t.lastSnapId)   || 0;
+    var source_max  = (t.sourceSnapId !== null) ? parseInt(t.sourceSnapId) : null;
+
+    if (source_max !== null && source_max > synced_to) {
+      // New rows in source not yet synced to Iceberg
+      return {
+        label: 'behind',
+        color: '#0891B2',
+        badge: ' <span style="padding:3px 10px;border-radius:999px;background:#ECFEFF;border:1px solid #67E8F9;color:#0891B2;font:700 12px Inter,sans-serif;white-space:nowrap">Behind</span>'
+      };
+    }
+    // source_max = synced_to, or source_max unknown → all caught up
     return { label: 'synced', color: '#17663A', badge: '' };
   }
+
+  // 4. failed
   if (s === 'failed') {
     return { label: 'failed', color: '#B42318', badge: '' };
   }
-  // no batches yet
-  return { label: 'not synced yet', color: '#9AA3B0', badge: '' };
+
+  // 5. No completed batch has ever run (no batches, or only failed/running)
+  return { label: 'never synced', color: '#9AA3B0', badge: '' };
 }
 
 
